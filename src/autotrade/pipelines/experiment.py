@@ -99,6 +99,7 @@ from .rolling_record import (
     SOURCE_HOST_COMPLETION,
     ValidationSteps,
     frontier_after,
+    readout,
     step_entry,
     test_step_record,
     test_step_records,
@@ -122,13 +123,10 @@ from .verdict import (
     forward_mde,
     forward_slice,
     graded_statistics,
-    graduation_verdict,
     heldout_slice,
     judge,
     registered_mandate,
     residual_reading,
-    sealed_slice,
-    sealed_strategy_error,
 )
 
 # A session deadline override may raise the research deadline above the
@@ -228,7 +226,7 @@ class DailyStrategyPipeline:
 
 
 class RollingExperimentPipeline:
-    """One research session → freeze → one continuous forward replay → verdict.
+    """One research session → freeze → one continuous forward replay → readout.
 
     Every stage reads what came before it from the ledger, so a resumed worker
     continues wherever the durable records end.
@@ -779,15 +777,14 @@ class RollingExperimentPipeline:
     def run_forward(
         self, *, session_context: dict[str, object] | None = None
     ) -> dict[str, object]:
-        """Read the frozen artifact on the sealed years, then replay it once
-        over forward and Held-out, and judge it (:meth:`replay_frozen`).
+        """Replay the frozen artifact once over forward and Held-out and record
+        its readout (:meth:`replay_frozen`).
 
         The stage runs after the research session has ended for good: a
-        failure here, the sealed reading's included, fails a forward-stage
-        attempt, which the caller retries from the sealed replay, and never
-        reopens the session. The strategy's own exception is a measurement;
-        any other failure measured nothing. Frozen trees that changed during
-        a replay are recorded and fail closed.
+        failure here fails a forward-stage attempt, which the caller retries,
+        and never reopens the session. The strategy's own exception is a
+        reading; any other failure measured nothing. Frozen trees that
+        changed during a replay are recorded and fail closed.
         """
 
         records = self.ledger.read()
@@ -796,7 +793,7 @@ class RollingExperimentPipeline:
         if frozen_row is None:
             raise RuntimeError("the forward replay needs a frozen artifact")
         if forward_record(records) is not None:
-            raise RuntimeError("the arm's forward verdict is already recorded")
+            raise RuntimeError("the arm's forward record is already recorded")
         block: Mapping[str, object] = frozen_row["frozen"]  # type: ignore[assignment]
         artifact = self._frozen_artifact(block)
         replicates = [
@@ -840,7 +837,6 @@ class RollingExperimentPipeline:
                     replicates,
                     progress,
                     run_id=run_id,
-                    sealed=self.validation_span(),
                     forward=forward,
                     heldout=heldout,
                     broker_profile=self.config.broker_profile,
@@ -872,7 +868,6 @@ class RollingExperimentPipeline:
         progress,
         *,
         run_id: str,
-        sealed: ReplaySpan,
         forward: Slot,
         heldout: Slot,
         broker_profile: BrokerProfile,
@@ -883,18 +878,12 @@ class RollingExperimentPipeline:
         with it), as :meth:`run_forward` records it. Writes nothing to the
         ledger.
 
-        First the sealed reading: the artifact replayed over ``sealed``, the
-        research span of the sealed years, as one book from the view at its
-        first year, read by ``verdict.sealed_slice``, each seed replicate
-        replayed the same way and reported beside it. Then, whether or not
-        the sealed gate passed, one continuous replay over the ``forward`` and
-        ``heldout`` slots and each replicate's, read and reported beside the
-        verdict, which is the sealed gate's (:meth:`_judge`). The strategy's
-        own exception in either replay is a reading
-        (``verdict.sealed_strategy_error``, or the forward record's
-        ``strategy_error`` status naming the slice it raised in, which no
-        condition reads); a failure that measured nothing raises,
-        and so does any replicate's failure. Frozen trees that changed during
+        One continuous replay over the ``forward`` and ``heldout`` slots and
+        each replicate's, read into the two slices and the arm's readout
+        (:meth:`_judge`); nothing gates. The strategy's own exception is a
+        reading (the record's ``strategy_error`` status naming the slice it
+        raised in, and the readout's forward block); a failure that measured
+        nothing raises, and so does any replicate's failure. Frozen trees that changed during
         a replay fail closed after the integrity row (the body of what
         :meth:`run_forward` appends) is handed to ``integrity_failure``, when
         given.
@@ -922,7 +911,6 @@ class RollingExperimentPipeline:
                 "truncation_reason": heldout.truncation_reason,
             },
             "snapshot_ids": {
-                "sealed_decision": sealed.snapshot.snapshot_id,
                 "forward_decision": forward_bundle.snapshot_id,
                 "heldout_decision": heldout_bundle.snapshot_id,
             },
@@ -1000,53 +988,6 @@ class RollingExperimentPipeline:
                 completed.append((item, item_result))
             return completed, raised
 
-        _publish_progress(progress, "sealed_replay", run_id=run_id)
-        sealed_result, sealed_error = replay(artifact, sealed)
-        sealed_record: dict[str, object] = {
-            "label": sealed.label,
-            "start": sealed.start,
-            "end": sealed.end,
-        }
-        sealed_raised: list[dict[str, object]] = []
-        if sealed_error is not None:
-            if not raised_by_strategy(sealed_error):
-                raise sealed_error
-            sealed_block = sealed_strategy_error(
-                start=sealed.start, end=sealed.end, error=_error_text(sealed_error)
-            )
-            sealed_record.update(result_ref=None, slice=sealed_block)
-        else:
-            assert sealed_result is not None
-            sealed_replicates, sealed_raised = replicate_results(sealed, "sealed_replay")
-            sealed_block = judged_sealed(
-                sealed_result.result_ref,
-                rules=self.config.acceptance,
-                start=sealed.start,
-                end=sealed.end,
-                seed_replicates=[
-                    (_replicate_identity(item), item_result.result_ref)
-                    for item, item_result in sealed_replicates
-                ],
-            )
-            sealed_record.update(
-                result_ref=sealed_result.result_ref,
-                **(
-                    {
-                        "seed_replicates": [
-                            *(
-                                {**_replicate_identity(item), "result_ref": item_result.result_ref}
-                                for item, item_result in sealed_replicates
-                            ),
-                            *sealed_raised,
-                        ]
-                    }
-                    if replicates
-                    else {}
-                ),
-                slice=sealed_block,
-            )
-        base["sealed"] = sealed_record
-
         _publish_progress(progress, "forward_replay", run_id=run_id)
         result, error = replay(artifact, span)
         if error is not None:
@@ -1063,26 +1004,25 @@ class RollingExperimentPipeline:
                 "slices": None,
                 "refits_executed": None,
                 "null_control": None,
-                "verdict": graduation_verdict(
-                    sealed=sealed_block,
-                    strategy_errors=(where, *(("replicate",) if sealed_raised else ())),
+                "readout": readout(
+                    self.ledger.read(),
+                    alpha=self.config.acceptance.alpha,
+                    strategy_error={"slice": where, "error": _error_text(error)},
                 ),
             }
         assert result is not None
         replays, forward_raised = replicate_results(span, "forward_replay")
-        _publish_progress(progress, "verdict", run_id=run_id)
+        _publish_progress(progress, "readout", run_id=run_id)
         return {
             **base,
             **self._judge(
                 result,
                 artifact,
-                sealed=sealed_block,
                 forward=forward,
                 heldout=heldout,
                 broker_profile=broker_profile,
                 seed_replicates=replays,
                 raised_replicates=forward_raised,
-                replicate_raised=bool(sealed_raised or forward_raised),
             ),
         }
 
@@ -1099,20 +1039,18 @@ class RollingExperimentPipeline:
         result: EvaluationResult,
         artifact: FrozenArtifact,
         *,
-        sealed: Mapping[str, object],
         forward: Slot,
         heldout: Slot,
         broker_profile: BrokerProfile,
         seed_replicates: Sequence[tuple[FrozenArtifact, EvaluationResult]] = (),
         raised_replicates: Sequence[Mapping[str, object]] = (),
-        replicate_raised: bool = False,
     ) -> dict[str, object]:
         """The two reported slices of one completed forward replay through
-        ``broker_profile``, and the verdict on the ``sealed`` block and on
-        whether a seed replicate raised in any replay (``replicate_raised``).
+        ``broker_profile``, and the arm's readout (``rolling_record.readout``):
+        the rolling record the ledger holds and the forward slice's reading.
 
         A slice that cannot be measured raises ``ValueError``, which fails the
-        attempt: a verdict is never read off a number that was not measured.
+        attempt: a reading is never recorded off a number that was not measured.
         Each seed replicate's completed replay is handed to both slices, named
         by its artifact and source Step: ``slices.<name>.seed_replicates`` and
         ``slices.<name>.seed_mean`` carry its readings and the mean with the
@@ -1143,13 +1081,11 @@ class RollingExperimentPipeline:
             replay,
             analysis,
             rules=self.config.acceptance,
-            sealed=sealed,
             forward=(forward.start, forward.end),
             heldout=(heldout.start, heldout.end),
             seed_key=artifact.artifact_id,
             slippage_bps=broker_profile.slippage_bps,
             seed_replicates=replicates,
-            strategy_errors=("replicate",) if replicate_raised else (),
         )
         replicate_rows.extend(dict(row) for row in raised_replicates)
         return {
@@ -1171,7 +1107,9 @@ class RollingExperimentPipeline:
                 seed=null_control_seed(artifact.artifact_id, "forward"),
                 step=(forward.start, forward.end),
             ),
-            "verdict": judged["verdict"],
+            "readout": readout(
+                self.ledger.read(), alpha=self.config.acceptance.alpha, forward=judged["slices"]["forward"]
+            ),
         }
 
     def _frozen_artifact(self, block: object) -> FrozenArtifact:
@@ -1600,51 +1538,22 @@ def _replicate_identity(item: FrozenArtifact) -> dict[str, object]:
     return {"artifact_id": item.artifact_id, "source_step_id": item.source_step_id}
 
 
-def judged_sealed(
-    result_ref: str,
-    *,
-    rules: AcceptanceRules,
-    start: str,
-    end: str,
-    seed_replicates: Sequence[tuple[Mapping[str, object], str]] = (),
-) -> dict[str, object]:
-    """The sealed gate on one completed replay of the frozen book over the
-    sealed years (``verdict.sealed_slice``), its seed replicates' replays
-    given as what names each and its result reference. What a forward record
-    stores under ``sealed.slice``, so a stored reading is judged again by
-    this same function (``scripts/dev/check_verdicts.py``)."""
-
-    return sealed_slice(
-        _result_analysis(result_ref),
-        rules=rules,
-        start=start,
-        end=end,
-        seed_replicates=[
-            (identity, _result_analysis(reference)) for identity, reference in seed_replicates
-        ],
-    )
-
-
 def judged_replay(
     replay: Mapping[str, object],
     analysis: Mapping[str, object],
     *,
     rules: AcceptanceRules,
-    sealed: Mapping[str, object],
     forward: tuple[str, str],
     heldout: tuple[str, str],
     seed_key: str,
     slippage_bps: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
-    strategy_errors: Sequence[str] = (),
 ) -> dict[str, object]:
-    """The ``slices`` and ``verdict`` of one completed forward replay: its
-    result ``replay`` and style sidecar ``analysis``, read under ``rules``
-    over the ``forward`` and ``heldout`` bounds, each slice with its activity,
-    and the verdict on the ``sealed`` gate's block and ``strategy_errors``
-    (``verdict.graduation_verdict``).
+    """The ``slices`` of one completed forward replay: its result ``replay``
+    and style sidecar ``analysis``, read under ``rules`` over the ``forward``
+    and ``heldout`` bounds, each slice with its activity.
 
-    What a forward record stores, so a stored replay is judged again by this
+    What a forward record stores, so a stored replay is read again by this
     same function (``scripts/dev/check_verdicts.py``). ``seed_key`` is the
     frozen artifact's id, ``slippage_bps`` the Broker's and
     ``seed_replicates`` what names each completed replicate with its replay's
@@ -1681,12 +1590,6 @@ def judged_replay(
             "forward": {**forward_block, "activity": activity["forward"]},
             "heldout": {**heldout_block, "activity": activity["heldout"]},
         },
-        "verdict": graduation_verdict(
-            sealed=sealed,
-            forward=forward_block,
-            heldout=heldout_block,
-            strategy_errors=strategy_errors,
-        ),
     }
 
 
@@ -1922,7 +1825,6 @@ __all__ = [
     "completed_rows",
     "freeze_registration",
     "judged_replay",
-    "judged_sealed",
     "null_control_seed",
     "one_line_change",
     "replay_and_analysis",

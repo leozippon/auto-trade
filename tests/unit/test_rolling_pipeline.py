@@ -302,6 +302,14 @@ def _pipeline(
     return pipeline, snapshots, evaluator, developer, ledger
 
 
+def _completed(tmp_path: Path):
+    """An arm whose session's budget ran out after two full-span Validations:
+    the host freezes the last and fills the whole rolling record from one
+    replay of it."""
+
+    return _pipeline(tmp_path, {1: ([0.0012, 0.0002], "deadline", {"finish_reason": "llm_call_budget_exhausted"})})
+
+
 def _freezing(tmp_path: Path):
     """A session that validates two full-span candidates and nominates the first."""
 
@@ -774,33 +782,22 @@ def test_a_failed_attempt_is_recorded_and_the_session_runs_again(tmp_path: Path)
 
 
 def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_path: Path):
-    pipeline, snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
+    pipeline, snapshots, evaluator, _developer, ledger = _completed(tmp_path)
     frozen = pipeline.run_research_session()["frozen"]
     snapshots.prepared.clear()
     evaluator.requests.clear()
 
     record = pipeline.run_forward()
 
-    # The research years' slots are prepared again for the sealed reading,
-    # then the forward and Held-out slots.
-    assert snapshots.prepared[-2:] == [
+    # The forward and Held-out slots, and nothing of the research years.
+    assert snapshots.prepared == [
         ("heldout", "20240701", "20250630", GEOMETRY.forward.anchor),
         ("heldout", "20250701", RELEASE_END, GEOMETRY.heldout(DAYS).anchor),
     ]
-    # First the sealed year, as one book from the view at its start, then the
-    # one continuous forward and Held-out replay.
-    sealed_request, request = evaluator.requests
-    assert (sealed_request.mode, sealed_request.start, sealed_request.end) == ("valid", "20230701", "20240630")
-    assert sealed_request.revision.revision_id == frozen["artifact_id"]
-    sealed = record["sealed"]
-    assert (sealed["label"], sealed["start"], sealed["end"]) == ("validation", "20230701", "20240630")
-    assert sealed["result_ref"] == str(Path(sealed["result_ref"]))
-    reading = sealed["slice"]
-    assert reading["series"] == "active" and reading["years"] == pytest.approx(reading["days"] / 244)
-    assert reading["bar"] == pytest.approx(1.6449 / (reading["days"] / 244) ** 0.5, abs=1e-3)
-    assert reading["reasons"] == (
-        [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
-    )
+    # One continuous forward and Held-out replay; the validation years are
+    # not replayed again.
+    [request] = evaluator.requests
+    assert "sealed" not in record
     assert (request.mode, request.start, request.end) == ("heldout", "20240701", RELEASE_END)
     assert request.continuation == (f"replay/heldout/20250701_{RELEASE_END}",)
     assert request.revision.revision_id == frozen["artifact_id"]
@@ -817,29 +814,41 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert (forward["start"], forward["end"]) == ("20240701", "20250630")
     assert (heldout["start"], heldout["end"]) == ("20250701", RELEASE_END)
     assert forward["activity"]["round_trips"] > 0
-    # Both slices are read and reported, their residual reading beside them.
+    # Both slices are read and reported, their residual reading beside them;
+    # nothing in the record judges.
     for block in (forward, heldout):
         assert "reasons" not in block and block["residual_reading"]["series"] == "active"
-    # The verdict is the sealed gate's alone, under the arm's own rules, and
-    # the record states them.
+    assert "verdict" not in record
     rules = CONFIG_ACCEPTANCE.to_record()
     assert record["initial_cash"] == CONFIG_PROFILE.initial_cash
     assert record["acceptance_rules"] == rules
-    assert record["verdict"]["thresholds"] == reading["thresholds"]
-    assert record["verdict"]["reasons"] == reading["reasons"]
     assert forward["parameters"]["cost_stress_multiplier"] == rules["cost_stress_multiplier"]
     assert set(forward["mandate"]) == {"tracking_error", "market_beta"}
     assert record["refits_executed"] == {"forward": 0, "heldout": 0}
-    assert record["verdict"]["status"] == ("discarded" if reading["reasons"] else "graduated")
-    assert experiment_verdict(ledger.read())["status"] == record["verdict"]["status"]
+    # The readout: the rolling record the host completed, read as one series
+    # with its one-sided p-value, and the forward reading beside it.
+    readout = record["readout"]
+    assert readout["state"] == "frozen_with_record"
+    steps = pipeline.validation_steps()
+    assert (readout["record"]["steps"], readout["record"]["candidate_changes"]) == (steps.count, 0)
+    assert (readout["record"]["start"], readout["record"]["end"]) == (steps.start, steps.end)
+    assert readout["record"]["years"] == pytest.approx(readout["record"]["days"] / 244)
+    assert readout["record"]["bar"] == pytest.approx(1.6449 / readout["record"]["years"] ** 0.5, abs=1e-3)
+    assert 0.0 <= readout["record"]["p_value"] <= 1.0
+    assert readout["forward"] == {
+        "lower_bound": forward["lower_bound"],
+        "residual_reading": forward["residual_reading"],
+    }
+    assert experiment_verdict(ledger.read()) == {"status": "frozen_with_record", "reasons": []}
+    assert paper_candidate(ledger.read())["artifact_id"] == frozen["artifact_id"]
     assert forward_record(ledger.read())["run_id"] == record["run_id"]
     with pytest.raises(RuntimeError, match="already recorded"):
         pipeline.run_forward()
 
 
 def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path):
-    """The verdict replays the frozen book on the Broker profile its arm was
-    created with, the dividend tax included, not on today's defaults."""
+    """The forward stage replays the frozen book on the Broker profile its arm
+    was created with, the dividend tax included, not on today's defaults."""
 
     taxed = replace(CONFIG_PROFILE, dividend_tax=True)
     pipeline, _snapshots, evaluator, _developer, _ledger = _pipeline(
@@ -850,9 +859,8 @@ def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path)
     pipeline.run_research_session()
     evaluator.requests.clear()
     pipeline.run_forward()
-    # The sealed reading and the forward replay alike.
-    assert len(evaluator.requests) == 2
-    assert all(request.broker_profile == taxed for request in evaluator.requests)
+    [request] = evaluator.requests
+    assert request.broker_profile == taxed
 
 
 def test_a_moved_arm_replays_the_artifact_its_frozen_block_names(tmp_path: Path):
@@ -923,9 +931,14 @@ def test_the_forward_replay_writes_nothing_a_session_can_read(tmp_path: Path):
     [StrategyRaised("boom"), StrategyMemoryExceeded("killed at the 32g memory cap")],
     ids=["raised", "memory_cap"],
 )
-def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
+def test_a_strategy_error_names_the_slice_it_raised_in_and_is_a_reading(
     tmp_path: Path, cause: StrategyRaised
 ):
+    """The frozen book's own exception during the forward replay is a reading:
+    the record names the slice it raised in, the readout's forward block
+    carries it in place of a lower bound, the rolling record stands, and no
+    Paper book can continue a replay that did not complete."""
+
     pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
     pipeline.run_research_session()
     failure = BacktestError(
@@ -938,37 +951,21 @@ def test_a_strategy_error_names_the_slice_it_raised_in_and_discards(
     record = pipeline.run_forward()
 
     assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
-    assert record["slices"] is None
-    # The book raised in its sealed replay too: no reading there, a failed
-    # sealed gate, and the forward replay still ran and raised.
-    assert record["sealed"]["result_ref"] is None
-    assert record["sealed"]["slice"]["strategy_error"] is True
-    assert record["verdict"] == {
-        "status": "discarded",
-        "reasons": ["sealed_strategy_error", "heldout_strategy_error"],
-        "thresholds": {},
-    }
-    assert experiment_verdict(ledger.read())["status"] == "discarded"
-    assert paper_candidate(ledger.read()) is None
-
-    # A book that passed its sealed gate and raised only in Held-out is
-    # discarded too, and no Paper book is opened for it.
-    pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path / "late")
-    pipeline.run_research_session()
-    evaluator.raise_with, evaluator.raise_in = failure, "heldout"
-    record = pipeline.run_forward()
-    assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
-    assert record["sealed"]["slice"]["reasons"] == []
-    assert record["verdict"]["status"] == "discarded"
-    assert record["verdict"]["reasons"] == ["heldout_strategy_error"]
-    assert experiment_verdict(ledger.read())["status"] == "discarded"
+    assert record["slices"] is None and "sealed" not in record and "verdict" not in record
+    readout = record["readout"]
+    assert readout["state"] == "frozen_with_record"
+    assert readout["forward"]["strategy_error"]["slice"] == "heldout"
+    assert str(cause) in readout["forward"]["strategy_error"]["error"]
+    assert "lower_bound" not in readout["forward"]
+    assert readout["record"]["steps"] == 0 and "unmeasured" in readout["record"]
+    assert experiment_verdict(ledger.read()) == {"status": "frozen_with_record", "reasons": []}
     assert paper_candidate(ledger.read()) is None
 
 
-def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path: Path):
-    """A host failure of the sealed replay is a forward-stage failure: the
+def test_an_environment_failure_fails_the_attempt_and_leaves_no_readout(tmp_path: Path):
+    """A host failure of the forward replay is a forward-stage failure: the
     research session stays finished and is never run again, and the retry
-    reads the sealed years afresh."""
+    replays forward afresh."""
 
     pipeline, _snapshots, evaluator, developer, ledger = _freezing(tmp_path)
     research = pipeline.run_research_session()
@@ -978,9 +975,9 @@ def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path
     with pytest.raises(TimeoutError):
         pipeline.run_forward()
 
-    # The first replay the stage asked for was the sealed year's.
-    [sealed_request] = evaluator.requests
-    assert (sealed_request.start, sealed_request.end) == ("20230701", "20240630")
+    # The one replay the stage asked for was the forward span's.
+    [request] = evaluator.requests
+    assert (request.start, request.end) == ("20240701", RELEASE_END)
     [failed] = [row for row in ledger.read() if row["record_type"] == "attempt_failed"]
     assert (failed["phase"], failed["session_key"]) == ("forward", "forward")
     assert forward_record(ledger.read()) is None
@@ -994,7 +991,7 @@ def test_an_environment_failure_fails_the_attempt_and_leaves_no_verdict(tmp_path
     with pytest.raises(RuntimeError, match="research is over"):
         pipeline.run_research_session()
     assert len(developer.requests) == 1
-    # The retry reads the sealed year again and records the verdict.
+    # The retry replays forward again and records the readout.
     evaluator.raise_with = None
     assert pipeline.run_forward()["status"] == "ok"
 

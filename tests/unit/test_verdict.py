@@ -94,8 +94,6 @@ def _ruled(arguments):
     return {**arguments, "rules": rules}
 
 
-
-
 def _heldout(analysis, **overrides):
     arguments = {"start": HELDOUT_START, "end": HELDOUT_END, "mean_gross": 1.0, **overrides}
     return verdict.heldout_slice(analysis, **_ruled(arguments))
@@ -413,46 +411,6 @@ def test_the_forward_mandate_and_active_drawdown_are_reported_whatever_the_rules
     assert tight == base
 
 
-def test_the_verdict_admits_exactly_when_the_sealed_gate_passes():
-    """The sealed gate is the verdict's one performance condition: a book
-    whose forward and Held-out slices read badly on every retired condition
-    -- a negative F2 bound, a negative F5 excess, no trades, a collapse --
-    graduates when its sealed reading passes, and one that reads well
-    forward is discarded when it does not. F2 and F5 are in the record,
-    never in the reasons; a strategy error is."""
-
-    rng = np.random.default_rng(81)
-    analysis = _analysis(
-        _segment(FORWARD_DAYS, -0.30, rng, te=0.05),
-        _segment(HELDOUT_DAYS, -0.50, rng, te=0.05, exact=True),
-    )
-    forward = _forward(analysis, turnover=40.0, round_trips=0, mean_gross=0.05)
-    heldout = _heldout(analysis, mean_gross=0.05)
-    assert forward["lower_bound"] < 0 and forward["excess_at_cost_stress"] < 0
-    assert heldout["plain_excess"] < 0 and "reasons" not in heldout
-
-    passed = {"reasons": [], "thresholds": {"alpha": 0.05, "bar": 0.736, "sealed_years": 5}}
-    refused = {**passed, "reasons": ["sealed_residual_ir_below_bar"]}
-    graduated = verdict.graduation_verdict(sealed=passed, forward=forward, heldout=heldout)
-    assert graduated["status"] == "graduated" and graduated["reasons"] == []
-    assert graduated["thresholds"] == passed["thresholds"]
-    assert set(graduated["holder_line"]) == {"forward", "heldout"}
-    discarded = verdict.graduation_verdict(sealed=refused, forward=forward, heldout=heldout)
-    assert discarded == {**graduated, "status": "discarded", "reasons": refused["reasons"]}
-    # A frozen book that raised in its own code after the freeze is never
-    # admitted, its sealed reading's reasons first.
-    raised = verdict.graduation_verdict(sealed=passed, strategy_errors=("heldout",))
-    assert raised == {"status": "discarded", "reasons": ["heldout_strategy_error"], "thresholds": passed["thresholds"]}
-    both = verdict.graduation_verdict(sealed=refused, strategy_errors=("replicate", "forward"))
-    assert both["reasons"] == [
-        "sealed_residual_ir_below_bar",
-        "forward_strategy_error",
-        "replicate_strategy_error",
-    ]
-    with pytest.raises(ValueError, match="strategy_errors"):
-        verdict.graduation_verdict(sealed=passed, strategy_errors=("sealed",))
-
-
 def test_an_unmeasurable_slice_raises_instead_of_judging():
     rng = np.random.default_rng(91)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.10, rng))
@@ -661,13 +619,6 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     assert heldout["raw_readings"]["strategy_return"] == pytest.approx(
         compound("strategy_daily", HELDOUT_START, HELDOUT_END), rel=1e-12
     )
-    passed = {"reasons": [], "thresholds": {}}
-    lines = verdict.graduation_verdict(sealed=passed, forward=forward, heldout=heldout)["holder_line"]
-    assert set(lines) == {"forward", "heldout"}
-    assert lines["forward"].startswith(
-        f"{FORWARD_START}..{FORWARD_END}: book {strategy * 100:+.1f}% against benchmark {benchmark * 100:+.1f}%"
-    )
-    assert f"plain selection {(strategy - panel) * 100:+.1f} points" in lines["forward"]
 
 
 def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
@@ -735,76 +686,23 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
 
 
 def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
-    """Every condition has its own reason token. The verdict's criteria are
-    the sealed gate's, S, and the validity conditions, F1, H1 and R1 (no
-    frozen book raised after the freeze); no registration condition has a
-    code. The only optional conditions are the tracking mandate's, which its
-    cap turns on."""
+    """Every condition has its own reason token, every condition is a
+    registration's (nothing after the registration judges), and the only
+    optional conditions are the tracking mandate's, which its cap turns on."""
 
     reasons = [condition.reason for condition in verdict.CONDITIONS]
     assert len(reasons) == len(set(reasons))
     stages: dict[str, list[verdict.Condition]] = {}
     for condition in verdict.CONDITIONS:
         stages.setdefault(condition.stage, []).append(condition)
-    assert list(stages) == ["nomination", "registration", "freeze", "seeds", "sealed", "validity"]
-    assert {condition.code for condition in stages["sealed"]} == {"S"}
-    assert [condition.code for condition in stages["validity"]] == ["F1", "H1", "R1"]
-    assert {condition.reason for condition in stages["validity"]} == {
-        f"{place}_strategy_error" for place in verdict.STRATEGY_ERROR_PLACES
-    }
-    assert not any(c.code for c in verdict.CONDITIONS if c.stage not in ("sealed", "validity"))
+    assert list(stages) == ["nomination", "registration", "freeze", "seeds"]
     assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
     assert {condition.reason for condition in stages["seeds"]} == {
         "freeze_seed_replicate_invalid",
         "freeze_too_few_seed_replicates",
     }
-def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict():
-    """The sealed gate reads the frozen book's active series over the sealed
-    years through the residual statistic at the rules' alpha: a book whose
-    residual IR clears the bar for that length passes, one that does not is
-    refused, a book that raised has no reading and is refused, and the
-    verdict lists the sealed reason first whatever the forward slices read."""
-
-    sealed = _weekdays("20200801", "20250731")
-    rules = AcceptanceRules(**{**REQUIRED_RULES, "research_years": 5})
-
-    def book(alpha):
-        sidecar = _analysis(_segment(sealed, alpha, np.random.default_rng(9), te=0.05, exact=True))
-        return _with_panel(sidecar, np.zeros(len(sealed)))
-
-    def read(alpha):
-        return verdict.sealed_slice(book(alpha), rules=rules, start=sealed[0], end=sealed[-1])
-
-    edge, flat = read(0.10), read(0.0)
-    assert edge["series"] == "active" and edge["years"] == pytest.approx(len(sealed) / 244)
-    assert edge["bar"] == pytest.approx(NormalDist().inv_cdf(0.95) / math.sqrt(len(sealed) / 244))
-    assert edge["residual_information_ratio"] >= edge["bar"] and edge["reasons"] == []
-    assert flat["residual_information_ratio"] < flat["bar"]
-    assert flat["reasons"] == ["sealed_residual_ir_below_bar"]
-    assert edge["thresholds"] == {"alpha": 0.05, "bar": edge["bar"]}
-    raised = verdict.sealed_strategy_error(start=sealed[0], end=sealed[-1], error="StrategyRaised: boom")
-    assert raised["reasons"] == ["sealed_strategy_error"] and "residual_information_ratio" not in raised
-    # A book that earned exactly its panel's return (it stayed in cash) left
-    # nothing to read: its own doing, a failed gate rather than a retry.
-    cash = _analysis(_segment(sealed, 0.0, np.random.default_rng(9), te=0.05))
-    cash = {**_with_panel(cash, [value for _day, value in cash["strategy_daily"]])}
-    unread = verdict.sealed_slice(cash, rules=rules, start=sealed[0], end=sealed[-1])
-    assert unread["reasons"] == ["sealed_unmeasurable"] and unread["unmeasurable"] is True
-    assert "residual_information_ratio" not in unread
-    # The gate reads the active series alone: a replay without a panel
-    # measured nothing and raises.
-    with pytest.raises(ValueError, match="no zero-skill panel"):
-        verdict.sealed_slice(_analysis(_segment(sealed, 0.10, np.random.default_rng(9))), rules=rules, start=sealed[0], end=sealed[-1])
-
-    forward = _forward(_selection_book(np.random.default_rng(3), 0.40))
-    heldout = _heldout(
-        _selection_book(np.random.default_rng(4), 0.40, days=FORWARD_DAYS + HELDOUT_DAYS)
-    )
-    passed = verdict.graduation_verdict(sealed=edge, forward=forward, heldout=heldout)
-    assert passed["status"] == "graduated"
-    for block in (flat, raised):
-        refused = verdict.graduation_verdict(sealed=block, forward=forward, heldout=heldout)
-        assert refused["status"] == "discarded" and refused["reasons"] == block["reasons"]
+    retired = {"sealed", "validity", "strategy_error", "graduat"}
+    assert not any(word in reason for reason in reasons for word in retired)
 
 
 def test_a_reading_is_weighed_by_its_null_p_value_and_readings_pool_by_their_years():

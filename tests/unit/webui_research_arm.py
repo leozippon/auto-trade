@@ -3,11 +3,13 @@
 The console reads experiments only through their files: ``hitl/`` control
 plane, the ledger and the result artifacts it names. ``build_arm`` writes those
 for one arm at a chosen stage — researching, frozen with the forward replay
-sealed, or with its verdict — from synthetic daily series, and computes every
-recorded statistic with the pipeline's own functions
-(``freeze_registration``, ``sealed_slice``, ``forward_slice``,
-``heldout_slice``, ``graduation_verdict``), so a projection test reads the
-same numbers a real arm would carry.
+running, or with its readout — from synthetic daily series, and computes
+every recorded statistic with the pipeline's own functions
+(``freeze_registration``, ``rolling_record.step_entry``, ``forward_slice``,
+``heldout_slice``, ``rolling_record.readout``), so a projection test reads
+the same numbers a real arm would carry. The ``graduated`` and ``discarded``
+stages write the records of an arm judged under the retired sealed gate, in
+the shape that code left, for the console's reading of such ledgers.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ from autotrade.common.records import write_json_atomic
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
+from autotrade.pipelines import rolling_record
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
 from autotrade.pipelines.experiment import freeze_registration
@@ -39,10 +42,9 @@ from autotrade.pipelines.verdict import (
     forward_mde,
     forward_slice,
     graded_statistics,
-    graduation_verdict,
     heldout_slice,
+    holder_readings,
     residual_reading,
-    sealed_slice,
 )
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
@@ -50,6 +52,7 @@ STAGES = (
     "created",
     "research",
     "sealed",
+    "frozen_with_record",
     "graduated",
     "discarded",
     "no_deliverable",
@@ -96,6 +99,16 @@ SEALED = (
     GEOMETRY.split_research(RULES.research_years)[1][0].start,
     GEOMETRY.split_research(RULES.research_years)[1][-1].end,
 )
+
+
+def _business_day_count(start: str, end: str) -> int:
+    day = date(int(start[:4]), int(start[4:6]), int(start[6:]))
+    last = date(int(end[:4]), int(end[4:6]), int(end[6:]))
+    count = 0
+    while day <= last:
+        count += day.weekday() < 5
+        day += timedelta(days=1)
+    return count
 
 
 def _business_days(start: str, count: int) -> list[str]:
@@ -282,7 +295,7 @@ def build_arm(
     # The one research session is in flight while the arm researches: it has
     # no ledger record until it ends.
     current = "research"
-    if stage in ("sealed", "graduated", "discarded"):
+    if stage in ("sealed", "frozen_with_record", "graduated", "discarded"):
         steps = [
             _step(directory, "research", 0, edge=0.0005, seed=1),
             _step(directory, "research", 1, edge=0.002, seed=3),
@@ -353,7 +366,11 @@ def build_arm(
         records.append(
             _session_record(
                 experiment_id,
-                outcome="freeze",
+                **(
+                    {"outcome": "completed", "finish_reason": "validation_period_complete"}
+                    if stage == "frozen_with_record"
+                    else {"outcome": "freeze"}
+                ),
                 steps=steps,
                                 nominated_step_id=nominee["step_id"],
                 freeze_gate=gate,
@@ -422,8 +439,45 @@ def build_arm(
         # The replay is running: its result directory is already on disk, and
         # no ledger record names it.
         write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=0.002, seed=9)
-    if stage in ("graduated", "discarded"):
-        edge = 0.002 if stage == "graduated" else -0.002
+    if stage == "frozen_with_record":
+        # The rolling record: every step of the validation period, read off
+        # one replay of the frozen strategy, as the host's completion writes it.
+        validation = GEOMETRY.split_research(RULES.research_years)[1]
+        plan = rolling_record.ValidationSteps.of(validation, RULES.test_step_months)
+        record_ref = write_result(
+            directory, "valid", start=SEALED[0], days=_business_day_count(SEALED[0], SEALED[1]), edge=0.002, seed=21
+        )
+        _with_panel(record_ref, 0.9, series="benchmark_daily")
+        record_replay = json.loads(Path(record_ref).read_text(encoding="utf-8"))
+        record_analysis = _analysis(record_ref)
+        for step in range(1, plan.count + 1):
+            first, last = plan.window(step)
+            records.append(
+                rolling_record.test_step_record(
+                    head={
+                        "experiment_id": experiment_id,
+                        "epoch_id": "research",
+                        "fold_id": "research",
+                        "run_id": "run_research",
+                        "session_key": "research",
+                    },
+                    steps=plan,
+                    step=step,
+                    candidate={
+                        "step_id": nominee["step_id"],
+                        "revision_id": nominee["revision_id"],
+                        "fingerprint": nominee["fingerprint"],
+                        "seed_replicates": [],
+                        "deterministic": False,
+                    },
+                    replay={"start": plan.start, "end": plan.end, "result_ref": record_ref},
+                    entry=rolling_record.step_entry(record_replay, record_analysis, start=first, end=last),
+                    registration=gate,
+                    source=rolling_record.SOURCE_HOST_COMPLETION,
+                )
+            )
+    if stage in ("frozen_with_record", "graduated", "discarded"):
+        edge = 0.002 if stage in ("frozen_with_record", "graduated") else -0.002
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)
         replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
@@ -448,14 +502,6 @@ def build_arm(
                     "refits_executed": {"forward": 0, "heldout": 0},
                 }
             )
-        # The sealed reading: the frozen book replayed over the sealed year.
-        sealed_ref = write_result(
-            directory, "valid", start=SEALED[0], days=250, edge=2 * edge, seed=11
-        )
-        _with_panel(sealed_ref, 0.9, series="benchmark_daily")
-        sealed = sealed_slice(
-            _analysis(sealed_ref), rules=RULES, start=SEALED[0], end=SEALED[1]
-        )
         analysis = _analysis(ref)
         forward = forward_slice(
             analysis,
@@ -477,6 +523,36 @@ def build_arm(
             mean_gross=0.9,
             seed_replicates=replicates,
         )
+        if stage == "frozen_with_record":
+            judged = {"readout": rolling_record.readout(records, alpha=RULES.alpha, forward=forward)}
+        else:
+            # The retired sealed gate's reading and verdict, as that code wrote
+            # them: the frozen book over the sealed years against its bar.
+            sealed_ref = write_result(directory, "valid", start=SEALED[0], days=250, edge=2 * edge, seed=11)
+            _with_panel(sealed_ref, 0.9, series="benchmark_daily")
+            sealed_analysis = _analysis(sealed_ref)
+            sealed_end = sealed_analysis["strategy_daily"][-1][0]
+            reading = residual_reading(sealed_analysis, start=SEALED[0], end=sealed_end, alpha=RULES.alpha)
+            reasons = [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
+            thresholds = {"alpha": RULES.alpha, "bar": reading["bar"]}
+            sealed = {
+                "start": SEALED[0],
+                "end": sealed_end,
+                **reading,
+                "raw_readings": holder_readings(sealed_analysis, start=SEALED[0], end=sealed_end),
+                "reasons": reasons,
+                "thresholds": thresholds,
+            }
+            assert bool(reasons) == (stage == "discarded"), stage
+            judged = {
+                "sealed": {"label": "Y4", "start": SEALED[0], "end": sealed_end, "result_ref": sealed_ref, "slice": sealed},
+                "verdict": {
+                    "status": stage,
+                    "reasons": reasons,
+                    "thresholds": thresholds,
+                    "holder_line": {name: f"{name} as the holder read it" for name in ("forward", "heldout")},
+                },
+            }
         ledger.append(
             {
                 "record_type": "forward",
@@ -487,13 +563,6 @@ def build_arm(
                 "session_key": "forward",
                 "artifact_id": "strategy_research_abc",
                 "replay": REPLAY,
-                "sealed": {
-                    "label": "Y4",
-                    "start": SEALED[0],
-                    "end": SEALED[1],
-                    "result_ref": sealed_ref,
-                    "slice": sealed,
-                },
                 "status": "ok",
                 "error": None,
                 "result_ref": ref,
@@ -501,12 +570,12 @@ def build_arm(
                 "refits_executed": {"forward": 0, "heldout": 0},
                 **({"seed_replicates": replicate_rows} if replicate_rows else {}),
                 "null_control": {"k": 500, "excess_percentile": 0.9, "step": {"excess_percentile": 0.77}},
-                "verdict": graduation_verdict(sealed=sealed, forward=forward, heldout=heldout),
+                **judged,
             }
         )
         current = ""
     status: dict[str, object] = {"schema_version": 1, "pid": 999_999_999, "state": "stopped"}
-    if stage in ("graduated", "discarded", "no_deliverable", "deadline", "environment_blocked"):
+    if stage in ("frozen_with_record", "graduated", "discarded", "no_deliverable", "deadline", "environment_blocked"):
         status["state"] = "completed"
     elif stage == "broken":
         status["state"] = "failed"

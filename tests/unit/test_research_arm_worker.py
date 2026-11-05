@@ -2,7 +2,7 @@
 
 Only the snapshot provider is synthetic (``tests/unit/synthetic_arm.py``): the
 params loader, the interactive runner, the pipeline, the deterministic
-developer, the span replay, the Broker, the verdict and the terminal status
+developer, the span replay, the Broker, the readout and the terminal status
 are the production code.
 """
 
@@ -165,10 +165,19 @@ def test_an_arm_runs_research_completes_the_record_and_replays_forward_and_heldo
     heldout_slice = replay["slices"]["heldout"]
     assert forward_slice["activity"]["round_trips"] >= 12
     assert heldout_slice["activity"]["trade_days"] < forward_slice["activity"]["trade_days"]
-    assert replay["verdict"]["status"] == "graduated", replay["verdict"]["reasons"]
+    # The readout: the record the host completed, read as one series, and
+    # the forward reading; nothing judges.
+    readout = replay["readout"]
+    assert "verdict" not in replay and "sealed" not in replay
+    assert (readout["state"], readout["record"]["steps"], readout["record"]["candidate_changes"]) == (
+        "frozen_with_record", 4, 0
+    )
+    assert (readout["record"]["start"], readout["record"]["end"]) == ("20230701", "20240630")
+    assert 0.0 <= readout["record"]["p_value"] <= 1.0
+    assert readout["forward"]["lower_bound"] == forward_slice["lower_bound"]
 
     verdict = experiment_verdict(records)
-    assert verdict == {"status": "graduated", "reasons": []}
+    assert verdict == {"status": "frozen_with_record", "reasons": []}
     assert paper_candidate(records)["artifact_id"] == frozen["artifact_id"]
     assert result["state"] == "completed"
     assert result["verdict"] == verdict
@@ -179,10 +188,8 @@ def test_an_arm_runs_research_completes_the_record_and_replays_forward_and_heldo
     assert not (experiment / "pit_views").exists()
     assert "pit_views_release_error" not in result
     assert {path.name for path in experiment.iterdir()} >= {".host", "artifacts", "hitl", "ledgers"}
-    # The graduate opened its own Paper book on the frozen artifact.
-    assert (result["paper_book"], result.get("paper_book_error")) == (experiment.name, None)
-    book = json.loads((repo / "data/trading/paper" / experiment.name / "book.json").read_text(encoding="utf-8"))
-    assert book["artifact_id"] == frozen["artifact_id"]
+    # No Paper book opens by itself: the operator opens one from the console.
+    assert "paper_book" not in result and not (repo / "data/trading/paper").exists()
     plan = json.loads((experiment / "hitl" / "schedule.json").read_text(encoding="utf-8"))
     assert [row["session_key"] for row in plan["sessions"]] == ["research", "forward"]
     assert plan["sessions"][-1]["replay"]["replay_end"] == RELEASE_END
@@ -191,7 +198,7 @@ def test_an_arm_runs_research_completes_the_record_and_replays_forward_and_heldo
     print(json.dumps({"peak_rss_growth_mib": measured}))
     assert set(measured) == {"research", "forward"}
 
-    # A resume after the verdict republishes the terminal status and runs nothing.
+    # A resume after the readout republishes the terminal status and runs nothing.
     before = ExperimentLedger(options.rolling.ledger_path).read()
     synthetic_provider.requests.clear()
     again = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
@@ -222,7 +229,7 @@ def test_a_crashed_research_attempt_is_run_again_by_the_next_worker_start(
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert calls == [1, 2]
     assert [row["session_key"] for row in research_records(ledger.read())] == ["research"]
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
 
 
 def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
@@ -255,7 +262,7 @@ def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
     monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", no_more_research)
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert state["forward_calls"] == 2
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
     assert research is not no_more_research
     assert not (experiment / "pit_views").exists()
 
@@ -295,7 +302,7 @@ def test_a_cache_that_cannot_be_released_is_recorded_and_the_verdict_stands(
     monkeypatch.setattr(worker, "release_pit_views", stuck)
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert result["state"] == "completed"
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
     assert result["pit_views_release_error"] == "OSError: pit_views still exists after removal"
     assert read_status(experiment / "hitl" / "status.json") == result
     assert (experiment / "pit_views" / "provider.json").is_file()
@@ -328,7 +335,7 @@ def test_a_failed_replay_attempt_is_recorded_and_retried_from_forward_start(
         ("forward", "TimeoutError: strategy inference exceeded 360s")
     ]
     assert forward_record(rows)["status"] == "ok"
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
 
 
 def test_a_forward_replay_that_keeps_failing_fails_the_experiment(
@@ -483,7 +490,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert research_row["frozen"]["source_step_id"] == research_row["nominated_step_id"] == tested
     assert research_row["budget_used"]["test_replays"] == 4
     assert replay["record_type"] == "forward"
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
     system_prompts = [
         message.content or ""
         for call in llm.calls
@@ -587,10 +594,11 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         replayed = json.loads(Path(row["replay"]["result_ref"]).read_text(encoding="utf-8"))
         assert first_validation_day <= replayed["equity_curve"][0]["trade_date"] <= "20230703"
         assert replayed["equity_curve"][-1]["trade_date"] <= row["frontier"]
-    # The forward stage read the validation year once more, after the session ended.
-    sealed = replay["sealed"]
-    assert (sealed["start"], sealed["end"]) == (first_validation_day, GEOMETRY["research_end"])
-    assert sealed["slice"]["residual_information_ratio"] >= sealed["slice"]["bar"]
+    # The readout reads the four tested steps as one record; the forward
+    # stage replayed nothing of the validation year again.
+    readout = replay["readout"]
+    assert "sealed" not in replay and readout["record"]["steps"] == 4
+    assert readout["record"]["candidate_changes"] == 0
     # Everything the model read, tool schemas included, is research-session
     # vocabulary, names the validation year only by its dates and no date
     # after research end, and never the forward reading.
@@ -599,7 +607,8 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert f"{first_validation_day}..{GEOMETRY['research_end']}" in read
     for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
         assert later not in read
-    assert f"{sealed['slice']['residual_information_ratio']:.4f}" not in read
+    forward_reading = replay["slices"]["forward"]["residual_reading"]["residual_information_ratio"]
+    assert f"{forward_reading:.4f}" not in read
     # What each test returned dates no later than the frontier it reached.
     returned = [
         message.content
@@ -695,7 +704,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert record["budget_used"]["test_replays"] == 4
     # The calls of both attempts: the first spent five (two scripted, three failed).
     assert record["budget_used"]["llm_calls"] == 5 + len(second_llm.calls)
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
     # The resumed attempt opened with the interrupted one's summary, then the note.
     opening = second_llm.calls[0]["messages"]
     assert opening[0].role == "system"
@@ -799,7 +808,7 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
     ]
     assert {row["candidate"]["step_id"] for row in completion} == {tested_node}
     assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
     # The resumed attempt opened on the frontier's view and read it in its facts.
     research_requests = synthetic_provider.requests[
         : next(index for index, item in enumerate(synthetic_provider.requests) if item[0] == "heldout")
@@ -866,7 +875,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert {row["source"] for row in records[1:5]} == {"host_completion"}
     # Three failed calls of the first attempt, then this attempt's one.
     assert record["budget_used"]["llm_calls"] == 3 + len(second_llm.calls) == 4
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
     opening = second_llm.calls[0]["messages"]
     assert [message.role for message in opening] == ["system", "user"]
     note = opening[1].content
@@ -951,7 +960,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     assert len(record["steps"]) == 2
     assert record["frozen"]["source_step_id"] == record["steps"][-1]["step_id"]
     assert record["budget_used"]["api_spend_usd"] == 0.082
-    assert result["verdict"]["status"] == "graduated"
+    assert result["verdict"]["status"] == "frozen_with_record"
     events = [
         json.loads(line)
         for line in Path(record["agent_trace_ref"]).read_text(encoding="utf-8").splitlines()
@@ -1161,7 +1170,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert record["frozen"]["source_step_id"] == tested and record["arm_end"] is None
     assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
     assert record["budget_used"]["test_replays"] == 1
-    assert replay["record_type"] == "forward" and result["verdict"]["status"] == "graduated"
+    assert replay["record_type"] == "forward" and result["verdict"]["status"] == "frozen_with_record"
     # The session's views: opened at the research year's end, remounted once
     # at the frontier its test reached, and never prepared for a later day.
     research_requests = synthetic_provider.requests[

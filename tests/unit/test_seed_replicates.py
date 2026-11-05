@@ -246,9 +246,9 @@ def _arm(
 
 def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
     """The registered replicates are checked, frozen beside the nominee, and
-    replayed exactly like it on the sealed years and then forward; the
-    forward record carries their readings beside the nominee's, and a seed
-    mean whose bound is below zero decides nothing: the sealed gate passed."""
+    replayed exactly like it forward; the forward record carries their
+    readings beside the nominee's, and a seed mean whose bound is below zero
+    decides nothing: the readout reads, it does not judge."""
 
     pipeline, evaluator = _arm(
         tmp_path,
@@ -279,22 +279,13 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     forward = pipeline.run_forward()
     replays = evaluator.requests[research:]
 
-    # Three replays of the sealed years, then three of forward and Held-out,
-    # each under one Broker, the nominee first.
+    # Three replays of forward and Held-out, each under one Broker, the
+    # nominee first; nothing replays the validation years again.
     artifacts = [frozen["artifact_id"], *(item["artifact_id"] for item in frozen["seed_replicates"])]
-    assert [request.revision.revision_id for request in replays] == artifacts * 2
+    assert [request.revision.revision_id for request in replays] == artifacts
     shapes = [(r.mode, r.start, r.end, r.continuation, r.broker_profile) for r in replays]
-    assert shapes[:3] == [shapes[0]] * 3 and shapes[3:] == [shapes[3]] * 3
-    sealed = forward["sealed"]
-    assert (shapes[0][1], shapes[0][2]) == (sealed["start"], sealed["end"]) == ("20230701", "20240630")
-    assert [row["source_step_id"] for row in sealed["seed_replicates"]] == [
-        "research_step_1",
-        "research_step_2",
-    ]
-    readings = sealed["slice"]["seed_replicates"]
-    assert [row["source_step_id"] for row in readings] == ["research_step_1", "research_step_2"]
-    assert all(row["residual_information_ratio"] > row["bar"] for row in readings)
-    assert sealed["slice"]["reasons"] == []
+    assert shapes == [shapes[0]] * 3 and shapes[0][0] == "heldout"
+    assert "sealed" not in forward
     assert [row["source_step_id"] for row in forward["seed_replicates"]] == [
         "research_step_1",
         "research_step_2",
@@ -314,11 +305,11 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     assert block["raw_readings"]["plain_selection"] > 0
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
     assert block["lower_bound"] < 0 < block["seed_mean"]["plain_excess"]
-    assert forward["verdict"]["reasons"] == []
-    assert experiment_verdict(pipeline.ledger.read())["status"] == "graduated"
+    assert forward["readout"]["forward"]["lower_bound"] == block["lower_bound"]
+    assert experiment_verdict(pipeline.ledger.read()) == {"status": "frozen_with_record", "reasons": []}
 
 
-def test_seeds_that_agree_forward_graduate_together(tmp_path: Path):
+def test_seeds_that_agree_forward_are_read_together(tmp_path: Path):
     pipeline, _evaluator = _arm(
         tmp_path, [(_source(1000), "full"), (_source(2000), "full")], replicates=(1,)
     )
@@ -326,7 +317,7 @@ def test_seeds_that_agree_forward_graduate_together(tmp_path: Path):
     forward = pipeline.run_forward()
     block = forward["slices"]["forward"]
     assert block["seed_mean"]["members"] == 2 and block["lower_bound"] > 0
-    assert forward["verdict"]["status"] == "graduated"
+    assert forward["readout"]["forward"]["lower_bound"] == block["lower_bound"]
 
 
 def _refused(
@@ -428,7 +419,7 @@ def test_a_deterministic_nominee_is_held_to_its_replicates_validity(tmp_path: Pa
 def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):
     """A nominee that trains no model needs no replicate: it freezes alone,
     its gate reads that it had nothing to replicate, and forward its own
-    series is judged, with its bound."""
+    series is read, with its bound."""
 
     pipeline, evaluator = _arm(
         tmp_path, [(_source(1000, fit=False), "full"), (_source(2000, fit=False), "full")]
@@ -441,19 +432,20 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
     assert "seed_replicates" not in record["frozen"]
     research = len(evaluator.requests)
     forward = pipeline.run_forward()
-    # One sealed replay, one forward.
-    assert len(evaluator.requests) == research + 2
+    # One forward replay, the book's own.
+    assert len(evaluator.requests) == research + 1
     block = forward["slices"]["forward"]
     assert "seed_mean" not in block
     assert 0 < block["lower_bound"] < block["plain_excess"]
-    assert forward["verdict"]["status"] == "graduated"
+    assert forward["readout"]["forward"]["lower_bound"] == block["lower_bound"]
 
 
-@pytest.mark.parametrize("start", ["20230701", "20240701"], ids=["on_the_sealed_years", "forward"])
-def test_a_replicate_whose_own_code_raises_is_a_verdict_and_never_graduates(tmp_path: Path, start):
-    """A seed replicate that raises in its own code, on the sealed years or
-    forward, is read, not retried: the record names it, it leaves every seed
-    mean, and the verdict discards the arm, whatever the nominee read."""
+def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
+    """A seed replicate that raises in its own code forward is read, not
+    retried: the record names it, it leaves every seed mean, and the
+    nominee's own readout stands."""
+
+    start = "20240701"
 
     pipeline, _evaluator = _arm(
         tmp_path,
@@ -463,18 +455,14 @@ def test_a_replicate_whose_own_code_raises_is_a_verdict_and_never_graduates(tmp_
     )
     pipeline.run_research_session()
     forward = pipeline.run_forward()
-    sealed = start == forward["sealed"]["start"]
-    rows = forward["sealed"]["seed_replicates"] if sealed else forward["seed_replicates"]
-    [raised] = rows
+    [raised] = forward["seed_replicates"]
     assert raised["source_step_id"] == "research_step_1" and raised["result_ref"] is None
     assert raised["strategy_error"] is True and "generate_orders raised" in raised["error"]
-    assert forward["sealed"]["slice"]["reasons"] == []
-    if not sealed:
-        assert "seed_mean" not in forward["slices"]["forward"]
-    assert forward["verdict"]["status"] == "discarded"
-    assert forward["verdict"]["reasons"] == ["replicate_strategy_error"]
-    assert paper_candidate(pipeline.ledger.read()) is None
-    # The consistency check reads the same verdict off the stored replays.
+    assert "seed_mean" not in forward["slices"]["forward"]
+    assert forward["readout"]["state"] == "frozen_with_record"
+    assert forward["readout"]["forward"]["lower_bound"] == forward["slices"]["forward"]["lower_bound"]
+    assert paper_candidate(pipeline.ledger.read())["artifact_id"] == forward["artifact_id"]
+    # The consistency check reads the same readings off the stored replays.
     arm = pipeline.config.experiment_dir
     (arm / "hitl" / "params.json").write_text(
         json.dumps({**REQUIRED_RULES, "_created_at": utc_now_iso()}), encoding="utf-8"

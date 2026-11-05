@@ -433,7 +433,7 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
     assert stages <= labels, sorted(stages - labels)
     # The forward replay runs with no Agent session at all.
     prep = _js_literal("const PREP_ENVIRONMENT_STAGES = new Set([", "\n]);")
-    assert '"forward_replay"' in prep and '"verdict"' in prep
+    assert '"forward_replay"' in prep and '"readout"' in prep
 
 
 def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
@@ -445,7 +445,7 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     from autotrade.pipelines.config import SESSION_OUTCOMES
     from autotrade.pipelines.verdict import CONDITIONS, ConditionReason
     recorded = {condition.reason for condition in CONDITIONS} | {ConditionReason.UNMEASURABLE}
-    assert {"sealed_residual_ir_below_bar", "replicate_strategy_error"} <= recorded
+    assert {"freeze_nominee_is_control", "max_drawdown_above_limit"} <= recorded
     labels = _reason_tokens()
     assert recorded <= labels, sorted(recorded - labels)
     outcomes = set(
@@ -481,7 +481,9 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
     assert len(reasons) == 4, reasons
     assert reasons <= keys("const VERDICT_REASON_LABELS = {"), sorted(reasons)
     assert keys("const VERDICT_STATUS = {") == {"observing", "confirmed", "killed"}
-    assert keys("const TRACK_LABELS = {") == {"graduated", "incubating"}
+    from autotrade.paper.book import TRACKS
+
+    assert keys("const TRACK_LABELS = {") == set(TRACKS)
 
 
 def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
@@ -606,12 +608,6 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     assert forward_rows <= slice_served["forward"]
     assert heldout_rows <= slice_served["heldout"]
     assert slice_rows == forward_rows | heldout_rows, sorted(slice_rows ^ (forward_rows | heldout_rows))
-    # Every criterion the verdict can fail is a line of its checklist.
-    from autotrade.pipelines.verdict import CONDITIONS
-
-    checked = set(re.findall(r'"(sealed_[a-z_]+)"', _js_function_body("sealedCriterion")))
-    checked |= set(re.findall(r'"([a-z]+_strategy_error)"', _js_function_body("validityCriteria")))
-    assert {condition.reason for condition in CONDITIONS if condition.code} == checked
     # The budget bars read the keys both the totals and the usage block carry.
     bars = set(re.findall(r'^  \["([a-z_]+)",', _js_literal("const BUDGET_ROWS = [", "\n];"), re.MULTILINE))
     assert bars and bars <= budget, sorted(bars - budget)

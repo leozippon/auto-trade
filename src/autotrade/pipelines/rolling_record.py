@@ -236,6 +236,53 @@ def test_step_record(
     }
 
 
+# The state a frozen strategy's readout gives its arm: a frozen strategy
+# with its rolling record and its forward reading (``ledger.VerdictStatus``).
+FROZEN_WITH_RECORD = "frozen_with_record"
+
+
+def readout(
+    records: Sequence[Mapping[str, object]],
+    *,
+    alpha: float,
+    forward: Mapping[str, object] | None = None,
+    strategy_error: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """The arm's readout, what its forward record states where a verdict once
+    stood: nothing here passes or fails.
+
+    ``record`` is the rolling record read as one series
+    (:func:`record_instrument`: residual IR, one-sided p-value, bar, years)
+    with its span and how often the candidate changed
+    (:func:`candidate_changes`). ``forward`` is the frozen strategy's reading
+    over the Forward year, the slice ``verdict.forward_slice`` read: its
+    lower bound and residual reading; a book that raised in its own code
+    during the replay has ``strategy_error`` there instead (the slice it
+    raised in and the error), which is a reading too.
+    """
+
+    tests = test_step_records(records)
+    block: dict[str, object] = {
+        "state": FROZEN_WITH_RECORD,
+        "record": {
+            **record_instrument([row["entry"] for row in tests], alpha=alpha),  # type: ignore[misc]
+            "start": str(tests[0]["window"]["start"]) if tests else None,  # type: ignore[index]
+            "end": str(tests[-1]["frontier"]) if tests else None,
+            "candidate_changes": candidate_changes(records),
+        },
+    }
+    if forward is not None:
+        block["forward"] = {
+            "lower_bound": forward.get("lower_bound"),
+            "residual_reading": dict(forward["residual_reading"]),  # type: ignore[arg-type]
+        }
+    else:
+        if strategy_error is None:
+            raise ValueError("a readout without a forward slice names the strategy error that left it unread")
+        block["forward"] = {"strategy_error": dict(strategy_error)}
+    return block
+
+
 def test_step_records(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     """The arm's ``test_step`` records in step order; a ledger whose steps are
     not exactly 1..k raises, since every reader counts on a contiguous record."""
@@ -268,12 +315,14 @@ def candidate_changes(records: Sequence[Mapping[str, object]]) -> int:
 
 __all__ = [
     "DAILY_COLUMNS",
+    "FROZEN_WITH_RECORD",
     "SOURCE_HOST_COMPLETION",
     "SOURCE_TEST",
     "ValidationSteps",
     "candidate_changes",
     "frontier_after",
     "month_table",
+    "readout",
     "record_instrument",
     "step_entry",
     "test_step_record",

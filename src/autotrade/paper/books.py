@@ -102,10 +102,12 @@ def run_books(
     return failures
 
 
-def open_graduated_book(repo_root: str | Path, experiment_dir: str | Path) -> str:
-    """Create a graduate's Paper book when none exists yet; the book id.
+def open_frozen_book(repo_root: str | Path, experiment_dir: str | Path) -> str:
+    """Create the Paper book of an arm's frozen strategy when none exists yet;
+    the book id.
 
-    The book is named after the experiment and trades its Paper candidate. A
+    The book is named after the experiment and trades its Paper candidate (a
+    frozen strategy with its forward record), within ``book.BOOK_CAP``. A
     book already on disk is left as it is.
     """
     repo_root = Path(repo_root).resolve()
@@ -117,15 +119,15 @@ def open_graduated_book(repo_root: str | Path, experiment_dir: str | Path) -> st
     records = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
     candidate = paper_candidate(records)
     if candidate is None:
-        raise ValueError(f"{book_id} has no Paper candidate: it did not graduate")
+        raise ValueError(f"{book_id} has no Paper candidate: no frozen strategy with a forward record")
     list_books(state_root)
     create_book(
         state_root / book_id,
         experiment_dir=experiment,
         artifact_id=str(candidate["artifact_id"]),
         repo_root=repo_root,
-        track="graduated",
-        note="graduated",
+        track="frozen",
+        note="frozen",
     )
     return book_id
 
@@ -159,7 +161,7 @@ __all__ = [
     "delete_book",
     "follows_real_fills",
     "list_books",
-    "open_graduated_book",
+    "open_frozen_book",
     "run_books",
     "run_order",
     "validate_book_id",

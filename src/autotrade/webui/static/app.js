@@ -33,6 +33,7 @@ const OUTCOME_LABELS = {
 // 裁决 view. A graduation withdrawn afterwards is a failure, `rejected`, and
 // only its reason says it had graduated.
 const ENDING_LABELS = {
+  frozen_with_record: "已冻结，有记录",
   graduated: "验收通过",
   rejected: "未通过",
   no_edge: "未发现超额",
@@ -45,6 +46,7 @@ const ENDING_LABELS = {
 // and the reason a terminal row or an unmeasured reading carries. A value not
 // listed renders as written.
 const TRACK_LABELS = {
+  frozen: "冻结策略",
   graduated: "验收通过",
   incubating: "模拟观察中",
 };
@@ -156,9 +158,8 @@ const ENVIRONMENT_STAGE_LABELS = {
   agent_complete: "Agent 推理完成",
   freezing: "定版策略",
   completing_record: "宿主补完滚动记录",
-  sealed_replay: "封存研究年回测",
   forward_replay: "前推与 Held-out 连续回测",
-  verdict: "裁决",
+  readout: "读出记录",
   publishing: "结果落盘",
   session_retry: "会话失败重试",
 };
@@ -171,9 +172,8 @@ const ENVIRONMENT_STAGE_ICONS = {
   agent_complete: "🤖",
   freezing: "❄",
   completing_record: "▶",
-  sealed_replay: "▶",
   forward_replay: "▶",
-  verdict: "⚖",
+  readout: "📖",
   publishing: "💾",
 };
 // Stages with no Agent session to watch: no live Trace is offered for them.
@@ -185,9 +185,8 @@ const PREP_ENVIRONMENT_STAGES = new Set([
   "pit_view",
   "sandbox_start",
   "completing_record",
-  "sealed_replay",
   "forward_replay",
-  "verdict",
+  "readout",
   "session_retry",
 ]);
 // Dead-worker states the backend can relaunch from a ledger resume; mirrors

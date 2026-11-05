@@ -268,6 +268,7 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     reason; an arm that can still run has none at all."""
 
     for experiment_id, stage in (
+        ("frozen_with_record", "frozen_with_record"),
         ("graduated", "graduated"),
         ("rejected", "discarded"),
         ("no_edge", "no_deliverable"),
@@ -297,8 +298,17 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         f" · 对面板 {raw['plain_selection'] * 100:+.2f}%"
         f" · 主动 IR {forward['information_ratio']:.2f}"
     )
-    # The sealed gate failed first, and leads the reasons.
-    assert endings["rejected"]["reason"].split(" · ")[0] == "S"
+    # A frozen strategy is named by its readout: the record's instrument and
+    # the forward lower bound.
+    readout = rows["frozen_with_record"]["forward"]["readout"]
+    assert endings["frozen_with_record"]["reason"] == (
+        f"滚动记录 残差 IR {readout['record']['residual_information_ratio']:.2f}"
+        f" · p {readout['record']['p_value']:.2f} · 换候选 0 次"
+        f" · 前推下界 {readout['forward']['lower_bound'] * 100:+.2f}%"
+    )
+    assert rows["frozen_with_record"]["paper_candidate"] is not None
+    # The retired sealed gate's reason token leads a rejected arm's reasons.
+    assert endings["rejected"]["reason"].split(" · ")[0] == "sealed_residual_ir_below_bar"
     assert rows["graduated"]["paper_candidate"] is not None
     assert endings["no_edge"]["reason"] == "没有候选值得冻结"
     assert endings["budget_exhausted"]["reason"] == "模型调用次数用尽"

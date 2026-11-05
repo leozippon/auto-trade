@@ -5,9 +5,10 @@ One JSONL file per experiment. The pipeline writes three record types:
 - ``research_session``: the arm's one research session, its outcome and the
   Steps of every attempt; it carries the arm's ``frozen`` block when the
   nominee registered for the freeze, otherwise ``arm_end``;
-- ``forward``: the frozen artifact's reading on the sealed research years,
-  then its continuous forward and Held-out replay, the two slices and the
-  graduation verdict;
+- ``test_step``: one step of the arm's rolling record, appended by a
+  session's ``test`` or by the host's completion (``rolling_record``);
+- ``forward``: the frozen artifact's continuous forward and Held-out
+  replay, the two slices and the arm's readout (``rolling_record.readout``);
 - ``attempt_failed``: a session or replay that raised before its business
   record. It carries the error evidence and is ignored by every reader of the
   business types, so the attempt is re-runnable but auditable. A run killed
@@ -16,9 +17,10 @@ One JSONL file per experiment. The pipeline writes three record types:
   missing ``attempt_failed``.
 
 An operator may append one more, by hand and never by the pipeline:
-``verdict_void`` withdraws a recorded graduation that later evidence showed
-was not one (who, when, why, and where the evidence is). The forward record
-stays as produced; :func:`experiment_verdict` reads the arm as ``voided``.
+``verdict_void`` withdraws a graduation recorded under the sealed-gate rules
+that later evidence showed was not one (who, when, why, and where the
+evidence is). The forward record stays as produced; :func:`experiment_verdict`
+reads the arm as ``voided``. Nothing grades a readout, so nothing voids one.
 Until 2026-11-03 an operator could incubate one node of an arm whose research
 ended without a graduation, which appended ``incubation`` (the node's
 entry-screen reading, the artifact it froze, its forward and Held-out reading
@@ -94,10 +96,13 @@ INCUBATION_RECORD_TYPE = "incubation"
 
 
 class VerdictStatus(StrEnum):
-    """An arm's verdict (:func:`experiment_verdict`): the forward record's
-    ``graduated`` or ``discarded``, ``voided`` over a withdrawn graduation,
-    or the ``arm_end`` status of a research session that ended the arm."""
+    """An arm's terminal status (:func:`experiment_verdict`): a forward record's
+    readout, ``frozen_with_record``; the ``arm_end`` status of a research
+    session that ended the arm; or, on an arm judged under the sealed-gate
+    rules, its forward record's ``graduated`` or ``discarded`` and ``voided``
+    over a withdrawn graduation, which stay readable."""
 
+    FROZEN_WITH_RECORD = "frozen_with_record"
     GRADUATED = "graduated"
     DISCARDED = "discarded"
     VOIDED = "voided"
@@ -297,19 +302,26 @@ def research_over(records: Sequence[Mapping[str, object]]) -> bool:
 def experiment_verdict(
     records: Sequence[Mapping[str, object]],
 ) -> dict[str, object] | None:
-    """The arm's verdict: ``graduated``/``discarded`` from its forward record,
-    ``voided`` when an operator withdrew that graduation, the ``arm_end``
-    status (:data:`ARM_END_STATUSES`) when research ended without a freeze,
-    else None.
+    """The arm's terminal status: ``frozen_with_record`` from its forward
+    record's readout (nothing gates; the record and the reading are the
+    status), the ``arm_end`` status (:data:`ARM_END_STATUSES`) when research
+    ended without a freeze, else None. A forward record judged under the
+    sealed-gate rules reads ``graduated``/``discarded``, or ``voided`` when an
+    operator withdrew that graduation.
 
-    The single source for the terminal status, the console, the graduated
-    memory tier and Paper: a voided arm is terminal, is no graduate to any of
-    them, and keeps its forward record's own reasons beside the void.
+    The single source for the terminal status, the console and Paper: a
+    voided arm is terminal, is no graduate to any of them, and keeps its
+    forward record's own reasons beside the void.
     """
 
     forward = forward_record(records)
     void = verdict_void_record(records)
     if forward is not None:
+        readout = forward.get("readout")
+        if isinstance(readout, Mapping):
+            if void is not None:
+                raise ValueError("a verdict void stands on a readout, which nothing grades")
+            return {"status": str(readout["state"]), "reasons": []}
         verdict = forward.get("verdict")
         if not isinstance(verdict, Mapping):
             raise ValueError("forward record carries no verdict block")
@@ -342,14 +354,23 @@ def experiment_verdict(
 
 
 def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The artifact Paper pins: the frozen artifact of a graduated arm, else None."""
+    """The artifact a Paper book trades: the frozen strategy of an arm with its
+    forward record (``frozen_with_record``) whose forward replay completed (a
+    book continues that replay's history), or the graduate of an arm judged
+    under the sealed-gate rules; else None."""
 
+    forward = forward_record(records)
+    if forward is not None and forward.get("status") != "ok":
+        return None
     verdict = experiment_verdict(records)
-    if verdict is None or verdict["status"] != VerdictStatus.GRADUATED:
+    if verdict is None or verdict["status"] not in (
+        VerdictStatus.FROZEN_WITH_RECORD,
+        VerdictStatus.GRADUATED,
+    ):
         return None
     frozen = frozen_record(records)
     if frozen is None:
-        raise ValueError("a graduated arm has no frozen record")
+        raise ValueError("an arm with a forward record has no frozen record")
     block = frozen["frozen"]
     return {
         "artifact_id": str(block["artifact_id"]),

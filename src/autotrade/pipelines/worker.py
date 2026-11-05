@@ -891,16 +891,8 @@ def run_local_interactive_worker(
     payload = _terminal_status(
         ledger, {"completed_at": utc_now_iso()}, developer_mode=developer_label
     )
-    if payload.get("paper_candidate"):
-        # A graduate opens its Paper book itself. A failure leaves the button.
-        try:
-            from autotrade.paper.books import open_graduated_book
-
-            payload["paper_book"] = open_graduated_book(
-                options.repo_root, options.experiment_dir
-            )
-        except Exception as exc:  # noqa: BLE001 - the verdict stands; the failure is recorded
-            payload["paper_book_error"] = str(exc)
+    # No book opens here: the operator opens a frozen strategy's Paper book
+    # from the console's ranking view (``paper.books.open_frozen_book``).
     write_json_atomic(hitl / "status.json", payload)
     _release_finished_arm(options, payload)
     return payload

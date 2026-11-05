@@ -89,7 +89,6 @@ from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.session_tools import BATCH_FAILURE_ENVIRONMENT
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
-    CONDITIONS,
     null_p_value,
     panel_return,
     pooled_reading,
@@ -135,6 +134,7 @@ STAGES = ("research", "forward", "verdict")
 # An arm whose session the host ended on the environment (``environment_blocked``)
 # is no research outcome and keeps that word of its own.
 ENDING_STATES = (
+    "frozen_with_record",
     "graduated",
     "rejected",
     "no_edge",
@@ -143,12 +143,6 @@ ENDING_STATES = (
     "broken",
 )
 _ENDING_ORDER = {state: index for index, state in enumerate(ENDING_STATES)}
-# Which graduation criterion each failed verdict token is, as the verdict's
-# own condition table numbers them: a rejected arm's reason names the criteria
-# that refused it. A criterion may cover two recorded conditions.
-_CRITERION_CODES = {
-    condition.reason: condition.code for condition in CONDITIONS if condition.code
-}
 # A verdict recorded before 2026-11-03 may carry a retired forward or
 # Held-out token, which has no code: the reason shows the token as recorded.
 # What a slice read before then holds on the retired regressed scale (the
@@ -434,6 +428,8 @@ def arm_ending(
     verdict = experiment_verdict(records)
     if verdict is None:
         return None
+    if verdict["status"] == VerdictStatus.FROZEN_WITH_RECORD:
+        return {"state": "frozen_with_record", "reason": _readout_line(_mapping(_mapping(forward).get("readout")))}
     if verdict["status"] == VerdictStatus.VOIDED:
         void = _mapping(verdict.get("void"))
         reason = _reason_line(identity.public_text(str(void.get("reason") or "")))
@@ -452,11 +448,7 @@ def arm_ending(
             ),
         }
     if verdict["status"] == VerdictStatus.DISCARDED:
-        codes = dict.fromkeys(
-            _CRITERION_CODES.get(token, token)
-            for token in _recorded_reasons(verdict.get("reasons"))
-        )
-        return {"state": "rejected", "reason": " · ".join(codes)}
+        return {"state": "rejected", "reason": " · ".join(_recorded_reasons(verdict.get("reasons")))}
     if verdict["status"] == VerdictStatus.ENVIRONMENT_BLOCKED:
         # The host's reason names the span and the error, like a broken
         # worker's: the error is what the operator acts on, so it is not cut.
@@ -474,6 +466,23 @@ def arm_ending(
         finish = str(session.get("finish_reason") or "")
         return {"state": "budget_exhausted", "reason": _BUDGET_EXHAUSTED.get(finish, finish)}
     return {"state": "rejected", "reason": "提名未通过定版登记"}
+
+
+def _readout_line(readout: Mapping[str, object]) -> str:
+    """One line of a frozen strategy's readout: the rolling record's residual
+    IR, its p-value and candidate changes, then the forward lower bound."""
+
+    record = _mapping(readout.get("record"))
+    forward = _mapping(readout.get("forward"))
+    ratio, p_value = _number(record.get("residual_information_ratio")), _number(record.get("p_value"))
+    bound = _number(forward.get("lower_bound"))
+    error = _mapping(forward.get("strategy_error"))
+    return (
+        f"滚动记录 残差 IR {'—' if ratio is None else f'{ratio:.2f}'}"
+        f" · p {'—' if p_value is None else f'{p_value:.2f}'}"
+        f" · 换候选 {record.get('candidate_changes', '—')} 次"
+        + (f" · 前推下界 {_percent(bound)}" if not error else f" · 前推 {error.get('slice')} 段策略异常")
+    )
 
 
 def arm_attention(
@@ -539,7 +548,10 @@ def _forward_view(
         "refits_executed": record.get("refits_executed"),
         # Diagnostic: the forward slice's excess among random-name replays.
         "null_percentile": _number(_mapping(null.get("step")).get("excess_percentile")),
-        "verdict": {**verdict, "reasons": _recorded_reasons(verdict.get("reasons"))},
+        # The arm's readout (``rolling_record.readout``); a record judged under
+        # the sealed-gate rules carries its verdict instead.
+        "readout": dict(_mapping(record.get("readout"))) or None,
+        "verdict": {**verdict, "reasons": _recorded_reasons(verdict.get("reasons"))} if verdict else None,
     }
 
 

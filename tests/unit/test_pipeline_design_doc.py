@@ -17,7 +17,7 @@ import pytest
 from autotrade.pipelines.verdict import CONDITIONS
 
 DOC = Path(__file__).resolve().parents[2] / "docs" / "PIPELINE_DESIGN.md"
-HEADER = "| 阶段 | 代码 | 条件 | 阈值参数 | 开关 | 原因 |"
+HEADER = "| 阶段 | 条件 | 阈值参数 | 开关 | 原因 |"
 NONE = "—"
 
 
@@ -29,8 +29,8 @@ def _cell(text: str) -> str:
     return match.group(1) if match else text
 
 
-def documented_conditions(text: str) -> list[tuple[str, str, str, str]]:
-    """``(stage, code, rule, reason)`` of every row of the condition table."""
+def documented_conditions(text: str) -> list[tuple[str, str, str]]:
+    """``(stage, rule, reason)`` of every row of the condition table."""
 
     lines = text.splitlines()
     starts = [index for index, line in enumerate(lines) if line.strip() == HEADER]
@@ -40,36 +40,26 @@ def documented_conditions(text: str) -> list[tuple[str, str, str, str]]:
         if not line.startswith("|"):
             break
         cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        assert len(cells) == 6, f"a condition row has six cells: {line!r}"
-        rows.append((_cell(cells[0]), cells[1], _cell(cells[4]), _cell(cells[5])))
+        assert len(cells) == 5, f"a condition row has five cells: {line!r}"
+        rows.append((_cell(cells[0]), _cell(cells[3]), _cell(cells[4])))
     return rows
 
 
 @pytest.mark.skipif(not DOC.is_file(), reason="docs/ is local and not tracked")
 def test_the_documented_condition_table_is_the_code_table():
     expected = [
-        (
-            condition.stage,
-            condition.code or NONE,
-            condition.requires or NONE,
-            condition.reason,
-        )
-        for condition in CONDITIONS
+        (condition.stage, condition.requires or NONE, condition.reason) for condition in CONDITIONS
     ]
     assert documented_conditions(DOC.read_text(encoding="utf-8")) == expected
 
 
 def test_a_reordered_or_missing_row_is_caught():
     rows = [
-        f"| `{stage}` | {code} | x | — | {f'`{rule}`' if rule != NONE else NONE} | `{reason}` |"
-        for stage, code, rule, reason in (
-            (c.stage, c.code or NONE, c.requires or NONE, c.reason) for c in CONDITIONS
-        )
+        f"| `{stage}` | x | — | {f'`{rule}`' if rule != NONE else NONE} | `{reason}` |"
+        for stage, rule, reason in ((c.stage, c.requires or NONE, c.reason) for c in CONDITIONS)
     ]
-    table = "\n".join([HEADER, "| --- | --- | --- | --- | --- | --- |", *rows, ""])
-    expected = [
-        (c.stage, c.code or NONE, c.requires or NONE, c.reason) for c in CONDITIONS
-    ]
+    table = "\n".join([HEADER, "| --- | --- | --- | --- | --- |", *rows, ""])
+    expected = [(c.stage, c.requires or NONE, c.reason) for c in CONDITIONS]
     assert documented_conditions(table) == expected
     swapped = "\n".join([HEADER, "| --- |", rows[1], rows[0], *rows[2:]])
     assert documented_conditions(swapped) != expected

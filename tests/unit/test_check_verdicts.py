@@ -1,5 +1,5 @@
 """The consistency check (``scripts/dev/check_verdicts.py``) on one synthetic
-arm the real worker ran to its verdict.
+arm the real worker ran to its readout.
 
 The run over the real arms reads ``experiments/`` and is made by hand (the
 script's docstring says how); here it reads an arm small enough for the unit
@@ -31,13 +31,13 @@ LEDGER = Path("ledgers") / "experiment_ledger.jsonl"
 
 @pytest.fixture(scope="module")
 def arm(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """An arm created now, with a recorded freeze gate and forward verdict."""
+    """An arm created now, with a recorded freeze gate, rolling record and readout."""
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(worker, "ResearchPITSnapshotProvider", SyntheticPITProvider)
         repo, experiment = make_arm(tmp_path_factory.mktemp("judged"), _created_at=utc_now_iso())
         result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
-    assert result["verdict"]["status"] in ("graduated", "discarded")
+    assert result["verdict"] == {"status": "frozen_with_record", "reasons": []}
     return experiment
 
 
@@ -63,7 +63,7 @@ def _record(records: list[dict], kind: str) -> dict:
 
 def test_every_reading_of_a_current_arm_reproduces(arm: Path) -> None:
     judgements = check_arm(arm)
-    assert [item.reading for item in judgements] == ["freeze_registration", "sealed", "forward"]
+    assert [item.reading for item in judgements] == ["freeze_registration", "forward", "readout"]
     assert [item.differences for item in judgements] == [[], [], []]
     assert current_arms(arm.parent) == [arm]
     assert main(["--experiments", str(arm.parent)]) == 0
@@ -85,8 +85,8 @@ def test_a_moved_arm_is_judged_from_where_it_now_lives(arm: Path, tmp_path: Path
     judgements = check_arm(copy)
     assert [(item.reading, item.differences) for item in judgements] == [
         ("freeze_registration", []),
-        ("sealed", []),
         ("forward", []),
+        ("readout", []),
     ]
 
     def elsewhere(records: list[dict]) -> None:
@@ -99,29 +99,30 @@ def test_a_moved_arm_is_judged_from_where_it_now_lives(arm: Path, tmp_path: Path
 
 
 def test_a_tampered_reading_is_named_and_fails_the_run(arm: Path, tmp_path: Path) -> None:
-    """One bit of a stored sealed reading, a registration's verdict and a
-    recorded status are enough."""
+    """One bit of a stored slice, of the readout's record and of a
+    registration's verdict are enough."""
 
     def tampered(records: list[dict]) -> None:
         _record(records, "research_session")["freeze_gate"]["passed"] = False
         forward = _record(records, "forward")
-        reading = forward["sealed"]["slice"]
-        reading["residual_information_ratio"] = math.nextafter(reading["residual_information_ratio"], 0.0)
-        forward["verdict"]["status"] = "graduated" if forward["verdict"]["status"] != "graduated" else "discarded"
+        block = forward["slices"]["forward"]
+        block["lower_bound"] = math.nextafter(block["lower_bound"], 0.0)
+        record = forward["readout"]["record"]
+        record["residual_information_ratio"] = math.nextafter(record["residual_information_ratio"], 0.0)
 
     copy = _copy(arm, tmp_path / "experiments", tampered)
     judgements = {item.reading: item.differences for item in check_arm(copy)}
     assert judgements == {
         "freeze_registration": ["passed"],
-        "sealed": ["residual_information_ratio"],
-        "forward": ["verdict.status"],
+        "forward": ["forward.lower_bound"],
+        "readout": ["record.residual_information_ratio"],
     }
     assert main(["--experiments", str(copy.parent)]) == 1
 
 
 def test_an_arm_created_under_retired_rules_is_not_judged(arm: Path, tmp_path: Path) -> None:
     """An arm is judged by the rules it states, whenever it was created: one
-    whose rules name no sealed years is never judged again."""
+    whose rules name no research years is never judged again."""
 
     root = tmp_path / "experiments"
     _copy(arm, root, research_years=None)
