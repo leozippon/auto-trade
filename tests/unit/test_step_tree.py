@@ -385,10 +385,8 @@ class PromptCompositionTest(unittest.TestCase):
 
     def test_the_step_tree_section_is_part_of_the_static_contract(self) -> None:
         prompt = build_system_prompt()
-        self.assertIn("# Step 产物树", prompt)
-        self.assertIn("step_rollback", prompt)
-        self.assertIn("finish_session", prompt)
-        self.assertLess(prompt.index("# Step 产物树"), prompt.index(self.MARKER))
+        self.assertIn("根 `steps` 的 Step 树（`tree.txt`）", prompt)
+        self.assertLess(prompt.index("Step 树"), prompt.index(self.MARKER))
 
     def test_the_session_directive_is_optional_and_framed_as_a_hypothesis(self) -> None:
         without = build_system_prompt()
@@ -426,18 +424,15 @@ class PromptCompositionTest(unittest.TestCase):
         second_prefix, second_context = second.split(self.MARKER, 1)
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
-        # Opening paragraph, harness, task, ending, strategy contract,
-        # prohibitions, tools, the Step tree, feedback -- then the environment.
+        # Opening paragraph, process, readings, strategy, prohibitions, how
+        # to work -- then the environment.
         order = [
-            first.index("你是 A 股量化策略研究会话的主 Agent"),
-            first.index("# 系统"),
-            first.index("# 研究任务"),
-            first.index("# 结束会话"),
-            first.index("# 策略合同"),
+            first.index("你是本研究框架的 AI 首席量化研究官"),
+            first.index("# 研究与回测流程"),
+            first.index("# 读数"),
+            first.index("# 策略"),
             first.index("# 禁止事项"),
-            first.index("# 使用工具"),
-            first.index("# Step 产物树"),
-            first.index("# 反馈通道"),
+            first.index("# 工作方式"),
             first.index(self.MARKER),
         ]
         self.assertEqual(order, sorted(order))

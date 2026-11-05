@@ -1340,18 +1340,22 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     tmp_path: Path,
 ):
     prompt = build_system_prompt(experiment_facts={"identity": {"session_kind": "research"}})
-    assert "generate_orders(context)" in prompt
-    assert "严格 JSON 往返的订单数组" in prompt
-    assert "策略执行时钟" in prompt
-    assert "不能假定 `context.bars` 含完整历史" in prompt
-    assert "实际挂载清单、schema、单位引用" in prompt
+    # The prompt points at the contract; the daily JSON entry, the order
+    # array, the execution clock and the bars' history are stated there.
+    assert "`output/README.md`" in prompt
     assert "Held-out" in prompt
-    # The prohibition list carries the item-6 execution-model rules.
+    reference = Path("configs/agent_output_template/README.md").read_text(encoding="utf-8")
+    for rule in (
+        "def generate_orders(context):",
+        "## Strict JSON order array",
+        "The fixed inference time controls when the strategy runs",
+        "`context.bars` is an evaluation-interval market surface, not the complete strategy input history",
+    ):
+        assert rule in reference, rule
     prohibitions = prompt[prompt.index("# 禁止事项") :]
     for rule in (
-        "读取可见研究年之后的任何数据（封存研究年、前推期或 Held-out）",
-        "绕过 `available_at`",
-        "把历史分钟、竞价或事件时间当成策略执行时钟",
+        "读取前沿之后的数据",
+        "使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录",
         "伪造工具结果",
     ):
         assert rule in prohibitions
@@ -1366,11 +1370,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
 
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     prompt = build_system_prompt(experiment_facts={})
-    for rule in (
-        "从日期、路径、元数据和模型常识推断它们的行情",
-        "正式回测不能由自建回放替代",
-    ):
-        assert rule in prompt
+    assert "从日期、路径、元数据和模型自身的知识推断之后的行情" in prompt
     # The shell's foreground-only rule and its one exception are the tool's
     # own description, not a second copy in the prompt.
     assert "starting work in the background" in SandboxShellTool.spec.description
@@ -1506,9 +1506,9 @@ def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
 
     registrable = _all_registrable_tool_names()
     referenced = _prompt_tool_tokens(build_system_prompt(experiment_facts={})) & registrable
-    assert "step_rollback" in referenced
-    allowed = set(_SESSION_TOOLS) - {"step_rollback"}
-    assert sorted(referenced - allowed) == ["step_rollback"]
+    assert "report_issue" in referenced
+    allowed = set(_SESSION_TOOLS) - {"report_issue"}
+    assert sorted(referenced - allowed) == ["report_issue"]
 
 
 def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:
