@@ -266,7 +266,10 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
     def test_every_paper_run_starts_before_the_default_decisions_sheet_is_due(self) -> None:
         # The first run follows the nightly chain at 05:40; the operator needs
         # the sheet ten minutes after the decision, so the last retry has to
-        # start before then.
+        # start before then. A GPU book of the first run waits for a card until
+        # the last retry starts, never past it.
+        from scripts.paper import run_paper
+
         paper = sorted(
             time(int(hour), int(minute))
             for minute, hour in re.findall(
@@ -278,6 +281,9 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         due = (decision + timedelta(minutes=10)).time()
         self.assertEqual(paper[0], time(5, 40))
         self.assertLess(paper[-1], due)
+        first = datetime.combine(date(2026, 11, 6), paper[0])
+        waited_until = (first + timedelta(minutes=run_paper.GPU_WAIT_MINUTES)).time()
+        self.assertEqual(waited_until, paper[-1])
 
     def test_managed_jobs_log_through_the_runner_only(self) -> None:
         # Every run writes its own log via the runner; cron lines carry no
