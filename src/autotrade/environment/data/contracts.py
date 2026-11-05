@@ -355,7 +355,7 @@ REFRESH_NODES: dict[str, RefreshNode] = {
     # Ann-date disclosure tables (holder counts/trades, top-10 holders,
     # repurchases), every calendar day (~one row in ten announces on a
     # weekend). The job runs at the end of the chain, after the morning's last
-    # Paper run: rows announced on day D become visible at D+1 09:55 (an 08:30
+    # Paper run: rows announced on day D become visible at D+1 09:55 (an 08:00
     # decision sees stk_holdertrade, stamped 19:00, from D+2 instead of D+1;
     # the other tables are stamped 23:59:59 and stay at D+2).
     "cn_nightly_disclosure_full": RefreshNode("cn_nightly_disclosure_full", time(9, 45), 10),

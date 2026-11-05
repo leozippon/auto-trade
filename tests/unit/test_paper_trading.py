@@ -196,7 +196,7 @@ def test_earlier_decisions_are_replayed_so_module_state_spans_the_book(tmp_path:
     # Same data and account, so every replayed call reproduced its journal.
     assert [row["replayed_matching_journal"] for row in decisions] == [0, 1, 2, 3]
     # One Timeview refresh per replayed and real call, in time order.
-    assert book.built[-1].views == [f"{day[:4]}-{day[4:6]}-{day[6:]}T08:30:00+08:00" for day in SESSIONS[:4]]
+    assert book.built[-1].views == [f"{day[:4]}-{day[4:6]}-{day[6:]}T08:00:00+08:00" for day in SESSIONS[:4]]
 
 
 def test_fitted_state_persists_and_refits_only_when_the_period_rolls(tmp_path: Path):

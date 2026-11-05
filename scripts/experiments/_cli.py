@@ -107,7 +107,7 @@ def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--inference-time",
-        default="08:30",
+        default="08:00",
         metavar="HH:MM",
         help="Fixed Asia/Shanghai inference time-of-day; any valid 24-hour HH:MM.",
     )

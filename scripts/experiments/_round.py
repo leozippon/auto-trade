@@ -181,7 +181,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "operating_memory": "curated+graduated",
     "initial_control_mode": "auto",
     "reasoning_effort": "xhigh",
-    "inference_time": "08:30",
+    "inference_time": "08:00",
     "strategy_period": "day",
     # Every model role, as the console defaults it: the relay's
     # DeepSeek-V4.1-Flash. A role an arm does not name runs on these; spelled

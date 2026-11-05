@@ -40,7 +40,7 @@ When creating an experiment, the user sets `strategy_period` and a fixed `Asia/S
 | `quarter` | First available trading day of a new quarter |
 | `year` | First available trading day of a new year |
 
-The first available trading day in a replay is always due. `inference_time` is any valid 24-hour `HH:MM`; the default is `08:30`.
+The first available trading day in a replay is always due. `inference_time` is any valid 24-hour `HH:MM`; the default is `08:00`.
 
 The schedule decides only when the strategy is asked. The strategy decides its own rebalance cadence — returning `[]` on a non-rebalance day is normal — and, through `REFIT_PERIOD`, its own re-fitting cadence. Historical one-minute and auction records can be point-in-time research features, but they never create strategy ticks. Static historical minute closes also provide exact execution prices outside the daily open and close timestamps.
 

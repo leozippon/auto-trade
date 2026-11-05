@@ -7,14 +7,14 @@
 - 写解析之前先跑一次原始命令、看几行真实输出，不凭印象假定格式。
 - 据离线网格、排名或统计量提交批次之前，用一条独立实现的路径重算所选点及其相邻两点。子代理交回的数也一样：核过再写进 `hypothesis` 或 `reason`，还没交回的数不先写。
 - 离线引擎先对上一个已验证节点再用：用候选自己的打分与下单函数，在该节点的前几个复核日重算名单与订单，逐笔对照它 `result_ref` 记录里的 `executions`。对不上先修引擎，不读它的收益。
-- 在研究期末视图上模拟 08:30 的决策时按下面截断。不要手拼时间字符串去和 `available_at` 比：格式差一个字符，字典序比较就会放进未来的行而不报错。
+- 在研究期末视图上模拟 08:00 的决策时按下面截断。不要手拼时间字符串去和 `available_at` 比：格式差一个字符，字典序比较就会放进未来的行而不报错。
 
 ```python
 import pandas as pd
 
 
 def visible(frame, inference_at):
-    """Rows an 08:30 decision at inference_at sees: daily by trade_date, macro by available_at."""
+    """Rows an 08:00 decision at inference_at sees: daily by trade_date, macro by available_at."""
     at = pd.Timestamp(inference_at).tz_convert("Asia/Shanghai")
     if "available_at" in frame.columns:
         return frame[pd.to_datetime(frame["available_at"], utc=True) <= at]

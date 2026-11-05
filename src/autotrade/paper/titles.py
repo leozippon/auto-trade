@@ -3,7 +3,7 @@
 A book whose data selection mounts announcement titles (``anns_d``) sees them
 through its replay slot, cut at the last run of their landing job that
 finished before the inference time (``contracts.TEXT_DATASET_REFRESH_NODES``):
-for an 08:30 decision, the 23:15 run of the evening before. The view assumes
+for an 08:00 decision, the 23:15 run of the evening before. The view assumes
 that run landed, as the research replays the strategy was validated on did.
 The job is separate from the rest of the lake (it has its own token), so it
 can fail while the lake still commits, and the view would then lack the newest

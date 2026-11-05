@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--strategy", type=Path, required=True, help="Python file defining generate_orders(context)")
     parser.add_argument("--daily", type=Path, required=True, help="daily parquet input")
     parser.add_argument("--strategy-period", choices=("day", "month", "quarter", "year"), default="day")
-    parser.add_argument("--inference-time", default="08:30", metavar="HH:MM")
+    parser.add_argument("--inference-time", default="08:00", metavar="HH:MM")
     parser.add_argument("--initial-cash", type=float, default=1_000_000.0)
     parser.add_argument(
         "--execution-mode",

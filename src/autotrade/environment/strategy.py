@@ -430,7 +430,7 @@ class StrategySchedule:
     """User-selected inference cadence and local China-market time."""
 
     period: StrategyPeriod = "day"
-    inference_time: str | time = "08:30"
+    inference_time: str | time = "08:00"
 
     def __post_init__(self) -> None:
         if self.period not in _PERIODS:
