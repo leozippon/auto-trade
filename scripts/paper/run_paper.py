@@ -12,7 +12,11 @@ whose data has landed and makes the pre-open decision for the target session
 (default: today, Asia/Shanghai), then writes the book's order sheet to
 ``<orders-dir>/<book>/<date>_orders.md`` and ``latest_orders.md`` and prints it.
 A book that fails writes its failure to the same two files and the run goes on
-to the next book; the run exits non-zero if any book failed. A book that reads
+to the next book; the run exits non-zero if any book failed. The books that ask
+for no GPU run first. A GPU book takes its card only as its strategy container
+starts; when no card is eligible then, it looks again every
+``--gpu-poll-seconds`` until ``--gpu-wait-minutes`` after the run started, and
+only then fails. A book that reads
 announcement titles fails this way, after settling, when the title job's run
 its decision relies on has not succeeded (``paper/titles.py``). Once a book's
 settlement is journaled the run reads its Paper verdict (``paper/verdict.py``),
@@ -29,8 +33,12 @@ import argparse
 import json
 import subprocess
 import sys
+import time
+from collections.abc import Callable
 from datetime import datetime
+from functools import partial
 from pathlib import Path
+from typing import NamedTuple
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[1]
 if str(SCRIPTS_ROOT) not in sys.path:
@@ -44,6 +52,7 @@ from autotrade.common.time import CN_TZ
 from autotrade.data_sources.tushare.audit import audit_summary_line
 from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_config
 from autotrade.environment.executor import StrategyExecutor
+from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.paper.book import (
@@ -88,6 +97,58 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_STATE_ROOT = PAPER_STATE_DIR
 DEFAULT_ORDERS_DIR = Path("logs/paper")
 DEFAULT_VINTAGE_REPORT = Path("results/data_quality/paper_vintages.json")
+# How long after a run starts a GPU book keeps looking for an eligible card,
+# and how often it looks. The 05:40 run (ops/cron/paper.cron) looks until 08:40,
+# about when the last retry (08:35) would start, so a card that frees up any
+# time in the morning is used, and a sheet decided on it is ready before the
+# 09:15 call auction as the last retry's would be.
+GPU_WAIT_MINUTES = 180
+GPU_POLL_SECONDS = 60
+
+
+class CardWait(NamedTuple):
+    """Until when (a ``clock`` reading) a run keeps looking for a GPU book's
+    cards, and how many seconds apart its looks are. (A named tuple, not a
+    dataclass: tests load this script without registering it as a module.)"""
+
+    deadline: float
+    poll_seconds: float
+    clock: Callable[[], float] = time.monotonic
+    sleep: Callable[[float], None] = time.sleep
+
+
+def wait_for_cards(take: Callable[[], list[int]], wait: CardWait, label: str) -> list[int]:
+    """The cards ``take`` gives, looking again every ``poll_seconds`` while it
+    refuses, until the deadline; then its last refusal, saying how long it
+    waited. A look only reads the devices and the running arms' claims: nothing
+    is held between looks, and the cards are the caller's once returned."""
+
+    started = wait.clock()
+    waited = False
+    while True:
+        try:
+            devices = take()
+        except GpuUnavailableError as exc:
+            now = wait.clock()
+            if now >= wait.deadline:
+                if not waited:
+                    raise
+                raise GpuUnavailableError(
+                    f"{exc}; no card became eligible in {(now - started) / 60:.0f} min of looking "
+                    f"every {wait.poll_seconds:g} s, until the run's deadline"
+                ) from exc
+            if not waited:
+                print(
+                    f"{label} no eligible GPU yet, looking every {wait.poll_seconds:g} s for up to "
+                    f"{(wait.deadline - now) / 60:.0f} min: {exc}",
+                    file=sys.stderr,
+                )
+            waited = True
+            wait.sleep(min(wait.poll_seconds, wait.deadline - now))
+            continue
+        if waited:
+            print(f"{label} took GPU {devices} after {(wait.clock() - started) / 60:.0f} min", file=sys.stderr)
+        return devices
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -121,6 +182,14 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--book", help="Run this book only; default: every book.")
     run.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     run.add_argument("--orders-dir", type=Path, default=DEFAULT_ORDERS_DIR)
+    run.add_argument(
+        "--gpu-wait-minutes", type=int, default=GPU_WAIT_MINUTES,
+        help="How long after the run starts a GPU book keeps looking for an eligible card; 0 looks once.",
+    )
+    run.add_argument(
+        "--gpu-poll-seconds", type=int, default=GPU_POLL_SECONDS,
+        help="Seconds between two looks for a GPU book's card.",
+    )
     verdict = commands.add_parser("verdict", help="Read and record each book's Paper verdict; print it as JSON.")
     verdict.add_argument("--book", help="This book only; default: every book.")
     verdict.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
@@ -208,28 +277,33 @@ def _executor_on_free_gpus(
     view: StrategyDataView,
     state_dir: Path | None,
     models_dir: Path | None,
+    *,
+    card_wait: CardWait | None = None,
+    label: str = "",
 ) -> StrategyExecutor:
     """A book's strategy container, on cards taken as it starts.
 
     A book holds no card between its runs, so a run that has a decision to
-    make takes the ones its book asks for from the one selection, sharing a
-    card when none is empty: on this shared machine an empty card is often
-    unavailable, and a book without its card decides nothing that day.
+    make takes the ones its book asks for from the one selection
+    (``hitl_state.select_gpus``) and starts the container on them at once.
+    With ``card_wait`` it waits for them while none is eligible
+    (:func:`wait_for_cards`); without, it looks once. A book without its card
+    decides nothing that day.
     """
 
     spec = sandbox.spec
     if spec.gpu == GpuMode.AUTO:
-        devices = select_gpus(
-            REPO_ROOT / "experiments",
-            spec.gpu_count,
-            require_name=spec.gpu_name_filter,
-            allow_shared=True,
-        )
+        def take() -> list[int]:
+            return select_gpus(REPO_ROOT / "experiments", spec.gpu_count, require_name=spec.gpu_name_filter)
+
+        devices = take() if card_wait is None else wait_for_cards(take, card_wait, label)
         sandbox = sandbox.on_devices(tuple(devices))
     return docker_executor(strategy_path, sandbox, view, state_dir, models_dir)
 
 
-def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> None:
+def run_book(
+    book_id: str, root: Path, trade_date: str, orders_dir: Path, card_wait: CardWait | None = None
+) -> None:
     # Own initialization, engine restoration, verdict and publication as one
     # writer. A busy contender never touches the active writer's output.
     with writer_lock(root):
@@ -237,7 +311,7 @@ def run_book(book_id: str, root: Path, trade_date: str, orders_dir: Path) -> Non
         try:
             with run_reporting(root, trade_date):
                 book = load_book(root)
-                _run_book_locked(book_id, book, trade_date, orders_dir)
+                _run_book_locked(book_id, book, trade_date, orders_dir, card_wait)
         except Exception as exc:
             text = render_failure(book, trade_date, exc)
             print(text, file=sys.stderr)
@@ -252,7 +326,9 @@ def _killed_sheet(book: Book, trade_date: str) -> str:
     return render_killed(book, trade_date, transitions[0])
 
 
-def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path) -> None:
+def _run_book_locked(
+    book_id: str, book: Book, trade_date: str, orders_dir: Path, card_wait: CardWait | None
+) -> None:
     root = book.root
     if trade_date not in set(load_sse_trading_days(book.raw_dir)):
         print(f"[{book_id}] {trade_date} is not an SSE session; nothing to decide")
@@ -299,7 +375,7 @@ def _run_book_locked(book_id: str, book: Book, trade_date: str, orders_dir: Path
         schedule=book.schedule,
         profile=book.profile,
         sandbox=book.sandbox,
-        executor_factory=_executor_on_free_gpus,
+        executor_factory=partial(_executor_on_free_gpus, card_wait=card_wait, label=f"[{book_id}]"),
         decision_check=lambda at: require_landed_titles(book.snapshot_config, at, REPO_ROOT),
         after_settlement=verdict_gate,
     )
@@ -334,6 +410,9 @@ def vintages(args: argparse.Namespace) -> int:
 
 
 def run(args: argparse.Namespace) -> int:
+    if args.gpu_wait_minutes < 0 or args.gpu_poll_seconds <= 0:
+        raise ValueError("--gpu-wait-minutes must be at least 0 and --gpu-poll-seconds more than 0")
+    card_wait = CardWait(time.monotonic() + args.gpu_wait_minutes * 60, args.gpu_poll_seconds)
     trade_date = args.trade_date or datetime.now(CN_TZ).strftime("%Y%m%d")
     book_ids = [validate_book_id(args.book)] if args.book else run_order(args.state_root)
     if not book_ids:
@@ -341,7 +420,9 @@ def run(args: argparse.Namespace) -> int:
         return 1
     _resources("before")
     failures = run_books(
-        args.state_root, book_ids, lambda book_id, root: run_book(book_id, root, trade_date, args.orders_dir)
+        args.state_root,
+        book_ids,
+        lambda book_id, root: run_book(book_id, root, trade_date, args.orders_dir, card_wait),
     )
     _resources("after")
     for book_id, exc in failures.items():

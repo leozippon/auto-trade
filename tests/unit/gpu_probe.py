@@ -2,7 +2,7 @@
 
 The console admits and claims a GPU arm's devices against the live host
 (``hitl_state.select_gpus`` reads ``autotrade.environment.gpu.list_gpus``
-through ``idle_gpus``), so a create request that passes parameter validation
+through ``gpus_with_free_memory``), so a create request that passes parameter validation
 depends on what is free on this machine. Tests that create an experiment for
 some other reason wrap the request in ``stubbed_gpu_probe``, which replaces
 only the ``nvidia-smi`` reading: the selection and the claims stay real. The
@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 def gpu_roster(idle: Sequence[int] = (0,), busy: Sequence[int] = ()) -> list[dict[str, object]]:
     """``list_gpus`` rows for L20 cards: ``idle`` ones nobody uses, ``busy``
-    ones another process holds 10 GiB on."""
+    ones another process holds 10 GiB on (still eligible: 34 GiB stay free)."""
 
     return sorted(
         (

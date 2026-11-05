@@ -49,7 +49,7 @@ def _setup(tmp_path, monkeypatch, *, losing=False):
             result.market = DailyMarketData(bars)
         return result
 
-    def executor(path, _sandbox, _view, state_dir, models_dir):
+    def executor(path, _sandbox, _view, state_dir, models_dir, **_wait):
         calls.append(path)
         return TrustedStrategyExecutor.from_path(path, state_dir=state_dir, models_dir=models_dir)
 

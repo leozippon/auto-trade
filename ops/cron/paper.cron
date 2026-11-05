@@ -7,8 +7,9 @@
 # logs/paper/<book>/<date>_orders.md plus that book's latest_orders.md. A book
 # that cannot decide writes the reason to the same files and the run continues
 # with the next book, exiting non-zero if any book failed. Weekday holidays
-# exit at once. The books the owner trades by hand -- the ones he switched to
-# real fills -- run first, so their sheets are ready before the others; this
+# exit at once. The books that ask for no GPU run first, then the GPU books;
+# within each group the books the owner trades by hand -- the ones he switched
+# to real fills -- run first, so their sheets are ready before the others; this
 # file names no book, so books can come and go without editing it.
 
 SHELL=/bin/bash
@@ -39,6 +40,14 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # part of the chain that can push past 05:40 under load (03:35-05:32 on a quiet
 # night, 03:35-07:14 on 2026-09-16 with four arms running); a night where it
 # runs past 08:35 needs the arms throttled, not another retry.
+#
+# A GPU book takes its card only as its strategy container starts; with no
+# eligible card it looks again every 60 s until 180 min after its run began
+# (run_paper.py --gpu-poll-seconds / --gpu-wait-minutes), so the 05:40 run keeps
+# looking until 08:40, about when the last retry would start. A run waiting for
+# a card is still working: the retries skip while it waits, so a book that
+# failed in it for late data is retried only after it ends, or by hand with
+# run_paper.py run --book <book>.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 35 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1

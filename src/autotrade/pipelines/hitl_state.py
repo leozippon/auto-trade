@@ -14,10 +14,9 @@ from pathlib import Path
 
 from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.gpu import (
-    MIN_FREE_GPU_MEMORY_MIB,
     GpuUnavailableError,
-    idle_gpus,
-    shareable_gpus,
+    gpus_with_free_memory,
+    host_min_free_gpu_memory_mib,
 )
 
 from .arm_params import (
@@ -281,24 +280,21 @@ def free_gpus(
     require_name: str | None = None,
     min_free_memory_mib: int | None = None,
 ) -> list[int]:
-    """The GPUs free to take, ascending: the devices matching ``require_name``
-    that nobody holds memory on (``gpu.idle_gpus``) and that no running arm
-    under ``experiments_root`` claims (:func:`gpu_claims`).
-
-    ``min_free_memory_mib`` relaxes "nobody holds memory on it" to "it keeps at
-    least this much free" (``gpu.shareable_gpus``, the most free first), for a
-    caller whose need is an admission margin rather than the whole card. A
-    running arm's claim excludes a card either way; ``None`` is the whole-card
-    rule.
+    """The GPUs eligible to take, the most free memory first: the devices
+    matching ``require_name`` that keep at least ``min_free_memory_mib`` free
+    (the host's floor, ``gpu.host_min_free_gpu_memory_mib``, when it is not
+    given) and that no running arm under ``experiments_root`` claims
+    (:func:`gpu_claims`). Somebody else's memory on a card does not keep it
+    out; only too little free memory or a running arm's claim does.
     """
 
+    floor = host_min_free_gpu_memory_mib() if min_free_memory_mib is None else min_free_memory_mib
     claimed = {device for devices in gpu_claims(experiments_root).values() for device in devices}
-    devices = (
-        idle_gpus(require_name=require_name)
-        if min_free_memory_mib is None
-        else shareable_gpus(require_name=require_name, min_free_memory_mib=min_free_memory_mib)
-    )
-    return [device for device in devices if device not in claimed]
+    return [
+        device
+        for device in gpus_with_free_memory(floor, require_name=require_name)
+        if device not in claimed
+    ]
 
 
 def select_gpus(
@@ -306,64 +302,29 @@ def select_gpus(
     count: int,
     *,
     require_name: str | None = None,
-    allow_shared: bool = False,
     min_free_memory_mib: int | None = None,
 ) -> list[int]:
     """The one way a GPU is chosen: the first ``count`` of :func:`free_gpus`.
 
     The console takes an arm's cards here when it starts the worker and
     records them as its claim. Whatever else needs a card -- a Paper book's
-    morning run, a session audited from the command line, an operator's replay
-    -- takes its cards here for that run and pins them on its containers, so
-    it is never given a card a running arm holds.
-
-    ``min_free_memory_mib`` is passed to :func:`free_gpus`: a card holding
-    somebody else's work is then a candidate when it keeps at least that much
-    free, and a card that keeps less is never taken, however few are left. The
-    console passes the host's admission margin (``gpu.host_min_free_gpu_memory_mib``);
-    unset, only whole empty cards are free.
-
-    ``allow_shared`` lets a caller share cards when too few are free: it then
-    gets the ``count`` matching cards no running arm claims that keep the most
-    free memory, each with at least ``min_free_memory_mib`` (default
-    ``MIN_FREE_GPU_MEMORY_MIB``) free (``gpu.shareable_gpus``). Only the Paper's
-    morning run asks for it: on a shared machine an empty card is often
-    unavailable, and a book without its card decides nothing that day.
-    ``GpuUnavailableError`` names the free cards and who holds the rest when
-    the request cannot be met, or says why the devices could not be read.
+    morning run, a round's smoke, a session audited from the command line, an
+    operator's replay -- takes its cards here for that run and pins them on its
+    containers, so it is never given a card a running arm holds. Every caller
+    gets the same rule; ``min_free_memory_mib`` defaults to the host's floor.
+    ``GpuUnavailableError`` names the eligible cards and who holds the rest
+    when the request cannot be met, or says why the devices could not be read.
     """
 
-    free = free_gpus(
-        experiments_root, require_name=require_name, min_free_memory_mib=min_free_memory_mib
-    )
+    floor = host_min_free_gpu_memory_mib() if min_free_memory_mib is None else min_free_memory_mib
+    free = free_gpus(experiments_root, require_name=require_name, min_free_memory_mib=floor)
     if len(free) >= count:
         return free[:count]
-    claims = gpu_claims(experiments_root)
-    floor = MIN_FREE_GPU_MEMORY_MIB if min_free_memory_mib is None else min_free_memory_mib
-    if allow_shared:
-        claimed = {device for devices in claims.values() for device in devices}
-        shareable = [
-            device
-            for device in shareable_gpus(require_name=require_name, min_free_memory_mib=floor)
-            if device not in claimed
-        ]
-        if len(shareable) >= count:
-            return shareable[:count]
-    holders = "; ".join(f"{name} {devices}" for name, devices in claims.items())
-    shared = (
-        f"fewer than {count} unclaimed card(s) keep {floor} MiB free to share; "
-        if allow_shared
-        else ""
-    )
-    rule = (
-        "a card is free only when nothing holds memory on it and no running arm claims it"
-        if min_free_memory_mib is None
-        else f"a card is free only when it keeps {floor} MiB free and no running arm claims it"
-    )
+    holders = "; ".join(f"{name} {devices}" for name, devices in gpu_claims(experiments_root).items())
     raise GpuUnavailableError(
-        f"requested {count} GPU(s), {len(free)} free "
-        f"({', '.join(map(str, free)) or 'none'}); {rule}; {shared}claimed by running arms: "
-        f"{holders or 'none'}"
+        f"requested {count} GPU(s), {len(free)} free ({', '.join(map(str, free)) or 'none'}); "
+        f"a card is free only when it keeps {floor} MiB free and no running arm claims it; "
+        f"claimed by running arms: {holders or 'none'}"
     )
 
 
