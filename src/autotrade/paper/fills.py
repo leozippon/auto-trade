@@ -398,7 +398,9 @@ def record_fill(
     out: no slippage on a known price, no price-limit or holding caps on a
     trade that took place, and a stated commission in place of the model's
     (a minimum of exactly that amount and no rate). The account's own rules
-    still hold, so a fill the account could not have made is refused.
+    still hold, so a fill the account could not have made is refused. The
+    known price stands for whatever session the order named, which the record
+    keeps.
     """
 
     base = broker.profile
@@ -408,7 +410,8 @@ def record_fill(
     broker.profile = replace(base, slippage_bps=0.0, max_total_holdings=None, max_single_name_weight=None, **fee)
     try:
         bar = {"up_limit": price * 2.0, "down_limit": price / 2.0, "is_suspended": False}
-        execution = broker.execute(order, bar, matched_at=order.execute_at, raw_price=price)
+        bare = replace(order, session=None, limit_price=None)
+        execution = broker.execute(bare, bar, matched_at=order.execute_at, raw_price=price)
     finally:
         broker.profile = base
     if execution.status != "filled":
@@ -416,7 +419,7 @@ def record_fill(
             f"{order_session(order)} {order_key(order)}: the recorded fill of {order.quantity} shares at "
             f"{price:.2f} cannot be booked ({execution.reason}); correct the record"
         )
-    return execution
+    return replace(execution, session=order.session, limit_price=order.limit_price)
 
 
 def _outcome(executions: Sequence[Execution]) -> dict[str, object]:
@@ -539,13 +542,14 @@ class RealFills:
         broker: DailyBroker, real: list[Execution], order: StrategyOrder, ordered: int, record: Record
     ) -> dict[str, object]:
         if record.outcome == FILLED:
-            fill = StrategyOrder(order.symbol, order.action, record.quantity, order.execute_at, order.metadata)
+            fill = replace(order, quantity=record.quantity)
             execution = record_fill(broker, fill, float(record.price), record.commission)
         else:
             execution = Execution(
                 symbol=order.symbol, action=order.action, quantity=ordered,
                 execute_at=order.execute_at.isoformat(), matched_at=order.execute_at.isoformat(),
                 status=UNFILLED, reason=NOT_TRADED, metadata=order.metadata,
+                session=order.session, limit_price=order.limit_price,
             )
         real.append(execution)
         return {"kind": "execution", **execution.to_record(), "recorded": record.event_id or None}

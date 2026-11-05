@@ -23,6 +23,7 @@ from autotrade.environment.broker import (
     DailyBroker,
     Position,
     default_permitted_boards,
+    session_price,
     stamped_permitted_boards,
 )
 from autotrade.environment.broker_core import (
@@ -265,6 +266,109 @@ class BrokerEligibilityTest(unittest.TestCase):
         broker = DailyBroker(BrokerProfile())
         with self.assertRaisesRegex(RuntimeError, "open_day"):
             broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
+
+
+# Real bars of the research release (normalized: CNY/share, shares, CNY).
+# 600000.SH on 2024-08-01 and 2024-08-02, two ordinary days.
+ORDINARY = {
+    "open": 8.40, "high": 8.61, "low": 8.34, "close": 8.57, "pre_close": 8.40, "vol": 54_560_150.0,
+    "amount": 464_982_610.0, "up_limit": 9.24, "down_limit": 7.56, "is_suspended": False,
+}
+GAPPED = {
+    "open": 8.56, "high": 8.60, "low": 8.40, "close": 8.47, "pre_close": 8.57, "vol": 31_361_531.0,
+    "amount": 266_363_129.0, "up_limit": 9.43, "down_limit": 7.71, "is_suspended": False,
+}
+# 600192.SH on 2024-08-07: opened at the upper limit, traded a tick below it, closed on it.
+OPENED_AT_LIMIT = {
+    "open": 4.98, "high": 4.98, "low": 4.96, "close": 4.98, "pre_close": 4.53, "vol": 27_912_028.0,
+    "amount": 139_001_094.0, "up_limit": 4.98, "down_limit": 4.08, "is_suspended": False,
+}
+# 600579.SH and 600711.SH on 2024-08-01: locked at the upper and the lower limit all day.
+LOCKED_UP = {
+    "open": 5.73, "high": 5.73, "low": 5.73, "close": 5.73, "pre_close": 5.21, "vol": 3_050_300.0,
+    "amount": 17_478_219.0, "up_limit": 5.73, "down_limit": 4.69, "is_suspended": False,
+}
+LOCKED_DOWN = {
+    "open": 4.52, "high": 4.52, "low": 4.52, "close": 4.52, "pre_close": 4.76, "vol": 5_236_000.0,
+    "amount": 23_666_720.0, "up_limit": 5.00, "down_limit": 4.52, "is_suspended": False,
+}
+BUY_SLIP, SELL_SLIP = 1.0005, 0.9995
+
+
+def _session_fill(
+    bar: dict[str, object], action: str, session: str | None, limit_price: float | None = None
+) -> tuple[str, str | None, float | None]:
+    """One order of ``session`` against ``bar`` at the default 5 bp slippage,
+    priced as the replay prices it; a sale sells a holding bought earlier."""
+
+    at = MATCHED_AT.replace(hour=15, minute=0) if session == "close" else MATCHED_AT
+    order = StrategyOrder("600000.SH", action, 100, at, session=session, limit_price=limit_price)
+    broker = _broker(initial_cash=1_000_000)
+    if action == "sell":
+        broker.positions["600000.SH"] = Position("600000.SH", 100, 100, 5.0, 5.0)
+    raw_price = session_price(order, bar) if session else bar["open"]
+    execution = broker.execute(order, bar, matched_at=at, raw_price=raw_price)
+    if execution.status == "filled":
+        assert (execution.session, execution.limit_price) == (session, limit_price)
+    return execution.status, execution.reason, execution.price
+
+
+class ExecutionSessionTest(unittest.TestCase):
+    """The README's execution sessions, on real bars and both sides."""
+
+    def test_each_session_fills_at_its_own_price_plus_slippage(self) -> None:
+        vwap = 464_982_610.0 / 54_560_150.0
+        self.assertTrue(ORDINARY["low"] < vwap < ORDINARY["high"])
+        for action, slip in (("buy", BUY_SLIP), ("sell", SELL_SLIP)):
+            for session, base in (("open", 8.40), ("close", 8.57), ("intraday", vwap)):
+                status, reason, price = _session_fill(ORDINARY, action, session)
+                self.assertEqual((status, reason), ("filled", None), (action, session))
+                self.assertAlmostEqual(price, base * slip, places=12)
+
+    def test_the_adverse_limit_leaves_each_session_unfilled_by_its_own_rule(self) -> None:
+        # An auction price on the limit does not fill a buy, and the reason
+        # names the session's rule; an order without a session keeps its own.
+        for session in ("open", "close"):
+            self.assertEqual(_session_fill(OPENED_AT_LIMIT, "buy", session)[:2], ("rejected", "unfilled_price_limit"))
+        self.assertEqual(_session_fill(OPENED_AT_LIMIT, "buy", None)[:2], ("rejected", "daily_price_limit"))
+        # The day traded below the limit, so the average-price buy fills, its
+        # slipped price (4.98 * 1.0005) held at the limit.
+        self.assertEqual(_session_fill(OPENED_AT_LIMIT, "buy", "intraday"), ("filled", None, 4.98))
+        # A day locked at the limit fills nothing on the side it locks out,
+        # limit order or not, and fills the other side.
+        self.assertEqual(_session_fill(LOCKED_UP, "buy", "intraday")[:2], ("rejected", "unfilled_locked"))
+        self.assertEqual(_session_fill(LOCKED_UP, "buy", "intraday", 5.73)[:2], ("rejected", "unfilled_locked"))
+        self.assertEqual(_session_fill(LOCKED_DOWN, "sell", "intraday")[:2], ("rejected", "unfilled_locked"))
+        self.assertEqual(_session_fill(LOCKED_DOWN, "sell", "intraday", 4.52)[:2], ("rejected", "unfilled_locked"))
+        status, _reason, price = _session_fill(LOCKED_UP, "sell", "intraday")
+        self.assertEqual(status, "filled")
+        self.assertAlmostEqual(price, 5.73 * SELL_SLIP, places=9)
+        status, _reason, price = _session_fill(LOCKED_DOWN, "buy", "intraday")
+        self.assertEqual(status, "filled")
+        self.assertAlmostEqual(price, 4.52 * BUY_SLIP, places=9)
+
+    def test_a_day_limit_order_fills_at_the_better_of_open_and_limit_without_slippage(self) -> None:
+        # GAPPED: open 8.56, high 8.60, low 8.40.
+        cases = [
+            ("buy", 8.60, "filled", 8.56),  # the open gapped below the limit
+            ("buy", 8.45, "filled", 8.45),
+            ("buy", 8.40, "filled", 8.40),  # the low touched the limit
+            ("buy", 8.39, "rejected", None),
+            ("sell", 8.50, "filled", 8.56),  # the open gapped above the limit
+            ("sell", 8.58, "filled", 8.58),
+            ("sell", 8.60, "filled", 8.60),  # the high touched the limit
+            ("sell", 8.61, "rejected", None),
+        ]
+        for action, limit, status, price in cases:
+            reason = None if status == "filled" else "unfilled_limit"
+            self.assertEqual(_session_fill(GAPPED, action, "intraday", limit), (status, reason, price), (action, limit))
+
+    def test_a_session_order_without_its_bar_fields_misses_its_price(self) -> None:
+        bar = {key: value for key, value in ORDINARY.items() if key not in ("amount", "high")}
+        self.assertEqual(_session_fill(bar, "buy", "intraday")[:2], ("rejected", "missing_execution_price"))
+        self.assertEqual(
+            _session_fill(dict(bar, amount=1.0), "buy", "intraday")[:2], ("rejected", "missing_execution_price")
+        )
 
 
 class BuyLotLadderTest(unittest.TestCase):

@@ -24,6 +24,7 @@ import numpy as np
 CN_TZ = ZoneInfo("Asia/Shanghai")
 StrategyPeriod = Literal["day", "month", "quarter", "year"]
 OrderAction = Literal["buy", "sell"]
+OrderSession = Literal["open", "close", "intraday"]
 _PERIODS = frozenset({"day", "month", "quarter", "year"})
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _ABSENT = object()
@@ -507,6 +508,18 @@ class FitSchedule:
         return {"refit_period": self.refit_period}
 
 
+# The daily bar's two exact observations: the open the 09:15-09:25 opening
+# call auction sets and the close the 14:57-15:00 closing call auction sets.
+MARKET_OPEN = time(9, 30)
+MARKET_CLOSE = time(15, 0)
+# The minute a session order is due at on its trading day. An intraday order
+# is live from the open, so the whole day it is priced on comes after it.
+SESSION_TIMES: Mapping[str, time] = MappingProxyType(
+    {"open": MARKET_OPEN, "close": MARKET_CLOSE, "intraday": MARKET_OPEN}
+)
+_ORDER_OPTIONS = frozenset({"session", "limit_price"})
+
+
 @dataclass(frozen=True)
 class StrategyOrder:
     symbol: str
@@ -514,6 +527,12 @@ class StrategyOrder:
     quantity: int
     execute_at: datetime
     metadata: Mapping[str, object] = field(default_factory=dict)
+    # How the order meets the market on execute_at's trading day (the
+    # template README's "Execution sessions and exact times"); None prices it at
+    # execute_at's own minute. A limit price makes an intraday order a day
+    # limit order.
+    session: OrderSession | None = None
+    limit_price: float | None = None
 
     @classmethod
     def from_record(cls, value: object, *, inference_at: datetime) -> StrategyOrder:
@@ -536,23 +555,56 @@ class StrategyOrder:
         normalized_inference = _require_cn_datetime(inference_at, "inference_at")
         if execute_at < normalized_inference:
             raise StrategyContractError("order execute_at cannot be earlier than the PIT inference time")
-        metadata = {str(key): item for key, item in value.items() if key not in required}
+        session = value.get("session")
+        if session is not None:
+            if not isinstance(session, str) or session not in SESSION_TIMES:
+                raise StrategyContractError("order session must be open, close or intraday")
+            if execute_at.time() != SESSION_TIMES[session]:
+                raise StrategyContractError(
+                    f"a {session} order's execute_at must be {SESSION_TIMES[session]:%H:%M} on its trading day"
+                )
+        limit_price = value.get("limit_price")
+        if limit_price is not None:
+            if session != "intraday":
+                raise StrategyContractError("order limit_price requires session intraday")
+            limit_price = _limit_price(limit_price)
+        metadata = {
+            str(key): item for key, item in value.items() if key not in required and key not in _ORDER_OPTIONS
+        }
         return cls(
             symbol=symbol,
             action=action,
             quantity=quantity,
             execute_at=execute_at,
             metadata=MappingProxyType(metadata),
+            session=session,
+            limit_price=limit_price,
         )
 
     def to_record(self) -> dict[str, object]:
-        return {
+        record = {
             **self.metadata,
             "symbol": self.symbol,
             "action": self.action,
             "quantity": self.quantity,
             "execute_at": self.execute_at.isoformat(),
         }
+        # Only when set, so an order without them records as it always did.
+        if self.session is not None:
+            record["session"] = self.session
+        if self.limit_price is not None:
+            record["limit_price"] = self.limit_price
+        return record
+
+
+def _limit_price(value: object) -> float:
+    """A limit price as the exchange accepts one: positive, in whole ticks."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+        raise StrategyContractError("order limit_price must be a positive finite price")
+    if abs(value * 100 - round(value * 100)) > 1e-6:
+        raise StrategyContractError("order limit_price must be in whole 0.01 CNY ticks")
+    return float(value)
 
 
 def _parse_datetime(value: object, name: str = "order execute_at") -> datetime:

@@ -105,14 +105,16 @@ Worker and revision restarts naturally clear module state, so a cache is only an
 
 The top-level return value must be a JSON array, including when there are no orders. `NaN`, infinity, Python objects, sets, tuples used as object keys, or any other non-JSON value are forbidden.
 
-Each order requires four fields:
+Each order requires four fields and may name a session and a limit price:
 
 ```json
 {
   "symbol": "000001.SZ",
   "action": "buy",
   "quantity": 100,
-  "execute_at": "2026-01-05T09:30:00+08:00"
+  "execute_at": "2026-01-05T09:30:00+08:00",
+  "session": "intraday",
+  "limit_price": 10.52
 }
 ```
 
@@ -122,6 +124,8 @@ Rules:
 - `action` is exactly `buy` or `sell`.
 - `quantity` is a positive integer share count; booleans are not integers for this contract.
 - `execute_at` is a timezone-aware ISO-8601 string and cannot precede `context.inference_at`.
+- `session` is optional and, when given, is exactly `open`, `close` or `intraday`: how the order meets the market on `execute_at`'s trading day (see below). A session order's `execute_at` is that day's session minute: `09:30` for `open` and `intraday`, `15:00` for `close`.
+- `limit_price` is optional, allowed only with `"session": "intraday"`, and is a positive price in whole 0.01 CNY ticks; it makes the order a day limit order.
 - Additional JSON fields are preserved as order metadata. A short `reason` is useful for review.
 - The list one call returns, metadata included, serializes to at most 1,000,000 characters of JSON (counted in UTF-8 bytes), so keep metadata to short summaries rather than logs.
 
@@ -129,15 +133,28 @@ A return value that breaks any of these rules fails the backtest at that decisio
 
 Sort candidates explicitly whenever order expresses investment priority: iteration order over an unordered container is not a substitute for stating intent, and it decides which orders get the remaining budget.
 
-## Exact execution time
+## Execution sessions and exact times
 
-The fixed inference time controls when the strategy runs; each order independently chooses a timezone-aware `execute_at` no earlier than that invocation. The Environment processes pending orders in timestamp order and resolves prices without rounding or delaying the requested timestamp:
+The fixed inference time controls when the strategy runs; each order independently chooses a timezone-aware `execute_at` no earlier than that invocation. The Environment processes pending orders in timestamp order, orders sharing a timestamp in the order the strategy returned them.
+
+An order with a `session` is priced from its trading day's normalized daily bar. The adverse daily limit is `up_limit` for a buy and `down_limit` for a sell:
+
+| Session | Fills at | Does not fill when |
+| --- | --- | --- |
+| `open` | the day's `open` (the opening call auction) plus directional slippage | the slipped price reaches the adverse limit: `unfilled_price_limit` |
+| `close` | the day's `close` (the closing call auction) plus directional slippage | the slipped price reaches the adverse limit: `unfilled_price_limit` |
+| `intraday` | the day's volume-weighted average price, `amount / vol`, plus directional slippage, at most the adverse limit | the day is locked at the adverse limit (`high` and `low` both on it): `unfilled_locked` |
+| `intraday` with `limit_price` | a buy at the lower of `open` and the limit once the day's `low` reaches the limit, a sell at the higher of `open` and the limit once the `high` reaches it; no slippage, so an open beyond the limit fills at the open | the limit is not reached (`unfilled_limit`) or the day is locked at the adverse limit (`unfilled_locked`) |
+
+An unfilled session order expires at the end of its day with that reason; nothing carries over to the next day and nothing fills in part.
+
+An order without a `session` is priced at its exact `execute_at`, without rounding or delaying it, and is rejected as `daily_price_limit` when its slipped price reaches the adverse limit:
 
 - `09:30` uses that trading day's normalized daily `open`.
 - `15:00` uses that trading day's normalized daily `close`.
 - Any other timestamp requires the same symbol's static historical one-minute row at that exact minute and uses its `close`.
 
-If the exact price source is absent or invalid, including when the required daily row is unavailable, the order is rejected as `missing_execution_price`; the Environment does not substitute an adjacent minute or a daily endpoint. Minute bars are off by default, and the run facts state whether this run actually has them: with `execution_policy.historical_minutes_available` false, only `09:30` and `15:00` can fill and every other `execute_at` is rejected.
+If the price source is absent or invalid, including when the required daily row or a field its rule reads is unavailable, the order is rejected as `missing_execution_price`; the Environment does not substitute an adjacent minute or a daily endpoint. Minute bars are off by default, and the run facts state whether this run actually has them: with `execution_policy.historical_minutes_available` false, an order without a session fills only at `09:30` and `15:00` and every other `execute_at` is rejected.
 
 ## DailyBroker quick reference
 
@@ -147,9 +164,9 @@ If the exact price source is absent or invalid, including when the required dail
 - A sell declares whole lots, or one declaration carrying the entire odd-lot tail a corporate action left behind (a STAR/BSE position below its minimum declaration is likewise exitable only in full).
 - A position bought today becomes sellable from the next trading day's open.
 - On an ex-date, before any fill or decision, the account is credited each held position's gross cash dividend less any policy-required withholding, and a bonus issue or split re-sizes the position to the whole shares the exchange's ex-rights reference price (`pre_close`) implies, with any fractional share paid in cash; shares created that day become sellable the next trading day.
-- Commission applies on both sides with a minimum fee, and a transfer fee (过户费) applies on both sides with no minimum. Stamp duty applies on sells only, at a rate that depends on the execution date. Directional slippage adjusts the event price.
+- Commission applies on both sides with a minimum fee, and a transfer fee (过户费) applies on both sides with no minimum. Stamp duty applies on sells only, at a rate that depends on the execution date. Directional slippage adjusts the event price of every fill except a day limit order's.
 - When the run facts' `broker_replay.dividend_tax_policy.charged` is true, dividend tax reduces available cash at distribution and/or sale under the dividend's record-date rule. That runtime policy is authoritative for historical regimes, withholding, FIFO holding periods and taxable bonus shares; use it rather than assuming all dividends are credited tax-free until sale.
-- Suspension, `missing_execution_price`, daily price limits, insufficient cash, insufficient sellable quantity, and invalid buy lots reject the whole order. Missing or non-finite direction-related limit-up/limit-down prices reject the whole order as `missing_daily_price_limit`.
+- Suspension, `missing_execution_price`, daily price limits (including the `unfilled_*` outcomes above), insufficient cash, insufficient sellable quantity, and invalid buy lots reject the whole order. Missing or non-finite direction-related limit-up/limit-down prices reject the whole order as `missing_daily_price_limit`.
 - Orders are all-or-reject. There is no partial fill, order-book depth, queue position, market impact, or liquidity-capacity model.
 
 Initial cash is an experiment setting, so size from `context.account.cash` instead of assuming a fixed account; the run facts' `broker_replay` gives this experiment's cash, commission, slippage, stamp duty and dividend-tax policy. The default cost profile uses 1 bp commission with a CNY 5 minimum, a 0.1 bp transfer fee, and 5 bp directional slippage. Sell stamp duty is **10 bp for executions before 2023-08-28 and 5 bp from 2023-08-28 onward** — size pre-cutover windows against the higher rate, because the Broker charges it. At the default profile a round trip of fills of at least CNY 50,000 each therefore costs about 22 bp before the cutover and 17 bp from it, slippage included; smaller fills pay more, because the commission minimum binds below that size.

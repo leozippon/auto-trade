@@ -132,6 +132,80 @@ def test_order_json_contract_rejects_invalid_and_pre_inference_orders():
         validate_order_payload({"orders": [valid]}, inference_at=inference)
 
 
+def test_an_order_names_a_session_at_its_minute_and_a_limit_only_intraday():
+    inference = datetime(2026, 1, 2, 8, 0, tzinfo=CN_TZ)
+    at_open = {"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": "2026-01-02T09:30:00+08:00"}
+    at_close = {**at_open, "execute_at": "2026-01-02T15:00:00+08:00"}
+    limited = {**at_open, "session": "intraday", "limit_price": 10.52, "reason": "dip"}
+    for record in (
+        {**at_open, "session": "open"}, {**at_close, "session": "close"}, {**at_open, "session": "intraday"}, limited
+    ):
+        [order] = validate_order_payload([record], inference_at=inference)
+        assert order.to_record() == record
+        assert "session" not in order.metadata and "limit_price" not in order.metadata
+    # An order without them records exactly as before.
+    assert validate_order_payload([at_open], inference_at=inference)[0].to_record() == at_open
+    for record, message in (
+        ({**at_open, "session": "auction"}, "open, close or intraday"),
+        ({**at_open, "session": "close"}, "must be 15:00"),
+        ({**at_close, "session": "intraday"}, "must be 09:30"),
+        ({**at_open, "session": "open", "limit_price": 10.5}, "requires session intraday"),
+        ({**at_open, "limit_price": 10.5}, "requires session intraday"),
+        ({**limited, "limit_price": 10.525}, "whole 0.01 CNY ticks"),
+        ({**limited, "limit_price": 0}, "positive"),
+        ({**limited, "limit_price": True}, "positive"),
+    ):
+        with pytest.raises(StrategyContractError, match=message):
+            validate_order_payload([record], inference_at=inference)
+
+
+def test_session_orders_fill_from_their_own_bar_and_expire_with_their_day():
+    """600000.SH on its real 2024-08-01 and 2024-08-02 bars: the day's
+    average price, a limit the day never reached (gone the next day), and a
+    limit sale the high reached; each execution records its session."""
+
+    daily = pd.DataFrame(
+        [
+            {"trade_date": "20240801", "symbol": "600000.SH", "open": 8.40, "high": 8.61, "low": 8.34,
+             "close": 8.57, "pre_close": 8.40, "vol": 54_560_150.0, "amount": 464_982_610.0,
+             "up_limit": 9.24, "down_limit": 7.56},
+            {"trade_date": "20240802", "symbol": "600000.SH", "open": 8.56, "high": 8.60, "low": 8.40,
+             "close": 8.47, "pre_close": 8.57, "vol": 31_361_531.0, "amount": 266_363_129.0,
+             "up_limit": 9.43, "down_limit": 7.71},
+        ]
+    )
+
+    def generate_orders(context):
+        day = context.inference_at.strftime("%Y-%m-%dT09:30:00+08:00")
+        if context.inference_at.day == 1:
+            return [
+                {"symbol": "600000.SH", "action": "buy", "quantity": 200, "execute_at": day, "session": "intraday"},
+                {"symbol": "600000.SH", "action": "buy", "quantity": 100, "execute_at": day,
+                 "session": "intraday", "limit_price": 8.30},
+            ]
+        return [{"symbol": "600000.SH", "action": "sell", "quantity": 200, "execute_at": day,
+                 "session": "intraday", "limit_price": 8.58}]
+
+    result = run_daily_replay(
+        daily=daily,
+        strategy=generate_orders,
+        schedule=StrategySchedule("day", "08:00"),
+        profile=BrokerProfile(initial_cash=100_000, slippage_bps=5),
+    )
+    assert [
+        (row["matched_at"][:10], row["action"], row["session"], row.get("limit_price"), row["status"], row["reason"])
+        for row in result.executions
+    ] == [
+        ("2024-08-01", "buy", "intraday", None, "filled", None),
+        ("2024-08-01", "buy", "intraday", 8.30, "rejected", "unfilled_limit"),
+        ("2024-08-02", "sell", "intraday", 8.58, "filled", None),
+    ]
+    assert result.executions[0]["price"] == pytest.approx(464_982_610.0 / 54_560_150.0 * 1.0005, rel=1e-12)
+    assert result.executions[2]["price"] == 8.58
+    assert result.pending_orders == ()
+    assert result.equity_curve[-1]["positions"] == {}
+
+
 def test_daily_market_hides_rows_until_available_at():
     market = DailyMarketData(_daily())
     morning = datetime(2026, 1, 2, 8, 30, tzinfo=CN_TZ)

@@ -5,7 +5,8 @@ names one target session ``D`` and does two things in order:
 
 1. It settles every earlier session of the book whose daily bars have landed:
    the day opens (T+1 release, ex-date settlement), the orders decided for it
-   fill at their ``execute_at`` prices, and the account is marked at the close.
+   fill as a replay fills them (their session's or ``execute_at``'s price),
+   and the account is marked at the close.
 2. It makes the pre-open decision for ``D`` at the scheduled inference time,
    from the account as of the previous close and the PIT view as of that
    inference time, so the orders exist before the market opens. They stay

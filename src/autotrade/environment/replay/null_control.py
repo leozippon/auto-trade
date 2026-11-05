@@ -24,6 +24,7 @@ here can reach the result it measures.
 from __future__ import annotations
 
 import hashlib
+import math
 from bisect import bisect_left
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
@@ -96,13 +97,21 @@ class ZeroSkillPanelError(RuntimeError):
 
 @dataclass(frozen=True)
 class RoundTrip:
-    """One FIFO-paired entry and its exit; ``exit_at`` is None when still open."""
+    """One FIFO-paired entry and its exit; ``exit_at`` is None when still open.
+
+    Each leg keeps the session and limit price its order named, so a
+    replacement meets the market the way the original did.
+    """
 
     symbol: str
     quantity: int
     price: float
     entry_at: datetime
     exit_at: datetime | None
+    entry_session: str | None = None
+    entry_limit: float | None = None
+    exit_session: str | None = None
+    exit_limit: float | None = None
 
     @property
     def notional(self) -> float:
@@ -135,6 +144,8 @@ def trade_skeleton(
             str(record["action"]),
             int(record["quantity"]),
             float(record["price"]),
+            record.get("session"),
+            record.get("limit_price"),
         )
         for record in executions
         if record.get("status") == "filled"
@@ -144,9 +155,9 @@ def trade_skeleton(
     open_lots: dict[str, list[list[object]]] = {}
     trips: list[RoundTrip] = []
     unpaired_sell_shares = 0
-    for matched_at, symbol, action, quantity, price in fills:
+    for matched_at, symbol, action, quantity, price, session, limit in fills:
         if action == "buy":
-            open_lots.setdefault(symbol, []).append([quantity, price, matched_at])
+            open_lots.setdefault(symbol, []).append([quantity, price, matched_at, session, limit])
             continue
         lots = open_lots.get(symbol, [])
         remaining = quantity
@@ -163,6 +174,10 @@ def trade_skeleton(
                     price=float(lot[1]),
                     entry_at=lot[2],  # type: ignore[arg-type]
                     exit_at=matched_at,
+                    entry_session=lot[3],  # type: ignore[arg-type]
+                    entry_limit=lot[4],  # type: ignore[arg-type]
+                    exit_session=session,
+                    exit_limit=limit,
                 )
             )
             lot[0] = int(lot[0]) - taken
@@ -170,7 +185,7 @@ def trade_skeleton(
             if lot[0] == 0:
                 lots.pop(0)
     for symbol, lots in open_lots.items():
-        for quantity, price, entry_at in lots:
+        for quantity, price, entry_at, session, limit in lots:
             trips.append(
                 RoundTrip(
                     symbol=symbol,
@@ -178,6 +193,8 @@ def trade_skeleton(
                     price=float(price),
                     entry_at=entry_at,  # type: ignore[arg-type]
                     exit_at=None,
+                    entry_session=session,  # type: ignore[arg-type]
+                    entry_limit=limit,  # type: ignore[arg-type]
                 )
             )
     trips.sort(key=lambda trip: (trip.entry_at, trip.symbol))
@@ -284,6 +301,7 @@ def run_null_control(
             lambda trip, symbol, quantity: universe.sellable_at_exit(
                 trip, symbol, quantity, market.cash_dividends_for_day
             ),
+            universe.carried_limit,
         )
         dropped.append(dropped_trips)
         run = run_daily_replay(
@@ -390,6 +408,7 @@ class _Universe:
                 "symbol": frame[symbol_column].astype(str).str.strip(),
                 "trade_date": [_date_text(value) for value in frame["trade_date"]],
                 "open": opens,
+                "pre_close": pd.to_numeric(frame["pre_close"], errors="coerce"),
                 "circ_mv": (
                     pd.to_numeric(frame["circ_mv"], errors="coerce")
                     if "circ_mv" in frame.columns
@@ -437,6 +456,22 @@ class _Universe:
             cached = pd.Series(codes, index=values.index, dtype=int)
             self._deciles[date] = cached
         return cached
+
+    def carried_limit(self, limit: float | None, original: str, replacement: str, date: str) -> float | None:
+        """``original``'s limit price on ``date`` carried to ``replacement``:
+        the same distance from its own previous close, on a whole tick.
+
+        The previous close is what both orders were placed against, so a
+        limit a few percent below the market stays a few percent below it.
+        """
+
+        if limit is None:
+            return None
+        day = self.day(date)
+        bases = day.loc[[original, replacement], "pre_close"].to_numpy(dtype=float)
+        if not (np.isfinite(bases).all() and (bases > 0).all()):
+            raise ValueError(f"no usable pre_close of {original} or {replacement} on {date} to carry a limit price")
+        return math.floor(limit / bases[0] * bases[1] * 100 + 0.5) / 100
 
     def sellable_at_exit(
         self,
@@ -565,6 +600,7 @@ def _orders_from_pools(
     seed: int,
     draw: int,
     sellable: Callable[[RoundTrip, str, int], int],
+    carried_limit: Callable[[float | None, str, str, str], float | None],
 ) -> tuple[dict[str, list[dict[str, object]]], int]:
     """Draw number ``draw``, and how many round trips it could not deploy.
 
@@ -573,7 +609,8 @@ def _orders_from_pools(
     travels with the draw so an under-deployed null is reported instead of
     silently shrinking the null distribution. Each exit sells what its lot has
     become by then (``sellable``, the Broker's own ex-date settlement of the
-    drawn name).
+    drawn name). Each leg keeps its session, and a limit price is carried to
+    the drawn name (``carried_limit``, ``_Universe.carried_limit``).
     """
 
     orders: dict[str, list[dict[str, object]]] = {}
@@ -593,7 +630,8 @@ def _orders_from_pools(
         drawn.append((trip, symbol, quantity))
         holders.setdefault(symbol, []).append(trip)
     for trip, symbol, quantity in drawn:
-        _queue(orders, symbol, "buy", quantity, trip.entry_at)
+        entry_limit = carried_limit(trip.entry_limit, trip.symbol, symbol, trip.entry_date)
+        _queue(orders, symbol, "buy", quantity, trip.entry_at, trip.entry_session, entry_limit)
         if trip.exit_at is None:
             continue
         shares = sellable(trip, symbol, quantity)
@@ -613,7 +651,8 @@ def _orders_from_pools(
             # and leaves its tail in the merged holding.
             shares -= shares % LOT_SIZE
         if shares > 0:
-            _queue(orders, symbol, "sell", shares, trip.exit_at)
+            exit_limit = carried_limit(trip.exit_limit, trip.symbol, symbol, str(trip.exit_date))
+            _queue(orders, symbol, "sell", shares, trip.exit_at, trip.exit_session, exit_limit)
     for day in orders.values():
         # Exits before entries at one instant, so a cash-bound null is not
         # rejected for money its own sales are about to release.
@@ -642,15 +681,20 @@ def _queue(
     action: str,
     quantity: int,
     when: datetime,
+    session: str | None = None,
+    limit_price: float | None = None,
 ) -> None:
-    orders.setdefault(when.strftime("%Y%m%d"), []).append(
-        {
-            "symbol": symbol,
-            "action": action,
-            "quantity": quantity,
-            "execute_at": when.isoformat(),
-        }
-    )
+    order: dict[str, object] = {
+        "symbol": symbol,
+        "action": action,
+        "quantity": quantity,
+        "execute_at": when.isoformat(),
+    }
+    if session is not None:
+        order["session"] = session
+    if limit_price is not None:
+        order["limit_price"] = limit_price
+    orders.setdefault(when.strftime("%Y%m%d"), []).append(order)
 
 
 _STAR, _BSE, _MAIN = "star", "bse", "main"
