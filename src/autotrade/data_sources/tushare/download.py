@@ -1801,8 +1801,6 @@ def download_board_trading(args: argparse.Namespace) -> int:
             download_board_static_dataset(client, raw_dir, spec, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE:
             download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
-        elif spec.strategy == FetchStrategy.TRADE_DATE_BOARD_TAIL:
-            download_board_members_by_date(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
             download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args), revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
@@ -1846,72 +1844,6 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-
-def download_board_members_by_date(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
-    """dc_member, one file per trade date: the whole day by offset paging,
-    and when the day runs past the vendor's offset cap, the boards past it
-    one request each.
-
-    The vendor serves the day ordered by board code, so every board before
-    the last one paged is complete; that order is checked, never assumed.
-    The last board paged, and every board the pages did not reach that
-    dc_index quotes on the date or on the run's next trade date or that the
-    current file holds, are then fetched by board. A new board sorts past
-    the cap and dc_index may first quote it a day late, so its first day
-    lands with the next evening's refresh, whose run holds that next date.
-    """
-    written = 0
-    skipped = 0
-    total_rows = 0
-    total_pages = 0
-    board_queries = 0
-    for position, trade_date in enumerate(trade_dates):
-        path = raw_dir / spec.api_name / f"trade_date={trade_date}.parquet"
-        if should_skip_existing_partition(path, force=force):
-            skipped += 1
-            continue
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, {"trade_date": trade_date}, spec.fields, page_limit, stop_at_offset_cap=True)
-            fields, items = result.fields, result.items
-            tail: list[str] = []
-            if items and len(items) == pages * page_limit:
-                # Every page was full: the cap, not the day, ended the paging.
-                board_index = fields.index("ts_code")
-                boards = [str(item[board_index]) for item in items]
-                if boards != sorted(boards):
-                    raise RuntimeError(
-                        f"{spec.api_name} {trade_date}: the whole-day pages are not ordered by board code, "
-                        "so the boards past the vendor's offset cap cannot be told apart"
-                    )
-                last_board = boards[-1]
-                index_path = raw_dir / "dc_index" / f"trade_date={trade_date}.parquet"
-                if not index_path.exists():
-                    raise RuntimeError(f"{spec.api_name} {trade_date} runs past the vendor's offset cap and needs the dc_index partition for that date; download dc_index first")
-                board_files = [index_path, path]
-                if position + 1 < len(trade_dates):
-                    board_files.append(raw_dir / "dc_index" / f"trade_date={trade_dates[position + 1]}.parquet")
-                candidates = {str(board) for board_file in board_files if board_file.exists() for board in pd.read_parquet(board_file, columns=["ts_code"])["ts_code"]}
-                tail = sorted((candidates | {last_board}) - (set(boards) - {last_board}))
-                items = [item for item in items if str(item[board_index]) != last_board]
-                for board in tail:
-                    board_result, board_pages = query_paged(client, spec.api_name, {"trade_date": trade_date, "ts_code": board}, spec.fields, page_limit)
-                    pages += board_pages
-                    if board_result.items and board_result.fields != fields:
-                        raise DefectiveAnswer(f"{spec.api_name} {trade_date} {board} answered fields {board_result.fields}, the day {fields}")
-                    items.extend(board_result.items)
-                board_queries += len(tail)
-                print(f"{spec.api_name} {trade_date} ran past the offset cap at {last_board}: {len(tail)} boards fetched one by one")
-            if items:
-                key_indexes = [fields.index(column) for column in spec.key_columns]
-                unique = {tuple(item[index] for index in key_indexes): item for item in items}
-                if len(unique) < len(items):
-                    print(f"{spec.api_name} {trade_date} dropped {len(items) - len(unique)} rows repeating a key")
-                items = list(unique.values())
-            meta_params = {"trade_date": trade_date, "pagination": {"page_limit": page_limit, "pages": pages}, "tail_boards": len(tail)}
-            total_rows += write_board_result(path, ApiResult(fields or spec.fields.split(","), items), spec, meta_params, revision_ledger)
-            total_pages += pages
-            written += 1
-    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} board_queries={board_queries} pages={total_pages}")
 
 def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None) -> None:
     total_tasks = len(trade_dates) * len(tags)
@@ -3861,8 +3793,8 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
         summary,
     )
     # Board datasets run last: none of them feeds Paper, and a vendor change
-    # to one of them (dc_member, 2026-11-03 and 2026-11-05) must not stop the
-    # fundamental refresh that Paper's readiness check requires.
+    # to one of them (twice in 2026-11, to a table since retired) must not
+    # stop the fundamental refresh that Paper's readiness check requires.
     if args.include_board_trading:
         run_update_step(
             "board_trading",

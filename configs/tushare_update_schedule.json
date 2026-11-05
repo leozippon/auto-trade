@@ -182,7 +182,7 @@
       "skip_if_already_ok": true
     },
     "cn_weekly_deep_audit": {
-      "description": "Saturday deep cross-check of local history against the vendor: a large deterministic sample of trade-date partitions across the daily, board and flat event tiers is re-fetched and diffed with the same sentinel machinery and ledger as the nightly job. Value recalculation on computed feeds stays a ledgered warning; a massive STRUCTURAL rewrite (at least five probed dates whose keys shrink or grow disproportionately, a quarter or more of the checked dates) escalates the dataset to error. Excluded as not like-for-like probeable: stk_auction (validated capture path), kpl_concept_cons and stk_surv (probe universe differs from the written one), dc_member and block_trade (duplicate business keys defeat the diff).",
+      "description": "Saturday deep cross-check of local history against the vendor: a large deterministic sample of trade-date partitions across the daily, board and flat event tiers is re-fetched and diffed with the same sentinel machinery and ledger as the nightly job. Value recalculation on computed feeds stays a ledgered warning; a massive STRUCTURAL rewrite (at least five probed dates whose keys shrink or grow disproportionately, a quarter or more of the checked dates) escalates the dataset to error. Excluded as not like-for-like probeable: stk_auction (validated capture path), stk_surv (probe universe differs from the written one) and block_trade (duplicate business keys defeat the diff).",
       "operation": "revision_sentinel",
       "end_date_offset_days": 1,
       "end_date_mode": "sse_open_on_or_before",
@@ -195,7 +195,6 @@
         "daily_basic",
         "stk_limit",
         "suspend_d",
-        "dc_index",
         "limit_step",
         "limit_cpt_list",
         "limit_list_d",
@@ -247,7 +246,6 @@
       "extra_args": [
         "--datasets",
         "kpl_list",
-        "kpl_concept_cons",
         "limit_step",
         "limit_cpt_list",
         "--force"
@@ -1133,36 +1131,6 @@
       "cron_policy": "next_morning_force_refresh_0850",
       "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=347"
-    },
-    {
-      "dataset": "kpl_concept_cons",
-      "api": "kpl_concept_cons",
-      "domain": "board_trading",
-      "frequency": "trade_date",
-      "official_update": "开盘啦概念成分与热度；次日 08:30 前更新。",
-      "cron_policy": "evening_plus_next_day_preopen_force_refresh",
-      "history_repull": "window_only",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=351"
-    },
-    {
-      "dataset": "dc_index",
-      "api": "dc_index",
-      "domain": "board_trading",
-      "frequency": "trade_date",
-      "official_update": "东财概念/行业板块指数日行情；盘后更新。",
-      "cron_policy": "same_day_evening_recent_force_refresh",
-      "history_repull": "window_only",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=362"
-    },
-    {
-      "dataset": "dc_member",
-      "api": "dc_member",
-      "domain": "board_trading",
-      "frequency": "trade_date",
-      "official_update": "东财板块成分（分页大表）；盘后更新。",
-      "cron_policy": "same_day_evening_recent_force_refresh",
-      "history_repull": "window_only",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=363"
     },
     {
       "dataset": "ths_daily",

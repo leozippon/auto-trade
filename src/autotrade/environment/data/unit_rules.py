@@ -499,14 +499,6 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               evidence="per-tag lake scan 2026-08: 100% non-null under tag=竞价 (the only "
                        "rows these fields describe), all-NA under the other tags",
               note="filter tag=竞价 before use; the unit is undocumented, so rank/quantile only"),
-    FieldRule("events.parquet", "kpl_concept_cons", ("hot_num",), source_unit="vendor_score"),
-    FieldRule("events.parquet", "dc_index",
-              ("pct_change", "leading_pct", "turnover_rate"), source_unit="percent"),
-    FieldRule("events.parquet", "dc_index", ("total_mv",), source_unit="10k_CNY",
-              status="inferred", evidence="concept aggregates only plausible at 10k-CNY scale"),
-    FieldRule("events.parquet", "dc_index", ("up_num", "down_num"), source_unit="count"),
-    FieldRule("events.parquet", "dc_index", ("level",), semantic="categorical"),
-    # dc_member is a membership mapping: identifiers only.
     FieldRule("events.parquet", "limit_list_d", ("close",), source_unit="CNY_per_share",
               status="verified", evidence="equals daily close (join ratio 1.0000, n=63)"),
     FieldRule("events.parquet", "limit_list_d", ("pct_chg", "turnover_ratio"),
@@ -883,6 +875,6 @@ FIELD_RULES: tuple[FieldRule, ...] = (
 # Datasets whose every column is an identifier/date/text resolved by the
 # common classifiers — they legitimately carry no unit rules.
 NO_NUMERIC_DATASETS = frozenset(
-    {"margin_secs", "dc_member", "hm_list", "broker_recommend",
+    {"margin_secs", "hm_list", "broker_recommend",
      "fut_mapping", "disclosure_date"}
 )

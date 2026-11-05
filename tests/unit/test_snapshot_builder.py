@@ -2019,10 +2019,10 @@ class SnapshotBuilderTest(unittest.TestCase):
         ):
             self.assertEqual(selected, DEFAULT_DATASETS[domain], domain)
             self.assertTrue(set(selected) <= set(SELECTABLE_DATASETS[domain]), domain)
-        # Vendor duplicates, concept-membership bulk and hot lists are out of
-        # the default scope; the official per-stock series stay in.
-        for dataset in ("moneyflow_dc", "moneyflow_ths", "dc_member",
-                        "kpl_concept_cons", "ths_hot", "dc_hot", "limit_list_ths"):
+        # Vendor duplicates and hot lists are out of the default scope; the
+        # official per-stock series stay in.
+        for dataset in ("moneyflow_dc", "moneyflow_ths", "ths_hot", "dc_hot",
+                        "limit_list_ths"):
             self.assertNotIn(dataset, config.events_datasets, dataset)
         for dataset in ("moneyflow", "limit_list_d", "kpl_list", "margin_detail"):
             self.assertIn(dataset, config.events_datasets, dataset)
