@@ -1,4 +1,4 @@
-# AutoTrade Agent sandbox image (docs/environment-design.md 3.1/3.3).
+# AutoTrade Agent sandbox image (docs/ENVIRONMENT_DESIGN.md 3.1/3.3).
 # Build (context is the repo root so the trusted runtime modules can be copied in):
 #   docker build --build-arg HTTP_PROXY --build-arg HTTPS_PROXY \
 #     --build-arg ALL_PROXY --build-arg NO_PROXY \

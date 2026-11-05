@@ -1,6 +1,6 @@
 # 登录门
 
-公网入口机上的回环登录服务 `admcube-login`：Nginx 用 `auth_request` 向它确认每个请求的会话，登录页与登出也由它提供，研究机上的控制台不参与鉴权。会话规则见[部署文档](../../docs/deployment-documentation.md#启动与检查-webui)。
+公网入口机上的回环登录服务 `admcube-login`：Nginx 用 `auth_request` 向它确认每个请求的会话，登录页与登出也由它提供，研究机上的控制台不参与鉴权。会话规则见[部署文档](../../docs/DEPLOYMENT_DOCUMENTATION.md#启动与检查-webui)。
 
 本目录是登录门唯一的源：`gateway.py`、`login.css` 和 systemd 单元 `admcube-login.service`。登录页的 logo 与公安徽标就是控制台的 `src/autotrade/webui/static/logo.png` 和 `gongan.png`，安装时一并拷过去，这里不另存副本。测试在 `tests/unit/test_login_gateway.py`，不需要网络、入口机或 bcrypt 库。
 

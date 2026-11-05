@@ -1,5 +1,5 @@
 """Verdict statistics: freeze gate, forward verdict, Held-out rule
-(docs/pipeline-design.md)."""
+(docs/PIPELINE_DESIGN.md)."""
 
 from __future__ import annotations
 

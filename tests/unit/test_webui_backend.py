@@ -1801,7 +1801,7 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertNotIn("research", self._control().directives)
         # The operator defines the PIT policy, so a directive that names a date
         # is stored as written: the rule against it is written guidance (see
-        # docs/agent-design.md), not a server-side refusal.
+        # docs/AGENT_DESIGN.md), not a server-side refusal.
         dated = self._post(action="set_directive", session_key="research", directive="在 2022Q1 减仓")
         self.assertEqual(dated.status_code, 200, dated.text)
         self.assertEqual(self._control().directives["research"], "在 2022Q1 减仓")

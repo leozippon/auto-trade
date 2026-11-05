@@ -1,4 +1,4 @@
-"""Orchestration contract of the HITL runner itself (docs/pipeline-design.md).
+"""Orchestration contract of the HITL runner itself (docs/PIPELINE_DESIGN.md).
 
 `tests/unit/test_research_arm_worker.py` drives the worker end to end, so the
 runner's own control-plane branches -- durable stop/pause at a session

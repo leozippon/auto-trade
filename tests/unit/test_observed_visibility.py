@@ -1,6 +1,6 @@
 """Observed-era visibility: a PIT view shows a row from the later of its
 vendor-date rule and the instant the raw lake first held its business key
-(docs/data-documentation.md §3.3). Keys visible before versioning started,
+(docs/DATA_DOCUMENTATION.md §3.3). Keys visible before versioning started,
 and keys first seen no later than their stamp, keep the vendor rule."""
 
 from __future__ import annotations

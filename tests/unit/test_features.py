@@ -1406,11 +1406,11 @@ class UnitRegistryProjectionTest(unittest.TestCase):
     def test_units_reference_doc_is_fresh(self):
         repo_root = Path(__file__).resolve().parents[2]
         module = self._export_units_module()
-        committed = (repo_root / "docs" / "units-reference.md").read_text(encoding="utf-8")
+        committed = (repo_root / "docs" / "UNITS_REFERENCE.md").read_text(encoding="utf-8")
         self.assertEqual(
             committed,
             module.render_units_markdown(),
-            "docs/units-reference.md is stale; run scripts/dev/export_units.py",
+            "docs/UNITS_REFERENCE.md is stale; run scripts/dev/export_units.py",
         )
 
     def test_units_reference_marks_every_excluded_column_as_out_of_snapshot(self):

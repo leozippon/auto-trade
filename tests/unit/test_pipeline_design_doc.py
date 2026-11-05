@@ -1,4 +1,4 @@
-"""The condition table of docs/pipeline-design.md is ``verdict.CONDITIONS``.
+"""The condition table of docs/PIPELINE_DESIGN.md is ``verdict.CONDITIONS``.
 
 The design document states every condition the freeze gate and the
 graduation verdict judge in one table. This keeps that table the code's: the
@@ -16,7 +16,7 @@ import pytest
 
 from autotrade.pipelines.verdict import CONDITIONS
 
-DOC = Path(__file__).resolve().parents[2] / "docs" / "pipeline-design.md"
+DOC = Path(__file__).resolve().parents[2] / "docs" / "PIPELINE_DESIGN.md"
 HEADER = "| 阶段 | 代码 | 条件 | 阈值参数 | 开关 | 原因 |"
 NONE = "—"
 

@@ -11,7 +11,7 @@ class RepoGuidelineSyncTest(unittest.TestCase):
         # AGENTS.md and CLAUDE.md are the same guideline document maintained in
         # lockstep for two agent CLIs; they have drifted before and needed an
         # explicit reconcile commit — pin byte equality (same pattern as the
-        # PROMPTS.md and units-reference.md freshness regressions).
+        # PROMPTS.md and UNITS_REFERENCE.md freshness regressions).
         root = Path(__file__).resolve().parents[2]
         agents = (root / "AGENTS.md").read_text(encoding="utf-8")
         claude = (root / "CLAUDE.md").read_text(encoding="utf-8")
