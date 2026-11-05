@@ -827,7 +827,7 @@ def test_session_and_subagent_prompts_keep_roles() -> None:
     # prompt names only the tool.
     parent = build_system_prompt(experiment_facts={})
     assert "`agent`" in parent
-    assert "`finish_session`" in parent
+    assert "`test`" in parent
     assert "通常优先" not in parent
     for stale in (
         "data_audit",
@@ -1166,7 +1166,7 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
     )
     assert "可写的子代理同样可以并行" in AGENT_TOOL_SPEC.description
     assert "subagent_completed" in SESSION_WORKFLOW_SECTION
-    assert "不要用工具轮询" in SESSION_WORKFLOW_SECTION
+    assert "不要轮询" in SESSION_WORKFLOW_SECTION
     assert "Sleep" not in SESSION_WORKFLOW_SECTION
 
 

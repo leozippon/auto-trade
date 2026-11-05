@@ -651,7 +651,8 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert checkpoint["trace"]["root"] == "trace"
     note = opening[2].content
     assert "第 2 次尝试" in note and "language model unavailable" in note
-    assert transcripts[0].name in note
+    assert "模型调用 5/" in note and transcripts[0].name in note
+    assert "回测年" not in note
     assert "上面是中断前最近一次压缩的摘要" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["arm"] == {
@@ -1070,9 +1071,9 @@ def test_a_nomination_that_does_not_register_is_refused_and_the_arm_ends_with_no
     }
     instrument = facts["artifact_contract"]["acceptance_rules"]["instrument"]
     assert (instrument["alpha"], instrument["bar_over_validation_period"]) == (0.05, 1.645)
-    # The prompt's run section reads the frontier facts (``agent/prompts.py``);
-    # the sealed-gate paragraph is gone with the gate.
-    assert "## 封存检验" not in system
+    # The facts state the frontier, so the prompt carries the run section
+    # (prompts.build_run_section) and no sealed-gate paragraph.
+    assert "## 本次运行" in system and "## 封存检验" not in system
 
     read = _model_input(llm)
     assert retired_vocabulary(read) == []

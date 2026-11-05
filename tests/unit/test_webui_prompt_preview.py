@@ -26,7 +26,6 @@ from autotrade.agent.prompts import (
     SESSION_DEFAULT_INSTRUCTION,
     SESSION_DYNAMIC_CONTEXT_HEADER,
     SESSION_STATIC_SECTIONS,
-    STEP_TREE_SECTION,
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import LOCAL_QWEN_MODEL
@@ -148,17 +147,15 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
     for section in SESSION_STATIC_SECTIONS:
         assert section.strip() in prompt
-    assert STEP_TREE_SECTION.strip() in prompt
     assert SESSION_DYNAMIC_CONTEXT_HEADER.strip() in prompt
     # The opening user message the session is actually started with.
     assert SESSION_DEFAULT_INSTRUCTION.strip() in prompt
     for tool in (
-        "batch_validate",
+        "validate",
+        "test",
         "agent",
         "report_issue",
         "skill_feedback",
-        "step_rollback",
-        "finish_session",
     ):
         assert f"`{tool}`" in prompt
     for retired in RETIRED_WORDING:
