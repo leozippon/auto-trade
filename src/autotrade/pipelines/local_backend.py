@@ -270,13 +270,13 @@ class DeterministicBaselineDeveloper:
                     span=request.full_span.label,
                 )
             )
-        # No agent tests anything here: the baseline's last Validation is the
-        # candidate the host freezes and completes the record with.
+        # No agent tests anything here: the session ends as one whose budget
+        # ran out before a test, and the host freezes the baseline's last
+        # Validation and completes the record with it.
         return ResearchSessionResult(
             f"deterministic_baseline_{request.run_id}",
             tuple(steps),
-            "completed",
-            node_id=steps[-1].step_id,
+            "deadline",
             finish_reason="deterministic_baseline_replay_no_agent_improvement",
         )
 

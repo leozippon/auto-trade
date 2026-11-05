@@ -23,7 +23,8 @@ from autotrade.environment.executor import StrategyMemoryExceeded, StrategyRaise
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.strategy import CN_TZ
-from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry
+from autotrade.pipelines import rolling_record
+from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry, anchor_on
 from autotrade.pipelines.config import (
     EvaluationRequest,
     EvaluationResult,
@@ -36,9 +37,11 @@ from autotrade.pipelines.config import (
     research_span,
 )
 from autotrade.pipelines.experiment import (
+    EnvironmentBlockedAttempt,
     RollingExperimentPipeline,
     _session_budgets,
     null_control_seed,
+    replay_and_analysis,
     research_step_record,
 )
 from autotrade.pipelines.ledger import (
@@ -451,7 +454,7 @@ HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/arm/
 
 def _interrupted_attempt(
     pipeline, ledger, *, summary: str | None, test_replays: int, node: bool, capped: bool = False
-) -> str:
+) -> str | None:
     """Leave what an interrupted attempt leaves: an attempt_failed row, a
     trace with budget checkpoints (and a compaction), a published tree node
     with its host sidecar and its revision in the store.
@@ -495,7 +498,7 @@ def _interrupted_attempt(
         events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "test_replays": test_replays, "null_controls": 1}})
     trace.write_text("".join(json.dumps(event) + "\n" for event in events) + "{torn", encoding="utf-8")
     if not node:
-        return run_id
+        return None
     source = pipeline.config.experiment_dir.parent / "candidates" / "earlier"
     source.mkdir(parents=True)
     (source / "main.py").write_text(f"{MAIN}# alpha=0.0011\n", encoding="utf-8")
@@ -519,7 +522,7 @@ def _interrupted_attempt(
         pipeline.config.experiment_dir,
         StepResult(node_id, typed.revision_id, validation, span="full"),
     )
-    return run_id
+    return node_id
 
 
 def _request_span(pipeline):
@@ -573,6 +576,89 @@ def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path
     assert request.resume is not None and request.resume.compaction_summary is None
     assert request.steps_before == () and request.budget_used.llm_calls == 9
     assert record["attempts"] == 2 and record["arm_end"]["status"] == "no_deliverable"
+
+
+def test_a_resumed_attempt_continues_from_the_frontier_and_the_record(tmp_path: Path):
+    """An attempt interrupted after a test leaves the step in the ledger. The
+    next attempt opens at the frontier that step reached, with the record so
+    far; when its budget ends before another test, the host freezes the tested
+    candidate -- not the Validation the attempt added -- and completes only the
+    record's remaining steps."""
+
+    pipeline, snapshots, evaluator, developer, ledger = _pipeline(
+        tmp_path, {1: ([0.0012], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
+    )
+    from autotrade.pipelines.session_resume import load_recorded_steps
+
+    node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=1, node=True)
+    [earlier] = load_recorded_steps(pipeline.config.experiment_dir)
+    steps = pipeline.validation_steps()
+    first, frontier = steps.window(1)
+    # The step the interrupted attempt tested: its candidate replayed from the
+    # validation start to the first frontier.
+    replayed = evaluator.evaluate(
+        pipeline.validation_span().request(
+            pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
+        )
+    )
+    replay, analysis = replay_and_analysis(replayed.result_ref)
+    ledger.append(
+        rolling_record.test_step_record(
+            head={"experiment_id": "arm", "epoch_id": "research", "fold_id": "research", "run_id": "run_ref_first", "session_key": "research"},
+            steps=steps,
+            step=1,
+            candidate={
+                "step_id": node_id,
+                "revision_id": earlier.revision_id,
+                "fingerprint": earlier.fingerprint,
+                "seed_replicates": [],
+                "deterministic": False,
+            },
+            replay={"start": steps.start, "end": frontier, "result_ref": replayed.result_ref},
+            entry=rolling_record.step_entry(replay, analysis, start=first, end=frontier),
+            registration={"passed": True, "reasons": []},
+            source=rolling_record.SOURCE_TEST,
+        )
+    )
+
+    record = pipeline.run_research_session()
+
+    request = developer.requests[-1]
+    assert request.resume is not None and request.resume.attempt == 2
+    assert [row["step"] for row in request.tests_before] == [1]
+    assert request.frontier == frontier == "20230930"
+    assert request.decision_time == anchor_on(frontier) and snapshots.decisions[-1] == anchor_on(frontier)
+    assert [step.step_id for step in request.steps_before] == [node_id]
+    # The tested candidate is frozen, not the Validation this attempt added.
+    assert record["frozen"]["source_step_id"] == node_id != record["steps"][-1]["step_id"]
+    rows = [row for row in ledger.read() if row["record_type"] == TEST_STEP_RECORD_TYPE]
+    assert [(row["step"], row["source"]) for row in rows] == [
+        (1, "test"), (2, "host_completion"), (3, "host_completion"), (4, "host_completion"),
+    ]
+    assert {row["candidate"]["step_id"] for row in rows} == {node_id}
+    assert (record["frontier"], record["steps_tested"], record["attempts"]) == (steps.end, 4, 2)
+
+
+def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_arm(tmp_path: Path):
+    """A session the host ended on its environment ends the attempt, not the
+    research: the next attempt resumes from the frontier and the record. Only
+    when the attempts are spent does the arm end ``environment_blocked``, with
+    nothing frozen and no replay to follow."""
+
+    reason = "span full: 2 batches failed on the environment in every candidate; last error: ArrowTypeError"
+    plan = {attempt: ([], "environment_blocked", {"reason": reason}) for attempt in (1, 2, 3)}
+    pipeline, *_rest, ledger = _pipeline(tmp_path, plan)
+    for attempt in (1, 2):
+        with pytest.raises(EnvironmentBlockedAttempt, match="2 batches failed"):
+            pipeline.run_research_session()
+        rows = ledger.read()
+        assert [row["record_type"] for row in rows] == ["attempt_failed"] * attempt
+        assert "EnvironmentBlockedAttempt" in str(rows[-1]["error"]) and not research_over(rows)
+    record = pipeline.run_research_session()
+    assert (record["outcome"], record["attempts"], record["frozen"]) == ("environment_blocked", 3, None)
+    assert record["arm_end"] == {"status": "environment_blocked", "reason": reason}
+    assert research_over(ledger.read())
+    assert experiment_verdict(ledger.read()) == {"status": "environment_blocked", "reasons": [reason]}
 
 
 def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):

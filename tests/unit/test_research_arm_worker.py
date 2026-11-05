@@ -87,7 +87,7 @@ class _PeakRss:
         return self.peak - self.start
 
 
-def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_one_span(
+def test_an_arm_runs_research_completes_the_record_and_replays_forward_and_heldout_in_one_span(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     repo, experiment = make_arm(tmp_path)
@@ -116,16 +116,30 @@ def test_an_arm_runs_research_freezes_once_and_replays_forward_and_heldout_in_on
     result = run_local_interactive_worker(options)
 
     records = ExperimentLedger(options.rolling.ledger_path).read()
-    assert [row["record_type"] for row in records] == ["research_session", "forward"]
-    research_row, replay = records
-    assert research_row["outcome"] == "completed"
+    assert [row["record_type"] for row in records] == [*(["test_step"] * 4), "research_session", "forward"]
+    *tests, research_row, replay = records
+    # The baseline tests nothing: its budget ends and the host freezes its
+    # last Validation and fills the whole record from one replay of it.
+    assert (research_row["outcome"], research_row["finish_reason"]) == (
+        "deadline", "deterministic_baseline_replay_no_agent_improvement"
+    )
     assert research_row["freeze_gate"]["passed"] is True
     assert [step["span"] for step in research_row["steps"]] == ["full", "full"]
+    assert research_row["nominated_step_id"] == research_row["steps"][-1]["step_id"]
+    assert [(row["step"], row["frontier"], row["source"]) for row in tests] == [
+        (1, "20230930", "host_completion"),
+        (2, "20231231", "host_completion"),
+        (3, "20240331", "host_completion"),
+        (4, "20240630", "host_completion"),
+    ]
+    assert {row["candidate"]["step_id"] for row in tests} == {research_row["nominated_step_id"]}
+    assert (research_row["frontier"], research_row["steps_tested"]) == ("20240630", 4)
     frozen = frozen_record(records)["frozen"]
     assert Path(frozen["output_path"], "main.py").is_file()
 
-    # Research never asked for a slot or view after research end; the forward
-    # stage asked for exactly the forward and the clipped Held-out slot.
+    # Research and the host's completion never asked for a slot or view after
+    # research end; the forward stage asked for exactly the forward and the
+    # clipped Held-out slot.
     research_end = decision_anchor(GEOMETRY["research_end"])
     requests = synthetic_provider.requests
     forward_start = next(index for index, item in enumerate(requests) if item[1] == "20240701")
@@ -714,6 +728,92 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
         None,
         manifests[0]["revision_id"],
     ]
+
+
+def test_an_interrupted_session_resumes_from_its_frontier_and_record(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """The first attempt validates the working copy, tests it and then loses
+    its model: the step it recorded stays in the ledger. The second worker
+    start resumes the session at the frontier that step reached -- the view
+    it mounts and the facts it reads are the frontier's -- and when its one
+    remaining call is spent the host completes the record from the tested
+    candidate, not from the Validation the resumed attempt added."""
+
+    from autotrade.environment.llm import ProviderResponse
+    from tests.unit.test_interactive_worker_local import (
+        TEST_WORKING_COPY,
+        VALIDATE_WORKING_COPY,
+        _NominatingLLM,
+        _NoShellRunner,
+    )
+
+    repo, experiment = make_arm(
+        tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=6
+    )
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    first_llm = _NominatingLLM(
+        [
+            ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
+            ProviderResponse(tool_calls=(TEST_WORKING_COPY,)),
+            # The script ends: three consecutive model failures end the attempt.
+        ]
+    )
+    with pytest.raises(RuntimeError, match="language model unavailable"):
+        run_local_interactive_worker(
+            options, llm=first_llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+        )
+    ledger = ExperimentLedger(options.rolling.ledger_path)
+    tested, failed = ledger.read()
+    assert (tested["record_type"], tested["step"], tested["frontier"], tested["source"]) == (
+        "test_step", 1, "20230930", "test"
+    )
+    assert failed["record_type"] == "attempt_failed"
+    tested_node = tested["candidate"]["step_id"]
+
+    second_llm = _NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))])
+    result = run_local_interactive_worker(
+        load_worker_options(experiment, repo_root=repo),
+        llm=second_llm,
+        command_runner_factory=lambda _workspace: _NoShellRunner(),
+    )
+
+    records = ledger.read()
+    assert [row["record_type"] for row in records] == [
+        "test_step", "attempt_failed", *(["test_step"] * 3), "research_session", "forward"
+    ]
+    record = records[-2]
+    assert (record["attempts"], record["outcome"], record["finish_reason"]) == (
+        2, "deadline", "llm_call_budget_exhausted"
+    )
+    # Five calls of the first attempt (two scripted, three failed), one of the second.
+    assert record["budget_used"]["llm_calls"] == 6 and record["budget_used"]["test_replays"] == 1
+    assert [row["step_id"] for row in record["steps"]] != [tested_node]
+    assert record["frozen"]["source_step_id"] == tested_node != record["steps"][-1]["step_id"]
+    completion = records[2:5]
+    assert [(row["step"], row["frontier"], row["source"]) for row in completion] == [
+        (2, "20231231", "host_completion"),
+        (3, "20240331", "host_completion"),
+        (4, "20240630", "host_completion"),
+    ]
+    assert {row["candidate"]["step_id"] for row in completion} == {tested_node}
+    assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
+    assert result["verdict"]["status"] == "graduated"
+    # The resumed attempt opened on the frontier's view and read it in its facts.
+    research_requests = synthetic_provider.requests[
+        : next(index for index, item in enumerate(synthetic_provider.requests) if item[0] == "heldout")
+    ]
+    assert [
+        decision.strftime("%Y%m%d") for phase, _start, _end, decision in research_requests if phase == "decision"
+    ] == ["20230630", "20230930", "20230930"]
+    opening = second_llm.calls[0]["messages"]
+    facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
+    geometry = facts["research_geometry"]
+    assert (geometry["frontier"], geometry["steps_tested"], geometry["steps"]) == ("20230930", 1, 4)
+    assert facts["arm"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
+    assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 1
+    assert "第 2 次尝试" in opening[1].content
 
 
 def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone(
