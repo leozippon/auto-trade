@@ -32,6 +32,27 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
         self.assertEqual(out.loc[0, "available_at"], "2020-01-10 20:00:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "source:rec_time")
 
+    def test_midnight_rec_time_is_a_bare_date(self):
+        # Every 2015 rec_time and most official-service rows since 2026-09-14
+        # read D 00:00:00: a date, not a receipt time, so the row takes the
+        # stamp a row without rec_time gets. A midnight outside the window
+        # stays a collection time; a time a second past midnight is kept.
+        frame = anns_frame([
+            ("20150811", "002285.SZ", "n", "t", "u", "2015-08-11 00:00:00"),
+            ("20261027", "601995.SH", "n", "t", "u", "2026-10-27 00:00:00"),
+            ("20200110", "000001.SZ", "n", "t", "u", "2025-07-05 00:00:00"),
+            ("20261027", "601995.SH", "n", "t", "u", "2026-10-26 00:00:01"),
+        ])
+        out = core.augment_text_frame(frame, core.TEXT_SPECS["anns_d"])
+        self.assertEqual(out["available_at"].tolist(), [
+            "2015-08-11 23:59:59+08:00", "2026-10-27 23:59:59+08:00",
+            "2020-01-10 23:59:59+08:00", "2026-10-26 00:00:01+08:00",
+        ])
+        self.assertEqual(out["available_at_rule"].tolist(), [
+            "conservative_from:ann_date:date_only_rec_time", "conservative_from:ann_date:date_only_rec_time",
+            "conservative_from:ann_date:implausible_rec_time", "source:rec_time",
+        ])
+
     def test_missing_rec_time_uses_ann_date_fallback(self):
         frame = anns_frame([("20200110", "000001.SZ", "n", "t", "u", "")])
         out = core.augment_text_frame(frame, core.TEXT_SPECS["anns_d"])

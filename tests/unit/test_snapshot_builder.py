@@ -2525,9 +2525,9 @@ class SnapshotBuilderTest(unittest.TestCase):
 
     def test_announcement_and_major_news_dedup_before_text_id(self):
         # Re-ingested duplicate rows collapse to the earliest copy BEFORE
-        # text_id assignment (measured 38% / 9% duplicates in production);
-        # distinct filings sharing a title, and joint announcements sharing a
-        # url across stocks, are preserved.
+        # text_id assignment; distinct filings sharing a title, and joint
+        # announcements sharing a url across stocks, are preserved.
+        page = "http://static.cninfo.com.cn/finalpage/2021-10-07"
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
 
@@ -2541,13 +2541,13 @@ class SnapshotBuilderTest(unittest.TestCase):
             write(
                 raw / "anns_d" / "month=202110.parquet",
                 pd.DataFrame([
-                    ann("000001.SZ", "回购公告", "http://cninfo/U1", "2021-10-07T18:00:00+08:00"),
+                    ann("000001.SZ", "回购公告", f"{page}/1211200001.PDF", "2021-10-07T18:00:00+08:00"),
                     # Literal re-ingest of the same filing, later rec_time.
-                    ann("000001.SZ", "回购公告", "http://cninfo/U1", "2021-10-08T09:00:00+08:00"),
+                    ann("000001.SZ", "回购公告", f"{page}/1211200001.PDF", "2021-10-08T09:00:00+08:00"),
                     # Joint announcement: same filing url, different stock.
-                    ann("000002.SZ", "回购公告", "http://cninfo/U1", "2021-10-07T18:00:00+08:00"),
+                    ann("000002.SZ", "回购公告", f"{page}/1211200001.PDF", "2021-10-07T18:00:00+08:00"),
                     # Different filing with the same recurring title.
-                    ann("000001.SZ", "回购公告", "http://cninfo/U2", "2021-10-07T19:00:00+08:00"),
+                    ann("000001.SZ", "回购公告", f"{page}/1211200002.PDF", "2021-10-07T19:00:00+08:00"),
                 ]),
             )
 
@@ -2585,6 +2585,139 @@ class SnapshotBuilderTest(unittest.TestCase):
             self.assertEqual(len(major), 2)
             self.assertNotIn("2021-10-07T09:00:00+08:00", set(major["available_at"]))
             self.assertEqual(index["text_id"].nunique(), len(index))
+
+    def test_announcement_copies_collapse_to_one_row_per_filing(self):
+        """The vendor's pre-2025 copies of one filing (the rows of
+        logs/research_audit_20261102/audit_anns_titles.md §1.3, plus a few
+        built on their pattern) leave one row: the same cninfo id in either
+        url form, or an id-less dataclouds copy of the same day and normalised
+        title. Distinct ids never merge, nor does a 摘要 beside its report.
+        The unprefixed title is kept, then the shorter one, then the earliest
+        available_at, then the smallest url, in any row order."""
+        from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+
+        # A v15 view holds every copy (v16).
+        self.assertGreaterEqual(SNAPSHOT_CACHE_FORMAT_VERSION, 16)
+
+        def detail(code, ann_id, day):
+            return (
+                f"http://www.cninfo.com.cn/new/disclosure/detail?stockCode={code[:6]}"
+                f"&announcementId={ann_id}&orgId=x&announcementTime={day}"
+            )
+
+        def page(day, ann_id):
+            return f"http://static.cninfo.com.cn/finalpage/{day}/{ann_id}.PDF"
+
+        def clouds(path):
+            return f"http://dataclouds.cninfo.com.cn/{path}.pdf"
+
+        def eod(day):
+            return f"{day} 23:59:59+08:00"
+
+        def ann(code, ann_date, title, url, available_at):
+            return {
+                "ann_date": ann_date, "ts_code": code, "name": "示例", "title": title, "url": url,
+                "rec_time": "", "available_at": available_at, "available_at_rule": "fixture",
+            }
+
+        sh_title = "南京钢铁股份有限公司关于为参股公司提供担保的进展情况公告"
+        report = "中国国际金融股份有限公司换股吸收合并东兴证券股份有限公司、信达证券股份有限公司之实施情况暨新增股份上市公告书"
+        rows = [
+            # Plain and 简称-prefixed copy on one finalpage url; in 2015 the
+            # plain copy carried the vendor's midnight date.
+            ann("002285.SZ", "20150811", "关于实际控制人投资世联启航一号基金暨关联交易的公告",
+                page("2015-08-11", 1201419011), "2015-08-11 00:00:00+08:00"),
+            ann("002285.SZ", "20150811", "世联行：关于实际控制人投资世联启航一号基金暨关联交易的公告",
+                page("2015-08-11", 1201419011), eod("2015-08-11")),
+            # The prefixed copy first, both stamped alike.
+            ann("000988.SZ", "20180804", "华工科技：独立董事关于第七届董事会第十二次会议相关事项的独立意见",
+                page("2018-08-04", 1205257704), eod("2018-08-04")),
+            ann("000988.SZ", "20180804", "独立董事关于第七届董事会第十二次会议相关事项的独立意见",
+                page("2018-08-04", 1205257704), eod("2018-08-04")),
+            # One id in both url forms; here the prefixed copy is stamped
+            # earlier, and the unprefixed title still wins.
+            ann("300070.SZ", "20200228", "关于完成选举公司独立董事的公告",
+                detail("300070.SZ", 1207333187, "2020-02-28"), eod("2020-02-28")),
+            ann("300070.SZ", "20200228", "碧水源：关于完成选举公司独立董事的公告",
+                page("2020-02-28", 1207333187), "2020-02-28 18:00:00+08:00"),
+            # A plain title with its own colon beside its 简称 copy: both read
+            # as prefixed, so the shorter one.
+            ann("000513.SZ", "20241102", "H股公告：证券变动月报表",
+                detail("000513.SZ", 1221602397, "2024-11-02"), eod("2024-11-02")),
+            ann("000513.SZ", "20241102", "丽珠集团：H股公告：证券变动月报表",
+                page("2024-11-02", 1221602397), eod("2024-11-02")),
+            # Shanghai dataclouds copy with the identical title: the smaller url.
+            ann("600282.SH", "20210619", sh_title, detail("600282.SH", 1210292241, "2021-06-19"), eod("2021-06-19")),
+            ann("600282.SH", "20210619", sh_title,
+                clouds("shgonggao/2021/2021-06-19/2b650a7cd00d11eb88d2fa163e26e5de"), eod("2021-06-19")),
+            # Beijing dataclouds copy with a [临时公告]XX: prefix.
+            ann("831167.BJ", "20231027", "[临时公告]鑫汇科:第四届监事会第四次会议决议公告",
+                clouds("sjother/neeq_notice/170663b274b311eebe02f010907b9098"), eod("2023-10-27")),
+            ann("831167.BJ", "20231027", "第四届监事会第四次会议决议公告",
+                detail("831167.BJ", 1218192295, "2023-10-27"), eod("2023-10-27")),
+            # Two id-less copies with no id twin group on their title.
+            ann("150001.SZ", "20221223", "[临时公告]瑞福进取:关于基金份额折算的公告",
+                clouds("sjother/fund/6e38d65c829611ed9746fa163e26e5de"), eod("2022-12-23")),
+            ann("150001.SZ", "20221223", "关于基金份额折算的公告",
+                clouds("sjother/fund/7f49e76d930722fe0857fb274f37f6ef"), eod("2022-12-23")),
+            # One id re-posted the next day: the earliest copy.
+            ann("002076.SZ", "20250507", "股票交易异常波动公告",
+                detail("002076.SZ", 1223475378, "2025-05-07"), "2025-05-07 18:00:00+08:00"),
+            ann("002076.SZ", "20250508", "股票交易异常波动公告",
+                detail("002076.SZ", 1223475378, "2025-05-08"), "2025-05-08 18:00:00+08:00"),
+            # Distinct documents under one title and day: both stay.
+            ann("002594.SZ", "20160721", "比亚迪股份：海外监管公告", page("2016-07-21", 1202497697), eod("2016-07-21")),
+            ann("002594.SZ", "20160721", "比亚迪股份：海外监管公告", page("2016-07-21", 1202497705), eod("2016-07-21")),
+            # A report and its 摘要 are separate documents, with or without an id.
+            ann("688779.SH", "20260818", "五矿新能源材料（湖南）股份有限公司2026年半年度报告",
+                page("2026-08-18", 1225476561), "2026-08-17 18:04:21+08:00"),
+            ann("688779.SH", "20260818", "五矿新能源材料（湖南）股份有限公司2026年半年度报告摘要",
+                page("2026-08-18", 1225476562), "2026-08-17 18:04:31+08:00"),
+            ann("601995.SH", "20221027", report, detail("601995.SH", 1214941101, "2022-10-27"), eod("2022-10-27")),
+            ann("601995.SH", "20221027", report + "（摘要）",
+                clouds("shgonggao/2022/2022-10-27/8a1f3d58560b11ed9d6dfa163e26e5de"), eod("2022-10-27")),
+        ]
+        kept = [
+            ("002285.SZ", "关于实际控制人投资世联启航一号基金暨关联交易的公告", "2015-08-11 00:00:00+08:00"),
+            ("000988.SZ", "独立董事关于第七届董事会第十二次会议相关事项的独立意见", eod("2018-08-04")),
+            ("300070.SZ", "关于完成选举公司独立董事的公告", eod("2020-02-28")),
+            ("000513.SZ", "H股公告：证券变动月报表", eod("2024-11-02")),
+            ("600282.SH", sh_title, eod("2021-06-19")),
+            ("831167.BJ", "第四届监事会第四次会议决议公告", eod("2023-10-27")),
+            ("150001.SZ", "关于基金份额折算的公告", eod("2022-12-23")),
+            ("002076.SZ", "股票交易异常波动公告", "2025-05-07 18:00:00+08:00"),
+            ("002594.SZ", "比亚迪股份：海外监管公告", eod("2016-07-21")),
+            ("002594.SZ", "比亚迪股份：海外监管公告", eod("2016-07-21")),
+            ("688779.SH", "五矿新能源材料（湖南）股份有限公司2026年半年度报告", "2026-08-17 18:04:21+08:00"),
+            ("688779.SH", "五矿新能源材料（湖南）股份有限公司2026年半年度报告摘要", "2026-08-17 18:04:31+08:00"),
+            ("601995.SH", report, eod("2022-10-27")),
+            ("601995.SH", report + "（摘要）", eod("2022-10-27")),
+        ]
+        config = SnapshotConfig(
+            events_datasets=(), macro_datasets=(), fundamental_datasets=(), text_datasets=("anns_d",),
+            intraday_trade_days=1, include_industry=False,
+        )
+        decision = datetime(2026, 11, 2, 8, 30, tzinfo=CN_TZ)
+        window_start = pd.Timestamp("2015-01-01", tz="Asia/Shanghai")
+        built = []
+        for order, frame in (("file", pd.DataFrame(rows)), ("reversed", pd.DataFrame(rows[::-1]))):
+            with tempfile.TemporaryDirectory() as tmp:
+                raw = Path(tmp) / "raw"
+                for month, part in frame.groupby(frame["ann_date"].str.slice(0, 6)):
+                    write(raw / "anns_d" / f"month={month}.parquet", part)
+                out_dir = Path(tmp) / "text_out"
+                out_dir.mkdir()
+                builder = SnapshotBuilder(raw, Path(tmp) / "fund_events_missing")
+                index, _ = builder._build_text(config, decision, window_start, out_dir)
+                bodies = pd.read_parquet(out_dir / "text_library" / "anns_d.parquet").set_index("text_id")["body"]
+            with self.subTest(order=order):
+                self.assertEqual(sorted(zip(index["ts_codes"], index["title"], index["available_at"])), sorted(kept))
+                self.assertEqual(index["text_id"].nunique(), len(index))
+            built.append(sorted(bodies.loc[index["text_id"]].tolist()))
+        # The same copy survives whatever order the rows come in: here the
+        # dataclouds url of the Shanghai pair, the smaller of the two.
+        self.assertEqual(built[0], built[1])
+        self.assertIn(f"{sh_title}\n{clouds('shgonggao/2021/2021-06-19/2b650a7cd00d11eb88d2fa163e26e5de')}", built[0])
 
     def test_investor_qa_uses_question_title_and_question_answer_body(self):
         with tempfile.TemporaryDirectory() as tmp:

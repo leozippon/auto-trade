@@ -2665,6 +2665,9 @@ def safe_partition_value(value: str) -> str:
 # A source timestamp is a credible publication time only when it sits near the
 # announcement/report date. Backfilled history carries collection timestamps
 # (e.g. 2025 rec_time on 2020 announcements) that must not gate PIT visibility.
+# Nor is a time of exactly midnight one: it is a bare date (every 2015 anns_d
+# rec_time, most official-service rows since 2026-09-14), so the row takes the
+# same date-only stamp as a row without a source time.
 TEXT_TIME_PLAUSIBLE_BEFORE_DAYS = 1.0
 TEXT_TIME_PLAUSIBLE_AFTER_DAYS = 3.0
 
@@ -2677,6 +2680,7 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
     if spec.date_column and spec.date_column in df.columns:
         date_value = df[spec.date_column].astype(str).str.strip()
     implausible = pd.Series(False, index=df.index)
+    date_only = pd.Series(False, index=df.index)
     if spec.time_column and spec.time_column in df.columns:
         source_time = df[spec.time_column].map(normalize_source_datetime)
         mask = source_time.ne("") & source_time.ne("nan") & source_time.ne("None")
@@ -2687,9 +2691,11 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
             plausible = lag_days.between(-TEXT_TIME_PLAUSIBLE_BEFORE_DAYS, TEXT_TIME_PLAUSIBLE_AFTER_DAYS)
             implausible = mask & base.notna() & ~plausible.fillna(False)
             mask = mask & (base.isna() | plausible.fillna(False))
+            date_only = mask & base.notna() & parsed.eq(parsed.dt.normalize())
+            mask = mask & ~date_only
         df.loc[mask, "available_at"] = source_time[mask]
         df.loc[mask, "available_at_rule"] = f"source:{spec.time_column}"
-        df.loc[implausible, "available_at"] = ""
+        df.loc[implausible | date_only, "available_at"] = ""
     if date_value is not None:
         mask = (df["available_at"].astype(str).str.strip() == "") & date_value.str.fullmatch(r"\d{8}", na=False)
         suffix = " 22:00:00+08:00" if spec.api_name == "report_rc" else " 23:59:59+08:00"
@@ -2698,6 +2704,9 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
         df.loc[mask, "available_at_rule"] = f"conservative_from:{spec.date_column}"
         df.loc[mask & implausible, "available_at_rule"] = (
             f"conservative_from:{spec.date_column}:implausible_{spec.time_column}"
+        )
+        df.loc[mask & date_only, "available_at_rule"] = (
+            f"conservative_from:{spec.date_column}:date_only_{spec.time_column}"
         )
     return df
 
