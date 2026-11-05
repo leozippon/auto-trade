@@ -9,13 +9,15 @@ created under the current rules is judged again by this code, CPU only, and
 compared with the ledger key for key:
 
 - a research session's freeze registration (``experiment.freeze_registration``),
-- a forward record's sealed reading (``experiment.judged_sealed``), its
-  ablation's increment where it froze one (``experiment.judged_ablation``)
-  and, where its forward replay completed, its slices and verdict
+- a forward record's sealed reading (``experiment.judged_sealed``) and,
+  where its forward replay completed, its slices and verdict
   (``experiment.judged_replay``).
 
 An arm whose rules state no ``sealed_years`` was judged under rules since
-retired and is never judged again: its readings are what its ledger says.
+retired and is never judged again: its readings are what its ledger says. An
+arm frozen before the ablation was retired recorded one in its registration
+(``ledger.RETIRED_ABLATION_KEY``) and an increment beside its sealed reading:
+the registration is compared without it, and the increment is not judged.
 
 Run it by hand before landing a change to the gate code, from a checkout
 whose ``experiments/`` holds the arms, or with ``--experiments``:
@@ -48,13 +50,12 @@ from autotrade.pipelines.arm_params import read_param
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
     freeze_registration,
-    judged_ablation,
     judged_replay,
     judged_sealed,
     replay_and_analysis,
 )
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
-from autotrade.pipelines.ledger import recorded_path
+from autotrade.pipelines.ledger import RETIRED_ABLATION_KEY, recorded_path
 
 
 class Judgement(NamedTuple):
@@ -194,37 +195,23 @@ def check_arm(arm: Path) -> list[Judgement]:
         if kind == "research_session" and isinstance(record.get("freeze_gate"), dict):
             steps = {str(row["step_id"]): row for row in record["steps"]}
             nominee = steps[str(record["nominated_step_id"])]
-            seeds = record["freeze_gate"].get("seed_replicates") or {}
-            ablation = record["freeze_gate"].get("ablation") or {}
+            gate = {key: value for key, value in record["freeze_gate"].items() if key != RETIRED_ABLATION_KEY}
+            seeds = gate.get("seed_replicates") or {}
             judge(
                 "freeze_registration",
-                record["freeze_gate"],
+                gate,
                 freeze_registration(
                     nominee,
                     experiment_dir=arm,
                     acceptance=rules,
                     seed_replicates=[steps[str(entry["step_id"])] for entry in seeds.get("replicates") or ()],
                     deterministic=bool(seeds.get("deterministic")),
-                    ablation=steps[str(ablation["step_id"])] if "step_id" in ablation else None,
                 ),
             )
         elif kind == "forward" and isinstance(record.get("sealed"), Mapping):
             stored = record["sealed"]["slice"]
             sealed = stored if stored.get("strategy_error") else _sealed(arm, record, rules)
             judge("sealed", stored, sealed)
-            control = record["sealed"].get("ablation") or {}
-            if control.get("result_ref"):
-                judge(
-                    "ablation",
-                    control["increment"],
-                    judged_ablation(
-                        str(recorded_path(arm, str(record["sealed"]["result_ref"]))),
-                        str(recorded_path(arm, str(control["result_ref"]))),
-                        rules=rules,
-                        start=str(record["sealed"]["start"]),
-                        end=str(record["sealed"]["end"]),
-                    )["increment"],
-                )
             if record.get("status") == "ok":
                 judge(
                     "forward",

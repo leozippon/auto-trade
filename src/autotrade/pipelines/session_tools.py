@@ -728,21 +728,19 @@ class SessionValidations:
         node_id: str,
         seed_replicates: Sequence[str] = (),
         deterministic: bool = False,
-        ablation: str | None = None,
     ) -> dict[str, object]:
         """Whether one Step of this session registers for a freeze, as the
         Pipeline reads it (``experiment.freeze_registration``), with
         ``seed_replicates`` the Steps it would register as its seed
-        replicates, ``deterministic`` its declaration that the package uses
-        no randomness and ``ablation`` the Step it would register as its
-        ablation. Registration only, never a score. A node that is not a
-        Step of this session does not register.
+        replicates and ``deterministic`` its declaration that the package
+        uses no randomness. Registration only, never a score. A node that is
+        not a Step of this session does not register.
         """
 
         rows = {
             str(row["step_id"]): row for row in (research_step_record(item) for item in self.steps)
         }
-        named = (node_id, *seed_replicates, *([ablation] if ablation else []))
+        named = (node_id, *seed_replicates)
         if any(step_id not in rows for step_id in named):
             return {"passed": False, "reasons": [ConditionReason.NOT_A_SESSION_STEP]}
         return freeze_registration(
@@ -751,7 +749,6 @@ class SessionValidations:
             acceptance=self.rules,
             seed_replicates=[rows[step_id] for step_id in seed_replicates],
             deterministic=deterministic,
-            ablation=rows[ablation] if ablation else None,
         )
 
     @property

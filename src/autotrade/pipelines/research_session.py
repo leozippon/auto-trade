@@ -684,7 +684,6 @@ class LLMResearchDeveloper:
                 node_id,
                 replicates,
                 deterministic,
-                ablation,
                 reason,
                 finish_reason,
             ) = self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
@@ -703,7 +702,6 @@ class LLMResearchDeveloper:
                 node_id=node_id,
                 seed_replicates=replicates,
                 deterministic=deterministic,
-                ablation=ablation,
                 reason=reason,
                 finish_reason=finish_reason,
             )
@@ -1228,11 +1226,11 @@ class LLMResearchDeveloper:
         resume: SessionResume | None,
         used: BudgetUsed,
         run_ref: str,
-    ) -> tuple[str, str, str | None, tuple[str, ...], bool, str | None, str, str]:
+    ) -> tuple[str, str, str | None, tuple[str, ...], bool, str, str]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
         the nominated node, its seed replicates, whether it was declared
-        deterministic and its ablation, the reason and the finish reason."""
+        deterministic, the reason and the finish reason."""
 
         from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
@@ -1291,7 +1289,6 @@ class LLMResearchDeveloper:
             outcome, node_id, reason = _session_outcome(result.finish_value)
             replicates = _seed_replicates(result.finish_value) if outcome == "freeze" else ()
             deterministic = outcome == "freeze" and _deterministic(result.finish_value)
-            ablation = _ablation(result.finish_value) if outcome == "freeze" else None
             finish_reason = "llm_agent_finish_session"
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace,
@@ -1299,14 +1296,14 @@ class LLMResearchDeveloper:
             # are still the arm's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
-            deterministic, ablation = False, None
+            deterministic = False
             finish_reason = exc.finish_reason
         except EnvironmentBlocked as exc:
             # The host ended the session: its replays on one span kept failing
             # on the environment, so the arm ends on that, not on research.
             conversation_id = runner.conversation_id
             outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
-            deterministic, ablation = False, None
+            deterministic = False
             finish_reason = ENVIRONMENT_BLOCKED
         return (
             conversation_id,
@@ -1314,7 +1311,6 @@ class LLMResearchDeveloper:
             node_id,
             replicates,
             deterministic,
-            ablation,
             reason,
             finish_reason,
         )
@@ -1336,7 +1332,6 @@ class LLMResearchDeveloper:
         node_id: str | None,
         seed_replicates: tuple[str, ...],
         deterministic: bool,
-        ablation: str | None,
         reason: str,
         finish_reason: str,
     ) -> ResearchSessionResult:
@@ -1358,10 +1353,10 @@ class LLMResearchDeveloper:
         )
         steps = tuple(backtest.steps)
         recorded = {step.step_id for step in steps}
-        named = {node_id, *seed_replicates, *([ablation] if ablation else [])}
+        named = {node_id, *seed_replicates}
         if outcome == "freeze" and not named <= recorded:
             raise RuntimeError(
-                "finish_session nominated a node, seed replicate or ablation absent "
+                "finish_session nominated a node or seed replicate absent "
                 "from this session's Validations"
             )
         manifest.update(
@@ -1380,7 +1375,6 @@ class LLMResearchDeveloper:
             node_id=node_id,
             seed_replicates=seed_replicates,
             deterministic=deterministic,
-            ablation=ablation,
             reason=reason,
             finish_reason=finish_reason,
             # The nulls the session already drew, for the freeze to reuse.
@@ -1611,13 +1605,6 @@ def _deterministic(finish: Mapping[str, object]) -> bool:
     """Whether a ``finish_session`` freeze declared its package deterministic."""
 
     return finish.get("deterministic") is True
-
-
-def _ablation(finish: Mapping[str, object]) -> str | None:
-    """The ablation a ``finish_session`` freeze registered (a full node id)."""
-
-    ablation = finish.get("ablation")
-    return None if ablation is None else str(ablation)
 
 
 def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:

@@ -33,7 +33,6 @@ from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
-    acceptance_for,
 )
 from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
@@ -70,9 +69,8 @@ CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
 
 
 def _sealed_round(**fields: object) -> Round:
-    """A synthetic round that states how many research years it seals and
-    whether a freeze registers an ablation, as every round must (neither
-    rule has a console default)."""
+    """A synthetic round that states how many research years it seals, as
+    every round must (the rule has no console default)."""
 
     overrides = {**CREATE_RULES, **dict(fields.pop("overrides", {}) or {})}  # type: ignore[call-overload]
     return Round(overrides=overrides, **fields)  # type: ignore[arg-type]
@@ -912,7 +910,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     # The account decides nothing: two arms an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
     assert rules("large") == rules("small") == acceptance_for(
-        {"alpha": WEB_CREATE_DEFAULTS["alpha"], "sealed_years": 1, "ablation_required": False}
+        {"alpha": WEB_CREATE_DEFAULTS["alpha"], "sealed_years": 1}
     ).to_record()
     tracked = rules("tracked")
     assert (tracked["tracking_error_cap"], tracked["beta_min"], tracked["beta_max"]) == (
@@ -1146,14 +1144,11 @@ LITERAL_DATE = re.compile(
 
 def test_the_sealed_round_runs_two_identical_experiments_on_the_open_pack() -> None:
     """Two experiments that send one request but for their ids, five of the
-    ten research years sealed at the program's alpha; a freeze takes no
-    ablation."""
+    ten research years sealed at the program's alpha."""
     rnd = ROUNDS[ROUND_SEALED]
     first, second = (rnd.request_params(arm) for arm in rnd.arms)
     assert second == {**first, "experiment_id": second["experiment_id"]}
     assert first["workspace_reference"] == SEALED_PACK
-    assert first["ablation_required"] is False
-    assert acceptance_for(first).ablation_required is False
     assert (first["research_start"], first["research_end"]) == ("20150801", "20250731")
     assert (first["sealed_years"], first["alpha"]) == (5, BASE_EXPECTED_DEFAULTS["alpha"])
     assert (first["model"], first["reasoning_effort"]) == ("gpt-6-astra", "xhigh")
@@ -1185,13 +1180,13 @@ def test_the_sealed_pack_dates_nothing_inside_the_sealed_years() -> None:
         assert not [word for word in (*AFTER_RESEARCH, "新意", "创新") if word in text], path.name
 
 
-def test_a_round_that_states_no_sealed_years_or_ablation_rule_is_refused(
+def test_a_round_that_states_no_sealed_years_is_refused(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The console has no value for ``sealed_years`` or ``ablation_required``
-    and the launcher sets neither: a round that does not state both is
-    refused before anything is sent, and one that states them passes the
-    same pre-flight."""
+    """The console has no value for ``sealed_years`` and the launcher sets
+    none: a round that does not state it is refused before anything is sent,
+    one that states it passes the same pre-flight, and one that still names
+    the retired ``ablation_required`` is refused."""
 
     rnd = Round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
@@ -1199,11 +1194,11 @@ def test_a_round_that_states_no_sealed_years_or_ablation_rule_is_refused(
         assert rnd.request_params(PROBE_ID).get(key) is None
     params, reason = rnd.validated(PROBE_ID)
     assert params is None
-    assert "missing required experiment parameters: ablation_required, sealed_years" in reason
-    half = Round(pit_views_seed="data/seed_probe", overrides={"sealed_years": 1})
-    params, reason = half.validated(PROBE_ID)
-    assert params is None and reason.endswith("missing required experiment parameters: ablation_required")
+    assert reason.endswith("missing required experiment parameters: sealed_years")
     stated = _sealed_round(pit_views_seed="data/seed_probe")
     params, reason = stated.validated(PROBE_ID)
     assert reason == "" and params is not None
-    assert (params["sealed_years"], params["ablation_required"]) == (1, False)
+    assert params["sealed_years"] == 1 and "ablation_required" not in params
+    retired = _sealed_round(pit_views_seed="data/seed_probe", overrides={"ablation_required": False})
+    params, reason = retired.validated(PROBE_ID)
+    assert params is None and reason.endswith("unknown experiment parameters: ablation_required")

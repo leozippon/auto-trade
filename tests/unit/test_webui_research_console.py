@@ -27,7 +27,11 @@ from autotrade.environment.tools.report_issue import (
     append_issue_resolution,
     issue_reports_path,
 )
-from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, RETIRED_SWITCHES
+from autotrade.pipelines.config import (
+    DEFAULT_RESEARCH_GEOMETRY,
+    RETIRED_ABLATION_RULES,
+    RETIRED_SWITCHES,
+)
 from autotrade.pipelines.ledger import ExperimentLedger, recorded_path, verdict_void
 from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.webui import registry
@@ -1490,10 +1494,11 @@ def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(
 
 
 def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path: Path) -> None:
-    """The console accepts the switches every older params.json carries and
-    reads nothing from them: the replay plan, the listing row and the page
-    are those of the same arm without them. A key no reader knows still makes
-    the arm unreadable."""
+    """The console accepts the switches every older params.json carries, and
+    the ablation rule of every arm created from 2026-11-03 until its
+    retirement, and reads nothing from them: the replay plan, the listing row
+    and the page are those of the same arm without them. A key no reader
+    knows still makes the arm unreadable."""
 
     def plan(experiment_id: str) -> dict[str, object]:
         return experiment_detail(tmp_path, experiment_id)["sessions"][1]["thresholds"]
@@ -1504,11 +1509,14 @@ def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path
         path.write_text(json.dumps({**params, **extra}), encoding="utf-8")
 
     build_arm(tmp_path, "current", "research")
-    written(build_arm(tmp_path, "legacy", "research"), dict.fromkeys(RETIRED_SWITCHES, False))
+    written(
+        build_arm(tmp_path, "legacy", "research"),
+        {**dict.fromkeys(RETIRED_SWITCHES, False), **dict.fromkeys(RETIRED_ABLATION_RULES, True)},
+    )
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["legacy"].get("state") != "unreadable"
     assert plan("legacy") == plan("current")
-    assert not RETIRED_SWITCHES & set(plan("legacy"))
+    assert not (RETIRED_SWITCHES | RETIRED_ABLATION_RULES) & set(plan("legacy"))
 
     written(build_arm(tmp_path, "unknown", "research"), {"require_heldout_magic": True})
     unknown = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}["unknown"]

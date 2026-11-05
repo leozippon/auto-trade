@@ -250,12 +250,6 @@ class AcceptanceRules:
     sealed_years: int = _required(
         "Sealed gate: trailing research years sealed from the session and read once after the freeze."
     )
-    # Whether a freeze registers an ablation: the nominee with one line
-    # changed, whose sealed reading beside the nominee's is reported, never
-    # judged (``verdict.ablation_increment``).
-    ablation_required: bool = _required(
-        "Freeze registration: the nominee names an ablation, its own bytes with one line changed."
-    )
 
     def __post_init__(self) -> None:
         mandate = (self.tracking_error_cap, self.beta_min, self.beta_max)
@@ -279,8 +273,6 @@ class AcceptanceRules:
         object.__setattr__(self, "sealed_years", _whole_int(self.sealed_years, "sealed_years"))
         if self.sealed_years < 1:
             raise ValueError("sealed_years must be an integer >= 1")
-        if not isinstance(self.ablation_required, bool):
-            raise ValueError("ablation_required must be true or false")
         if any(value is None for value in mandate):
             if any(value is not None for value in mandate):
                 raise ValueError(
@@ -314,7 +306,8 @@ class AcceptanceRules:
         Run manifests and ``hitl/params.json`` are read back long after they
         were written, so a record that carries a retired key (the former
         ``min_return``/``min_sharpe`` targets, the deflated-Sharpe bars, the
-        ``RETIRED_SWITCHES``) must still rebuild the rules it does name. A
+        ``RETIRED_SWITCHES``, ``ablation_required``) must still rebuild the
+        rules it does name. A
         record that lacks a required rule (``REQUIRED_ACCEPTANCE_KEYS``) is
         refused: it was written under rules these are not.
         """
@@ -396,8 +389,8 @@ class AcceptanceRules:
                 ),
                 "read": (
                     "once, by the host, after the freeze has ended the session: the "
-                    "frozen node, its seed replicates and its ablation replayed over the "
-                    "sealed years as one continuous book each. No session sees the "
+                    "frozen node and its seed replicates replayed over the sealed years "
+                    "as one continuous book each. No session sees the "
                     "sealed years, their data or the reading, and there is no second "
                     "reading"
                 ),
@@ -428,28 +421,6 @@ class AcceptanceRules:
                     "nominee without fit needs none, and a nomination declared "
                     "deterministic in finish_session (its package uses no "
                     "randomness) owes none"
-                ),
-                "ablation": (
-                    {
-                        "required": True,
-                        "definition": (
-                            "the nominee names one ablation in finish_session's "
-                            "ablation: another complete full-span Validation of this "
-                            "session whose strategy is the nominee's bytes with exactly "
-                            "one line changed, the line that switches off the mechanism "
-                            "the nominee is built on (a constant flip such as "
-                            "MECHANISM = False), and whose bytes differ from the "
-                            "nominee's and its seed replicates'"
-                        ),
-                        "reading": (
-                            "frozen and replayed on the sealed years beside the nominee; "
-                            "the increment, the sealed_gate statistic of the nominee's "
-                            "daily active return minus the ablation's, is recorded with "
-                            "its t-statistic (increment x sqrt(years)) and never gates"
-                        ),
-                    }
-                    if self.ablation_required
-                    else "none for this arm: finish_session takes no ablation"
                 ),
                 "tracking_mandate": mandate,
                 "freezes_per_arm": "1: a freeze that registers ends the session",
@@ -518,6 +489,14 @@ RETIRED_SWITCHES = frozenset(
         "dividend_tax",
     }
 )
+
+# The rule retired on 2026-11-05 with the freeze's ablation: its
+# registration, its sealed replay and the increment recorded beside the
+# sealed reading. Every params.json written from 2026-11-03 until then
+# states it, and the run records of that time state it in their acceptance
+# rules; readers accept exactly this key beside ``RETIRED_SWITCHES`` and
+# ``RETIRED_RULES`` and derive nothing from it, so those arms still list.
+RETIRED_ABLATION_RULES = frozenset({"ablation_required"})
 
 # The rules and the create parameter retired on 2026-11-03 with the
 # deflated-Sharpe freeze gate, its trial family and its lineage, and the
@@ -1202,12 +1181,11 @@ class ResearchSessionResult:
     # never land in an older field's positional slot.
     _: KW_ONLY
     # ``freeze``: the nominated Step, the Steps it registered as its seed
-    # replicates, whether it declared its package deterministic and the Step
-    # it registered as its ablation (``experiment.freeze_registration``).
+    # replicates and whether it declared its package deterministic
+    # (``experiment.freeze_registration``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
     deterministic: bool = False
-    ablation: str | None = None
     # The Agent's own account of its outcome.
     reason: str = ""
     finish_reason: str = ""
@@ -1242,6 +1220,7 @@ __all__ = [
     "DEFAULT_MAX_RESEARCH_MINUTES",
     "DEFAULT_RESEARCH_GEOMETRY",
     "REQUIRED_ACCEPTANCE_KEYS",
+    "RETIRED_ABLATION_RULES",
     "RETIRED_RULES",
     "SESSION_OUTCOMES",
     "AcceptanceRules",

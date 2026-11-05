@@ -18,6 +18,8 @@ import pytest
 
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines import worker
+from autotrade.pipelines.experiment import _keep_frozen_artifact_ids
+from autotrade.pipelines.ledger import RETIRED_ABLATION_KEY
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
     check_arm,
@@ -128,3 +130,38 @@ def test_an_arm_created_under_retired_rules_is_not_judged(arm: Path, tmp_path: P
     assert current_arms(root) == []
     assert main(["--experiments", str(root)]) == 0
 
+
+def test_an_arm_frozen_with_the_retired_ablation_is_judged_without_it(arm: Path, tmp_path: Path) -> None:
+    """An arm frozen while the ablation existed states ``ablation_required``,
+    recorded what registration read of its ablation and froze it, and holds
+    its increment beside the sealed reading. The registration is compared
+    without that one key and the increment is not judged, while any other key
+    the code does not reproduce is still named; the frozen ablation stays out
+    of the prune."""
+
+    ablation = {"artifact_id": "strategy_research_0ab1a7e0f00d", "source_step_id": "s", "line": "main.py:7: A -> B"}
+
+    def recorded(records: list[dict]) -> None:
+        research = _record(records, "research_session")
+        research["freeze_gate"][RETIRED_ABLATION_KEY] = {"required": True, "step_id": "s", "line": ablation["line"]}
+        research["frozen"][RETIRED_ABLATION_KEY] = ablation
+        _record(records, "forward")["sealed"][RETIRED_ABLATION_KEY] = {
+            "artifact_id": ablation["artifact_id"],
+            "increment": {"residual_information_ratio": 0.4, "t_statistic": 0.9},
+        }
+
+    copy = _copy(arm, tmp_path / "experiments", recorded, ablation_required=True)
+    assert [(item.reading, item.differences) for item in check_arm(copy)] == [
+        ("freeze_registration", []),
+        ("sealed", []),
+        ("forward", []),
+    ]
+    records = [json.loads(line) for line in (copy / LEDGER).read_text(encoding="utf-8").splitlines()]
+    assert ablation["artifact_id"] in _keep_frozen_artifact_ids(records)
+
+    def stray(records: list[dict]) -> None:
+        recorded(records)
+        _record(records, "research_session")["freeze_gate"]["unread"] = True
+
+    copy = _copy(arm, tmp_path / "stray" / "experiments", stray)
+    assert {item.reading: item.differences for item in check_arm(copy)}["freeze_registration"] == ["unread"]

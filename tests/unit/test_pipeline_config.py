@@ -29,6 +29,7 @@ from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
+    RETIRED_ABLATION_RULES,
     RETIRED_SWITCHES,
     AcceptanceRules,
     RollingExperimentConfig,
@@ -168,8 +169,6 @@ class AcceptanceRulesTest(unittest.TestCase):
             {"alpha": 1.0},
             {"sealed_years": 0},
             {"sealed_years": 2.5},
-            {"ablation_required": 1},
-            {"ablation_required": "true"},
             {"forward_confidence": 0.0},
             {"forward_confidence": 1.0},
         ):
@@ -300,7 +299,6 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertEqual(
             sorted(registration),
             [
-                "ablation",
                 "control",
                 "finite_metrics",
                 "freezes_per_arm",
@@ -310,13 +308,6 @@ class AcceptanceRulesTest(unittest.TestCase):
                 "tracking_mandate",
             ],
         )
-        # An arm that asks for no ablation says so; one that asks defines it.
-        self.assertIn("takes no ablation", registration["ablation"])
-        asked = AcceptanceRules(**{**REQUIRED_RULES, "ablation_required": True}).agent_facts()
-        ablation = asked["freeze_registration"]["ablation"]
-        self.assertTrue(ablation["required"])
-        self.assertIn("exactly one line changed", ablation["definition"])
-        self.assertIn("never gates", ablation["reading"])
         self.assertIn("span=full", registration["span"])
         self.assertIn("finite", registration["finite_metrics"])
         self.assertIn("0.2", registration["max_drawdown"])
@@ -470,10 +461,10 @@ class DefaultsDriftTest(unittest.TestCase):
         # A retired switch is no parameter a request can name.
         self.assertFalse(RETIRED_SWITCHES & set(WEB_CREATE_DEFAULTS))
         # Drawdowns and the mandate switch stay empty so the form does not pin
-        # a mandate onto every arm, and the sealed years and the ablation have
-        # no console value: every request states them (WEB_REQUIRED_PARAMS).
-        # Every other rule shows what an empty request would stamp.
-        stated = {"sealed_years", "ablation_required"}
+        # a mandate onto every arm, and the sealed years have no console
+        # value: every request states them (WEB_REQUIRED_PARAMS). Every other
+        # rule shows what an empty request would stamp.
+        stated = {"sealed_years"}
         blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max", *stated}
         self.assertEqual(set(rules), set(ACCEPTANCE_KEYS))
         self.assertLessEqual(stated, WEB_REQUIRED_PARAMS)
@@ -591,6 +582,61 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(new["withholding_rate"], 0.0)
         self.assertEqual(old["final_rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
         self.assertEqual((old["final_rate_beyond"], new["final_rate_beyond"]), (0.05, 0.0))
+
+    def test_the_retired_ablation_rule_loads_inert_and_no_request_may_name_it(self) -> None:
+        """Every arm created from 2026-11-03 until the freeze's ablation was
+        retired states ``ablation_required`` in its params.json and in the
+        acceptance rules its runs recorded. The worker loads it as the same
+        arm without the key, whatever its value; the rules rebuilt from a
+        record carrying it are the rules without it; and a create request may
+        no longer name it, nor any other key no parameter declares."""
+        import tempfile
+
+        from autotrade.pipelines.arm_params import console_request
+        from autotrade.pipelines.worker import resolve_worker_options
+
+        self.assertEqual(RETIRED_ABLATION_RULES, {"ablation_required"})
+        self.assertNotIn("ablation_required", ACCEPTANCE_KEYS)
+        base = {
+            "experiment_id": "sealed_demo",
+            "strategy_path": "configs/agent_output_template/main.py",
+            **REQUIRED_RULES,
+            "data_backend": "pit",
+            "raw_dir": "data/raw",
+            "fundamental_events_root": "data/pit/fundamental_events",
+            "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+
+            def options(params: dict[str, object]):
+                return resolve_worker_options(
+                    params,
+                    experiment_dir=repo_root / "experiments/sealed_demo",
+                    repo_root=repo_root,
+                    preflight=True,
+                )
+
+            current = options(base)
+            for value in (True, False):
+                with self.subTest(value=value):
+                    self.assertEqual(options({**base, "ablation_required": value}), current)
+                    self.assertEqual(
+                        AcceptanceRules.from_record({**REQUIRED_RULES, "ablation_required": value}),
+                        AcceptanceRules(**REQUIRED_RULES),
+                    )
+            with self.assertRaisesRegex(ValueError, r"unknown experiment parameters: \['ablation_magic'\]"):
+                options({**base, "ablation_magic": True})
+        request = {"experiment_id": "sealed_demo", **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES}
+        console_request(request, defaults=WEB_CREATE_DEFAULTS, experiments_root="experiments", work_root="work")
+        with self.assertRaisesRegex(ValueError, "unknown experiment parameters: ablation_required"):
+            console_request(
+                {**request, "ablation_required": False},
+                defaults=WEB_CREATE_DEFAULTS,
+                experiments_root="experiments",
+                work_root="work",
+            )
 
     def test_the_permitted_boards_are_pinned_per_arm_and_stated_only_where_pinned(self) -> None:
         """An arm without the key buys on every board and its facts say nothing
