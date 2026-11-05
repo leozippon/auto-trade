@@ -10,22 +10,16 @@ such a trace is refused rather than resumed from.
 The validations an attempt recorded survive in the experiment's step tree,
 whose nodes carry only opaque ids, plus a host-only sidecar per node holding
 the raw revision id, the span, the summary and the result reference the
-Pipeline needs to freeze it, and the control flag, batch id and declared
-offline screens the freeze gate's trial family reads; which bytes a Validation
-replayed is its revision's, read from the arm's revision store
-(:func:`revision_fingerprint`). A Step is durable from
-the moment it is recorded, while the budget block only rides on the event that
-settles its tool call, so an attempt that died inside a batch leaves Steps
-newer than its last block; the resume names them by recorded time so their
-replay-years are added to the block's
-(``ResearchSessionRequest.replay_years_spent``).
+Pipeline needs to freeze it, and the control flag and batch id; which bytes a
+Validation replayed is its revision's, read from the arm's revision store
+(:func:`revision_fingerprint`). The tests an attempt ran are the ledger's
+``test_step`` records (``pipelines/rolling_record.py``).
 """
 
 from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime
 from pathlib import Path
 
 from autotrade.common.records import (
@@ -153,8 +147,6 @@ def resume_state(
     ``budget_used`` block is the cumulative spend (each attempt seeds its
     counters from the amounts before it), the last successful compaction's
     summary is the checkpoint, and the last event's time is where it stopped.
-    The recorded Validations created after that last block are the ones its
-    replay-years never counted.
 
     A trace that reached ``TRACE_MAX_BYTES`` stopped at its marker while the
     attempt kept spending, so seeding from it would let the arm run past its
@@ -170,7 +162,6 @@ def resume_state(
     if not attempts:
         return None
     budget = BudgetUsed()
-    budget_at: datetime | None = None
     summary: str | None = None
     interrupted_at = ""
     transcripts: list[str] = []
@@ -189,7 +180,6 @@ def resume_state(
             used = event.get("budget_used")
             if isinstance(used, Mapping):
                 budget = BudgetUsed.from_record(used)
-                budget_at = _moment(event.get("ts"), f"a budget event of trace {run_id}")
             if (
                 event.get("event_type") == TraceEvent.CONTEXT_COMPACTION
                 and event.get("status") == "ok"
@@ -208,29 +198,8 @@ def resume_state(
         error=redact_host_paths(str(last.get("error") or "")),
         compaction_summary=summary,
         budget_used=budget,
-        unseen_step_ids=tuple(
-            str(node["node_id"])
-            for node in _recorded_nodes(Path(experiment_dir))
-            if budget_at is None
-            or _moment(node.get("created_at"), f"step node {node['node_id']}") > budget_at
-        ),
         transcripts=tuple(transcripts),
     )
-
-
-def _moment(value: object, what: str) -> datetime:
-    """The aware time a trace event or a step node was written."""
-
-    try:
-        moment = datetime.fromisoformat(str(value))
-    except ValueError:
-        moment = None
-    if moment is None or moment.tzinfo is None:
-        raise RuntimeError(
-            f"{what} carries no aware ISO time ({value!r}); the resumed replay-year "
-            "counter cannot tell which recorded Validations it already counts"
-        )
-    return moment
 
 
 def _trace_events(path: Path) -> list[dict[str, object]]:

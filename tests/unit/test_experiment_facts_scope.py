@@ -68,15 +68,15 @@ def test_the_session_facts_state_the_research_period_and_the_session_place() -> 
     facts = _facts()
     scope = facts["research_scope"]
     assert "The experiment's one research session researches the period 20210701..20250630" in scope["research"]
-    assert "no other session follows" in scope["research"]
-    assert "sealed data" in scope["research"]
+    assert "No other session follows" in scope["research"]
+    assert "validation years" in scope["research"]
     assert scope["universe"].startswith("The universe is unfiltered")
     assert "ST names included" in scope["universe"]
     assert "every trading day at 08:30" in scope["strategy_cadence"]
     assert "own rebalance cadence" in scope["strategy_cadence"]
     assert "session" not in facts["identity"]
     assert facts["visibility_policy"]["visible_research_period"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_visible_research_period"]
+    assert "不进入任何会话" in facts["visibility_policy"]["after_the_frontier"]
     rendered = json.dumps(facts, ensure_ascii=False)
     for later in ("2026", "202507", "2025-07"):
         assert later not in rendered
@@ -186,14 +186,6 @@ def test_the_facts_say_where_the_session_started() -> None:
         "kind": "step_node",
         "node_id": "research__session_ref_a__run_ref_b__valid_002",
     }
-
-
-def test_the_replay_year_budget_travels_with_how_it_is_spent() -> None:
-    budgets = _facts(budgets={"max_replay_years": 24, "max_null_controls": 3})["budgets"]
-    assert budgets["max_replay_years"] == 24
-    assert budgets["max_null_controls"] == 3
-    assert "回测年" in budgets["max_replay_years_note"]
-    assert "max_replay_years_note" not in _facts(budgets={})["budgets"]
 
 
 def test_the_session_is_told_which_index_it_is_measured_against() -> None:
@@ -358,10 +350,15 @@ def test_an_early_research_year_does_not_advertise_history_before_the_store() ->
     from autotrade.pipelines.research_session import research_geometry_record
 
     record = research_geometry_record(
-        [SimpleNamespace(label="Y1", start="20170701", end="20180630")],
+        [
+            SimpleNamespace(label="Y1", start="20170701", end="20180630"),
+            SimpleNamespace(label="Y2", start="20180701", end="20190630"),
+        ],
+        research_years=1,
+        test_step_months=3,
+        steps_tested=0,
         window_months=108,
         decision_time="2018-06-30T23:59:59+08:00",
-        sealed=("20180701", "20190630"),
     )
     # 108 months before 2017-06-30 is 2008-07-01. Daily bars start in 2010.
     assert record["years"][0]["input_window"] == "20100101..20170630"
@@ -371,9 +368,14 @@ def test_an_early_research_year_does_not_advertise_history_before_the_store() ->
         "macro": dict.fromkeys(("index_daily", "index_dailybasic", "index_weight", "sw_daily"), "20140701"),
     }
     later = research_geometry_record(
-        [SimpleNamespace(label="Y1", start="20220701", end="20230630")],
+        [
+            SimpleNamespace(label="Y1", start="20220701", end="20230630"),
+            SimpleNamespace(label="Y2", start="20230701", end="20240630"),
+        ],
+        research_years=1,
+        test_step_months=3,
+        steps_tested=0,
         window_months=24,
         decision_time="2023-06-30T23:59:59+08:00",
-        sealed=("20230701", "20240630"),
     )
     assert later["years"][0]["input_window"] == "20200701..20220630"

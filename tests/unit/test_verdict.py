@@ -232,50 +232,6 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
         verdict.residual_bar(5.0, 0.0)
 
 
-def test_the_ablation_increment_is_the_residual_statistic_of_the_difference():
-    """The increment reads the book's active series minus its ablation's on
-    the three legs, with its t-statistic, residual IR x sqrt(years), and no
-    bar: it is never judged. Two replays of different days have no
-    difference to read."""
-
-    rng = np.random.default_rng(9)
-    dates = [
-        stamp.strftime("%Y%m%d")
-        for stamp in pd.bdate_range("2021-01-04", periods=2 * TRADING_DAYS_PER_YEAR)
-    ]
-    days = len(dates)
-    market, size, value = (rng.normal(0.0, scale / SCALE, days) for scale in (0.20, 0.10, 0.08))
-    # The ablation's own active series, and what the changed line adds to it.
-    control = 0.5 * market + rng.normal(0.0, 0.15 / SCALE, days)
-    difference = 0.04 / TRADING_DAYS_PER_YEAR + 0.1 * size + rng.normal(0.0, 0.05 / SCALE, days)
-
-    def pairs(series):
-        return [[day, float(item)] for day, item in zip(dates, series, strict=True)]
-
-    def sidecar(active):
-        panel = rng.normal(0.0, 0.01, days)
-        return {
-            "strategy_daily": pairs(active + panel),
-            "panel_daily": pairs(panel),
-            "benchmark_daily": pairs(market),
-            "size_factor_daily": pairs(size),
-            "value_factor_daily": pairs(value),
-        }
-
-    book, ablation = sidecar(control + difference), sidecar(control)
-    increment = verdict.ablation_increment(book, ablation, start=dates[0], end=dates[-1], alpha=0.05)
-    expected = verdict.residual_statistics(difference, market, size, value, alpha=0.05)
-    assert increment["series"] == "active" and "bar" not in increment
-    for key in ("days", "years", "residual_excess", "residual_information_ratio", "size_beta"):
-        assert increment[key] == pytest.approx(expected[key], rel=1e-9), key
-    assert increment["t_statistic"] == pytest.approx(
-        expected["residual_information_ratio"] * math.sqrt(2.0), rel=1e-9
-    )
-    shorter = {key: series[1:] for key, series in ablation.items()}
-    with pytest.raises(ValueError, match="different days"):
-        verdict.ablation_increment(book, shorter, start=dates[0], end=dates[-1], alpha=0.05)
-
-
 def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
     rng = np.random.default_rng(12)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.05, rng))
@@ -783,20 +739,17 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     the sealed gate's, S, and the validity conditions, F1, H1 and R1 (no
     frozen book raised after the freeze); no registration condition has a
     code. The only optional conditions are the tracking mandate's, which its
-    cap turns on. The Environment's copies of the seed and the ablation
-    reasons (it cannot import the Pipeline) are the table's."""
+    cap turns on. The Environment's copy of the seed reasons (it cannot import
+    the Pipeline) is the table's."""
 
-    from autotrade.environment.tools.finish_session import (
-        ABLATION_REASONS,
-        SEED_REASONS,
-    )
+    from autotrade.environment.tools.finish_session import SEED_REASONS
 
     reasons = [condition.reason for condition in verdict.CONDITIONS]
     assert len(reasons) == len(set(reasons))
     stages: dict[str, list[verdict.Condition]] = {}
     for condition in verdict.CONDITIONS:
         stages.setdefault(condition.stage, []).append(condition)
-    assert list(stages) == ["nomination", "registration", "freeze", "seeds", "ablation", "sealed", "validity"]
+    assert list(stages) == ["nomination", "registration", "freeze", "seeds", "sealed", "validity"]
     assert {condition.code for condition in stages["sealed"]} == {"S"}
     assert [condition.code for condition in stages["validity"]] == ["F1", "H1", "R1"]
     assert {condition.reason for condition in stages["validity"]} == {
@@ -805,7 +758,6 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     assert not any(c.code for c in verdict.CONDITIONS if c.stage not in ("sealed", "validity"))
     assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
     assert {condition.reason for condition in stages["seeds"]} == SEED_REASONS
-    assert {condition.reason for condition in stages["ablation"]} == ABLATION_REASONS
 def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict():
     """The sealed gate reads the frozen book's active series over the sealed
     years through the residual statistic at the rules' alpha: a book whose
@@ -814,7 +766,7 @@ def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict(
     verdict lists the sealed reason first whatever the forward slices read."""
 
     sealed = _weekdays("20200801", "20250731")
-    rules = AcceptanceRules(**{**REQUIRED_RULES, "sealed_years": 5})
+    rules = AcceptanceRules(**{**REQUIRED_RULES, "research_years": 5})
 
     def book(alpha):
         sidecar = _analysis(_segment(sealed, alpha, np.random.default_rng(9), te=0.05, exact=True))
@@ -829,7 +781,7 @@ def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict(
     assert edge["residual_information_ratio"] >= edge["bar"] and edge["reasons"] == []
     assert flat["residual_information_ratio"] < flat["bar"]
     assert flat["reasons"] == ["sealed_residual_ir_below_bar"]
-    assert edge["thresholds"] == {"alpha": 0.05, "bar": edge["bar"], "sealed_years": 5}
+    assert edge["thresholds"] == {"alpha": 0.05, "bar": edge["bar"]}
     raised = verdict.sealed_strategy_error(start=sealed[0], end=sealed[-1], error="StrategyRaised: boom")
     assert raised["reasons"] == ["sealed_strategy_error"] and "residual_information_ratio" not in raised
     # A book that earned exactly its panel's return (it stayed in cash) left

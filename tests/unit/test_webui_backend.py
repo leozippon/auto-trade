@@ -99,7 +99,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     assert fields["active_max_drawdown"]["placeholder"] == "留空：0.30"
     assert "mandate_paired" not in fields["max_drawdown"]
     assert fields["beta_min"]["mandate_paired"] is True
-    for key in ("sealed_years", "ablation_required", "alpha", "forward_confidence"):
+    for key in ("research_years", "test_step_months", "validates_per_step", "alpha", "forward_confidence"):
         assert key in fields
         assert fields[key]["default"] == WEB_CREATE_DEFAULTS[key]
     # The retired bars are no form field.
@@ -190,7 +190,6 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     for key in (
         "max_research_minutes",
         "window_months",
-        "max_replay_years",
         "max_null_controls",
         "max_llm_calls",
     ):

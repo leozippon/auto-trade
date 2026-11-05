@@ -26,7 +26,7 @@ from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
-from .calendar import FULL_SPAN, ResearchGeometry
+from .calendar import FULL_SPAN, ResearchGeometry, step_windows
 from .ledger import ENVIRONMENT_BLOCKED, SessionKind
 from .skills import DEFAULT_OPERATING_MEMORY
 
@@ -68,10 +68,9 @@ SNAPSHOT_CACHE_FORMAT_VERSION = 15
 # Trailing wrap-up grace added to the research session budget. Not a console or
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.
 DEFAULT_DEADLINE_GRACE_MINUTES = 10
-# A research session's time, replay-year, null-control and model-call budgets
-# are arm-level: one session per arm spends them across every attempt.
+# A research session's time, null-control and model-call budgets are
+# arm-level: one session per arm spends them across every attempt.
 DEFAULT_MAX_RESEARCH_MINUTES = 2400
-DEFAULT_MAX_REPLAY_YEARS = 96
 DEFAULT_MAX_NULL_CONTROLS = 12
 DEFAULT_MAX_LLM_CALLS = 6400
 # What one arm's research session may spend on hosted model APIs, in USD at the
@@ -85,9 +84,9 @@ DEFAULT_MAX_API_SPEND_USD = 50.0
 # pre-registers each hypothesis before any result exists. One candidate is a
 # round too: the hypothesis is the same binding pre-registration at any width.
 BATCH_VALIDATE_MIN_CANDIDATES = 1
-# The session's replay-year budget is the real limit and is checked per call;
-# this cap only bounds what one observation may carry, and six screening
-# candidates already make a wide round.
+# The rules' ``validates_per_step`` bounds how many calls an interval between
+# tests may make; this cap only bounds what one observation may carry, and six
+# screening candidates already make a wide round.
 BATCH_VALIDATE_MAX_CANDIDATES = 6
 # Concurrent replays per batch, the arm's ``batch_validate_max_concurrency``
 # (1 up to the candidate cap; more workers than candidates run nothing). Each
@@ -191,21 +190,24 @@ def _required(text: str) -> Any:
     return field(kw_only=True, metadata={"help": text})
 
 
+# The step lengths a test may advance the validation frontier by, in months:
+# a quarter by default, a month where a round wants finer steps.
+TEST_STEP_MONTHS = (1, 3)
+
+
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """The arm's create-time rules for the freeze registration and the verdict.
+    """The arm's create-time rules: the research geometry's split, the test
+    steps, the registration every ``test`` checks its candidate against and
+    the readings the forward stage reports.
 
-    A nominated research node is refused at registration on a non-finite
-    metric or a drawdown over ``max_drawdown`` over its span (``evaluate``),
-    and on a broken tracking mandate when one is set. Its one performance
-    test is the sealed gate: the factor-residual information ratio of the
-    frozen node over the ``sealed_years`` trailing research years, read once
-    by the host after the freeze, against ``verdict.residual_bar`` at
-    ``alpha``. Every forward and Held-out threshold is a field here too,
-    stamped into ``params.json`` at creation so a later change to the
-    defaults cannot move an arm that already exists. Statistical definitions
-    (the residual statistic, the bootstrap, the panel) stay in
-    ``pipelines/verdict.py``. Every field is a limit something enforces.
+    A candidate is refused at registration on a non-finite metric or a
+    drawdown over ``max_drawdown`` over its span (``evaluate``), and on a
+    broken tracking mandate when one is set. Nothing else gates: the host
+    reads the rolling record and the forward reading with the residual
+    statistic (``pipelines/verdict.py``) at ``alpha`` and records them. Every
+    field is stamped into ``params.json`` at creation so a later change to
+    the defaults cannot move an arm that already exists.
 
     This is the one declaration of the rules. The record (``to_record``), the
     parameters a worker accepts (``ACCEPTANCE_KEYS``), the console's creation
@@ -216,7 +218,7 @@ class AcceptanceRules:
     written before it existed is refused rather than judged under it.
     """
 
-    # The registration's limit over the nominee's span, and the Paper book's
+    # The registration's limit over the candidate's span, and the Paper book's
     # kill limits.
     max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze registration and of Paper.")
     cost_stress_multiplier: float = _rule(
@@ -242,19 +244,21 @@ class AcceptanceRules:
         verdict.FORWARD_CONFIDENCE,
         "Forward reading: one-sided block-bootstrap confidence of its reported lower bound.",
     )
-    # The sealed gate (``verdict.residual_bar``): its significance level, and
-    # how many trailing research years the session never sees.
+    # The residual statistic's one-sided level (``verdict.residual_bar``):
+    # the bar every reading is stated against, never a gate.
     alpha: float = _required(
-        "Sealed gate: one-sided significance level of the residual information ratio."
+        "Residual statistic: one-sided level of the bar stated beside every reading."
     )
-    sealed_years: int = _required(
-        "Sealed gate: trailing research years sealed from the session and read once after the freeze."
+    # The geometry's split: the first research_years are the research years a
+    # session sees; the rest are the validation years its tests reveal.
+    research_years: int = _required(
+        "Research years the session sees; the rest of the geometry are the validation years."
     )
-    # Whether a freeze registers an ablation: the nominee with one line
-    # changed, whose sealed reading beside the nominee's is reported, never
-    # judged (``verdict.ablation_increment``).
-    ablation_required: bool = _required(
-        "Freeze registration: the nominee names an ablation, its own bytes with one line changed."
+    # How far one test advances the validation frontier, and how many
+    # validate calls an interval between tests may make.
+    test_step_months: int = _rule(3, "Months the validation frontier advances per test (1 or 3).")
+    validates_per_step: int = _rule(
+        6, "batch_validate calls allowed before the first test and between consecutive tests."
     )
 
     def __post_init__(self) -> None:
@@ -276,11 +280,19 @@ class AcceptanceRules:
             _open_unit(self.forward_confidence, "forward_confidence", include_one=False),
         )
         object.__setattr__(self, "alpha", _open_unit(self.alpha, "alpha", include_one=False))
-        object.__setattr__(self, "sealed_years", _whole_int(self.sealed_years, "sealed_years"))
-        if self.sealed_years < 1:
-            raise ValueError("sealed_years must be an integer >= 1")
-        if not isinstance(self.ablation_required, bool):
-            raise ValueError("ablation_required must be true or false")
+        object.__setattr__(self, "research_years", _whole_int(self.research_years, "research_years"))
+        if self.research_years < 1:
+            raise ValueError("research_years must be an integer >= 1")
+        object.__setattr__(
+            self, "test_step_months", _whole_int(self.test_step_months, "test_step_months")
+        )
+        if self.test_step_months not in TEST_STEP_MONTHS:
+            raise ValueError(f"test_step_months must be one of {TEST_STEP_MONTHS}")
+        object.__setattr__(
+            self, "validates_per_step", _whole_int(self.validates_per_step, "validates_per_step")
+        )
+        if self.validates_per_step < 1:
+            raise ValueError("validates_per_step must be an integer >= 1")
         if any(value is None for value in mandate):
             if any(value is not None for value in mandate):
                 raise ValueError(
@@ -314,9 +326,10 @@ class AcceptanceRules:
         Run manifests and ``hitl/params.json`` are read back long after they
         were written, so a record that carries a retired key (the former
         ``min_return``/``min_sharpe`` targets, the deflated-Sharpe bars, the
-        ``RETIRED_SWITCHES``) must still rebuild the rules it does name. A
-        record that lacks a required rule (``REQUIRED_ACCEPTANCE_KEYS``) is
-        refused: it was written under rules these are not.
+        ``RETIRED_SWITCHES``, the sealed gate's ``OBSOLETE_KEYS``) must still
+        rebuild the rules it does name. A record that lacks a required rule
+        (``REQUIRED_ACCEPTANCE_KEYS``) is refused: it was written under rules
+        these are not.
         """
 
         missing = [
@@ -329,11 +342,17 @@ class AcceptanceRules:
             )
         return cls(**{rule.name: record[rule.name] for rule in fields(cls) if rule.name in record})  # type: ignore[arg-type]
 
-    def agent_facts(self) -> dict[str, object]:
+    def agent_facts(self, *, validation_years: int) -> dict[str, object]:
         """The ``acceptance_rules`` run fact, derived from these rules so no
-        prompt restates a threshold. Rules only: no forward or Held-out date
-        appears here, and the sealed years' dates are the research
-        geometry's (``research_session.research_geometry_record``)."""
+        prompt restates a threshold. ``validation_years`` is how many years
+        the arm's geometry leaves after the research years, for the bar over
+        the whole validation period. Rules and that count only: the dates of
+        the research and validation years are the research geometry's
+        (``research_session.research_geometry_record``), and no forward or
+        Held-out date appears anywhere a session reads."""
+
+        if isinstance(validation_years, bool) or not isinstance(validation_years, int) or validation_years < 1:
+            raise ValueError(f"validation_years must be a positive integer, got {validation_years!r}")
 
         if self.tracking_error_cap is None:
             mandate: object = (
@@ -351,7 +370,7 @@ class AcceptanceRules:
                     "(benchmark.market_beta)"
                 ),
                 "role": (
-                    "a constraint the book must satisfy over the nominee's span "
+                    "a constraint the book must satisfy over the candidate's span "
                     "and again forward; meeting it is not evidence of skill"
                 ),
             }
@@ -374,7 +393,7 @@ class AcceptanceRules:
                 "day as the active_return of its daily_series. The strategy exposes "
                 "nothing for this beyond its orders"
             ),
-            "sealed_gate": {
+            "instrument": {
                 "statistic": (
                     "the residual information ratio of the active series: its daily "
                     "return regressed by OLS on an intercept, the benchmark_index return "
@@ -382,96 +401,82 @@ class AcceptanceRules:
                     f"intercept times sqrt({years}) over the residual standard deviation; "
                     f"years = trading days / {years}"
                 ),
-                "bar": "z(1 - alpha) / sqrt(years)",
+                "bar": "z(1 - alpha) / sqrt(years): the level a zero-skill reading reaches with probability alpha; stated beside every reading, never a gate",
                 "alpha": self.alpha,
-                "sealed_years": self.sealed_years,
-                "bar_over_sealed_years": round(
-                    verdict.residual_bar(float(self.sealed_years), self.alpha), 3
-                ),
                 "bar_over_one_year": round(verdict.residual_bar(1.0, self.alpha), 3),
-                "passes": (
-                    "the frozen node's residual information ratio over the sealed years "
-                    "is at least the bar for their length; the only performance "
-                    "condition of the verdict"
+                "bar_over_validation_period": round(
+                    verdict.residual_bar(float(validation_years), self.alpha), 3
                 ),
-                "read": (
-                    "once, by the host, after the freeze has ended the session: the "
-                    "frozen node, its seed replicates and its ablation replayed over the "
-                    "sealed years as one continuous book each. No session sees the "
-                    "sealed years, their data or the reading, and there is no second "
-                    "reading"
-                ),
-                "on_visible_spans": (
-                    "every batch_validate row reports the same statistic over its own "
-                    "span (residual_reading) with the bar for that span's length"
+                "on_spans": (
+                    "every batch_validate row reports it over its own span (residual_reading) "
+                    "with the bar for that span's length; every test reports it over the "
+                    "rolling record so far with the bar for the record's length"
                 ),
             },
-            "freeze_registration": {
-                "span": f"the nominee replayed the whole visible research period (span={FULL_SPAN})",
-                "control": "a node registered as a control (control: true) is never nominated",
+            "validation": {
+                "research_years": self.research_years,
+                "test_step_months": self.test_step_months,
+                "validates_per_step": self.validates_per_step,
+                "test": (
+                    "test(candidate) advances the validation frontier one step: the host "
+                    "replays the candidate as a fresh book from the validation start to the "
+                    "new frontier with its matched panel, records the newest step as the "
+                    "rolling record's entry for that step, returns the whole replay's "
+                    "statistics, a per-month table, the record to date and its residual "
+                    "statistic, then mounts the decision view at the new frontier; the "
+                    "candidate must register (registration below) and may change at any step"
+                ),
+                "validates_per_step_rule": (
+                    f"at most {self.validates_per_step} batch_validate calls before the first "
+                    "test and between two tests; a further call is refused until the next test"
+                ),
+                "end": (
+                    "the session ends when the frontier reaches the end of the validation "
+                    "years; the candidate of the last test is the frozen strategy. There is "
+                    "no action that ends the session earlier. If the time, call or spend "
+                    "budget runs out after a test, the host completes the record with the "
+                    "last tested candidate; before any test, with the last registrable "
+                    "full-span candidate"
+                ),
+                "after": (
+                    "the frozen strategy and its seed replicates are then replayed by the "
+                    "host over the Forward year and the Held-out months as one book; those "
+                    "readings are recorded, gate nothing and reach no session"
+                ),
+            },
+            "registration": {
+                "span": f"the candidate replayed the whole research-years span (span={FULL_SPAN})",
+                "control": "a node registered as a control (control: true) is never a candidate",
                 "finite_metrics": "total_return/max_drawdown/sharpe must be finite",
                 "max_drawdown": (
-                    f"<= {self.max_drawdown}: equity drawdown over the nominee's span"
+                    f"<= {self.max_drawdown}: equity drawdown over the candidate's span"
                 ),
                 "seed_replicates": (
-                    "a nominee whose main.py defines fit (it trains a model) "
-                    "names at least one seed replicate in finish_session's "
-                    "seed_replicates: another complete full-span Validation of "
-                    "this session, registered as a candidate (not a control), "
-                    "whose strategy is the nominee's bytes with exactly one line "
-                    "changed, an integer assignment to a seed name (SEED, "
-                    "SEED_BASE, or one ending in _SEED or _SEED_BASE; e.g. "
-                    "SEED_BASE = 1000 in the nominee, 2000 in a replicate), "
-                    "and whose bytes differ from every other registered one. "
-                    "Replicates are frozen and replayed on the sealed years beside "
-                    "the nominee and reported; the gate reads the nominee. A "
-                    "nominee without fit needs none, and a nomination declared "
-                    "deterministic in finish_session (its package uses no "
-                    "randomness) owes none"
-                ),
-                "ablation": (
-                    {
-                        "required": True,
-                        "definition": (
-                            "the nominee names one ablation in finish_session's "
-                            "ablation: another complete full-span Validation of this "
-                            "session whose strategy is the nominee's bytes with exactly "
-                            "one line changed, the line that switches off the mechanism "
-                            "the nominee is built on (a constant flip such as "
-                            "MECHANISM = False), and whose bytes differ from the "
-                            "nominee's and its seed replicates'"
-                        ),
-                        "reading": (
-                            "frozen and replayed on the sealed years beside the nominee; "
-                            "the increment, the sealed_gate statistic of the nominee's "
-                            "daily active return minus the ablation's, is recorded with "
-                            "its t-statistic (increment x sqrt(years)) and never gates"
-                        ),
-                    }
-                    if self.ablation_required
-                    else "none for this arm: finish_session takes no ablation"
+                    "a candidate whose main.py defines fit (it trains a model) names at "
+                    "least one seed replicate in test's seed_replicates: another complete "
+                    "full-span Validation of this session, registered as a candidate (not "
+                    "a control), whose strategy is the candidate's bytes with exactly one "
+                    "line changed, an integer assignment to a seed name (SEED, SEED_BASE, "
+                    "or one ending in _SEED or _SEED_BASE; e.g. SEED_BASE = 1000 in the "
+                    "candidate, 2000 in a replicate), and whose bytes differ from every "
+                    "other registered one. The replicates named at the last test are "
+                    "frozen beside the strategy and replayed forward with it. A candidate "
+                    "without fit needs none, and one declared deterministic in test (its "
+                    "package uses no randomness) owes none"
                 ),
                 "tracking_mandate": mandate,
-                "freezes_per_arm": "1: a freeze that registers ends the session",
+                "checked": "at every test; a candidate that fails is refused and the frontier does not move",
             },
-            "graduation": {
-                "admits": (
-                    "exactly when the sealed gate passes (sealed_gate above) and "
-                    "neither the frozen node nor a seed replicate raised in its own "
-                    "code in any replay after the freeze"
-                ),
+            "forward": {
                 "reported": (
-                    "after the sealed reading, one continuous replay of the frozen "
-                    "artifact over the twelve months after research end and then "
-                    "Held-out, graded on its active series against a panel drawn from "
-                    "that replay; no session sees either period. Its readings -- the "
-                    "sealed_gate statistic, the "
-                    f"{self.forward_confidence:.0%} block-bootstrap lower bound of "
-                    "active excess over the frozen book and its seed replicates, the "
-                    "active excess with slippage multiplied by "
-                    f"{self.cost_stress_multiplier}, drawdowns, round trips, exposure "
-                    "and tracking -- are recorded, and the forward statistic is pooled "
-                    "across frozen strategies; none decides the verdict"
+                    "one continuous replay of the frozen strategy over the twelve months "
+                    "after the research geometry's last year and then Held-out, graded on its "
+                    "active series against a panel drawn from that replay: the "
+                    f"{self.forward_confidence:.0%} block-bootstrap lower bound of active "
+                    "excess over the frozen book and its seed replicates, the active excess "
+                    f"with slippage multiplied by {self.cost_stress_multiplier}, drawdowns, "
+                    "turnover and the residual statistic; recorded beside the rolling "
+                    "record, pooled across frozen strategies, deciding nothing"
                 ),
             },
         }
@@ -536,6 +541,21 @@ RETIRED_RULES = frozenset(
         "min_mean_gross",
         "min_round_trips_per_month",
         "heldout_tolerance_z",
+    }
+)
+
+# The keys retired on 2026-11-06 with the rolling validation: the sealed gate's
+# rule and its ablation, the research session's replay-year budget and the
+# hard-finalization window. Every params.json and ledger record written before
+# then carries some of them; readers accept exactly these keys beside the two
+# sets above and derive nothing from them, so an archived arm still loads and
+# lists, while a create request naming one is refused like any unknown key.
+OBSOLETE_KEYS = frozenset(
+    {
+        "sealed_years",
+        "ablation_required",
+        "max_replay_years",
+        "finalize_before_deadline_seconds",
     }
 )
 
@@ -607,11 +627,7 @@ class RollingExperimentConfig:
     # ``contracts.BENCHMARK_INDEXES``.
     benchmark_index: str = DEFAULT_BENCHMARK_INDEX
     # The research session's budgets, spent across every attempt of the arm's
-    # one session. The host's forward replay is charged to none of them. One
-    # replay-year is one research year replayed for one candidate: a batch of
-    # three candidates on a two-year span costs six, and a full-period
-    # validation costs as many as the research period has years.
-    max_replay_years: int = DEFAULT_MAX_REPLAY_YEARS
+    # one session. The host's forward replay is charged to none of them.
     # Host-side random-portfolio null controls the session may request through
     # ``run_null_control`` (``null_control.PANEL_DRAWS`` replays each); the
     # frozen node's block is reused at freeze. 0 leaves the tool out.
@@ -630,7 +646,6 @@ class RollingExperimentConfig:
     # Trailing wrap-up grace added to the session budget and forwarded on
     # ResearchSessionRequest.deadline_grace_seconds. Implementation default only.
     deadline_grace_minutes: int = DEFAULT_DEADLINE_GRACE_MINUTES
-    finalize_before_deadline_seconds: int = 300
     per_call_timeout_seconds: int = 3600
     # Wall clock for one ``fit(context)`` invocation of the formal strategy;
     # the executor default is the single source. A slower fit fails the backtest.
@@ -675,7 +690,6 @@ class RollingExperimentConfig:
             raise TypeError("geometry must be a ResearchGeometry")
         for name in (
             "window_months",
-            "max_replay_years",
             "max_llm_calls",
             "session_max_attempts",
             "max_research_minutes",
@@ -691,7 +705,6 @@ class RollingExperimentConfig:
         for name in (
             "max_null_controls",
             "deadline_grace_minutes",
-            "finalize_before_deadline_seconds",
         ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -708,8 +721,10 @@ class RollingExperimentConfig:
             )
         positive_spend_cap(self.max_api_spend_usd)
         benchmark_index_label(self.benchmark_index)
-        # The sealed years must leave at least one visible year.
-        self.geometry.split_sealed(self.acceptance.sealed_years)
+        # The research years must leave at least one validation year, and the
+        # validation years must tile into whole test steps.
+        _research, validation = self.geometry.split_research(self.acceptance.research_years)
+        step_windows(validation[0].start, validation[-1].end, self.acceptance.test_step_months)
         object.__setattr__(self, "experiments_root", Path(self.experiments_root))
 
     @property
@@ -882,21 +897,28 @@ class ReplaySpan:
 _YEAR_SPAN = re.compile(r"Y(\d+)(?:\.\.Y(\d+))?")
 
 
-def research_span(years: Sequence[ReplaySpan], label: str) -> ReplaySpan:
-    """The span ``label`` names over the research years, replayed as one book.
+def research_span(
+    years: Sequence[ReplaySpan], label: str, *, research_years: int | None = None
+) -> ReplaySpan:
+    """The span ``label`` names over ``years``, replayed as one book.
 
-    ``full`` is every year, ``Yk`` one year and ``Yi..Yj`` the contiguous years
-    i through j. The span opens on its first year's slot and decision view and
-    continues through the rest; a span covering every year is labelled
-    ``full`` however it was named. Any other label, or a year the research
-    period does not have, is refused, so no span reaches past research end.
+    ``full`` is the first ``research_years`` years (every year when none is
+    given), ``Yk`` one year and ``Yi..Yj`` the contiguous years i through j.
+    The span opens on its first year's slot and decision view and continues
+    through the rest; a span covering exactly the ``full`` years is labelled
+    ``full`` however it was named. Any other label, or a year ``years`` does
+    not have, is refused. Whether a year may be replayed yet (the validation
+    frontier) is the caller's rule, not the parser's.
     """
 
     count = len(years)
+    full = count if research_years is None else int(research_years)
+    if not 1 <= full <= count:
+        raise ValueError(f"research_years must be 1..{count}, got {research_years!r}")
     text = str(label).strip()
     match = _YEAR_SPAN.fullmatch(text)
     if text == FULL_SPAN:
-        first, last = 1, count
+        first, last = 1, full
     elif match:
         first = int(match.group(1))
         last = int(match.group(2) or first)
@@ -908,7 +930,7 @@ def research_span(years: Sequence[ReplaySpan], label: str) -> ReplaySpan:
             f"years such as Y1..Y{count}; got {label!r}"
         )
     chosen = years[first - 1 : last]
-    if (first, last) == (1, count):
+    if (first, last) == (1, full):
         canonical = FULL_SPAN
     elif first == last:
         canonical = f"Y{first}"
@@ -975,7 +997,9 @@ class BudgetUsed:
     main_calls: int = 0
     subagent_calls: int = 0
     compact_calls: int = 0
-    replay_years: int = 0
+    # Test replays the session's tests ran (``session_tools.TestTool``): a
+    # counter of its own, outside every budget.
+    test_replays: int = 0
     null_controls: int = 0
     # USD charged against ``max_api_spend_usd``; a block written before the cap
     # existed reads as 0.
@@ -988,7 +1012,7 @@ class BudgetUsed:
             "main_calls": int(self.main_calls),
             "subagent_calls": int(self.subagent_calls),
             "compact_calls": int(self.compact_calls),
-            "replay_years": int(self.replay_years),
+            "test_replays": int(self.test_replays),
             "null_controls": int(self.null_controls),
             "api_spend_usd": round(float(self.api_spend_usd), 4),
         }
@@ -1007,7 +1031,7 @@ class BudgetUsed:
             main_calls=number("main_calls", int),  # type: ignore[arg-type]
             subagent_calls=number("subagent_calls", int),  # type: ignore[arg-type]
             compact_calls=number("compact_calls", int),  # type: ignore[arg-type]
-            replay_years=number("replay_years", int),  # type: ignore[arg-type]
+            test_replays=number("test_replays", int),  # type: ignore[arg-type]
             null_controls=number("null_controls", int),  # type: ignore[arg-type]
             api_spend_usd=number("api_spend_usd", float),  # type: ignore[arg-type]
         )
@@ -1026,10 +1050,6 @@ class SessionResume:
     # starts from; None when the interrupted attempts never compacted.
     compaction_summary: str | None
     budget_used: BudgetUsed
-    # Step ids of the recorded Validations newer than that last budget block:
-    # an attempt killed inside a batch recorded them after its trace last
-    # counted replay-years (``ResearchSessionRequest.replay_years_spent``).
-    unseen_step_ids: tuple[str, ...]
     # Transcript file names of the earlier attempts under the ``trace`` root.
     transcripts: tuple[str, ...]
 
@@ -1047,22 +1067,20 @@ SESSION_OUTCOMES = ("freeze", "no_edge", "deadline", ENVIRONMENT_BLOCKED)
 class ResearchSessionRequest:
     experiment_id: str
     run_id: str
-    # The Agent's only data view: the decision view at the end of the visible
-    # research years, anchored at ``decision_time``.
+    # The Agent's data view when the attempt opens: the decision view at the
+    # validation frontier, anchored at ``decision_time``.
     snapshot: SnapshotBundle
     decision_time: datetime
-    # The visible research years in order, one single-slot span each (labels
-    # Y1..Yk): every span a Validation may replay is resolved from them
-    # (``research_span``), so ``full`` is the visible period. The sealed
-    # years after them are never among them.
-    research_years: tuple[ReplaySpan, ...]
+    # Every year of the research geometry in order, one single-slot span each
+    # (labels Y1..Yn): the first ``acceptance_rules.research_years`` are the
+    # research years and ``full`` (``research_span``) is their span; the rest
+    # are the validation years, which a Validation may reach only up to the
+    # frontier and which the tests replay.
+    years: tuple[ReplaySpan, ...]
     # Months of history every decision view carries up to its anchor
-    # (``RollingExperimentConfig.window_months``): the research-end view the
-    # session reads and the view each research year's replay starts from.
+    # (``RollingExperimentConfig.window_months``): the view the session reads
+    # and the view each research year's replay starts from.
     window_months: int
-    # Replay-years the session may spend on Validations (see
-    # ``RollingExperimentConfig.max_replay_years``).
-    max_replay_years: int
     max_llm_calls: int
     deadline_seconds: float
     # The arm's benchmark index (``RollingExperimentConfig.benchmark_index``),
@@ -1080,16 +1098,11 @@ class ResearchSessionRequest:
     # The arm's ``AcceptanceRules.to_record()``; no default, as the rules
     # carry required keys.
     acceptance_rules: Mapping[str, object] = field(kw_only=True)
-    # The sealed research years' calendar bounds (``YYYYMMDD``, start and
-    # end): the dates the session is told are sealed, never a span it can
-    # replay.
-    sealed_period: tuple[str, str] = field(kw_only=True)
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
     snapshot_config: Mapping[str, object] = field(default_factory=dict)
     record_failed_attempts: bool = True
-    finalize_before_deadline_seconds: int = 300
     # Cap on the session's own ``run_null_control`` calls; the experiment default
     # is the single source (RollingExperimentConfig.max_null_controls).
     max_null_controls: int = RollingExperimentConfig.max_null_controls
@@ -1129,10 +1142,10 @@ class ResearchSessionRequest:
     ) -> ResearchSessionRequest:
         """The request for one session of ``config``'s arm.
 
-        The arm-level fields come from the config, the five budgets
-        (``max_replay_years``, ``max_llm_calls``, ``max_api_spend_usd``,
-        ``deadline_seconds``, ``deadline_grace_seconds``) as given after any
-        HITL override, and every other field is the session's own.
+        The arm-level fields come from the config, the four budgets
+        (``max_llm_calls``, ``max_api_spend_usd``, ``deadline_seconds``,
+        ``deadline_grace_seconds``) as given after any HITL override, and
+        every other field is the session's own.
         """
 
         return cls(
@@ -1142,10 +1155,8 @@ class ResearchSessionRequest:
             acceptance_rules=config.acceptance.to_record(),
             modification_constraints=config.step_constraints,
             record_failed_attempts=config.record_failed_attempts,
-            finalize_before_deadline_seconds=config.finalize_before_deadline_seconds,
             max_null_controls=config.max_null_controls,
             batch_validate_max_concurrency=config.batch_validate_max_concurrency,
-            max_replay_years=int(budgets["max_replay_years"]),
             max_llm_calls=int(budgets["max_llm_calls"]),
             max_api_spend_usd=float(budgets["max_api_spend_usd"]),
             deadline_seconds=float(budgets["deadline_seconds"]),
@@ -1154,43 +1165,16 @@ class ResearchSessionRequest:
         )
 
     @property
-    def validation(self) -> ReplaySpan:
-        """The whole visible research period as one span."""
+    def research_years(self) -> int:
+        """How many of ``years`` are the research years (the rules' value)."""
 
-        return research_span(self.research_years, FULL_SPAN)
+        return int(self.acceptance_rules["research_years"])  # type: ignore[call-overload]
 
     @property
-    def replay_years_spent(self) -> int:
-        """Replay-years the earlier attempts spent, the counter a resume continues.
+    def full_span(self) -> ReplaySpan:
+        """The research years as one span: what ``full`` names."""
 
-        The two records an interrupted attempt leaves behind are durable at
-        different moments: a Validation lands in the step tree as
-        ``batch_validate`` records it, while the cumulative budget block only
-        rides on the ``tool_call`` event the tool emits once it settles, and no
-        budgeted event is emitted between a batch's reservation and that one.
-        An attempt killed inside a batch -- after a candidate was recorded,
-        before the call returned -- therefore leaves Steps newer than its last
-        block, which that block never counted. The counter is the block (every
-        charge up to it, the ones that leave no Step included: candidates that
-        failed in their own code, refunds, rejection charges) plus the span
-        cost of those unseen Steps; without an earlier attempt every recorded
-        Step is unseen. A candidate the same kill charged but never recorded
-        leaves neither record and its years are lost with it, at most the rest
-        of one batch.
-        """
-
-        unseen = (
-            self.steps_before
-            if self.resume is None
-            else tuple(
-                step
-                for step in self.steps_before
-                if step.step_id in self.resume.unseen_step_ids
-            )
-        )
-        return int(self.budget_used.replay_years) + sum(
-            research_span(self.research_years, step.span).slots for step in unseen
-        )
+        return research_span(self.years, FULL_SPAN, research_years=self.research_years)
 
 
 @dataclass(frozen=True)
@@ -1203,12 +1187,11 @@ class ResearchSessionResult:
     # never land in an older field's positional slot.
     _: KW_ONLY
     # ``freeze``: the nominated Step, the Steps it registered as its seed
-    # replicates, whether it declared its package deterministic and the Step
-    # it registered as its ablation (``experiment.freeze_registration``).
+    # replicates and whether it declared its package deterministic
+    # (``experiment.freeze_registration``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
     deterministic: bool = False
-    ablation: str | None = None
     # The Agent's own account of its outcome.
     reason: str = ""
     finish_reason: str = ""
@@ -1239,12 +1222,13 @@ __all__ = [
     "DEFAULT_MAX_API_SPEND_USD",
     "DEFAULT_MAX_LLM_CALLS",
     "DEFAULT_MAX_NULL_CONTROLS",
-    "DEFAULT_MAX_REPLAY_YEARS",
     "DEFAULT_MAX_RESEARCH_MINUTES",
     "DEFAULT_RESEARCH_GEOMETRY",
+    "OBSOLETE_KEYS",
     "REQUIRED_ACCEPTANCE_KEYS",
     "RETIRED_RULES",
     "SESSION_OUTCOMES",
+    "TEST_STEP_MONTHS",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",

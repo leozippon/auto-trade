@@ -91,10 +91,10 @@ REPLAY = {
 # The rules every recorded statistic of the arm is judged under: drawdown
 # limits wide enough that the synthetic series' edge alone decides.
 RULES = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.9, active_max_drawdown=0.9)
-# The sealed research year of the default geometry under the fixture's rules.
+# The validation years of the default geometry under the fixture's rules.
 SEALED = (
-    GEOMETRY.split_sealed(RULES.sealed_years)[1][0].start,
-    GEOMETRY.split_sealed(RULES.sealed_years)[1][-1].end,
+    GEOMETRY.split_research(RULES.research_years)[1][0].start,
+    GEOMETRY.split_research(RULES.research_years)[1][-1].end,
 )
 
 
@@ -228,7 +228,7 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
         "attempts": 1,
         "budget_used": {
             "inference_seconds": 600.0, "llm_calls": 40, "main_calls": 30, "subagent_calls": 10, "compact_calls": 0,
-            "replay_years": 8, "null_controls": 0, "api_spend_usd": 1.25,
+            "test_replays": 8, "null_controls": 0, "api_spend_usd": 1.25,
         },
         "run_wall_seconds": 600.0,
         **fields,

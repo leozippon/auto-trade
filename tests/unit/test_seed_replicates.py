@@ -181,7 +181,7 @@ class SeedDeveloper:
             directory.mkdir(parents=True)
             (directory / "main.py").write_text(source, encoding="utf-8")
             typed, _fingerprint = self.store.create_revision(directory)
-            replayed = research_span(request.research_years, span)
+            replayed = research_span(request.years, span, research_years=request.research_years)
             validation = self.evaluator.evaluate(
                 replayed.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
             )
@@ -195,7 +195,6 @@ class SeedDeveloper:
             node_id=steps[self.nominee].step_id,
             seed_replicates=tuple(steps[index].step_id for index in self.replicates),
             deterministic=self.deterministic,
-            ablation=None if self.ablation is None else steps[self.ablation].step_id,
         )
 
 
@@ -206,15 +205,13 @@ def _arm(
     nominee=0,
     replicates=(),
     deterministic=False,
-    ablation=None,
-    ablation_required=False,
     **replays,
 ):
     config = RollingExperimentConfig(
         experiment_id="arm",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
-        acceptance=acceptance_for({**REQUIRED_RULES, "ablation_required": ablation_required}),
+        acceptance=acceptance_for(REQUIRED_RULES),
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", **replays)
@@ -230,7 +227,6 @@ def _arm(
             nominee=nominee,
             replicates=replicates,
             deterministic=deterministic,
-            ablation=ablation,
         ),
         trading_days=DAYS,
         ledger=ExperimentLedger(config.ledger_path),

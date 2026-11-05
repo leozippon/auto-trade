@@ -44,7 +44,7 @@ from tests.unit.gpu_probe import stubbed_gpu_probe
 
 
 def _experiment(
-    tmp_path: Path, *, developer_mode: str = "baseline", max_replay_years: int = 1
+    tmp_path: Path, *, developer_mode: str = "baseline"
 ) -> tuple[Path, Path]:
     repo = tmp_path / "repo"
     experiment = repo / "experiments" / "smoke"
@@ -85,7 +85,6 @@ def _experiment(
                 "strategy_period": "day",
                 "inference_time": "08:30",
                 "initial_cash": 100_000,
-                "max_replay_years": max_replay_years,
                 **REQUIRED_RULES,
             }
         ),
@@ -1167,7 +1166,6 @@ _REMOVED_BROWSER_BOUNDS = (
     ("tracking_error_cap", -0.08, "tracking_error_cap must be positive"),
     # This arm's capital derives no tracking mandate, so a band has no cap.
     ("beta_min", 0.9, "are set together or not at all"),
-    ("max_replay_years", 0, "max_replay_years must be a positive integer"),
     ("max_llm_calls", 0, "max_llm_calls must be a positive integer"),
     ("initial_cash", 0.0, "initial_cash must be a positive finite number"),
     (

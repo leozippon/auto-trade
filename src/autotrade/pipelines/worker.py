@@ -496,7 +496,6 @@ def resolve_worker_options(
         geometry=geometry,
         benchmark_index=benchmark_index,
         window_months=_positive_int(read_param(params, "window_months"), "window_months"),
-        max_replay_years=_positive_int(read_param(params, "max_replay_years"), "max_replay_years"),
         max_null_controls=_nonnegative_int(
             read_param(params, "max_null_controls"), "max_null_controls"
         ),
@@ -519,10 +518,6 @@ def resolve_worker_options(
         operating_memory=resolve_operating_memory(read_param(params, "operating_memory")),
         record_failed_attempts=_strict_bool(
             read_param(params, "record_failed_attempts"), "record_failed_attempts"
-        ),
-        finalize_before_deadline_seconds=_nonnegative_int(
-            read_param(params, "finalize_before_deadline_seconds"),
-            "finalize_before_deadline_seconds",
         ),
         per_call_timeout_seconds=_positive_int(
             read_param(params, "per_call_timeout_seconds"), "per_call_timeout_seconds"

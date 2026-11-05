@@ -1361,7 +1361,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
     assert facts["visibility_policy"]["visible_research_period"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_visible_research_period"]
+    assert "不进入任何会话" in facts["visibility_policy"]["after_the_frontier"]
 
 
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():

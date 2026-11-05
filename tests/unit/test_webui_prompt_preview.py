@@ -19,7 +19,7 @@ from autotrade.agent import prompts
 from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     DEADLINE_SECONDS_NOTE,
-    REPLAY_YEARS_NOTE,
+    VALIDATION_FAILURE_NOTE,
     strategy_container_note,
 )
 from autotrade.agent.prompts import (
@@ -176,11 +176,8 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         ),
         "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
         "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
-        "finalize_before_deadline_seconds": rolling_default(
-            "finalize_before_deadline_seconds"
-        ),
-        "max_replay_years": rolling_default("max_replay_years"),
-        "max_replay_years_note": REPLAY_YEARS_NOTE,
+        "validates_per_step": 6,
+        "validation_failure_note": VALIDATION_FAILURE_NOTE,
         "max_null_controls": rolling_default("max_null_controls"),
         "max_llm_calls": rolling_default("max_llm_calls"),
         "max_api_spend_usd": rolling_default("max_api_spend_usd"),
@@ -190,7 +187,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
             "main_calls": 0,
             "subagent_calls": 0,
             "compact_calls": 0,
-            "replay_years": 0,
+            "test_replays": 0,
             "null_controls": 0,
             "api_spend_usd": 0.0,
         },
@@ -205,16 +202,18 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
-    # The visible years, read at their end; the sealed year is named, never
-    # offered.
+    # The research years, read at their end; the validation years are named
+    # as what the tests reveal.
     geometry = facts["research_geometry"]
-    visible, [sealed] = GEOMETRY.split_sealed(REQUIRED_RULES["sealed_years"])
-    assert geometry["research_period"] == f"{GEOMETRY.research_start}..{visible[-1].end}"
-    assert geometry["sealed_years"]["period"] == f"{sealed.start}..{GEOMETRY.research_end}"
-    assert geometry["decision_time"] == sealed.anchor.isoformat()
-    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3"]
+    research, validation = GEOMETRY.split_research(REQUIRED_RULES["research_years"])
+    assert geometry["research_period"] == f"{GEOMETRY.research_start}..{research[-1].end}"
+    assert geometry["validation_period"] == f"{validation[0].start}..{GEOMETRY.research_end}"
+    assert geometry["decision_time"] == validation[0].anchor.isoformat()
+    assert geometry["frontier"] == research[-1].end
+    assert (geometry["step"], geometry["steps"], geometry["steps_tested"]) == ("quarter", 12, 0)
+    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
     assert "session" not in facts["identity"]
-    assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 0
+    assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 0
     # Runtime-only facts are marked, never invented.
     assert facts["identity"]["run_id"] == RUNTIME_PLACEHOLDER
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER
@@ -255,14 +254,14 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
             SESSION_KEY,
             directive,
             max_research_minutes=90,
-            max_replay_years=7,
+            max_null_controls=7,
             max_llm_calls=123,
             max_api_spend_usd=12.5,
             research_directive="以截面因子为主线",
         )["prompt"]
     )
     facts = _facts(prompt)
-    assert facts["budgets"]["max_replay_years"] == 7
+    assert facts["budgets"]["max_null_controls"] == 7
     assert facts["budgets"]["max_llm_calls"] == 123
     assert facts["budgets"]["max_api_spend_usd"] == 12.5
     assert facts["budgets"]["deadline_seconds"] == session_deadline_seconds(

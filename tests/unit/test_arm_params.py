@@ -51,9 +51,9 @@ def test_every_console_surface_is_read_off_the_record() -> None:
         *NON_PERSISTABLE_PARAMS,
     }
     assert WEB_REQUIRED_PARAMS == {"experiment_id", *CREATE_RULES, "research_start", "research_end", "forward_end", "heldout_end"}
-    # The rules a create request must state, sealed_years and
-    # ablation_required, have no value anywhere; alpha, the third required
-    # rule, carries the console's value 0.05 and is no create-time requirement.
+    # The rule a create request must state, research_years, has no value
+    # anywhere; alpha, the other required rule, carries the console's value
+    # 0.05 and is no create-time requirement.
     assert all(WEB_CREATE_DEFAULTS[name] is None for name in ("experiment_id", *CREATE_RULES))
     assert WEB_CREATE_DEFAULTS["alpha"] == 0.05 and "alpha" not in WEB_REQUIRED_PARAMS
 
@@ -65,7 +65,7 @@ def test_a_created_arm_reads_back_to_the_parameters_it_states() -> None:
     assert params.experiment_id == "arm_a"
     assert params.broker.initial_cash == 100_000
     assert params.data.screen_boards == ("main",)
-    assert params.acceptance.sealed_years == CREATE_RULES["sealed_years"]
+    assert params.acceptance.research_years == CREATE_RULES["research_years"]
     assert params.environment.data_backend == "pit"
     # Every parameter holds what the file states, or its default where the
     # file states nothing (the host parameters a create never writes).
@@ -99,7 +99,7 @@ def test_an_arm_created_before_a_parameter_existed_still_loads() -> None:
     assert params.retired.min_dsr_probability == 0.975
     assert params.retired.recency_months == 6
     assert params.retired.nl_max_results is None
-    assert params.acceptance.sealed_years is None
+    assert params.acceptance.research_years is None
     assert params.environment.daily_path is None
 
 
@@ -129,7 +129,7 @@ def test_null_reads_as_unset_and_a_missing_key_as_its_default() -> None:
     # A cleared form field sends "": unset for a number, the text itself for text.
     assert params.agent.compact_token_threshold is None
     assert params.packs.research_directive == ""
-    assert params.budgets.max_replay_years == WEB_CREATE_DEFAULTS["max_replay_years"]
+    assert params.budgets.max_null_controls == WEB_CREATE_DEFAULTS["max_null_controls"]
 
 
 def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
@@ -145,7 +145,7 @@ def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
         ({"data_backend": "daily"}, "console-managed parameters are not accepted: data_backend"),
         ({"work_root": "/elsewhere"}, "console-managed parameters are not accepted: work_root"),
         ({"llm_base_url": "http://x"}, "console-managed parameters are not accepted: llm_base_url"),
-        ({"sealed_years": None}, "missing required experiment parameters: sealed_years"),
+        ({"research_years": None}, "missing required experiment parameters: research_years"),
         ({"experiment_id": "_hidden"}, "experiment_id must match"),
     ],
 )

@@ -48,7 +48,6 @@ from autotrade.pipelines.arm_params import read_param
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
     freeze_registration,
-    judged_ablation,
     judged_replay,
     judged_sealed,
     replay_and_analysis,
@@ -77,7 +76,7 @@ def current_arms(experiments: Path) -> list[Path]:
     arms = []
     for path in sorted(Path(experiments).iterdir()):
         params = path / HITL_DIR_NAME / PARAMS_NAME
-        if params.is_file() and read_json_object(params).get("sealed_years") is not None:
+        if params.is_file() and read_json_object(params).get("research_years") is not None:
             arms.append(path)
     return arms
 
@@ -195,7 +194,6 @@ def check_arm(arm: Path) -> list[Judgement]:
             steps = {str(row["step_id"]): row for row in record["steps"]}
             nominee = steps[str(record["nominated_step_id"])]
             seeds = record["freeze_gate"].get("seed_replicates") or {}
-            ablation = record["freeze_gate"].get("ablation") or {}
             judge(
                 "freeze_registration",
                 record["freeze_gate"],
@@ -205,26 +203,12 @@ def check_arm(arm: Path) -> list[Judgement]:
                     acceptance=rules,
                     seed_replicates=[steps[str(entry["step_id"])] for entry in seeds.get("replicates") or ()],
                     deterministic=bool(seeds.get("deterministic")),
-                    ablation=steps[str(ablation["step_id"])] if "step_id" in ablation else None,
                 ),
             )
         elif kind == "forward" and isinstance(record.get("sealed"), Mapping):
             stored = record["sealed"]["slice"]
             sealed = stored if stored.get("strategy_error") else _sealed(arm, record, rules)
             judge("sealed", stored, sealed)
-            control = record["sealed"].get("ablation") or {}
-            if control.get("result_ref"):
-                judge(
-                    "ablation",
-                    control["increment"],
-                    judged_ablation(
-                        str(recorded_path(arm, str(record["sealed"]["result_ref"]))),
-                        str(recorded_path(arm, str(control["result_ref"]))),
-                        rules=rules,
-                        start=str(record["sealed"]["start"]),
-                        end=str(record["sealed"]["end"]),
-                    )["increment"],
-                )
             if record.get("status") == "ok":
                 judge(
                     "forward",

@@ -50,7 +50,7 @@ from autotrade.environment.tools.workspace import (
     LOW_DISK_SPACE,
     WORKSPACE_MIN_FREE_BYTES,
 )
-from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
+from tests.unit.acceptance_fixture import RULES
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -2016,14 +2016,12 @@ def _fold_backtest_tool(
         run_id="run_budget",
         snapshot=snapshot,
         decision_time=datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC),
-        research_years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
+        years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
         window_months=24,
-        max_replay_years=3,
         max_llm_calls=3,
         deadline_seconds=600.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
-        sealed_period=SEALED_PERIOD,
     )
     # The experiment the worker roots a session in: the freeze gate reads a
     # nominee's strategy from its revision store.
@@ -2165,7 +2163,6 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             self.assertIn("could not start", result.error)
             self.assertIn("changed", result.error)
             # Nothing was evaluated: no slot, no Step, no dead-end node.
-            self.assertEqual(tool.backtest.replay_years_used, 0)
             self.assertEqual(tool.backtest.steps, [])
             self.assertEqual(tool.backtest.tree.nodes(), [])
             # The manifest still records the attempt, as what it was.
@@ -2177,8 +2174,6 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
             drifting.drift = False
             retried = registry.invoke("batch_validate", WORKING_COPY)
             self.assertTrue(retried.ok, retried.error)
-            self.assertEqual(tool.backtest.replay_years_used, 1)
-            self.assertEqual(retried.value["replay_years_used"], 1)
             self.assertEqual(manifest.summaries[-1]["result_name"], "valid_001")
 
     def test_a_write_during_the_replay_cannot_reach_the_evaluated_bytes(self) -> None:

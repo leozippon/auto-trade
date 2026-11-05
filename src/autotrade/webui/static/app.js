@@ -1367,7 +1367,6 @@ function ratioBar(ratio, { cls = "", tone = true } = {}) {
 const BUDGET_ROWS = [
   ["inference_seconds", "时间", fmtDuration],
   ["llm_calls", "模型调用", String],
-  ["replay_years", "回测（年）", String],
   ["null_controls", "随机对照", String],
   ["api_spend_usd", "API 花费", (usd) => `$${usd.toFixed(2)}`],
   ["subagent_calls", "子代理调用", String],

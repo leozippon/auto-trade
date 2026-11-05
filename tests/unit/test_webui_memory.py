@@ -336,12 +336,12 @@ def test_held_is_not_mounted_the_page_says_which_arms_mount_a_source(
     _params(current, operating_memory="curated+graduated")
     payload = memory.experiment_memory(experiments, "current")
     assert payload["admitted_by"] == DEFAULT_RESEARCH_GEOMETRY.research_end
-    # A sealed arm admits against the end of the years its session sees, as
-    # the session's mount does: a source whose Held-out ended in the sealed
-    # years is refused.
-    _params(current, operating_memory="curated+graduated", sealed_years=2)
+    # An arm admits against the end of its research years, as the session's
+    # mount does: a source whose Held-out ended in the validation years is
+    # refused.
+    _params(current, operating_memory="curated+graduated", research_years=2)
     payload = memory.experiment_memory(experiments, "current")
-    visible_end = DEFAULT_RESEARCH_GEOMETRY.split_sealed(2)[0][-1].end
+    visible_end = DEFAULT_RESEARCH_GEOMETRY.split_research(2)[0][-1].end
     assert payload["admitted_by"] == visible_end == "20230630"
     sources = {source["source"]: source for source in payload["snapshot"]["sources"]}
     assert sources["early"]["mounted"] is False and sources["curated"]["mounted"] is True

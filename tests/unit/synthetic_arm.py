@@ -31,7 +31,7 @@ from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBu
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 GENERATION = "synthetic_generation"
-# Two research years: the session sees Y1 and the test rules seal Y2.
+# Two research years: the session researches on Y1 and Y2 is the validation year.
 GEOMETRY = {
     "research_start": "20220701",
     "research_end": "20240630",

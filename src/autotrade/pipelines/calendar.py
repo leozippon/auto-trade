@@ -1,12 +1,15 @@
 """The research calendar: SSE trading days and the research geometry.
 
-An arm researches on whole years that begin on the first of a month, freezes
-at most once, and the frozen artifact is then replayed once, continuously,
-over the twelve months after research and the Held-out period after those:
+An arm researches on whole years that begin on the first of a month. The
+first ``research_years`` of them are the research years a session sees; the
+rest are the validation years, revealed to the session one step at a time
+through its tests (``step_windows``). The frozen artifact is then replayed
+once, continuously, over the twelve months after research and the Held-out
+period after those, as one book:
 
-    research  research_start .. research_end    one slot per year, Y1..Yn
-    forward   research_end+1 .. forward_end     slot F
-    Held-out  forward_end+1  .. heldout_end     slot H, clipped to the release
+    research    research_start .. research_end    one slot per year, Y1..Yn
+    forward     research_end+1 .. forward_end     slot F
+    Held-out    forward_end+1  .. heldout_end     slot H, clipped to the release
 
 Every slot is anchored at 23:59:59 +08:00 of the calendar day before it starts,
 and it carries the rows whose ``available_at`` falls after that anchor and no
@@ -33,9 +36,11 @@ from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 
 # Snapshot anchor time of day: close of business, not an intraday moment.
 RESEARCH_ANCHOR_TIME = time(23, 59, 59)
-# The span label of a replay over the whole research period, Y1 through the
-# last research year.
+# The span label of a replay over the research years, Y1 through the last of
+# them; and of the validation years as one span, which the tests replay up to
+# their frontier.
 FULL_SPAN = "full"
+VALIDATION_SPAN = "validation"
 
 
 def yyyymmdd(value: object) -> str:
@@ -88,11 +93,46 @@ def anchor_before(start: str) -> datetime:
     return datetime.combine(day, RESEARCH_ANCHOR_TIME, tzinfo=CN_TZ)
 
 
+def anchor_on(day: str) -> datetime:
+    """23:59:59 +08:00 of ``day`` itself: the decision view that has read
+    every row stamped on it, which is the view a frontier on ``day`` mounts."""
+
+    return datetime.combine(date.fromisoformat(day), RESEARCH_ANCHOR_TIME, tzinfo=CN_TZ)
+
+
 def months_before(end: str, months: int) -> str:
     """The first day of the ``months``-long window that ends on ``end``."""
 
     stamp = pd.Timestamp(end) - pd.DateOffset(months=months) + pd.Timedelta(days=1)
     return stamp.strftime("%Y%m%d")
+
+
+def step_windows(start: str, end: str, months: int) -> tuple[tuple[str, str], ...]:
+    """Consecutive ``months``-long calendar windows that tile ``start..end``.
+
+    ``start`` is the first day of a month and ``end`` the last day of one
+    (``YYYYMMDD``); each window is ``(first day, last day)``. ``ValueError``
+    unless the period is a whole number of such windows, so a step never
+    ends inside a month and the last step ends exactly on ``end``.
+    """
+
+    if isinstance(months, bool) or not isinstance(months, int) or months < 1:
+        raise ValueError(f"step length must be a positive number of months, got {months!r}")
+    first = date.fromisoformat(start)
+    after = date.fromisoformat(end) + timedelta(days=1)
+    if first.day != 1 or after.day != 1 or after <= first:
+        raise ValueError(
+            f"steps tile a period from the first of a month to the last of one, got {start}..{end}"
+        )
+    span = (after.year - first.year) * 12 + after.month - first.month
+    if span % months:
+        raise ValueError(f"{start}..{end} is {span} months, not a whole number of {months}-month steps")
+    windows = []
+    for index in range(span // months):
+        opened = _plus_months(first, index * months)
+        closed = _plus_months(first, (index + 1) * months) - timedelta(days=1)
+        windows.append((opened.strftime("%Y%m%d"), closed.strftime("%Y%m%d")))
+    return tuple(windows)
 
 
 # The research store holds no daily bars before DAILY_HISTORY_START, and none
@@ -116,6 +156,13 @@ def _plus_years(month_start: date, years: int) -> date:
     """The same month-start ``years`` later. ``month_start`` is day 1."""
 
     return date(month_start.year + years, month_start.month, 1)
+
+
+def _plus_months(month_start: date, months: int) -> date:
+    """The month-start ``months`` later. ``month_start`` is day 1."""
+
+    index = month_start.year * 12 + month_start.month - 1 + months
+    return date(index // 12, index % 12 + 1, 1)
 
 
 @dataclass(frozen=True)
@@ -227,23 +274,22 @@ class ResearchGeometry:
             slots.append(Slot(f"Y{index}", begin, finish, finish))
         return tuple(slots)
 
-    def split_sealed(self, sealed_years: int) -> tuple[tuple[Slot, ...], tuple[Slot, ...]]:
-        """The research years a session sees, and the trailing
-        ``sealed_years`` it never sees, which the host reads once after the
-        freeze. ``ValueError`` unless at least one year is sealed and at
-        least one stays visible."""
+    def split_research(self, research_years: int) -> tuple[tuple[Slot, ...], tuple[Slot, ...]]:
+        """The first ``research_years`` years, which a session researches on,
+        and the validation years after them, which it lives through one step
+        at a time. ``ValueError`` unless at least one year is on each side."""
 
         years = self.research_years
         if (
-            isinstance(sealed_years, bool)
-            or not isinstance(sealed_years, int)
-            or not 1 <= sealed_years < len(years)
+            isinstance(research_years, bool)
+            or not isinstance(research_years, int)
+            or not 1 <= research_years < len(years)
         ):
             raise ValueError(
-                f"sealed_years must seal at least one of the {len(years)} research "
-                f"years and leave at least one visible, got {sealed_years!r}"
+                f"research_years must take at least one of the {len(years)} research "
+                f"years and leave at least one validation year, got {research_years!r}"
             )
-        return years[:-sealed_years], years[-sealed_years:]
+        return years[:research_years], years[research_years:]
 
     @property
     def forward(self) -> Slot:
@@ -284,10 +330,13 @@ __all__ = [
     "FULL_SPAN",
     "GEOMETRY_PARAMETERS",
     "RESEARCH_ANCHOR_TIME",
+    "VALIDATION_SPAN",
     "ResearchGeometry",
     "Slot",
     "anchor_before",
+    "anchor_on",
     "load_sse_trading_days",
     "replay_window",
+    "step_windows",
     "yyyymmdd",
 ]

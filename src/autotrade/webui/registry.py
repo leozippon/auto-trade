@@ -45,7 +45,11 @@ from autotrade.environment.tools.report_issue import (
 )
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.arm_params import PARAMETERS
-from autotrade.pipelines.calendar import FULL_SPAN
+from autotrade.pipelines.calendar import (
+    FULL_SPAN,
+    GEOMETRY_PARAMETERS,
+    ResearchGeometry,
+)
 from autotrade.pipelines.config import (
     acceptance_for,
     defaulted_acceptance,
@@ -690,7 +694,6 @@ def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
     return {
         "inference_seconds": minutes * 60.0 if minutes is not None else None,
         "llm_calls": calls,
-        "replay_years": _number(effective.get("max_replay_years")),
         "null_controls": _number(effective.get("max_null_controls")),
         "api_spend_usd": _number(
             effective.get("max_api_spend_usd", rolling_default("max_api_spend_usd"))
@@ -1186,20 +1189,23 @@ def _research_result(
 
 
 def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
-    """What the forward stage will judge, from the arm's own stamped rules,
-    so the console states it before the replay has run; the forward record's
-    own block replaces it once it exists. An arm created under the sealed
-    gate is judged on it alone: its level, its sealed years and the bar for
-    them (``verdict.sealed_slice``). An arm created before it states none:
-    it can no longer run a forward stage."""
+    """How the arm's record will be read, from its own stamped rules, so the
+    console states it before any record exists: the residual statistic's
+    level, the research years, the step length and the bar for the whole
+    validation period. An arm created before the rolling validation states
+    none: it can no longer run a session."""
 
-    if params.get("sealed_years") is None:
+    if params.get("research_years") is None:
         return {}
     rules = acceptance_for(params)
+    geometry = ResearchGeometry(**{name: str(params[name]) for name in GEOMETRY_PARAMETERS})
+    validation_years = len(geometry.research_years) - rules.research_years
     return {
         "alpha": rules.alpha,
-        "bar": residual_bar(float(rules.sealed_years), rules.alpha),
-        "sealed_years": rules.sealed_years,
+        "research_years": rules.research_years,
+        "validation_years": validation_years,
+        "test_step_months": rules.test_step_months,
+        "bar": residual_bar(float(validation_years), rules.alpha),
     }
 
 

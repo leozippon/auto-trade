@@ -54,7 +54,7 @@ from autotrade.pipelines.session_tools import (
     BatchValidateTool,
     SessionValidations,
 )
-from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
+from tests.unit.acceptance_fixture import RULES
 
 from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
@@ -147,15 +147,13 @@ def _research_request() -> ResearchSessionRequest:
         run_id="run_budget",
         snapshot=snapshot,
         decision_time=moment,
-        research_years=(ReplaySpan("Y1", "valid", "20240701", "20250630", snapshot),),
+        years=(ReplaySpan("Y1", "valid", "20240701", "20250630", snapshot),),
         window_months=24,
-        max_replay_years=3,
         max_llm_calls=3,
         deadline_seconds=2.0,
         record_failed_attempts=False,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
-        sealed_period=SEALED_PERIOD,
     )
 
 

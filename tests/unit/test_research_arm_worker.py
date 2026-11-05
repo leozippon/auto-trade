@@ -422,7 +422,7 @@ def test_the_llm_research_session_mounts_only_the_visible_years_and_freezes(
     )
     from tests.unit.test_operating_memory import GRADUATED_SKILL, _experiment_with_skill
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2)
+    repo, experiment = make_arm(tmp_path, developer_mode="llm")
     # The assertions below read the session tree. A finished arm otherwise deletes it.
     monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
     _experiment_with_skill(repo / "experiments", "adopted", heldout_end="20230331")
@@ -585,7 +585,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     )
 
     repo, experiment = make_arm(
-        tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1, max_llm_calls=40
+        tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=40
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
@@ -638,7 +638,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert len(record["steps"]) == 2 and record["freeze_gate"]["passed"] is True
     assert len({row["revision_id"] for row in record["steps"]}) == 2
     assert len({row["fingerprint"] for row in record["steps"]}) == 1
-    assert record["budget_used"]["replay_years"] == 2
+    assert record["budget_used"]["test_replays"] == 0
     # The calls of both attempts: the first spent five (two scripted, three failed).
     assert record["budget_used"]["llm_calls"] == 5 + len(second_llm.calls)
     assert result["verdict"]["status"] == "graduated"
@@ -651,7 +651,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert checkpoint["trace"]["root"] == "trace"
     note = opening[2].content
     assert "第 2 次尝试" in note and "language model unavailable" in note
-    assert "回测年 1/2" in note and transcripts[0].name in note
+    assert transcripts[0].name in note
     assert "上面是中断前最近一次压缩的摘要" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["arm"] == {
@@ -660,7 +660,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
         "validations_to_date": 1,
         "full_span_validations_to_date": 1,
     }
-    assert facts["budgets"]["used_before_this_attempt"]["replay_years"] == 1
+    assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 0
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 5
     # One session root, two transcripts, and both attempts' revisions kept as
     # the arm's artifact history: the resumed attempt's revision descends from
@@ -696,7 +696,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     )
 
     repo, experiment = make_arm(
-        tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1, max_llm_calls=40
+        tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=40
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
@@ -775,7 +775,6 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_ends_the_arm(
     repo, experiment = make_arm(
         tmp_path,
         developer_mode="llm",
-        max_replay_years=2,
         session_max_attempts=1,
         max_llm_calls=40,
         max_api_spend_usd=0.08,
@@ -867,7 +866,7 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     from autotrade.pipelines.research_session import _remove_mounted_tree
     from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1)
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", session_max_attempts=1)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     with pytest.raises(RuntimeError, match="language model unavailable"):
@@ -905,7 +904,7 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
         _NoShellRunner,
     )
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2, session_max_attempts=1)
+    repo, experiment = make_arm(tmp_path, developer_mode="llm", session_max_attempts=1)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     session_root = tmp_path / "unused"
 
@@ -1002,7 +1001,7 @@ def test_a_nomination_that_does_not_register_is_refused_and_the_arm_ends_with_no
     def finish(**arguments: object) -> ProviderResponse:
         return ProviderResponse(tool_calls=(ToolCall("finish", "finish_session", dict(arguments)),))
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=6)
+    repo, experiment = make_arm(tmp_path, developer_mode="llm")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     llm = _NominatingLLM(
@@ -1023,9 +1022,14 @@ def test_a_nomination_that_does_not_register_is_refused_and_the_arm_ends_with_no
     assert [(step["span"], step["control"]) for step in record["steps"]] == [("full", True), ("full", False)]
     assert (record["outcome"], record["frozen"]) == ("no_edge", None)
     assert result["verdict"] == {"status": "no_deliverable", "reasons": [f"no_edge: {record['reason']}"]}
-    # The session prepared no view of the sealed year and no forward slot.
+    # The host prepared the validation year's slot for the tests, but the
+    # session's view stops at the research year's end and no forward slot exists.
     assert all(item[0] != "heldout" for item in synthetic_provider.requests)
-    assert all(start < "20230701" for phase, start, _end, _decision in synthetic_provider.requests if phase == "valid")
+    assert all(
+        decision.strftime("%Y%m%d") <= "20230630"
+        for phase, _start, _end, decision in synthetic_provider.requests
+        if phase == "decision"
+    )
 
     # The refusal the model read names the registration's reason and nothing measured.
     refusal = next(
@@ -1054,9 +1058,9 @@ def test_a_nomination_that_does_not_register_is_refused_and_the_arm_ends_with_no
     facts = json.loads(system.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert "session" not in facts["identity"] and "earlier_sessions" not in facts
     assert facts["artifact_contract"]["start"]["kind"] == "template"
-    assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1"]
+    assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1", "Y2"]
     assert facts["research_geometry"]["research_period"] == "20220701..20230630"
-    assert facts["research_geometry"]["sealed_years"]["period"] == "20230701..20240630"
+    assert facts["research_geometry"]["validation_period"] == "20230701..20240630"
     assert facts["research_geometry"]["input_window"] == "20210701..20230630"
     assert facts["arm"] == {
         "frozen": False,
@@ -1064,9 +1068,11 @@ def test_a_nomination_that_does_not_register_is_refused_and_the_arm_ends_with_no
         "validations_to_date": 0,
         "full_span_validations_to_date": 0,
     }
-    gate = facts["artifact_contract"]["acceptance_rules"]["sealed_gate"]
-    assert (gate["alpha"], gate["sealed_years"], gate["bar_over_sealed_years"]) == (0.05, 1, 1.645)
-    assert "## 封存检验" in system and "封存的 1 年约 1.645" in system
+    instrument = facts["artifact_contract"]["acceptance_rules"]["instrument"]
+    assert (instrument["alpha"], instrument["bar_over_validation_period"]) == (0.05, 1.645)
+    # The prompt's run section reads the frontier facts (``agent/prompts.py``);
+    # the sealed-gate paragraph is gone with the gate.
+    assert "## 封存检验" not in system
 
     read = _model_input(llm)
     assert retired_vocabulary(read) == []
@@ -1123,7 +1129,7 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
             )
         )
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=6)
+    repo, experiment = make_arm(tmp_path, developer_mode="llm")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     never = ProviderResponse(
@@ -1147,7 +1153,7 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
     assert record["arm_end"] == {"status": "environment_blocked", "reason": reason}
     assert record["steps"] == []
     # The failed batches were refunded: no replay-year was spent.
-    assert record["budget_used"]["replay_years"] == 0
+    assert record["budget_used"]["test_replays"] == 0
     verdict = {"status": "environment_blocked", "reasons": [reason]}
     assert result["verdict"] == verdict
     assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict

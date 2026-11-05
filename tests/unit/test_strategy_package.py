@@ -408,19 +408,17 @@ def test_budgets_come_from_one_source_each():
         None, fit_timeout_seconds=rolling_default("strategy_fit_timeout_seconds")
     )
     assert strategy_config == executor
-    for name in ("max_research_minutes", "max_replay_years", "max_llm_calls", "max_null_controls", "max_api_spend_usd"):
+    for name in ("max_research_minutes", "max_llm_calls", "max_null_controls", "max_api_spend_usd"):
         assert WEB_CREATE_DEFAULTS[name] == rolling_default(name)
     assert (
         rolling_default("max_research_minutes"),
-        rolling_default("max_replay_years"),
         rolling_default("max_llm_calls"),
         rolling_default("max_null_controls"),
-    ) == (2400, 96, 6400, 12)
+    ) == (2400, 6400, 12)
     assert rolling_default("max_api_spend_usd") == 50.0
     assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_research_minutes") == 4800
 
     config = SimpleNamespace(
-        max_replay_years=rolling_default("max_replay_years"),
         max_llm_calls=rolling_default("max_llm_calls"),
         max_api_spend_usd=rolling_default("max_api_spend_usd"),
         max_research_minutes=rolling_default("max_research_minutes"),

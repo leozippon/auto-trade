@@ -227,14 +227,14 @@ class Developer:
             (source / "main.py").write_text(f"{MAIN}# alpha={alpha}\n", encoding="utf-8")
             typed, _fingerprint = self.store.create_revision(source)
             validation = self.evaluator.evaluate(
-                request.validation.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
+                request.full_span.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
             )
             steps.append(
                 StepResult(
                     f"{request.session_key}_step_{number}",
                     typed.revision_id,
                     validation,
-                    span=request.validation.label,
+                    span=request.full_span.label,
                     control=number in extra.get("controls", ()),
                 )
             )
@@ -301,33 +301,33 @@ def _freezing(tmp_path: Path):
     return _pipeline(tmp_path, {1: ([0.0012, 0.0002], "freeze", {"nominee": 0})})
 
 
-def test_the_research_session_sees_only_the_visible_years(tmp_path: Path):
-    """The arm seals its trailing research year: the Agent's view is the
-    decision view at the end of the visible year, every span the session can
-    replay ends before the first sealed day, and the request names the sealed
-    year's dates and nothing to replay them with."""
+def test_the_research_session_opens_at_the_validation_start(tmp_path: Path):
+    """The arm researches on its first year and validates through its second:
+    the Agent's view is the decision view at the end of the research year,
+    ``full`` is the research year alone, and the request carries every year
+    of the geometry so a test can replay the validation year."""
 
     pipeline, snapshots, evaluator, developer, _ledger = _freezing(tmp_path)
     pipeline.run_research_session()
 
-    visible, sealed = GEOMETRY.split_sealed(CONFIG_ACCEPTANCE.sealed_years)
-    assert [slot.label for slot in visible] == ["Y1"] and [slot.label for slot in sealed] == ["Y2"]
-    first_sealed = sealed[0].start
-    assert snapshots.decisions == [sealed[0].anchor]
+    research, validation = GEOMETRY.split_research(CONFIG_ACCEPTANCE.research_years)
+    assert [slot.label for slot in research] == ["Y1"] and [slot.label for slot in validation] == ["Y2"]
+    validation_start = validation[0].start
+    assert snapshots.decisions == [validation[0].anchor]
     [request] = developer.requests
     assert request.session_key == "research"
-    assert request.decision_time == sealed[0].anchor < datetime(2023, 7, 1, tzinfo=CN_TZ)
+    assert request.decision_time == validation[0].anchor < datetime(2023, 7, 1, tzinfo=CN_TZ)
     assert request.snapshot.decision_ref == "decision/20230630"
-    assert request.sealed_period == (sealed[0].start, sealed[-1].end)
-    assert [year.label for year in request.research_years] == ["Y1"]
-    assert (request.validation.label, request.validation.mode) == ("full", "valid")
-    assert (request.validation.start, request.validation.end) == ("20220701", "20230630")
-    # Every span a Validation may name resolves inside the visible years.
+    assert [year.label for year in request.years] == ["Y1", "Y2"]
+    assert request.research_years == 1
+    assert (request.full_span.label, request.full_span.mode) == ("full", "valid")
+    assert (request.full_span.start, request.full_span.end) == ("20220701", "20230630")
+    # ``full`` and the research year end before the validation start; the
+    # validation year parses but is the frontier's to allow.
     for label in ("full", "Y1"):
-        assert research_span(request.research_years, label).end < first_sealed
-    with pytest.raises(ValueError):
-        research_span(request.research_years, "Y2")
-    assert all(item.end < first_sealed for item in evaluator.requests)
+        assert research_span(request.years, label, research_years=1).end < validation_start
+    assert research_span(request.years, "Y2", research_years=1).start == validation_start
+    assert all(item.end < validation_start for item in evaluator.requests)
     replayed = {(item.start, item.end, item.continuation) for item in evaluator.requests}
     assert replayed == {("20220701", "20230630", ())}
 
@@ -338,10 +338,7 @@ def test_a_freeze_registers_and_records_the_frozen_block(tmp_path: Path):
     gate = record["freeze_gate"]
     assert gate["passed"] is True and gate["reasons"] == []
     # Registration reads no score: no IR, no trial count, no bar.
-    assert set(gate) == {"passed", "reasons", "mandate", "seed_replicates", "ablation", "thresholds"}
-    # This arm asks for no ablation and its nominee names none.
-    assert gate["ablation"] == {"required": False}
-    assert "ablation" not in record["frozen"]
+    assert set(gate) == {"passed", "reasons", "mandate", "seed_replicates", "thresholds"}
     assert "trials_to_date" not in record and "terminal_offline_trials" not in record
     assert [row["control"] for row in record["steps"]] == [False, False]
     # It is judged under the arm's own rules -- here a tracking mandate,
@@ -451,7 +448,7 @@ HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/arm/
 
 
 def _interrupted_attempt(
-    pipeline, ledger, *, summary: str | None, replay_years: int, node: bool, capped: bool = False
+    pipeline, ledger, *, summary: str | None, test_replays: int, node: bool, capped: bool = False
 ) -> str:
     """Leave what an interrupted attempt leaves: an attempt_failed row, a
     trace with budget checkpoints (and a compaction), a published tree node
@@ -485,7 +482,7 @@ def _interrupted_attempt(
             "event_type": "llm_call",
             "ts": "2026-09-15T01:10:00+00:00",
             "run_id": "run_ref_first",
-            "budget_used": {"inference_seconds": 600.0, "llm_calls": 7, "main_calls": 5, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1},
+            "budget_used": {"inference_seconds": 600.0, "llm_calls": 7, "main_calls": 5, "subagent_calls": 2, "compact_calls": 0, "test_replays": test_replays, "null_controls": 1},
         },
     ]
     if summary is not None:
@@ -493,7 +490,7 @@ def _interrupted_attempt(
     if capped:
         events.append({"event_type": "trace_limit_reached", "ts": "2026-09-15T01:25:00+00:00", "run_id": "run_ref_first", "max_bytes": 33554432})
     else:
-        events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "replay_years": replay_years, "null_controls": 1}})
+        events.append({"event_type": "session_error", "ts": "2026-09-15T01:30:00+00:00", "run_id": "run_ref_first", "budget_used": {"inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2, "compact_calls": 0, "test_replays": test_replays, "null_controls": 1}})
     trace.write_text("".join(json.dumps(event) + "\n" for event in events) + "{torn", encoding="utf-8")
     if not node:
         return run_id
@@ -536,7 +533,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "freeze", {"nominee": 1})}
     )
-    _interrupted_attempt(pipeline, ledger, summary="## 目标\n继续动量腿", replay_years=2, node=True)
+    _interrupted_attempt(pipeline, ledger, summary="## 目标\n继续动量腿", test_replays=2, node=True)
     revisions = pipeline.artifacts.root / "revisions"
     assert len(list(revisions.iterdir())) == 1, "a failed attempt keeps its revisions"
 
@@ -551,7 +548,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     assert request.resume.transcripts == ("run_ref_first.txt",)
     assert request.budget_used.to_record() == {
         "inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2,
-        "compact_calls": 0, "replay_years": 2, "null_controls": 1, "api_spend_usd": 0.0,
+        "compact_calls": 0, "test_replays": 2, "null_controls": 1, "api_spend_usd": 0.0,
     }
     [earlier] = request.steps_before
     assert earlier.span == "full" and earlier.validation.summary["order_count"] > 0
@@ -568,7 +565,7 @@ def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0], "no_edge", {"reason": "nothing survived the second look"})}
     )
-    _interrupted_attempt(pipeline, ledger, summary=None, replay_years=0, node=False)
+    _interrupted_attempt(pipeline, ledger, summary=None, test_replays=0, node=False)
     record = pipeline.run_research_session()
     request = developer.requests[-1]
     assert request.resume is not None and request.resume.compaction_summary is None
@@ -584,7 +581,7 @@ def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "freeze", {"nominee": 1})}
     )
-    _interrupted_attempt(pipeline, ledger, summary=None, replay_years=2, node=False, capped=True)
+    _interrupted_attempt(pipeline, ledger, summary=None, test_replays=2, node=False, capped=True)
     with pytest.raises(RuntimeError, match="reached its size cap"):
         pipeline.run_research_session()
     assert developer.requests == []
@@ -618,7 +615,7 @@ def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path:
 
     plan = {1: ([0.0012], "freeze", {"nominee": 1})}
     old, _snapshots, old_evaluator, _developer, old_ledger = _pipeline(tmp_path / "old", plan)
-    _interrupted_attempt(old, old_ledger, summary=None, replay_years=2, node=True)
+    _interrupted_attempt(old, old_ledger, summary=None, test_replays=2, node=True)
     (tmp_path / "old").rename(tmp_path / "new")
     pipeline, _snapshots, evaluator, developer, _ledger = _pipeline(tmp_path / "new", plan)
     # The fixture names results by count: number on after the moved ones.
@@ -703,7 +700,7 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert (sealed_request.mode, sealed_request.start, sealed_request.end) == ("valid", "20230701", "20240630")
     assert sealed_request.revision.revision_id == frozen["artifact_id"]
     sealed = record["sealed"]
-    assert (sealed["label"], sealed["start"], sealed["end"]) == ("Y2", "20230701", "20240630")
+    assert (sealed["label"], sealed["start"], sealed["end"]) == ("validation", "20230701", "20240630")
     assert sealed["result_ref"] == str(Path(sealed["result_ref"]))
     reading = sealed["slice"]
     assert reading["series"] == "active" and reading["years"] == pytest.approx(reading["days"] / 244)

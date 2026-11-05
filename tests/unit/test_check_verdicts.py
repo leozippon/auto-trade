@@ -124,7 +124,7 @@ def test_an_arm_created_under_retired_rules_is_not_judged(arm: Path, tmp_path: P
     whose rules name no sealed years is never judged again."""
 
     root = tmp_path / "experiments"
-    _copy(arm, root, sealed_years=None)
+    _copy(arm, root, research_years=None)
     assert current_arms(root) == []
     assert main(["--experiments", str(root)]) == 0
 

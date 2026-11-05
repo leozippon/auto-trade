@@ -624,7 +624,6 @@ if __name__ == "__main__":
 #: second later; the pre-flight turns each into an actionable HTTP 400.
 _REJECTED_CREATES = (
     ({"max_research_minutes": 0}, "max_research_minutes must be a positive integer"),
-    ({"max_replay_years": 0}, "max_replay_years must be a positive integer"),
     ({"initial_cash": 0}, "initial_cash must be a positive finite number"),
     ({"max_drawdown": 1.5}, "max_drawdown must be between zero and one"),
     ({"tracking_error_cap": 0.08, "beta_min": 1.2}, "beta_min must be below beta_max"),

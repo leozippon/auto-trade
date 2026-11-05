@@ -89,7 +89,7 @@ def test_the_best_candidate_carries_the_deflated_sharpe_the_gate_gave_the_nomine
     assert record["outcome"] == "freeze"
     assert record["froze"] is True
     assert record["attempts"] == 1
-    assert record["budget_used"]["replay_years"] == 8
+    assert record["budget_used"]["test_replays"] == 8
     assert record["best"]["step_id"] == record["nominated_step_id"]
     # No trial count and no deflated Sharpe since the sealed gate.
     assert (record["best"]["trials"], record["best"]["deflated_sharpe_probability"]) == (None, None)
@@ -557,7 +557,7 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
             json.dumps(event)
             for event in (
                 {"event_type": "session_start"},
-                {"event_type": "llm_call", "budget_used": {"inference_seconds": 900.0, "llm_calls": 7, "replay_years": 4, "null_controls": 0}},
+                {"event_type": "llm_call", "budget_used": {"inference_seconds": 900.0, "llm_calls": 7, "test_replays": 4, "null_controls": 0}},
             )
         )
         + "\n",
@@ -571,14 +571,13 @@ def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path)
     assert rows["live"]["budget"] == {
         "inference_seconds": 3600.0,
         "llm_calls": 6400.0,
-        "replay_years": 96.0,
         "null_controls": 12.0,
         "api_spend_usd": 50.0,
         "subagent_calls": float(session_role_quotas(6400)[0]),
     }
-    assert rows["live"]["budget_used"] == {"inference_seconds": 900.0, "llm_calls": 7, "replay_years": 4, "null_controls": 0}
+    assert rows["live"]["budget_used"] == {"inference_seconds": 900.0, "llm_calls": 7, "test_replays": 4, "null_controls": 0}
     assert rows["idle"]["budget_used"] is None
-    assert rows["judged"]["budget_used"]["replay_years"] == 8
+    assert rows["judged"]["budget_used"]["test_replays"] == 8
     assert (rows["live"]["research_outcome"], rows["judged"]["research_outcome"]) == (None, "freeze")
     client = TestClient(create_app(tmp_path.parent, tmp_path))
     assert client.get("/api/experiments/live/status").json()["budget_used"]["llm_calls"] == 7
@@ -593,7 +592,7 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
     reading as a step yet to run."""
 
     directory = build_arm(tmp_path, "cut", "research")
-    block = {"inference_seconds": 1316.2, "llm_calls": 180, "replay_years": 0, "null_controls": 0, "api_spend_usd": 1.8}
+    block = {"inference_seconds": 1316.2, "llm_calls": 180, "test_replays": 0, "null_controls": 0, "api_spend_usd": 1.8}
     write_json_atomic(
         directory / "hitl/status.json",
         {
@@ -654,18 +653,19 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     # This arm nominated its best candidate, so both names agree.
     assert rows["frozen"]["research_best"]["result"] == rows["frozen"]["research_result"]
 
-    # The verdict is the sealed gate's alone: the step lists its level, its
-    # sealed years and the bar for them, and the record's own block carries
-    # the same keys, its bar for the days the sealed replay read.
+    # The forward step states how the record will be read: the level, the
+    # research and validation years, the step length and the bar over the
+    # whole validation period.
     preview = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
     assert preview == {
         "alpha": REQUIRED_RULES["alpha"],
-        "bar": pytest.approx(1.6449, abs=1e-4),
-        "sealed_years": REQUIRED_RULES["sealed_years"],
+        "research_years": REQUIRED_RULES["research_years"],
+        "validation_years": 3,
+        "test_step_months": 3,
+        "bar": pytest.approx(0.9497, abs=1e-4),
     }
     recorded = experiment_detail(tmp_path, "judged")["forward"]["verdict"]["thresholds"]
-    assert set(recorded) == set(preview)
-    assert (recorded["alpha"], recorded["sealed_years"]) == (preview["alpha"], preview["sealed_years"])
+    assert recorded["alpha"] == preview["alpha"]
     # An arm created before the sealed gate can run no forward stage: none.
     path = tmp_path / "researching/hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))

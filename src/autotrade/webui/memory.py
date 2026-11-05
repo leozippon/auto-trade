@@ -288,15 +288,15 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
     # The day the session's mount admits against, resolved as the worker
     # resolves it: a graduated source is mounted only when its Held-out ended
-    # by the end of the research years the session sees -- the visible years
-    # of an arm that seals some, the whole research period of one created
-    # before the sealed gate.
+    # by the end of the research years the session sees -- the first
+    # research_years of an arm created under the rolling validation, the
+    # whole research period of one created before it.
     geometry = ResearchGeometry(**{name: read_param(params, name) for name in GEOMETRY_PARAMETERS})
-    sealed_years = params.get("sealed_years")
+    research_years = params.get("research_years")
     admitted_by = (
         geometry.research_end
-        if sealed_years is None
-        else geometry.split_sealed(int(sealed_years))[0][-1].end  # type: ignore[call-overload]
+        if research_years is None
+        else geometry.split_research(int(research_years))[0][-1].end  # type: ignore[call-overload]
     )
     payload: dict[str, object] = {
         "experiment_id": experiment_id,

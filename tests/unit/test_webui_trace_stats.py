@@ -921,14 +921,14 @@ def test_trace_stats_carries_the_last_budget_block(tmp_path: Path) -> None:
         tmp_path / "run.jsonl",
         [
             {"event_type": "session_start"},
-            {"event_type": "llm_call", "budget_used": {"inference_seconds": 10.0, "llm_calls": 1, "replay_years": 0, "null_controls": 0}},
-            {"event_type": "tool_call", "tool": "shell", "budget_used": {"inference_seconds": 25.5, "llm_calls": 2, "replay_years": 4, "null_controls": 0}},
+            {"event_type": "llm_call", "budget_used": {"inference_seconds": 10.0, "llm_calls": 1, "test_replays": 0, "null_controls": 0}},
+            {"event_type": "tool_call", "tool": "shell", "budget_used": {"inference_seconds": 25.5, "llm_calls": 2, "test_replays": 4, "null_controls": 0}},
         ],
     )
     first = trace_stats(path)
-    assert first["budget_used"] == {"inference_seconds": 25.5, "llm_calls": 2, "replay_years": 4, "null_controls": 0}
+    assert first["budget_used"] == {"inference_seconds": 25.5, "llm_calls": 2, "test_replays": 4, "null_controls": 0}
     with path.open("a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"event_type": "llm_call", "budget_used": {"inference_seconds": 30.0, "llm_calls": 3, "replay_years": 4, "null_controls": 1}}) + "\n")
+        handle.write(json.dumps({"event_type": "llm_call", "budget_used": {"inference_seconds": 30.0, "llm_calls": 3, "test_replays": 4, "null_controls": 1}}) + "\n")
     assert trace_stats(path)["budget_used"]["llm_calls"] == 3
     assert trace_stats(_write_trace(tmp_path / "bare.jsonl", [{"event_type": "session_start"}]))["budget_used"] is None
 

@@ -34,7 +34,7 @@ from autotrade.pipelines.session_tools import (
     SMOKE_BACKTEST_MAX_DAYS,
     SmokeBacktestTool,
 )
-from tests.unit.acceptance_fixture import RULES, SEALED_PERIOD
+from tests.unit.acceptance_fixture import RULES
 
 from .test_inference_time_budget import FakeClock
 
@@ -92,14 +92,12 @@ def _tool(
         run_id="run_x",
         snapshot=snapshot,
         decision_time=datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC),
-        research_years=(ReplaySpan("Y1", "valid", DAYS[0], DAYS[-1], snapshot),),
+        years=(ReplaySpan("Y1", "valid", DAYS[0], DAYS[-1], snapshot),),
         window_months=24,
-        max_replay_years=15,
         max_llm_calls=200,
         deadline_seconds=1200.0,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
-        sealed_period=SEALED_PERIOD,
     )
     seeded = readonly_baseline(output)
     return SmokeBacktestTool(
@@ -205,7 +203,6 @@ def test_smoke_is_outside_every_official_accounting_surface(tmp_path: Path) -> N
     value = tool.invoke({}).value
 
     assert value["official"] is False
-    assert value["counts_against_replay_budget"] is False
     # No revision was committed and no result survived for a ledger or a freeze
     # to pick up: the tool owns no artifact store and no step tree at all.
     assert not hasattr(tool, "tree")
@@ -224,7 +221,6 @@ def test_a_failing_strategy_returns_the_exact_exception_text(tmp_path: Path) -> 
     assert result.value["status"] == "failed"
     assert "AccountSnapshot" in str(result.value["error"])
     assert "not subscriptable" in str(result.value["error"])
-    assert result.value["counts_against_replay_budget"] is False
 
 
 def test_days_argument_is_bounded(tmp_path: Path) -> None:
@@ -326,7 +322,6 @@ def test_a_rehearsal_does_not_spend_the_session_thinking_clock(tmp_path: Path) -
     assert result.ok
     assert result.value["status"] == "failed"
     assert "fit exceeded 3600s" in str(result.value["error"])
-    assert result.value["counts_against_replay_budget"] is False
 
 
 def test_smoke_backtest_is_registered_for_fold_sessions() -> None:
@@ -377,7 +372,7 @@ def test_start_outside_the_research_period_is_refused(tmp_path: Path) -> None:
 
     tool = _tool(tmp_path, WORKING_STRATEGY)
     for outside in ("20250101", "20260101"):
-        with pytest.raises(ToolError, match="outside the research period"):
+        with pytest.raises(ToolError, match="outside the research years"):
             tool.invoke({"start": outside})
     with pytest.raises(ToolError, match="must be a YYYYMMDD string"):
         tool.invoke({"start": 20251010})

@@ -256,7 +256,7 @@ class DeterministicBaselineDeveloper:
                 source, models_path=None
             )
             validation = self.evaluator.evaluate(
-                request.validation.request(
+                request.full_span.request(
                     typed_revision, schedule=self.schedule, broker_profile=self.broker_profile
                 )
             )
@@ -265,7 +265,7 @@ class DeterministicBaselineDeveloper:
                     f"{prefix}__valid_{index:03d}",
                     typed_revision.revision_id,
                     validation,
-                    span=request.validation.label,
+                    span=request.full_span.label,
                 )
             )
         return ResearchSessionResult(

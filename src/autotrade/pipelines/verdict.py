@@ -240,43 +240,6 @@ def residual_reading(
     return {"series": series, **residual_statistics(*rows.T, alpha=alpha), "dropped_days": dropped}
 
 
-def ablation_increment(
-    nominee: Mapping[str, object],
-    ablation: Mapping[str, object],
-    *,
-    start: str,
-    end: str,
-    alpha: float,
-) -> dict[str, object]:
-    """What the line an ablation changes adds, over a slice of two replays.
-
-    :func:`residual_statistics` of the frozen book's graded series minus its
-    ablation's, day by day, on the three legs of the book's sidecar, and its
-    t-statistic, the residual information ratio × √years. Reported, never
-    judged: no condition reads it, so it carries no bar. ``ValueError`` when
-    the two grade different series or replayed different days, or as
-    :func:`residual_statistics` raises.
-    """
-
-    start, end = _span(start, end)
-    (book, series), (control, other) = _graded(nominee), _graded(ablation)
-    if series != other:
-        raise ValueError(f"the book grades its {series} series and its ablation its {other} series")
-    mine = dict(_strategy_returns(book, start, end))
-    theirs = dict(_strategy_returns(control, start, end))
-    if mine.keys() != theirs.keys():
-        raise ValueError("the book and its ablation replayed different days")
-    difference = {**book, "strategy_daily": [[day, value - theirs[day]] for day, value in mine.items()]}
-    rows, dropped = _regression_rows(difference, start, end)
-    reading = residual_statistics(*rows.T, alpha=alpha)
-    del reading["bar"]
-    return {
-        "series": series,
-        **reading,
-        "dropped_days": dropped,
-        "t_statistic": reading["residual_information_ratio"] * math.sqrt(reading["years"]),
-    }
-
 
 def _reported_residual(
     analysis: Mapping[str, object], *, start: str, end: str, alpha: float
@@ -687,7 +650,6 @@ class ConditionStage(StrEnum):
     REGISTRATION = "registration"
     FREEZE = "freeze"
     SEEDS = "seeds"
-    ABLATION = "ablation"
     SEALED = "sealed"
     VALIDITY = "validity"
 
@@ -707,8 +669,6 @@ class ConditionReason(StrEnum):
     FREEZE_BETA_OUTSIDE_BAND = "freeze_beta_outside_band"
     FREEZE_SEED_REPLICATE_INVALID = "freeze_seed_replicate_invalid"
     FREEZE_TOO_FEW_SEED_REPLICATES = "freeze_too_few_seed_replicates"
-    FREEZE_ABLATION_INVALID = "freeze_ablation_invalid"
-    FREEZE_ABLATION_MISSING = "freeze_ablation_missing"
     SEALED_STRATEGY_ERROR = "sealed_strategy_error"
     SEALED_UNMEASURABLE = "sealed_unmeasurable"
     SEALED_RESIDUAL_IR_BELOW_BAR = "sealed_residual_ir_below_bar"
@@ -793,10 +753,6 @@ CONDITIONS: tuple[Condition, ...] = (
     # none, unless the nomination declared its package deterministic.
     Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_SEED_REPLICATE_INVALID, lambda m, t: not _refused_replicate(m)),
     Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_TOO_FEW_SEED_REPLICATES, lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
-    # The nominee's ablation (``experiment._ablation``): named exactly where
-    # the rules require one, and then the nominee with one line changed.
-    Condition(ConditionStage.ABLATION, ConditionReason.FREEZE_ABLATION_INVALID, lambda m, t: "problem" not in m),
-    Condition(ConditionStage.ABLATION, ConditionReason.FREEZE_ABLATION_MISSING, lambda m, t: "step_id" in m or not m["required"]),
     # The sealed gate (:func:`sealed_slice`): the frozen book's residual IR
     # over the sealed years against its bar, unread when the book raised or
     # its own series left nothing to read.
@@ -1107,10 +1063,10 @@ def sealed_slice(
         reading = residual_reading(analysis, start=start, end=end, alpha=rules.alpha)
     except ExactFit as exc:
         measured = {"start": start, "end": end, "unmeasurable": True, "error": str(exc), **readings}
-        thresholds = {"alpha": rules.alpha, "sealed_years": rules.sealed_years}
+        thresholds = {"alpha": rules.alpha}
         return {**measured, "reasons": judge(ConditionStage.SEALED, measured, thresholds), "thresholds": thresholds}
     measured = {"start": start, "end": end, **reading, **readings}
-    thresholds = {"alpha": rules.alpha, "bar": reading["bar"], "sealed_years": rules.sealed_years}
+    thresholds = {"alpha": rules.alpha, "bar": reading["bar"]}
     return {**measured, "reasons": judge(ConditionStage.SEALED, measured, thresholds), "thresholds": thresholds}
 
 
