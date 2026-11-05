@@ -79,6 +79,7 @@ def _experiment(
                 # The local model the tests' VLLM credential serves; a file
                 # that leaves the roles out runs on the hosted default.
                 "model": LOCAL_QWEN_MODEL,
+                "subagent_model": LOCAL_QWEN_MODEL,
                 "compact_model": LOCAL_QWEN_MODEL,
                 "data_backend": "daily",
                 "initial_control_mode": "auto",
@@ -103,13 +104,14 @@ def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
 ) -> None:
     """The worker keeps no fallback of its own: a key the file leaves out
     reads the parameter's one declared default, the value a console create
-    stamps, so such a file runs as a console-created arm does."""
+    stamps, so such a file runs as a console-created arm does -- each model
+    role its own, the sub-agents not following the main model."""
     from autotrade.environment.llm import effective_max_output_tokens
     from autotrade.pipelines.worker import resolve_worker_options
 
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
-    for role in ("model", "compact_model"):
+    for role in ("model", "subagent_model", "compact_model"):
         params.pop(role)
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo, preflight=True)
 
@@ -181,6 +183,7 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     params.update(
         {
             "model": "deepseek-flash",
+            "subagent_model": "deepseek-flash",
             "compact_model": "deepseek-flash",
             "reasoning_effort": "medium",
             "no_thinking": True,
@@ -230,7 +233,9 @@ def test_worker_accepts_and_ignores_the_retired_nl_params(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
-    params.update({"model": "deepseek-flash", "compact_model": "deepseek-flash"})
+    params.update(
+        {"model": "deepseek-flash", "subagent_model": "deepseek-flash", "compact_model": "deepseek-flash"}
+    )
     path.write_text(json.dumps(params), encoding="utf-8")
     current = load_worker_options(experiment, repo_root=repo)
 
@@ -472,7 +477,7 @@ def test_worker_derives_the_compaction_threshold_from_the_model_context(
     monkeypatch,
 ):
     """The default threshold is window − output ceiling − margin, and a
-    configured value is clamped to that same bound."""
+    configured value above that same bound is refused, not clamped."""
     from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
     from autotrade.pipelines.worker import COMPACTION_SAFETY_MARGIN_TOKENS
 
@@ -494,6 +499,12 @@ def test_worker_derives_the_compaction_threshold_from_the_model_context(
     path.write_text(json.dumps(params), encoding="utf-8")
     assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == derived
     params["compact_token_threshold"] = 300_000
+    path.write_text(json.dumps(params), encoding="utf-8")
+    with pytest.raises(
+        ValueError, match=r"compact_token_threshold 300,000 exceeds the \w+ conversation's bound 221,184"
+    ):
+        load_worker_options(experiment, repo_root=repo)
+    params["compact_token_threshold"] = derived
     path.write_text(json.dumps(params), encoding="utf-8")
     assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == derived
     params["compact_token_threshold"] = 90_000
@@ -524,12 +535,12 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     options = load_worker_options(experiment, repo_root=repo)
     # 1,048,576 − 32,768 output ceiling − 8,192 margin: shipped defaults launch.
     assert options.llm.compaction.token_threshold == 1_007_616
-    # A file without the key reads the parameter's one default, the value a
-    # console create stamps, as a console-created arm does.
+    # A file without the key reads the parameter's one default, the null a
+    # console create stamps, so it derives the same bound.
+    assert WEB_CREATE_DEFAULTS["compact_token_threshold"] is None
     params.pop("compact_token_threshold")
     path.write_text(json.dumps(params), encoding="utf-8")
-    stamped = WEB_CREATE_DEFAULTS["compact_token_threshold"]
-    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == stamped
+    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == 1_007_616
     params["disable_context_compact"] = True
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)
@@ -537,43 +548,45 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
 
 
 
-def test_worker_refuses_a_gpt6_conversation_that_could_outgrow_the_short_tier(
+def test_a_console_default_arm_compacts_gpt6_astra_at_its_maximum(
     tmp_path: Path,
     monkeypatch,
 ):
-    """The relay bills gpt-6 prompts past 272,000 tokens at a tier the spend
-    cap does not price, so every conversation on or compacted by a gpt-6 id
-    must compact at or below 221,184 -- a console-created arm included."""
+    """No billing tier bounds the threshold: the spend cap prices the relay's
+    long-context tier, so the console's default roles -- gpt-6-astra main,
+    DeepSeek-V4.1-Flash sub-agents and compaction -- compact at their window
+    bound, and only a stated value above that bound is refused."""
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
+    for role in ("model", "subagent_model", "compact_model"):
+        params[role] = WEB_CREATE_DEFAULTS[role]
+    params["compact_token_threshold"] = WEB_CREATE_DEFAULTS["compact_token_threshold"]
     monkeypatch.setenv("LIGHTING_API_KEY", "relay-test-key")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
-    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
 
     def load(**overrides: object):
         params.update(overrides)
         path.write_text(json.dumps(params), encoding="utf-8")
         return load_worker_options(experiment, repo_root=repo).llm
 
-    # Derived from the windows (null): the local compaction model, at the
-    # default 10,000-token compaction budget, bounds the gpt-6 parent at
-    # 262,144 - 10,000 - 8,192 = 243,952, past the priced tier.
-    with pytest.raises(ValueError, match=r"compact_token_threshold must be at most 221,184 .*main.*gpt-6\.1-sol.*243,952"):
-        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=None)
-    assert load(compact_token_threshold=221_184).compaction.token_threshold == 221_184
-    with pytest.raises(ValueError, match="compact_token_threshold must be at most"):
-        load(compact_token_threshold=221_185)
-    # A sub-agent conversation on gpt-6, or a gpt-6 compaction model reading a
-    # DeepSeek conversation, is held to the same bound.
-    with pytest.raises(ValueError, match=r"subagent conversation runs on or is compacted by gpt-6-luna"):
-        load(model="deepseek-flash", subagent_model="gpt-6-luna", compact_token_threshold=None)
-    with pytest.raises(ValueError, match=r"main conversation runs on or is compacted by gpt-6-astra"):
-        load(subagent_model="deepseek-flash", compact_model="gpt-6-astra")
-    assert load(compact_token_threshold=200_000).compaction.token_threshold == 200_000
-    # Without compaction nothing keeps a gpt-6 conversation below the tier.
-    with pytest.raises(ValueError, match="disable_context_compact"):
-        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL, disable_context_compact=True)
+    settings = load()
+    assert (settings.model, settings.subagent_model, settings.compact_model) == (
+        "gpt-6-astra",
+        "DeepSeek-V4.1-Flash",
+        "DeepSeek-V4.1-Flash",
+    )
+    # 1,000,000 − 32,768 output − 8,192 margin for both conversation roles,
+    # below the DeepSeek compaction model's 1,000,000 − 10,000 − 8,192.
+    assert settings.compaction.token_threshold == 959_040
+    assert settings.compaction_for("subagent").token_threshold == 959_040
+    # A lower stated threshold applies; one past the bound is refused.
+    assert load(compact_token_threshold=500_000).compaction.token_threshold == 500_000
+    with pytest.raises(
+        ValueError, match=r"compact_token_threshold 959,041 exceeds the \w+ conversation's bound 959,040"
+    ):
+        load(compact_token_threshold=959_041)
+    # Compaction may be switched off on gpt-6-astra like on any other model.
+    assert load(compact_token_threshold=None, disable_context_compact=True).compact_enabled is False
 
 
 def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
@@ -627,10 +640,16 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     settings = settings_for(compact_model="deepseek-flash")
     assert settings.compaction.token_threshold == 1_007_616
     assert settings.compaction_for("subagent").token_threshold == 221_184
-    # A configured threshold is clamped per role.
-    settings = settings_for(compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=230_000)
-    assert settings.compaction.token_threshold == 230_000
-    assert settings.compaction_for("subagent").token_threshold == 221_184
+    # A stated threshold holds for every conversation role, so it is refused
+    # past the narrowest role's bound and applies to both below it.
+    with pytest.raises(
+        ValueError, match=r"compact_token_threshold 230,000 exceeds the subagent conversation's bound 221,184"
+    ):
+        settings_for(compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=230_000)
+    settings = settings_for(compact_token_threshold=200_000)
+    assert settings.compaction.token_threshold == 200_000
+    assert settings.compaction_for("subagent").token_threshold == 200_000
+    settings_for(compact_token_threshold=None)
     # Every gateway is validated at create preflight without credentials.
     monkeypatch.delenv("DEEPSEEK_API_KEY")
     monkeypatch.delenv("VLLM_API_KEY")

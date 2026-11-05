@@ -16,8 +16,9 @@ not parameters. A missing key takes its field's default. That is the
 parameter's one default: the console stamps it at creation, and the worker
 reads it for a file that leaves the key out (:func:`read_param`), so an arm
 created before a parameter existed still loads and runs on it. A parameter
-the worker derives from another one when unset says so beside its field (the
-sub-agent role runs on the main model, :func:`session_models`).
+the worker derives from another one when unset says so beside its field (a
+worker-side ``llm_model`` stands in for an unset main model,
+:func:`session_models`).
 """
 
 from __future__ import annotations
@@ -42,7 +43,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm.lighting import (
     DEEPSEEK_FLASH_MODEL,
-    SHORT_TIER_MAX_COMPACTION_THRESHOLD,
+    GPT_ASTRA_MODEL,
 )
 from autotrade.environment.llm.model_profiles import (
     AGENT_MAX_OUTPUT_TOKENS,
@@ -250,11 +251,10 @@ class BrokerParams:
 class AgentParams:
     """The session's models and context management (``worker.LLMWorkerSettings``)."""
 
-    # The conversation roles run on the relay's DeepSeek-V4.1-Flash: hosted
-    # APIs are the operating default, the local model the fallback once the
-    # API quota is exhausted.
-    model: str = _param(DEEPSEEK_FLASH_MODEL)
-    # Left out or empty: the main model (:func:`session_models`).
+    # The main conversation runs on the relay's gpt-6-astra, the sub-agents
+    # and compaction on its DeepSeek-V4.1-Flash: hosted APIs are the operating
+    # default, the local model the fallback once the API quota is exhausted.
+    model: str = _param(GPT_ASTRA_MODEL)
     subagent_model: str = _param(DEEPSEEK_FLASH_MODEL)
     compact_model: str = _param(DEEPSEEK_FLASH_MODEL)
     # Which relay credential the arm's calls start on (``primary`` or
@@ -263,11 +263,11 @@ class AgentParams:
     reasoning_effort: str = _param("xhigh")
     no_thinking: bool = _param(False)
     disable_context_compact: bool = _param(False)
-    # The value the local model's window derives (262,144 - 32,768 - 8,192),
-    # which is also the most a conversation touching the relay's gpt-6 tier may
-    # use: with the 1M-window default roles the derived bound would be 959,040.
-    # Null still derives it per role.
-    compact_token_threshold: int | None = _param(SHORT_TIER_MAX_COMPACTION_THRESHOLD)
+    # Null: each conversation role compacts at its bound, its model's and the
+    # compaction model's window less the output budget and a margin
+    # (``worker.LLMWorkerSettings.compaction_for``). A value is a lower
+    # threshold; one above the bound is refused.
+    compact_token_threshold: int | None = _param()
     compact_keep_recent_messages: int = _param(10)
     compact_max_tokens: int = _param(10_000)
     compact_max_calls: int = _param(10)
@@ -566,15 +566,13 @@ def read_param_or_default(params: Mapping[str, object], name: str) -> object:
 def session_models(params: Mapping[str, object]) -> tuple[str, str, str]:
     """The models an arm's main, sub-agent and compaction roles run on.
 
-    A role the file leaves out or empty takes its default, except that a
-    worker-side ``llm_model`` stands in for the main role and the sub-agent
-    role runs on the main model.
+    A role the file leaves out or empty takes its own default, except that
+    a worker-side ``llm_model`` stands in for the main role.
     """
 
-    main = str(params.get("model") or params.get("llm_model") or PARAMETERS["model"].default)
     return (
-        main,
-        str(params.get("subagent_model") or main),
+        str(params.get("model") or params.get("llm_model") or PARAMETERS["model"].default),
+        str(read_param_or_default(params, "subagent_model")),
         str(read_param_or_default(params, "compact_model")),
     )
 

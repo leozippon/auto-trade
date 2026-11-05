@@ -183,12 +183,13 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "reasoning_effort": "xhigh",
     "inference_time": "08:30",
     "strategy_period": "day",
-    # Every model role, as the console defaults it: the relay's
-    # DeepSeek-V4.1-Flash. A role an arm does not name runs on these; spelled
-    # out as literals on purpose, since a change of a console default is
-    # exactly the drift this has to catch. An arm that wants the local model
-    # for a role names it.
-    "model": "DeepSeek-V4.1-Flash",
+    # Every model role, as the console defaults it: the relay's gpt-6-astra
+    # for the main conversation, its DeepSeek-V4.1-Flash for the sub-agents
+    # and compaction. A role an arm does not name runs on these; spelled out
+    # as literals on purpose, since a change of a console default is exactly
+    # the drift this has to catch. An arm that wants the local model for a
+    # role names it.
+    "model": "gpt-6-astra",
     "subagent_model": "DeepSeek-V4.1-Flash",
     "compact_model": "DeepSeek-V4.1-Flash",
     # Left to the console, which stamps the boards the arm's initial cash

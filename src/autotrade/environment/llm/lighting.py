@@ -28,7 +28,7 @@ from .openai_compatible import (
     _provider_response_validation_error,
     load_env_value,
 )
-from .pricing import TokenPrices
+from .pricing import LongContextTier, TokenPrices
 from .proxy import (
     ChatMessage,
     LLMProxy,
@@ -54,13 +54,15 @@ DEFAULT_BASE_URL = "https://lightingtheword.com/v1"
 RESPONSES_DIALECT = "openai-responses"
 CHAT_DIALECT = "openai"
 DEEPSEEK_DIALECT = "deepseek"
-# The relay's DeepSeek: the console's default for every conversation role
-# (pipelines.hitl_state.WEB_CREATE_DEFAULTS).
+# The console's defaults (pipelines.hitl_state.WEB_CREATE_DEFAULTS): the
+# relay's gpt-6-astra for the main conversation, its DeepSeek for the
+# sub-agents and compaction.
+GPT_ASTRA_MODEL = "gpt-6-astra"
 DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 
 # (relay model id, request dialect, context window, max output tokens, list
 # prices). Every relay id declares a 1M window, with the relay's own completion
-# ceilings; for the gpt-6 ids that is the project owner's figure (2026-10-14),
+# ceilings; for gpt-6-astra that is the project owner's figure (2026-10-14),
 # backed by the relay pricing a tier past 272k but, as of that date, not probed
 # with such a request, and gemini-4-argon's upstream refuses a maxOutputTokens
 # above 1,048,576 (probed 2026-10-26), more than the window, which bounds it
@@ -68,24 +70,34 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # Prices are USD per million uncached prompt / cached prompt / completion /
 # cache-write tokens from the relay's public
 # ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
-# gemini-4-argon's and the gpt-6-astra and gpt-6-luna cache writes as of
+# gemini-4-argon's prices and gpt-6-astra's cache write as of
 # 2026-10-26 (``pricing_version`` a42d372c): a dated snapshot, refreshed by
-# hand when the relay's ``pricing_version`` moves. The gpt-6 ids bill a
-# request by its length: up to 272,000 prompt tokens at the short-context tier
-# listed here, a longer one at twice the prompt and 1.5 times the completion
-# price, which the spend cap does not model -- a conversation on them must
-# compact below that boundary (see LONG_CONTEXT_TIER_MODELS). gemini-4-argon
-# bills one tier at any length. DeepSeek-V4.1-Flash is listed at its
-# weekday-peak rate (off-peak bills half).
-# Cache writes: the gpt-6 ids' at the relay's own (1.25 times the uncached
+# hand when the relay's ``pricing_version`` moves (unchanged on 2026-11-05).
+# gpt-6-astra bills a request by its length: the short-context tier listed
+# here up to 272,000 prompt tokens, a longer request whole at the
+# long-context tier (GPT_LONG_CONTEXT_TIER), which the spend cap charges too.
+# gemini-4-argon bills one tier at any length. DeepSeek-V4.1-Flash is listed
+# at its weekday-peak rate (off-peak bills half).
+# Cache writes: gpt-6-astra's at the relay's own (1.25 times the uncached
 # prompt); the Claude ids' at 1.25 times the uncached prompt, Anthropic's rate
 # for the 5-minute TTL their breakpoint asks for; gemini-4-argon's price lists
 # no cache-write term, so it stays at the uncached prompt; DeepSeek reports
 # none.
+# The relay's ``billing_expr`` for its gpt-6 ids: ``len <= 272000`` bills the
+# short-context tier, a longer prompt bills the whole request at twice every
+# prompt price (uncached, cached and cache write) and 1.5 times the
+# completion price.
+GPT_LONG_CONTEXT_TIER = LongContextTier(
+    above_prompt_tokens=272_000, prompt_multiplier=2.0, completion_multiplier=1.5
+)
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
-    ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0, 2.5)),
-    ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 12.5)),
-    ("gpt-6-luna", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(0.1, 0.01, 0.5, 0.125)),
+    (
+        GPT_ASTRA_MODEL,
+        RESPONSES_DIALECT,
+        1_000_000,
+        128_000,
+        TokenPrices(10.0, 1.0, 50.0, 12.5, GPT_LONG_CONTEXT_TIER),
+    ),
     ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0, 12.5)),
     ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0, 2.5)),
     ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0, 5.0)),
@@ -99,15 +111,6 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ),
 )
 MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)
-# The ids billed past 272,000 prompt tokens at the long-context tier above.
-# Only compaction keeps a conversation below it, so a conversation on one, or
-# compacted by one, must compact at or below the local arms' threshold
-# (262,144 - 32,768 - 8,192), which leaves 50,816 tokens under the boundary
-# for the prompt estimate's error; the worker refuses a larger one.
-LONG_CONTEXT_TIER_MODELS = tuple(
-    model for model in MODEL_CHOICES if model.startswith("gpt-6")
-)
-SHORT_TIER_MAX_COMPACTION_THRESHOLD = 221_184
 # The Anthropic ids. Their upstream caches only a prefix that ends at an
 # explicit ``cache_control`` breakpoint (the relay's other ids cache on their
 # own), so their requests mark one (see ``_mark_cache_breakpoint``).
@@ -199,7 +202,7 @@ def build_gateway(
                 # hosted Claude ids accept no reasoning control at all,
                 # gemini-4-argon thinks at its upstream default, and the
                 # responses dialect sends no field when thinking is off (the
-                # gpt-6 family has no "none" tier except gpt-6-luna).
+                # relay's gpt-6-astra has no "none" tier).
                 reasoning_effort=(
                     reasoning_effort
                     if thinking_enabled
@@ -823,12 +826,12 @@ __all__ = [
     "BASE_URL_ENV",
     "DEEPSEEK_FLASH_MODEL",
     "DEFAULT_BASE_URL",
+    "GPT_ASTRA_MODEL",
+    "GPT_LONG_CONTEXT_TIER",
     "LLM_KEY_ENVS",
-    "LONG_CONTEXT_TIER_MODELS",
     "MODEL_CHOICES",
     "MODEL_PROFILES",
     "PROVIDER_TEMPERATURE_MODELS",
-    "SHORT_TIER_MAX_COMPACTION_THRESHOLD",
     "LightingProxy",
     "build_gateway",
     "is_credential_failure",

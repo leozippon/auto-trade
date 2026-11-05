@@ -256,6 +256,7 @@ def make_arm(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 # The local model the tests' VLLM credential serves; a file
                 # that leaves the roles out runs on the hosted default.
                 "model": LOCAL_QWEN_MODEL,
+                "subagent_model": LOCAL_QWEN_MODEL,
                 "compact_model": LOCAL_QWEN_MODEL,
                 "initial_cash": 1_000_000,
                 # No tracking_error_cap: a one-name book cannot track CSI 300,

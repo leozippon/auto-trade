@@ -46,8 +46,8 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_keep_recent_messages": 10,
     "compact_max_calls": 10,
     "compact_max_tokens": 10_000,
-    # The local window's derived value; empty would derive it per role.
-    "compact_token_threshold": 221_184,
+    # Null: each conversation role compacts at its bound.
+    "compact_token_threshold": None,
     # Four July-June research years, a forward year, a Held-out quarter.
     "research_start": "20210701",
     "research_end": "20250630",
@@ -65,7 +65,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "max_replay_years": 96,
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
-    "model": "DeepSeek-V4.1-Flash",
+    "model": "gpt-6-astra",
     # The universe reaches the agent unfiltered; the strategy filters itself.
     "screen_boards": (),
     "screen_exclude_new_listed_days": 0,

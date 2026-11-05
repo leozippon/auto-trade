@@ -116,6 +116,7 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
         # The local model the fixture's VLLM credential serves; a file that
         # leaves the roles out runs on the hosted default.
         "model": LOCAL_QWEN_MODEL,
+        "subagent_model": LOCAL_QWEN_MODEL,
         "compact_model": LOCAL_QWEN_MODEL,
         **GEOMETRY.to_record(),
         # Keeps the pinned release to the core datasets the fixture provides.

@@ -85,7 +85,7 @@ CACHE_WRITE_USAGES = {
         },
     },
     # The relay's responses dialect, after its parse adds the shared names.
-    "gpt-6.1-sol": {
+    "gpt-6-astra": {
         "input_tokens": 1_000,
         "output_tokens": 300,
         "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
@@ -100,8 +100,8 @@ CACHE_WRITE_USAGES = {
     [
         # 100 x 4 + 600 x 0.2 + 300 x 20 + 300 x 5.0 (1.25 x 4), per million.
         ("claude-opus-5-5", 0.008020),
-        # 100 x 2 + 600 x 0.1 + 300 x 10 + 300 x 2.5, per million.
-        ("gpt-6.1-sol", 0.004010),
+        # 100 x 10 + 600 x 1 + 300 x 50 + 300 x 12.5, per million.
+        ("gpt-6-astra", 0.020350),
     ],
 )
 def test_cache_writes_are_billed_apart_at_the_write_price(model, spend):
@@ -155,9 +155,46 @@ def test_the_local_model_is_free_and_every_hosted_model_is_priced():
         if profile.provider == "vllm":
             assert profile.prices == FREE, model
         else:
-            assert all(price > 0 for price in profile.prices), model
+            prices = profile.prices
+            listed = (prices.uncached_prompt, prices.cached_prompt, prices.completion, prices.cache_write)
+            assert min(listed) > 0, model
             # A write is never billed below an uncached prompt token.
-            assert profile.prices.cache_write >= profile.prices.uncached_prompt, model
+            assert prices.cache_write >= prices.uncached_prompt, model
+
+
+@pytest.mark.parametrize(
+    ("prompt", "spend"),
+    [
+        # At the relay's boundary the short-context tier:
+        # 62,000 x 10 + 200,000 x 1 + 2,000 x 50 + 10,000 x 12.5, per million.
+        (272_000, 1.045),
+        # One prompt token past it the whole call bills at the long-context
+        # tier, every prompt price doubled and the completion's 1.5 times:
+        # (62,001 x 10 + 200,000 x 1 + 10,000 x 12.5) x 2 + 2,000 x 50 x 1.5.
+        (272_001, 2.04002),
+    ],
+    ids=["short-context", "long-context"],
+)
+def test_a_gpt6_call_past_the_relay_length_boundary_bills_at_its_long_context_tier(
+    prompt, spend
+):
+    """The boundary is the whole prompt, cached and written tokens included,
+    so the cap stays truthful at any compaction threshold."""
+    usage = {
+        "input_tokens": prompt,
+        "output_tokens": 2_000,
+        "input_tokens_details": {"cached_tokens": 200_000, "cache_write_tokens": 10_000},
+        "prompt_tokens": prompt,
+        "completion_tokens": 2_000,
+    }
+    budget = SessionCallBudget(
+        max_calls=4, max_api_spend_usd=50.0, deadline=time.monotonic() + 60
+    )
+    SessionBudgetLLM(
+        _priced("gpt-6-astra", "lighting", [_response(usage)]), budget=budget
+    ).complete(MESSAGES)
+
+    assert budget.api_spend_usd == pytest.approx(spend)
 
 
 def test_a_gateway_outside_the_catalog_is_refused_before_any_call():

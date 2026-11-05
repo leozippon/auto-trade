@@ -172,12 +172,13 @@ def test_a_reader_takes_the_one_declared_default_for_a_key_the_file_leaves_out()
 
 
 def test_the_session_roles_take_their_defaults_and_derive_only_what_they_name() -> None:
-    flash = PARAMETERS["model"].default
-    assert session_models({}) == (flash, flash, PARAMETERS["compact_model"].default)
+    defaults = tuple(PARAMETERS[role].default for role in ("model", "subagent_model", "compact_model"))
+    assert defaults == ("gpt-6-astra", "DeepSeek-V4.1-Flash", "DeepSeek-V4.1-Flash")
+    assert session_models({}) == defaults
+    # Each role left out or empty takes its own default, never another role's.
     assert session_models({"model": "m", "subagent_model": "", "compact_model": None}) == (
         "m",
-        "m",
-        PARAMETERS["compact_model"].default,
+        *defaults[1:],
     )
     # A worker-side llm_model stands in for an empty main role only.
     assert session_models({"llm_model": "x"})[0] == "x"

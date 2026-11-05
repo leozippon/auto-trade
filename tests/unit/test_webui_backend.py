@@ -159,9 +159,13 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "compact_max_calls",
     ]
     assert fields["model"]["choices"] == list(MODEL_CHOICES)
-    # The conversation roles default to the relay's DeepSeek-V4.1-Flash.
-    for role in ("model", "subagent_model", "compact_model"):
-        assert fields[role]["default"] == "DeepSeek-V4.1-Flash", role
+    # The main conversation defaults to the relay's gpt-6-astra, the
+    # sub-agents and compaction to its DeepSeek-V4.1-Flash.
+    assert [fields[role]["default"] for role in ("model", "subagent_model", "compact_model")] == [
+        "gpt-6-astra",
+        "DeepSeek-V4.1-Flash",
+        "DeepSeek-V4.1-Flash",
+    ]
     assert fields["subagent_model"]["choices"] == fields["model"]["choices"]
     # A choice between the relay's two keys, never a variable name.
     assert (fields["llm_key"]["choices"], fields["llm_key"]["default"]) == (
@@ -169,9 +173,8 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "primary",
     )
     assert fields["reasoning_effort"]["default"] == "xhigh"
-    # The local window's derived value, kept by the 1M-window defaults; an
-    # empty field still derives it per role from the model windows.
-    assert fields["compact_token_threshold"]["default"] == 221_184
+    # Empty by default: each conversation role compacts at its bound.
+    assert fields["compact_token_threshold"]["default"] is None
     assert fields["compact_token_threshold"]["optional"] is True
     assert fields["compact_keep_recent_messages"]["default"] == 10
     assert fields["compact_max_tokens"]["default"] == 10_000
@@ -271,7 +274,11 @@ def test_cli_exposes_distinct_session_and_subagent_model_choices() -> None:
     parser = argparse.ArgumentParser()
     add_model_arguments(parser)
     defaults = parser.parse_args([])
-    assert defaults.model == defaults.subagent_model == WEB_CREATE_DEFAULTS["model"]
+    assert (defaults.model, defaults.subagent_model, defaults.compact_model) == (
+        WEB_CREATE_DEFAULTS["model"],
+        WEB_CREATE_DEFAULTS["subagent_model"],
+        WEB_CREATE_DEFAULTS["compact_model"],
+    )
     assert not hasattr(defaults, "nl_model")
     assert not hasattr(defaults, "meta_model")
     mixed = parser.parse_args(
