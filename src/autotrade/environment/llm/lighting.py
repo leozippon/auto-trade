@@ -54,8 +54,10 @@ DEFAULT_BASE_URL = "https://lightingtheword.com/v1"
 RESPONSES_DIALECT = "openai-responses"
 CHAT_DIALECT = "openai"
 DEEPSEEK_DIALECT = "deepseek"
-# The relay's DeepSeek: the console's default for every conversation role
-# (pipelines.hitl_state.WEB_CREATE_DEFAULTS).
+# The console's defaults (pipelines.hitl_state.WEB_CREATE_DEFAULTS): the
+# relay's gpt-6-astra for the main conversation, its DeepSeek for the
+# sub-agents and compaction.
+GPT_ASTRA_MODEL = "gpt-6-astra"
 DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 
 # (relay model id, request dialect, context window, max output tokens, list
@@ -83,7 +85,7 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # no cache-write term, so it stays at the uncached prompt; DeepSeek reports
 # none.
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
-    ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 12.5)),
+    (GPT_ASTRA_MODEL, RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 12.5)),
     ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0, 12.5)),
     ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0, 2.5)),
     ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0, 5.0)),
@@ -821,6 +823,7 @@ __all__ = [
     "BASE_URL_ENV",
     "DEEPSEEK_FLASH_MODEL",
     "DEFAULT_BASE_URL",
+    "GPT_ASTRA_MODEL",
     "LLM_KEY_ENVS",
     "LONG_CONTEXT_TIER_MODELS",
     "MODEL_CHOICES",

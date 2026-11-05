@@ -64,7 +64,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "max_replay_years": 96,
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
-    "model": "DeepSeek-V4.1-Flash",
+    "model": "gpt-6-astra",
     # The universe reaches the agent unfiltered; the strategy filters itself.
     "screen_boards": (),
     "screen_exclude_new_listed_days": 0,

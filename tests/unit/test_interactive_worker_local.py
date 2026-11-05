@@ -79,6 +79,7 @@ def _experiment(
                 # The local model the tests' VLLM credential serves; a file
                 # that leaves the roles out runs on the hosted default.
                 "model": LOCAL_QWEN_MODEL,
+                "subagent_model": LOCAL_QWEN_MODEL,
                 "compact_model": LOCAL_QWEN_MODEL,
                 "data_backend": "daily",
                 "initial_control_mode": "auto",
@@ -103,13 +104,14 @@ def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
 ) -> None:
     """The worker keeps no fallback of its own: a key the file leaves out
     reads the parameter's one declared default, the value a console create
-    stamps, so such a file runs as a console-created arm does."""
+    stamps, so such a file runs as a console-created arm does -- each model
+    role its own, the sub-agents not following the main model."""
     from autotrade.environment.llm import effective_max_output_tokens
     from autotrade.pipelines.worker import resolve_worker_options
 
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
-    for role in ("model", "compact_model"):
+    for role in ("model", "subagent_model", "compact_model"):
         params.pop(role)
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo, preflight=True)
 
@@ -181,6 +183,7 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     params.update(
         {
             "model": "deepseek-flash",
+            "subagent_model": "deepseek-flash",
             "compact_model": "deepseek-flash",
             "reasoning_effort": "medium",
             "no_thinking": True,
@@ -230,7 +233,9 @@ def test_worker_accepts_and_ignores_the_retired_nl_params(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
-    params.update({"model": "deepseek-flash", "compact_model": "deepseek-flash"})
+    params.update(
+        {"model": "deepseek-flash", "subagent_model": "deepseek-flash", "compact_model": "deepseek-flash"}
+    )
     path.write_text(json.dumps(params), encoding="utf-8")
     current = load_worker_options(experiment, repo_root=repo)
 
