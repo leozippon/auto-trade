@@ -75,6 +75,30 @@ def test_a_created_arm_reads_back_to_the_parameters_it_states() -> None:
         assert getattr(owner, name) == (tuple(stated) if isinstance(stated, list) else stated), name
 
 
+def test_an_arm_stamped_under_the_sealed_gate_loads_with_its_retired_rules_ignored() -> None:
+    """An arm created between 2026-11-03 and 11-06 states the sealed gate's
+    rules (``config.OBSOLETE_KEYS``): its params.json still loads, the keys
+    land among the retired parameters and the acceptance rules it resolves to
+    are the same as without them."""
+
+    from autotrade.pipelines.config import OBSOLETE_KEYS, acceptance_for
+
+    current = _created(initial_cash=100_000)
+    stamped = {
+        **current,
+        "sealed_years": 5,
+        "ablation_required": True,
+        "max_replay_years": 144,
+        "finalize_before_deadline_seconds": 900,
+    }
+    assert set(stamped) - set(current) == set(OBSOLETE_KEYS)
+    params = ArmParams.from_record(stamped)
+    assert (params.retired.sealed_years, params.retired.ablation_required) == (5, True)
+    assert (params.retired.max_replay_years, params.retired.finalize_before_deadline_seconds) == (144, 900)
+    assert params.acceptance == ArmParams.from_record(current).acceptance
+    assert acceptance_for(stamped) == acceptance_for(current)
+
+
 def test_an_arm_created_before_a_parameter_existed_still_loads() -> None:
     # An arm of 2026-09-25 as its params.json stands: the retired gate rules
     # and NL parameters, and none of the parameters added since.
