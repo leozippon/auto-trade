@@ -329,35 +329,6 @@ class EndlessPagedClient:
         return common.ApiResult(["trade_date", "ts_code"], [["20261103", str(offset + index)] for index in range(limit)])
 
 
-class BoardMemberClient:
-    """dc_member as the vendor serves it since 2026-11-05: trade_date is
-    required, and a whole day comes ordered by board code (``board_order``
-    overrides the order)."""
-
-    def __init__(self, members, board_order=None):
-        self.members = members  # {(board, trade_date): [con_code, ...]}
-        self.board_order = board_order
-        self.calls = []
-
-    def query(self, api_name, params=None, fields="", retries=5):
-        params = dict(params or {})
-        self.calls.append(params)
-        if "trade_date" not in params:
-            raise RuntimeError(f"{api_name} answered code 50101: 必填参数, trade_date")
-        if params["offset"] > common.VENDOR_MAX_OFFSET:
-            raise RuntimeError(f"{api_name} answered code 50101: offset不能大于{common.VENDOR_MAX_OFFSET}")
-        names = fields.split(",")
-        boards = self.board_order or sorted({board for board, _ in self.members})
-        served = [
-            {"trade_date": params["trade_date"], "ts_code": board, "con_code": code, "name": "x"}
-            for board in boards
-            if params.get("ts_code", board) == board
-            for code in self.members.get((board, params["trade_date"]), [])
-        ]
-        page = served[params["offset"]:params["offset"] + params["limit"]]
-        return common.ApiResult(names, [[row[name] for name in names] for row in page])
-
-
 class FetchStrategyTest(unittest.TestCase):
     def test_a_spec_holds_its_strategy_as_the_member_its_family_dispatches_on(self):
         spec = common.DatasetSpec("income_vip", strategy="period")
@@ -454,74 +425,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             common.query_paged(RepeatingPagedClient(), "daily", {"trade_date": "20200102"}, "trade_date,ts_code", page_limit=1)
 
     def test_query_paged_never_requests_past_the_vendor_offset_cap(self):
-        # dc_member's 20261103 answer needed offset 104000 at 8,000 rows a
-        # page; the vendor refuses it, and five retries cannot change that.
+        # A day of 105,452 rows needs offset 104000 at 8,000 rows a page; the
+        # vendor refuses it, and five retries cannot change that.
         client = EndlessPagedClient()
         with self.assertRaisesRegex(RuntimeError, "runs past the vendor's offset cap 100000"):
-            common.query_paged(client, "dc_member", {"trade_date": "20261103"}, "trade_date,ts_code", page_limit=8000)
+            common.query_paged(client, "top_list", {"trade_date": "20261103"}, "trade_date,ts_code", page_limit=8000)
         self.assertEqual(client.offsets, list(range(0, 96001, 8000)))
-
-    def _write_board_partition(self, dataset, trade_date, boards):
-        rows = pd.DataFrame([{"trade_date": trade_date, "ts_code": board, "con_code": code} for board, code in boards])
-        common.write_parquet(
-            self.raw_dir / dataset / f"trade_date={trade_date}.parquet",
-            rows, api_name=dataset, params={"trade_date": trade_date}, fields=list(rows.columns),
-        )
-
-    def _dc_member_past_the_cap(self, client, trade_dates):
-        # A cap of offset 8 at 4 rows a page: the whole-day pages reach 12 rows.
-        with patch.object(common, "VENDOR_MAX_OFFSET", 8), redirect_stdout(io.StringIO()):
-            download.download_board_members_by_date(
-                client, self.raw_dir, common.BOARD_TRADING_SPECS["dc_member"], trade_dates, True, 4,
-                str(self.root / "ledger.jsonl"),
-            )
-
-    def test_dc_member_pages_the_day_and_fetches_the_boards_past_the_cap_one_by_one(self):
-        self.assertIs(common.BOARD_TRADING_SPECS["dc_member"].strategy, common.FetchStrategy.TRADE_DATE_BOARD_TAIL)
-        # 20261103 holds 16 rows: the pages stop inside BK3. BK4 is a new
-        # board dc_index first quotes on 20261104; the lake's file still names
-        # BK9, which the vendor no longer serves. 20261104 fits in the pages.
-        self._write_board_partition("dc_index", "20261103", [("BK1.DC", ""), ("BK2.DC", ""), ("BK3.DC", "")])
-        self._write_board_partition("dc_index", "20261104", [("BK1.DC", ""), ("BK4.DC", "")])
-        self._write_board_partition("dc_member", "20261103", [("BK1.DC", "000001.SZ"), ("BK9.DC", "000009.SZ")])
-        members = {
-            ("BK1.DC", "20261103"): [f"{index:06d}.SZ" for index in range(5)],
-            ("BK2.DC", "20261103"): [f"{index:06d}.SZ" for index in range(10, 15)],
-            ("BK3.DC", "20261103"): [f"{index:06d}.SZ" for index in range(20, 24)],
-            ("BK4.DC", "20261103"): ["600000.SH", "600004.SH"],
-            ("BK1.DC", "20261104"): ["000001.SZ", "000002.SZ", "000003.SZ"],
-            ("BK4.DC", "20261104"): ["600000.SH", "600004.SH"],
-        }
-        client = BoardMemberClient(members)
-        self._dc_member_past_the_cap(client, ["20261103", "20261104"])
-
-        for trade_date in ("20261103", "20261104"):
-            frame = pd.read_parquet(self.raw_dir / "dc_member" / f"trade_date={trade_date}.parquet")
-            expected = sorted((board, code) for (board, day), codes in members.items() if day == trade_date for code in codes)
-            self.assertEqual(sorted(zip(frame["ts_code"], frame["con_code"], strict=True)), expected)
-        self.assertTrue(all("trade_date" in params and params["offset"] <= 8 for params in client.calls))
-        self.assertEqual(
-            sorted({(params["trade_date"], params["ts_code"]) for params in client.calls if "ts_code" in params}),
-            [("20261103", "BK3.DC"), ("20261103", "BK4.DC"), ("20261103", "BK9.DC")],
-        )
-
-    def test_dc_member_refuses_a_day_past_the_cap_it_cannot_split(self):
-        members = {(board, "20261103"): [f"{index:06d}.SZ" for index in range(5)] for board in ("BK1.DC", "BK2.DC", "BK3.DC")}
-        self._write_board_partition("dc_index", "20261103", [("BK1.DC", ""), ("BK2.DC", ""), ("BK3.DC", "")])
-        cases = (
-            # Out of board order the pages prove no board complete.
-            ("unsorted", BoardMemberClient(members, board_order=["BK3.DC", "BK1.DC", "BK2.DC"]), "20261103: the whole-day pages are not ordered by board code"),
-            # Without dc_index the boards past the cap are unknown.
-            ("no dc_index", BoardMemberClient(members), "20261103 runs past the vendor's offset cap and needs the dc_index partition"),
-        )
-        for label, client, message in cases:
-            with self.subTest(label):
-                if label == "no dc_index":
-                    (self.raw_dir / "dc_index" / "trade_date=20261103.parquet").unlink()
-                with self.assertRaisesRegex(RuntimeError, message):
-                    self._dc_member_past_the_cap(client, ["20261103"])
-                self.assertFalse(any("ts_code" in params for params in client.calls))
-                self.assertFalse((self.raw_dir / "dc_member" / "trade_date=20261103.parquet").exists())
 
     def test_trade_cal_helpers_normalize_date_strings(self):
         path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"

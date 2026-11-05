@@ -444,45 +444,6 @@
     "ts_code",
     "turnover_rate"
    ],
-   "kpl_concept_cons": [
-    "available_at",
-    "available_at_rule",
-    "con_code",
-    "con_name",
-    "dataset",
-    "desc",
-    "hot_num",
-    "name",
-    "trade_date",
-    "ts_code"
-   ],
-   "dc_index": [
-    "available_at",
-    "available_at_rule",
-    "dataset",
-    "down_num",
-    "idx_type",
-    "leading",
-    "leading_code",
-    "leading_pct",
-    "level",
-    "name",
-    "pct_change",
-    "total_mv",
-    "trade_date",
-    "ts_code",
-    "turnover_rate",
-    "up_num"
-   ],
-   "dc_member": [
-    "available_at",
-    "available_at_rule",
-    "con_code",
-    "dataset",
-    "name",
-    "trade_date",
-    "ts_code"
-   ],
    "limit_step": [
     "available_at",
     "available_at_rule",

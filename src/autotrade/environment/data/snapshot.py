@@ -321,9 +321,6 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
         # next-morning labels — descriptive sentiment signals, never a truth
         # source for fills, tradability or risk)
         "kpl_list",
-        "kpl_concept_cons",
-        "dc_index",
-        "dc_member",
         "limit_step",
         "limit_cpt_list",
         "limit_list_ths",
@@ -411,15 +408,16 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
 
 # What a snapshot carries when the experiment selects nothing. Excluded by
 # default and why (measured on the 2025-12-31 decision snapshot; the share is
-# of that domain's rows):
-# - events: dc_member (55.1%) and kpl_concept_cons (6.6%) are concept-board
-#   membership tables, ths_hot/dc_hot (5.6%) are hot-list rankings, moneyflow_dc
+# of that domain's rows at the time, when the events domain still held the
+# concept-board tables retired on 2026-11-05, about 62% of its rows):
+# - events: ths_hot/dc_hot (5.6%) are hot-list rankings, moneyflow_dc
 #   /moneyflow_ths (7.4%) duplicate moneyflow per stock and the moneyflow_ind_*
 #   /moneyflow_cnt_ths series aggregate it by industry, margin_secs (3.0%) is
 #   the eligibility roster behind margin_detail, top10_holders /
 #   top10_floatholders / stk_surv are quarterly holder and survey tables, and
 #   limit_step / limit_cpt_list / limit_list_ths / hm_detail extend the board
-#   cluster past the official limit_list_d. Together 81% of the domain's rows.
+#   cluster past the official limit_list_d. Together about 19% of the
+#   domain's rows.
 # - macro: opt_*/fut_*/cb_* derivatives and convertible bonds (54.9%),
 #   ths_daily and ci_daily duplicate sw_daily's industry-index role (32.7%),
 #   and repo_daily, fx_daily, us_* curves, index_global, shibor_quote,

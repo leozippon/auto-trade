@@ -148,9 +148,6 @@ def benchmark_index_label(ts_code: str) -> str:
 # historical PIT stamp), so the snapshot's board gate simply never matches it.
 BOARD_TRADING_DATASETS = [
     "kpl_list",
-    "kpl_concept_cons",
-    "dc_index",
-    "dc_member",
     "limit_step",
     "limit_cpt_list",
     "limit_list_d",
@@ -435,7 +432,6 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     # Board-trading sources publishing next-day ~08:30: the 08:50 pre-open
     # backfill is their real landing job (the evening node refines backfills).
     "kpl_list": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
-    "kpl_concept_cons": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
     "limit_step": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
     "limit_cpt_list": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
     # limit_list_ths / ths_hot / dc_hot / hm_detail / hm_list land in the
