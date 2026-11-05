@@ -323,7 +323,7 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     # A held name is quoted at the close the account was marked with (20260106: 12.50).
     assert "总资产 ¥100,149.89，现金 ¥98,899.89，持仓 1 只" in text
     assert "### 上午 · 开盘集合竞价 09:15–09:25 申报 · 按开盘价成交（1 笔）" in text
-    assert "| 卖出 | 000001.SZ | 平安银行 | 100 | 12.50 | ¥1,250.00 | 上午 开盘集合竞价 09:15–09:25 |" in text
+    assert "| 卖出 | 000001.SZ | 平安银行 | 100 | 开盘 | — | 12.50 | ¥1,250.00 | 上午 开盘集合竞价 09:15–09:25 |" in text
     assert "## 成交后目标持仓（0 只）" in text
     assert "重放此前决策 2 次，其中 2 次与模拟账户记录的订单一致" in text
     idle = render_orders(sheet_book, "20260106")
@@ -375,7 +375,8 @@ def test_every_order_names_the_auction_it_is_placed_in_whatever_its_side(
     [row] = sheet["orders"]
     assert (row["window"], row["window_label"], row["time"], row["session"]) == (window, line, clock, "20260105")
     side = "买入" if action == "buy" else "卖出"
-    assert f"| {side} | 000001.SZ | 平安银行 | 100 | 10.50 | ¥1,050.00 | {line} |" in text
+    cell = "开盘" if window == "open_auction" else "收盘"
+    assert f"| {side} | 000001.SZ | 平安银行 | 100 | {cell} | — | 10.50 | ¥1,050.00 | {line} |" in text
     assert heading in text and "分 " not in text.split("## 订单", 1)[1].split("\n", 1)[0]
     # The wrong statements are gone: nothing is placed "from 09:30", and the
     # book is not said to fill everything at the open.
@@ -402,6 +403,48 @@ def test_a_sheet_placed_in_two_sittings_says_so_before_its_first_table(tmp_path:
         "### 下午 · 收盘集合竞价 14:57–15:00 申报 · 按收盘价成交（1 笔）",
     ]
     assert "09:20–09:25 只能申报、不能撤单" in text and "申报后不能撤单" in text
+
+
+SESSION_STRATEGY = """def generate_orders(context):
+    day = context.inference_at.strftime("%Y-%m-%d")
+
+    def order(clock, **fields):
+        return {"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T" + clock + ":00+08:00", **fields}
+
+    return [
+        order("15:00", session="close"),
+        order("09:30", session="intraday"),
+        order("09:30", session="intraday", limit_price=10.2),
+        order("09:30", session="open"),
+    ]
+"""
+
+
+def test_each_order_shows_its_session_and_a_day_limit_order_its_limit(tmp_path: Path):
+    """The opening auction first, then the day limit orders entered in the
+    same window, then the orders worked through the day, then the close."""
+
+    book = _Book(tmp_path, SESSION_STRATEGY, sessions=("20260102", *SESSIONS))
+    book.run("20260105")
+    sheet = order_sheet(book.root, "20260105")
+    text = render_orders(_sheet_book(book), "20260105")
+    assert [(row["window"], row["limit_price"]) for row in sheet["orders"]] == [
+        ("open_auction", None), ("day_limit", 10.2), ("intraday", None), ("close_auction", None),
+    ]
+    assert [line for line in text.splitlines() if line.startswith("### ")] == [
+        "### 上午 · 开盘集合竞价 09:15–09:25 申报 · 按开盘价成交（1 笔）",
+        "### 上午 · 当日限价单 09:15–09:25 申报 · 触及限价时按限价或更优的开盘价成交（1 笔）",
+        "### 全天 · 盘中分批 09:30–15:00 申报 · 按全天成交均价成交（1 笔）",
+        "### 下午 · 收盘集合竞价 14:57–15:00 申报 · 按收盘价成交（1 笔）",
+    ]
+    for line in (
+        "| 买入 | 000001.SZ | 平安银行 | 100 | 开盘 | — | 10.50 | ¥1,050.00 | 上午 开盘集合竞价 09:15–09:25 |",
+        "| 买入 | 000001.SZ | 平安银行 | 100 | 盘中 | 10.20 | 10.50 | ¥1,050.00 | 上午 当日限价单 09:15–09:25 |",
+        "| 买入 | 000001.SZ | 平安银行 | 100 | 盘中 | — | 10.50 | ¥1,050.00 | 全天 盘中分批 09:30–15:00 |",
+        "| 买入 | 000001.SZ | 平安银行 | 100 | 收盘 | — | 10.50 | ¥1,050.00 | 下午 收盘集合竞价 14:57–15:00 |",
+    ):
+        assert line in text
+    assert "限价怎么填" in text
 
 
 def test_an_order_for_a_later_session_says_which_day_it_is_placed_on(tmp_path: Path):
