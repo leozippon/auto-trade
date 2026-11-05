@@ -1956,14 +1956,6 @@ def text_pit_rules() -> dict[str, dict[str, str]]:
 
 def expected_text_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
-    # A frozen interface can never gain a partition past the day its access
-    # was withdrawn. Expecting one turns an accepted, documented loss into a
-    # nightly error that grows by one day forever, which buries the findings
-    # that still mean something. The history it does hold stays audited.
-    if spec.frozen_through:
-        end_date = min(end_date, spec.frozen_through)
-        if end_date < start:
-            return set()
     if spec.strategy in {FetchStrategy.RANGE_MONTH, FetchStrategy.TIME_RANGE_MONTH}:
         months = [month for _, _, month in month_windows(start, end_date)]
         if spec.strategy == FetchStrategy.TIME_RANGE_MONTH:
@@ -1994,13 +1986,6 @@ def audit_text_completeness(raw_dir: Path, args: argparse.Namespace, add) -> Non
         "datasets": datasets,
         "start_date": args.text_start_date,
         "end_date": text_end,
-        # Datasets whose access the vendor withdrew: history retained and
-        # audited, no partition expected past the stated day.
-        "frozen_through": {
-            dataset: TEXT_SPECS[dataset].frozen_through
-            for dataset in datasets
-            if TEXT_SPECS[dataset].frozen_through
-        },
         "dataset_pit_rules": text_pit_rules(),
     })
     for dataset in datasets:

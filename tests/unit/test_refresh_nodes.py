@@ -18,7 +18,7 @@ from autotrade.data_sources.tushare.common import (
     INTRADAY_DATASETS,
     MACRO_REGIME_DEFAULT_DATASETS,
     REFERENCE_DATASETS,
-    TEXT_FETCHABLE_DATASETS,
+    TEXT_DATASETS,
     TEXT_SPECS,
 )
 from autotrade.environment.data.contracts import (
@@ -30,6 +30,7 @@ from autotrade.environment.data.contracts import (
     MACRO_DATASET_REFRESH_NODES,
     REFRESH_NODES,
     TEXT_DATASET_REFRESH_NODES,
+    TEXT_NODE,
     default_tushare_contracts,
     domain_visible_cutoff,
     event_dataset_visible_cutoff,
@@ -101,7 +102,7 @@ TIER_DATASETS = {
     "intraday": INTRADAY_DATASETS,
     "event_flow": EVENT_FLOW_DATASETS,
     "board_trading": BOARD_TRADING_DEFAULT_DATASETS,
-    "text_evidence": TEXT_FETCHABLE_DATASETS,
+    "text_evidence": TEXT_DATASETS,
     "macro": MACRO_REGIME_DEFAULT_DATASETS,
     "global": GLOBAL_CONTEXT_DEFAULT_DATASETS,
 }
@@ -349,26 +350,20 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             domain_visible_cutoff("auction", datetime(2022, 1, 5, 20, 0, tzinfo=CN_TZ))
         )
 
-    def test_no_job_requests_a_frozen_text_interface(self) -> None:
-        # The token lost access to every text interface but report_rc, so a
-        # scheduled job naming one of the others fails the whole run and leaves
-        # the raw lake dirty. The text tier default must not name one either.
-        frozen = {name for name, spec in TEXT_SPECS.items() if spec.frozen_through}
-        self.assertTrue(frozen)
-        self.assertEqual(set(TEXT_FETCHABLE_DATASETS) & frozen, set())
+    def test_every_text_dataset_is_landed_by_the_job_its_node_names(self) -> None:
+        # A text dataset rolls on its node's cutoff, so the job of that node
+        # must download it: otherwise the replay keeps granting visibility to
+        # a feed nothing lands, and the lake goes quietly stale behind it (the
+        # seven relay-lost interfaces sat between 2026-09-10 and 2026-11).
         jobs = json.loads(CRON_SCHEDULE.read_text(encoding="utf-8"))["jobs"]
-        for name, job in jobs.items():
-            selected = self._job_datasets(job)
-            if selected is None:
-                continue
-            self.assertEqual(
-                selected & frozen, set(), f"job {name!r} requests frozen text interfaces"
-            )
+        for dataset in TEXT_SPECS:
+            for node_name in TEXT_DATASET_REFRESH_NODES.get(dataset, (TEXT_NODE,)):
+                self.assertIn(dataset, self._job_datasets(jobs[node_name]), node_name)
 
     def test_retired_text_backfill_leaves_no_node_behind(self) -> None:
         # The 08:55 short-text backfill only ever landed cctv_news and news.
-        # With both frozen the job is gone, and so must its node be: a node
-        # without a job would grant replay visibility no ingestion produces.
+        # The job is gone, and so must its node be: a node without a job
+        # would grant replay visibility no ingestion produces.
         self.assertNotIn("cn_preopen_text_backfill_0855", REFRESH_NODES)
         self.assertNotIn("cn_preopen_text_backfill_0855", _cron_jobs())
         self.assertEqual(TEXT_DATASET_REFRESH_NODES, {"anns_d": ("cn_nightly_anns_full",)})

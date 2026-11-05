@@ -36,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 
 from autotrade.common.time import CN_TZ
-from autotrade.data_sources.tushare.common import STK_MINS_BY_DATE_DATASET, TEXT_SPECS
+from autotrade.data_sources.tushare.common import STK_MINS_BY_DATE_DATASET
 from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
     EVENING_NODE,
@@ -60,12 +60,11 @@ REFUSING_ISSUES = frozenset({"defect", "staged"})
 
 def landing_nodes(config: SnapshotConfig) -> dict[str, tuple[str, ...]]:
     """The refresh nodes that land each raw dataset ``config`` mounts and
-    records a refresh of; frozen text sources and the minute-derived tables
-    have none."""
+    records a refresh of; the minute-derived tables have none."""
 
     nodes: dict[str, tuple[str, ...]] = {}
     for dataset in required_release_raw_datasets(config):
-        if dataset in LOCALLY_DERIVED_DATASETS or (dataset in TEXT_SPECS and TEXT_SPECS[dataset].frozen_through):
+        if dataset in LOCALLY_DERIVED_DATASETS:
             continue
         if dataset in config.events_datasets:
             nodes[dataset] = EVENT_DATASET_REFRESH_NODES.get(dataset, (EVENING_NODE,))

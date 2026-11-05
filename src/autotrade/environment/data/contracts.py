@@ -454,10 +454,10 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "report_rc": (TEXT_NODE,),
 }
 
-# Per-dataset overrides inside the text domain (default = TEXT_NODE). The
-# 08:55 pre-open short-text backfill is retired: the token lost access to
-# cctv_news and news, so no text table gains rows between the evening text
-# jobs and the open, and both follow the evening node for their whole retained
+# Per-dataset overrides inside the text domain (default = TEXT_NODE). There is
+# no pre-open text job (the 08:55 short-text backfill was retired on
+# 2026-09-10), so no text table gains rows between the evening text jobs and
+# the open, and cctv_news and news follow the evening node for their whole
 # history (a later boundary than the 08:55 one they used to get, i.e.
 # conservative, never a look-ahead). anns_d is landed by its own job.
 TEXT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {"anns_d": ("cn_nightly_anns_full",)}

@@ -97,7 +97,7 @@
       "skip_if_already_ok": true
     },
     "cn_nightly_text_full": {
-      "description": "Land the text-evidence tier every calendar evening. Text publishes on weekends and holidays, so its window is natural-day (no end_date_mode) and never resolves to an unchanged range: the job runs on Saturdays and Sundays like any other day. Rolling window with a forced refresh, so late vendor corrections in the trailing month are still picked up. Scope is report_rc alone since 2026-09-10: the token lost access to every other text interface (major_news answers only inside a 40-request/day complimentary trial that one monthly page loop already exceeds), and their history is frozen at 20260813.",
+      "description": "Land the text-evidence tier every calendar evening. Text publishes on weekends and holidays, so its window is natural-day (no end_date_mode) and never resolves to an unchanged range: the job runs on Saturdays and Sundays like any other day. Rolling window with a forced refresh, so late vendor corrections in the trailing month are still picked up. Every text dataset but anns_d (its own job): report_rc from the relay with TUSHARE_TOKEN, the other seven from the official service with TUSHARE_TOKEN_TMP, since the relay lost them on 2026-09-10. The downloader proves official access before it writes, so a missing or refused TUSHARE_TOKEN_TMP fails this job with nothing written (exit 77), report_rc included, and the forced window heals the gap once the token is back.",
       "operation": "download_tier",
       "tier": "text_evidence",
       "end_date_offset_days": 0,
@@ -105,12 +105,19 @@
       "extra_args": [
         "--datasets",
         "report_rc",
+        "major_news",
+        "cctv_news",
+        "npr",
+        "research_report",
+        "irm_qa_sh",
+        "irm_qa_sz",
+        "news",
         "--force"
       ],
       "skip_if_already_ok": true
     },
     "cn_nightly_anns_full": {
-      "description": "Land announcement titles (anns_d) every calendar evening from the official TuShare service with TUSHARE_TOKEN_TMP: the relay's permission for anns_d lapsed on 2026-09-10, and the official copy is the same announcement set (logs/data/anns_official_20261006/). It is its own job so that losing that token stops anns_d alone: the downloader proves access with one request before it writes, and a refusal exits 77, which keeps the raw generation and records an error. Natural-day window with a forced 30-day refresh like the text job, launched at the same 23:15 (the updater lock serialises the two), so anns_d keeps the visibility cutoff it has always had. The window ends on the next calendar day (offset -1): an evening disclosure is dated the following calendar day, and the vendor receives most of them that evening, so the 23:15 run lands every title the replay already shows at the next 08:30 decision. Such a title is stamped at its receive time (augment_text_frame), and the view cuts at the 23:15 launch, so fetching it early never makes it visible early.",
+      "description": "Land announcement titles (anns_d) every calendar evening from the official TuShare service with TUSHARE_TOKEN_TMP: the relay's permission for anns_d lapsed on 2026-09-10, and the official copy is the same announcement set (logs/data/anns_official_20261006/). It is its own job so that no other text dataset can fail it (Paper's title check reads this job's state): the downloader proves access with one request before it writes, and a refusal exits 77, which keeps the raw generation and records an error. Natural-day window with a forced 30-day refresh like the text job, launched at the same 23:15 (the updater lock serialises the two), so anns_d keeps the visibility cutoff it has always had. The window ends on the next calendar day (offset -1): an evening disclosure is dated the following calendar day, and the vendor receives most of them that evening, so the 23:15 run lands every title the replay already shows at the next 08:30 decision. Such a title is stamped at its receive time (augment_text_frame), and the view cuts at the 23:15 launch, so fetching it early never makes it visible early.",
       "operation": "download_tier",
       "tier": "text_evidence",
       "end_date_offset_days": -1,
@@ -1237,26 +1244,20 @@
       "api": "irm_qa_sh",
       "domain": "text_evidence",
       "frequency": "trade_date",
-      "official_update": "投资者互动问答；随发布滚动更新。历史冻结（权限已失）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
+      "official_update": "上证e互动董秘问答；随发布滚动更新。中转权限 2026-09-10 失效，经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_text_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "history_repull": "window_only",
-      "status": "permission_denied",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=364"
+      "doc_ref": "https://tushare.pro/document/2?doc_id=366"
     },
     {
       "dataset": "irm_qa_sz",
       "api": "irm_qa_sz",
       "domain": "text_evidence",
       "frequency": "trade_date",
-      "official_update": "投资者互动问答；随发布滚动更新。历史冻结（权限已失）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
+      "official_update": "深交所互动易董秘问答；随发布滚动更新。中转权限 2026-09-10 失效，经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_text_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "history_repull": "window_only",
-      "status": "permission_denied",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=365"
+      "doc_ref": "https://tushare.pro/document/2?doc_id=367"
     },
     {
       "dataset": "anns_d",
@@ -1273,12 +1274,9 @@
       "api": "major_news",
       "domain": "text_evidence",
       "frequency": "near_realtime",
-      "official_update": "新闻通讯；官方页面提供pub_time，未标固定入库时刻。历史冻结（仅 40 次/天官方赠送试用额度，不在购买范围内）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
+      "official_update": "新闻通讯；官方页面提供pub_time，未标固定入库时刻。中转仅有 40 次/天赠送试用额度，经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_text_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "history_repull": "window_only",
-      "status": "trial_quota_only",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=195"
     },
     {
@@ -1286,12 +1284,9 @@
       "api": "cctv_news",
       "domain": "text_evidence",
       "frequency": "daily",
-      "official_update": "新闻联播文字稿；按日期提取，官方未标具体入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
+      "official_update": "新闻联播文字稿；按日期提取，官方未标具体入库时刻。中转权限 2026-09-10 失效，经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_text_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "history_repull": "window_only",
-      "status": "permission_denied",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=154"
     },
     {
@@ -1299,12 +1294,9 @@
       "api": "npr",
       "domain": "text_evidence",
       "frequency": "event_driven",
-      "official_update": "国家政策法规库；官方页面提供pubtime，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
+      "official_update": "国家政策法规库；官方页面提供pubtime，未标固定入库时刻。中转权限 2026-09-10 失效，经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_text_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "history_repull": "window_only",
-      "status": "permission_denied",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=406"
     },
     {
@@ -1312,12 +1304,9 @@
       "api": "research_report",
       "domain": "text_evidence",
       "frequency": "daily",
-      "official_update": "券商研究报告；增量每天两次更新。历史冻结（权限已失）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
+      "official_update": "券商研究报告；增量每天两次更新。中转权限 2026-09-10 失效，经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_text_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "history_repull": "window_only",
-      "status": "permission_denied",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
       "doc_ref": "https://tushare.pro/document/2?doc_id=415"
     },
     {
@@ -1335,12 +1324,9 @@
       "api": "news",
       "domain": "text_evidence",
       "frequency": "near_realtime",
-      "official_update": "新闻快讯；官方页面提供datetime，未标固定入库时刻。历史冻结（权限已失）：截至 2026-08-13。",
-      "cron_policy": "frozen_history_no_refresh",
+      "official_update": "新闻快讯；官方页面提供datetime，未标固定入库时刻。中转权限 2026-09-10 失效，经官方服务以 TUSHARE_TOKEN_TMP 拉取（cn_nightly_text_full）。",
+      "cron_policy": "evening_open_window_force_refresh_with_revision_ledger",
       "history_repull": "window_only",
-      "status": "permission_denied",
-      "status_since": "2026-09-10",
-      "frozen_through": "20260813",
       "doc_ref": "https://www.tushare.pro/document/41?doc_id=143"
     },
     {

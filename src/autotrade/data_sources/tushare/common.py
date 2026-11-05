@@ -448,8 +448,8 @@ INTEGRATED_DOC_REFS = {
     "ths_member": "https://tushare.pro/document/2?doc_id=261",
     "index_basic": "https://tushare.pro/document/2?doc_id=94",
     "index_weight": "https://tushare.pro/document/2?doc_id=96",
-    "irm_qa_sh": "https://tushare.pro/document/2?doc_id=364",
-    "irm_qa_sz": "https://tushare.pro/document/2?doc_id=365",
+    "irm_qa_sh": "https://tushare.pro/document/2?doc_id=366",
+    "irm_qa_sz": "https://tushare.pro/document/2?doc_id=367",
     "ths_daily": "https://tushare.pro/document/2?doc_id=260",
     "broker_recommend": "https://tushare.pro/document/2?doc_id=337",
     "top10_holders": "https://tushare.pro/document/2?doc_id=61",
@@ -596,11 +596,6 @@ class DatasetSpec:
     # ---- fundamental family ----
     period_param: str = "period"
     # ---- text family ----
-    # Last day this interface can ever cover, set when the vendor withdrew
-    # access. The lake keeps and audits the history it already holds, and a
-    # snapshot can still select it; nothing new will ever land, so the download
-    # default drops it and the audit expects no partition past this day.
-    frozen_through: str = ""
     # Fetched from the official service with OFFICIAL_TOKEN_ENV instead of the
     # relay (the relay's permission for it lapsed).
     official: bool = False
@@ -714,16 +709,13 @@ FUNDAMENTAL_SPECS = {
     ),
 }
 
-# 2026-09-10: the TuShare token lost access to every text interface but
-# ``report_rc``; each of the others answers "没有接口访问权限". ``major_news``
-# still answers, yet the vendor states it is a 40-request/day complimentary
-# trial outside the purchased plan and one monthly page loop alone exceeds
-# that, so it cannot be scheduled either. All of them stop at this day.
-# ``anns_d`` came back on 2026-10-06 through the official service (its
-# ``official`` flag); the relay copy it continues is the same announcement set
-# (logs/data/anns_official_20261006/).
-TEXT_ACCESS_LOST_THROUGH = "20260813"
-
+# The relay token lost every text interface but ``report_rc`` on 2026-09-10
+# (each answers "没有接口访问权限"; ``major_news`` only inside a
+# 40-request/day trial). The others are fetched from the official service
+# (``official``): ``anns_d`` since 2026-10-06, the other seven since 2026-11.
+# The official answers carry the same fields and business keys as the relay
+# copies they continue (logs/data/anns_official_20261006/,
+# logs/research_audit_20261102/stopped_datasets/).
 TEXT_SPECS = {
     "anns_d": DatasetSpec(
         api_name="anns_d",
@@ -739,7 +731,7 @@ TEXT_SPECS = {
     ),
     "major_news": DatasetSpec(
         api_name="major_news",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy=FetchStrategy.TIME_RANGE_MONTH,
         fields="title,pub_time,src,content",
         page_limit=400,
@@ -749,7 +741,7 @@ TEXT_SPECS = {
     ),
     "cctv_news": DatasetSpec(
         api_name="cctv_news",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy=FetchStrategy.DAY,
         fields="date,title,content",
         key_columns=("date", "title"),
@@ -758,7 +750,7 @@ TEXT_SPECS = {
     ),
     "npr": DatasetSpec(
         api_name="npr",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy=FetchStrategy.RANGE_MONTH,
         fields="pubtime,title,pcode,puborg,ptype,url,content_html",
         page_limit=500,
@@ -768,7 +760,7 @@ TEXT_SPECS = {
     ),
     "research_report": DatasetSpec(
         api_name="research_report",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy=FetchStrategy.RANGE_MONTH,
         fields="trade_date,abstr,title,report_type,author,name,ts_code,inst_csname,ind_name,url",
         page_limit=1000,
@@ -788,7 +780,7 @@ TEXT_SPECS = {
     ),
     "irm_qa_sh": DatasetSpec(
         api_name="irm_qa_sh",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy=FetchStrategy.DAY,
         fields="ts_code,name,trade_date,q,a,pub_time",
         key_columns=("trade_date", "ts_code", "q"),
@@ -798,7 +790,7 @@ TEXT_SPECS = {
     ),
     "irm_qa_sz": DatasetSpec(
         api_name="irm_qa_sz",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy=FetchStrategy.DAY,
         fields="ts_code,name,trade_date,q,a,pub_time,industry",
         key_columns=("trade_date", "ts_code", "q"),
@@ -808,7 +800,7 @@ TEXT_SPECS = {
     ),
     "news": DatasetSpec(
         api_name="news",
-        frozen_through=TEXT_ACCESS_LOST_THROUGH,
+        official=True,
         strategy=FetchStrategy.NEWS_SRC_DAY,
         fields="datetime,content,title,channels",
         page_limit=1500,
@@ -818,13 +810,7 @@ TEXT_SPECS = {
     ),
 }
 
-# Two scopes over one registry. ``TEXT_DATASETS`` is every text table the lake
-# holds — what the text audit inventories, keys and PIT-checks, frozen history
-# included. ``TEXT_FETCHABLE_DATASETS`` is what a download can still land, so
-# it is the tier default; naming a frozen dataset there only buys a vendor
-# permission error.
 TEXT_DATASETS = list(TEXT_SPECS)
-TEXT_FETCHABLE_DATASETS = [name for name, spec in TEXT_SPECS.items() if not spec.frozen_through]
 
 MACRO_SPECS = {
     "cn_schedule": DatasetSpec(

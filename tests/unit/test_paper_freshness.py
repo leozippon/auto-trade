@@ -39,6 +39,7 @@ FRESH = {
     "margin": "2026-10-23T01:20:00+00:00",  # Friday's 09:15 pre-open retry
     "stk_holdernumber": "2026-10-25T01:50:00+00:00",  # Sunday's 09:45 disclosure run
     "anns_d": "2026-10-25T15:20:00+00:00",  # Sunday's 23:15 titles run
+    "research_report": "2026-10-25T15:20:00+00:00",  # Sunday's 23:15 text run
 }
 
 
