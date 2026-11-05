@@ -1,4 +1,4 @@
-"""Rolling Timeview (docs/environment-design.md).
+"""Rolling Timeview (docs/ENVIRONMENT_DESIGN.md).
 
 Replays the real local-DB refresh cadence so a strategy at any tick sees only the
 data its landing cron job has already written. Each agent-readable parquet domain

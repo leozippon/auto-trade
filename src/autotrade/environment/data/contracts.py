@@ -166,7 +166,7 @@ BOARD_TRADING_DATASETS = [
 
 # Close-published daily tables: the row is public on its data date, after the
 # close at the latest, so the daily core and the same-day macro tables below
-# share one stamp (docs/data-documentation.md §3.3).
+# share one stamp (docs/DATA_DOCUMENTATION.md §3.3).
 CLOSE_PUBLISHED_TIME = time(17, 30)
 
 
@@ -303,7 +303,7 @@ MACRO_DATASET_CONTRACTS: dict[str, DatasetContract] = {
 }
 
 
-# ---- Timeview refresh nodes (docs/environment-design.md) ----
+# ---- Timeview refresh nodes (docs/ENVIRONMENT_DESIGN.md) ----
 #
 # The Timeview replays the real local-DB refresh cadence: a dataset row
 # is visible only once the cron job that lands it has finished writing. Each node

@@ -1,4 +1,4 @@
-"""Argument groups for ``run_audit_session.py`` (docs/pipeline-design.md).
+"""Argument groups for ``run_audit_session.py`` (docs/PIPELINE_DESIGN.md).
 
 Holds the audit entrypoint's argparse groups and ``--help`` wording, and
 renders them as the validated parameter file ``worker.load_worker_options``

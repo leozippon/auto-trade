@@ -12,7 +12,7 @@ datasets points at a tree prebuilt for exactly its own selection
 pins the research release that tree was built from rather than the newest one,
 so a seed stays usable while the nightly chain commits new generations. What a
 tree carries is the
-``SeedPlan`` of one research geometry (docs/data-documentation.md §3.4).
+``SeedPlan`` of one research geometry (docs/DATA_DOCUMENTATION.md §3.4).
 """
 
 from __future__ import annotations

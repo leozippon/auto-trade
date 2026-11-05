@@ -181,7 +181,7 @@ def complete_interrupted_commits(raw_dir: str | Path) -> dict[str, int]:
 # the partition's ``visible_since`` belongs to a write that never became
 # visible and is not read. The PIT views make a row visible from the later of
 # its vendor-rule ``available_at`` and the first-seen time of its key
-# (docs/data-documentation.md §3.3).
+# (docs/DATA_DOCUMENTATION.md §3.3).
 
 KEY_SEPARATOR = "\x1f"
 

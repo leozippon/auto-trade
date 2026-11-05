@@ -1,4 +1,4 @@
-"""PIT snapshot construction (docs/environment-design.md §1).
+"""PIT snapshot construction (docs/ENVIRONMENT_DESIGN.md §1).
 
 Builds the seven domain files plus universe and manifest for one decision time:
 
@@ -260,7 +260,7 @@ DomainBuildTask = tuple[
 # experiment selects nothing — the A-share daily/weekly stock material, one
 # series per concept. Selectable-but-not-default datasets stay downloadable,
 # auditable and opt-in per experiment; the scope and the evidence behind it are
-# in docs/data-documentation.md.
+# in docs/DATA_DOCUMENTATION.md.
 #
 # Never selectable (raw keeps downloading; re-enable once the stated condition
 # is met):
@@ -1505,7 +1505,7 @@ class SnapshotBuilder:
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         """Implemented dividend events with an ex-date inside the replay window,
         one row per (ts_code, ex_date): SimBroker's ex-date corporate-action truth
-        (docs/environment-design.md §1.2). Not an agent input — agent visibility of
+        (docs/ENVIRONMENT_DESIGN.md §1.2). Not an agent input — agent visibility of
         dividends stays announcement-gated via the PIT fundamental events.
 
         ``cash_per_share`` is the gross (税前) per-share cash amount,

@@ -1,4 +1,4 @@
-"""Research-arm pipeline package (docs/pipeline-design.md).
+"""Research-arm pipeline package (docs/PIPELINE_DESIGN.md).
 
 The facade re-exports only what callers outside the package actually import
 through it; everything else is reached from its own module (``from

@@ -1,7 +1,7 @@
 """Verdict statistics of one arm: the sealed gate, and the forward and
 Held-out readings reported beside it.
 
-Pure functions over frozen replay data (docs/pipeline-design.md). Every
+Pure functions over frozen replay data (docs/PIPELINE_DESIGN.md). Every
 statistic grades one series, the ACTIVE one: the strategy's daily return
 minus the zero-skill panel composite the host drew from the strategy's own
 realized book (``environment/replay/null_control.py``). What zero skill earns
@@ -730,7 +730,7 @@ class Condition(NamedTuple):
     ``requires`` names the rule that turns a condition on, the tracking
     mandate's cap (empty: every arm is held to it); an arm without a mandate
     is not judged on it. ``code`` is the graduation criterion a forward or
-    Held-out condition belongs to (docs/pipeline-design.md).
+    Held-out condition belongs to (docs/PIPELINE_DESIGN.md).
     """
 
     stage: ConditionStage
@@ -909,7 +909,7 @@ def forward_slice(
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
     """The forward slice's readings under the arm's ``rules``: reported,
-    never judged (docs/pipeline-design.md, the graduation verdict).
+    never judged (docs/PIPELINE_DESIGN.md, the graduation verdict).
 
     The graded series is read as it is (:func:`graded_statistics`) and
     through the sealed gate's statistic (``residual_reading``, what
@@ -1003,7 +1003,7 @@ def heldout_slice(
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
     """The Held-out slice's readings under the arm's ``rules``: reported,
-    never judged (docs/pipeline-design.md, the graduation verdict).
+    never judged (docs/PIPELINE_DESIGN.md, the graduation verdict).
 
     The graded series' statistics and its residual reading, the equity and
     the graded series' drawdowns and the mean gross exposure, the holder's

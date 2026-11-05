@@ -1,7 +1,7 @@
 """Replay result container and the return-statistics reducer.
 
 ``ReplayResult`` is what one full daily replay produces; ``compute_return_stats``
-reduces it to the ``detailed_return.json`` payload (docs/environment-design.md
+reduces it to the ``detailed_return.json`` payload (docs/ENVIRONMENT_DESIGN.md
 §3.8). Pure result→dict math — no replay logic.
 """
 
@@ -119,7 +119,7 @@ def compute_return_stats(
     end: str = "",
     year_windows: Sequence[tuple[str, str]] = (),
 ) -> dict[str, object]:
-    """The minimum return statistics from docs/environment-design.md §3.8.
+    """The minimum return statistics from docs/ENVIRONMENT_DESIGN.md §3.8.
 
     ``start``/``end`` are the replay window that was requested (``YYYYMMDD``)
     and ``year_windows`` the years it was requested over, as ``(start, end)``

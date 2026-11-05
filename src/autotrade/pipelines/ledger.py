@@ -1,4 +1,4 @@
-"""The single experiment ledger (docs/pipeline-design.md §4.1).
+"""The single experiment ledger (docs/PIPELINE_DESIGN.md §4.1).
 
 One JSONL file per experiment. The pipeline writes three record types:
 

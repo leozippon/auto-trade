@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""HITL experiment console server (docs/deployment-documentation.md).
+"""HITL experiment console server (docs/DEPLOYMENT_DOCUMENTATION.md).
 
 Serves the web console (homepage + experiment detail SPA) and the JSON control
 API over the interactive experiment pipeline. Run on the workstation that

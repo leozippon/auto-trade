@@ -1,6 +1,6 @@
 """Experiment pipeline: one research session, one freeze, one forward replay.
 
-docs/pipeline-design.md. The Pipeline schedules Data, Environment and Agent in
+docs/PIPELINE_DESIGN.md. The Pipeline schedules Data, Environment and Agent in
 time order, freezes inputs and outputs at each boundary and writes the single
 experiment ledger. It implements no investment logic and never rewrites
 strategy content; it only prepares, freezes, replays and records.
@@ -1211,7 +1211,7 @@ def freeze_registration(
     deterministic: bool = False,
     ablation: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """Whether one nominated Step registers for a freeze (docs/pipeline-design.md).
+    """Whether one nominated Step registers for a freeze (docs/PIPELINE_DESIGN.md).
 
     Registration only, never a score: the nominee's summary breaks no hard
     nomination rule (``AcceptanceRules.evaluate``: finite metrics, the

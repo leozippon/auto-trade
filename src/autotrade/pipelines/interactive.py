@@ -1,4 +1,4 @@
-"""Interactive (human-in-the-loop) session orchestration (docs/pipeline-design.md §5).
+"""Interactive (human-in-the-loop) session orchestration (docs/PIPELINE_DESIGN.md §5).
 
 Drives the pipeline's ``run_research_session`` and ``run_forward`` primitives in
 plan order with durable pause/stop, session-boundary restart, per-session

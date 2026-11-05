@@ -1,4 +1,4 @@
-"""Host-side LLM Proxy boundary (docs/environment-design.md §2.4).
+"""Host-side LLM Proxy boundary (docs/ENVIRONMENT_DESIGN.md §2.4).
 
 All provider calls go through an :class:`LLMProxy`. API keys live only on the
 host side inside provider adapters; sandbox code never sees them. Callers are

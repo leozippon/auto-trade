@@ -191,7 +191,7 @@ def read_image_contract(
             f"sandbox image {image} cannot be read for the strategy contract it bakes, "
             f"so what it would enforce is unknown ({detail or 'no detail'}). Rebuild the "
             f"base image with `{REBUILD_COMMAND}`, then re-point every pinned experiment "
-            "tag at it (see docs/environment-design.md)."
+            "tag at it (see docs/ENVIRONMENT_DESIGN.md)."
         )
     try:
         payload = json.loads(completed.stdout)
@@ -214,7 +214,7 @@ def check_runtime_contract(image: str, image_runtime: str, host: str) -> None:
         f"enforces (image {image_runtime or '<empty>'}, host {host}); the container would enforce "
         f"superseded rules from {', '.join(RUNTIME_CONTRACT_MODULES)}. Rebuild the base "
         f"image with `{REBUILD_COMMAND}`, then re-point every pinned experiment tag at it "
-        "(see docs/environment-design.md)."
+        "(see docs/ENVIRONMENT_DESIGN.md)."
     )
 
 
@@ -232,7 +232,7 @@ def check_agent_contract(image: str, image_contract: str, host: str) -> None:
             f"sandbox image {image} carries no strategy contract fingerprint at "
             f"{IMAGE_FINGERPRINT_PATH}, so the rules it was built from are unknown. "
             f"Rebuild the base image with `{REBUILD_COMMAND}`, then re-point every "
-            "pinned experiment tag at it (see docs/environment-design.md)."
+            "pinned experiment tag at it (see docs/ENVIRONMENT_DESIGN.md)."
         )
     if image_contract == host:
         return
@@ -241,7 +241,7 @@ def check_agent_contract(image: str, image_contract: str, host: str) -> None:
         f"this checkout (image {image_contract}, host {host}); the Agent would be told "
         f"rules from {', '.join(AGENT_CONTRACT_PATHS)} that the image was not built "
         f"from. Rebuild the base image with `{REBUILD_COMMAND}`, then re-point every "
-        "pinned experiment tag at it (see docs/environment-design.md)."
+        "pinned experiment tag at it (see docs/ENVIRONMENT_DESIGN.md)."
     )
 
 

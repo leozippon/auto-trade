@@ -100,7 +100,7 @@ def months_before(end: str, months: int) -> str:
 # before MACRO_HISTORY_START. A requested input window is clipped to the daily
 # floor; ``history_floors`` names both. Other macro tables are not listed:
 # each starts at its own download floor. These mirror the lake's download
-# floors (docs/data-documentation.md) by hand. A view manifest's
+# floors (docs/DATA_DOCUMENTATION.md) by hand. A view manifest's
 # ``coverage_start`` cannot stand in: the research-end view's window rarely
 # reaches the floor, and a year's replay view is built only when replayed.
 DAILY_HISTORY_START = "20100101"
