@@ -539,14 +539,12 @@ _FIELDS: list[dict[str, object]] = [
         "choices": list(OPERATING_MEMORY_MODES),
         "choice_labels": {
             "none": "不挂载",
-            "curated": "只挂载精选条目",
-            "curated+graduated": "精选条目 + 验收通过实验的 skills",
+            "curated": "挂载精选条目",
         },
         "help": (
-            "把跨实验知识只读挂载进每个研究会话工作区："
-            f"精选库是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
-            "验收层是前推与 Held-out 判定为 graduated（验收通过）的实验自己写下的 skills，"
-            "带来源实验与判定标记，由 Agent 自行取舍。会话不能改写或删除挂载内容。"
+            "把精选库只读挂载进每个研究会话工作区："
+            f"精选库是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验，"
+            "在实验创建时冻结为本实验的快照。会话不能改写或删除挂载内容。"
         ),
     },
     {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 0, "max": 4,

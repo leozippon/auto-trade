@@ -2,36 +2,27 @@
 
 Both halves stand on the two places the pipeline already treats as
 authoritative: the curated library committed under ``configs/operating_memory/``
-and the experiment trees under ``experiments/``. Admission is never recomputed
-here -- ``pipelines.skills`` answers it in two steps: the graduated tier holds
-an experiment's skills (``graduated_memory_sources``), and an arm mounts a held
-source only when that source's Held-out ended by the arm's research end
-(``admit_memory_sources``). So the tier lists what it holds with that Held-out
-end, and one experiment's block says which of its snapshot's sources its arm
-mounts.
+and the experiment trees under ``experiments/``, each holding the snapshot of
+the library it froze at creation, which is what its sessions mount.
 
-The curated tier is the one writable surface. It is a tracked repository
-directory that every session copies read-only into its workspace at session
-start, so a write here is a repository edit that reaches sessions started
-afterwards and never the sessions already running. Every write validates a
-staged copy with the same validator the mount uses before it touches the
-library, and lands the entry with a single rename.
+The curated library is the one writable surface. It is a tracked repository
+directory that every experiment snapshots read-only at creation, so a write
+here is a repository edit that reaches experiments created afterwards and
+never the ones already created. Every write validates a staged copy with the
+same validator the mount uses before it touches the library, and lands the
+entry with a single rename.
 """
 
 from __future__ import annotations
 
 import shutil
 import tempfile
-import threading
 from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.common.records import read_json_object
 from autotrade.environment.runtime import chmod_tree
-from autotrade.pipelines.arm_params import read_param
-from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS, ResearchGeometry
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
-from autotrade.pipelines.ledger import experiment_verdict
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
@@ -40,13 +31,8 @@ from autotrade.pipelines.skills import (
     MAX_SKILLS_FILES,
     OPERATING_MEMORY_LIBRARY,
     SKILL_FILENAME,
-    MemorySource,
     SkillsStats,
-    admit_memory_sources,
     build_skills_index,
-    graduated_memory_source,
-    graduated_memory_sources,
-    latest_skills_snapshot,
     operating_memory_snapshot_root,
     read_operating_memory_snapshot,
     resolve_operating_memory,
@@ -57,7 +43,8 @@ from autotrade.pipelines.skills import (
     validate_skills_tree,
 )
 
-from .registry import read_ledger_records, resolve_experiment_dir
+from .feedback_page import experiment_directories
+from .registry import resolve_experiment_dir
 
 # The sandbox writes the full host-side manifest beside the Agent-visible one
 # when a run's artifacts are collected (environment/runtime.py,
@@ -67,8 +54,6 @@ HOST_RUN_MANIFEST_NAME = "host_run_manifest.json"
 # Errors reach the browser as a category plus a stable phrase: the underlying
 # exceptions embed absolute ledger and library paths in their messages.
 _UNREADABLE_LIBRARY = "curated memory library is unreadable"
-_UNREADABLE_TIER = "graduated memory cannot be resolved"
-_UNREADABLE_EXPERIMENT = "experiment state is unreadable"
 _UNREADABLE_SNAPSHOT = "operating memory snapshot is unreadable"
 
 
@@ -139,170 +124,23 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
     return {**listed, "content": content}
 
 
-# The tier reads every experiment's ledger and validates every published skills
-# tree, which is seconds on a full experiments root, and running arms append to
-# their ledgers all the time. Everything one experiment contributes -- the
-# source the tier holds from it and its row -- hangs off its own ledger: the
-# ledger is append-only (or atomically rewritten), and the skills generation a
-# row points at is published immutably before the row names it. So each
-# experiment's contribution is kept while its ledger's size and mtime are
-# unchanged, and a ledger that moved re-reads that experiment alone; the lock
-# makes overlapping requests compute it once.
-_TIER_LOCK = threading.Lock()
-_TIER_CACHE: dict[
-    Path, tuple[tuple[int, int] | None, MemorySource | None, dict[str, object]]
-] = {}
-
-
-def _ledger_key(directory: Path) -> tuple[int, int] | None:
-    try:
-        stat = (directory / "ledgers" / "experiment_ledger.jsonl").stat()
-    except OSError:
-        return None
-    return (stat.st_size, stat.st_mtime_ns)
-
-
-def _contribution(directory: Path) -> tuple[MemorySource | None, dict[str, object]]:
-    """The source the tier holds from ``directory``, if any, and its row
-    before admission. Raises what ``graduated_memory_source`` raises."""
-
-    key = _ledger_key(directory)
-    kept = _TIER_CACHE.get(directory)
-    if kept is not None and kept[0] == key:
-        return kept[1], kept[2]
-    _TIER_CACHE.pop(directory, None)
-    source = graduated_memory_source(directory)
-    row = _tier_row(directory)
-    # An error may be a transient I/O failure the key cannot see, so it is
-    # read afresh on every request rather than kept.
-    if "error" not in row:
-        _TIER_CACHE[directory] = (key, source, row)
-    return source, row
-
-
-def graduated_tier(experiments_root: Path) -> dict[str, object]:
-    """Every experiment's verdict, whether the tier holds it, and what it holds.
-
-    ``admitted`` is whatever ``skills.graduated_memory_sources`` returns, never
-    a second rule: the tier holds the source, read one experiment at a time by
-    the same ``skills.graduated_memory_source``. Holding is not mounting -- an arm
-    mounts it only when ``heldout_end``, the last day the source's verdict
-    read, is no later than the arm's research end, and never when it is
-    unknown (``skills.admit_memory_sources``). ``published`` is the size of the
-    experiment's current skills generation — the page needs it to tell an
-    experiment the tier declines to offer from one that has nothing to offer
-    yet.
-    """
-
-    root = Path(experiments_root)
-    if not root.is_dir():
-        return {"experiments": []}
-    with _TIER_LOCK:
-        # Every directory feeds the tier, as ``graduated_memory_sources``
-        # reads it; a dot-directory is no experiment row.
-        directories = sorted(
-            (path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name
-        )
-        for gone in {path for path in _TIER_CACHE if path.parent == root} - set(directories):
-            del _TIER_CACHE[gone]
-        admitted: dict[str, MemorySource] | None = {}
-        failure: Exception | None = None
-        rows: list[dict[str, object]] = []
-        for directory in directories:
-            try:
-                source, row = _contribution(directory)
-            except (OSError, ValueError) as exc:
-                failure = failure or exc
-                row = _tier_row(directory)
-            else:
-                if source is not None:
-                    admitted[source.source] = source
-            if not directory.name.startswith("."):
-                rows.append(row)
-    payload: dict[str, object] = {"experiments": []}
-    if failure is not None:
-        # A tier that cannot be resolved is what a session starting now would
-        # also hit. Report it, and leave every row's admission unknown rather
-        # than printing a "not admitted" the read model cannot stand behind.
-        payload["error"] = _error(failure, _UNREADABLE_TIER)
-        admitted = None
-    payload["experiments"] = [_admitted(row, admitted) for row in rows]
-    return payload
-
-
-def _admitted(
-    row: Mapping[str, object], admitted: Mapping[str, MemorySource] | None
-) -> dict[str, object]:
-    """``row`` with whether the tier holds it and what; a row that could not
-    be read answers neither."""
-
-    if "error" in row:
-        return dict(row)
-    if admitted is None:
-        return {**row, "admitted": None}
-    source = admitted.get(str(row["experiment_id"]))
-    if source is None:
-        return dict(row)
-    return {
-        **row,
-        "admitted": True,
-        "heldout_end": source.heldout_end,
-        "entries": list(source.entries),
-    }
-
-
-def _tier_row(directory: Path) -> dict[str, object]:
-    row: dict[str, object] = {
-        "experiment_id": directory.name,
-        "verdict": None,
-        "admitted": False,
-        "heldout_end": None,
-        "published": 0,
-        "entries": [],
-    }
-    try:
-        records = read_ledger_records(directory)
-        verdict = experiment_verdict(records)
-        published = latest_skills_snapshot(records, experiment_dir=directory)
-    except (OSError, TypeError, ValueError) as exc:
-        row["error"] = _error(exc, _UNREADABLE_EXPERIMENT)
-        # Unknown, not zero: an unreadable ledger answers neither question.
-        row["published"] = None
-        return row
-    row["verdict"] = str(verdict["status"]) if isinstance(verdict, Mapping) else None
-    row["published"] = published.stats.count
-    return row
-
-
 def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, object]:
     """This experiment's operating memory: one list, frozen when it was created.
 
-    Nothing here is per session any more. The experiment resolved the curated
-    library and the graduated tier once, at creation, and every one of its
-    sessions mounts that same snapshot — so the question "what did this session
-    get" has one answer for the whole experiment, and a later library change
-    belongs to the next experiment rather than to this one's middle.
+    Nothing here is per session. The experiment resolved the curated library
+    once, at creation, and every one of its sessions mounts that same snapshot
+    -- so the question "what did this session get" has one answer for the
+    whole experiment, and a later library change belongs to the next
+    experiment rather than to this one's middle. A snapshot frozen before the
+    graduated tier was retired lists only what its sessions still mount.
     """
 
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
     params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
-    # The day the session's mount admits against, resolved as the worker
-    # resolves it: a graduated source is mounted only when its Held-out ended
-    # by the end of the research years the session sees -- the visible years
-    # of an arm that seals some, the whole research period of one created
-    # before the sealed gate.
-    geometry = ResearchGeometry(**{name: read_param(params, name) for name in GEOMETRY_PARAMETERS})
-    sealed_years = params.get("sealed_years")
-    admitted_by = (
-        geometry.research_end
-        if sealed_years is None
-        else geometry.split_sealed(int(sealed_years))[0][-1].end  # type: ignore[call-overload]
-    )
     payload: dict[str, object] = {
         "experiment_id": experiment_id,
         "mode": resolve_operating_memory(params.get("operating_memory")),
         "default_mode": DEFAULT_OPERATING_MEMORY,
-        "admitted_by": admitted_by,
         # A count, not a projection: the collected runs no longer answer what was
         # mounted, they only say how many sessions have run against the snapshot.
         "sessions_seen": len(
@@ -313,28 +151,17 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     try:
         record = read_operating_memory_snapshot(directory)
         if record is not None:
-            sources = snapshot_memory_sources(record, directory)
-            mounted, _refused = admit_memory_sources(sources, admitted_by)
             payload["snapshot"] = {
                 "created_at": str(record.get("created_at") or ""),
                 "created_from": str(record.get("created_from") or ""),
                 "mode": str(record.get("mode") or ""),
-                # The snapshot holds every source; ``mounted`` is the mount's
-                # own admission at this arm's research end, the rule that
-                # records the refused ones under operating_memory_refused.
                 "sources": [
                     {
                         "source": source.source,
                         "origin": source.origin,
                         "entries": list(source.entries),
-                        "mounted": source in mounted,
-                        **(
-                            {"heldout_end": source.heldout_end}
-                            if source.origin == "graduated"
-                            else {}
-                        ),
                     }
-                    for source in sources
+                    for source in snapshot_memory_sources(record, directory)
                 ],
             }
     except (OSError, TypeError, ValueError) as exc:
@@ -371,20 +198,10 @@ def experiment_memory_entry(
     )
     if listed is None:
         raise KeyError(f"{experiment_id} did not mount {mount_source}/{entry_name}")
-    origin = next(
-        (
-            str(entry.get("origin") or "")
-            for entry in record.get("entries") or ()  # type: ignore[union-attr]
-            if isinstance(entry, Mapping)
-            and str(entry.get("source")) == mount_source
-            and str(entry.get("name")) == entry_name
-        ),
-        "",
-    )
     return {
         "experiment_id": experiment_id,
         "source": mount_source,
-        "origin": origin,
+        "origin": "curated",
         "name": entry_name,
         "title": str(listed["title"]),
         "summary": str(listed["summary"]),
@@ -469,7 +286,7 @@ def _install_entry(
         item.mkdir(parents=True)
         for relative, payload in files.items():
             # The shared path rule refuses '..', absolute and hidden paths, so a
-            # promoted file name cannot escape the entry it belongs to.
+            # file name cannot escape the entry it belongs to.
             target = item.joinpath(*validate_skill_path(relative).parts)
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload)
@@ -559,102 +376,14 @@ def delete_curated_entry(repo_root: Path, name: str) -> dict[str, object]:
     return _write_result(repo_root, entry, "deleted")
 
 
-def _admitted_skill_dir(experiments_root: Path, experiment_id: str, skill: str) -> Path:
-    """The only place a promotion may copy from: an admitted graduated skill.
-
-    Admission is ``skills.graduated_memory_sources``, exactly as
-    :func:`graduated_tier` shows it, so the console cannot promote from a
-    candidate the page does not offer.
-    """
-
-    root = Path(experiments_root)
-    resolve_experiment_dir(root, experiment_id)
-    source = next(
-        (
-            item
-            for item in graduated_memory_sources(root)
-            if item.source == experiment_id
-        ),
-        None,
-    )
-    if source is None or skill not in source.entries:
-        raise KeyError(f"{experiment_id} admits no skill named {skill}")
-    return source.root / skill
-
-
-def graduated_entry(
-    experiments_root: Path, experiment_id: str, skill: str
-) -> dict[str, object]:
-    """One admitted graduated skill's body, read where it already lives.
-
-    The same admission gate as the promotion it precedes, so the
-    console can never show a candidate it could not copy — and a skill whose
-    experiment is no longer admitted reads as unknown rather than as a body the
-    tier would not mount.
-    """
-
-    name = validate_skill_name(skill)
-    item = _admitted_skill_dir(Path(experiments_root), experiment_id, name)
-    # The generation's own index, so a candidate is described exactly as the
-    # session that mounts it would describe it.
-    listed = next(
-        (
-            entry
-            for entry in build_skills_index(item.parent)["skills"]  # type: ignore[union-attr]
-            if entry["name"] == name
-        ),
-        None,
-    )
-    if listed is None:
-        raise KeyError(f"{experiment_id} admits no skill named {name}")
-    return {
-        "experiment_id": experiment_id,
-        "name": name,
-        "title": str(listed["title"]),
-        "summary": str(listed["summary"]),
-        "bytes": int(listed["bytes"]),
-        "files": len(listed["files"]),  # type: ignore[arg-type]
-        "content": (item / SKILL_FILENAME).read_text(encoding="utf-8"),
-    }
-
-
-def promote_curated_entry(
-    repo_root: Path,
-    experiments_root: Path,
-    *,
-    name: str,
-    experiment_id: str,
-    skill: str,
-) -> dict[str, object]:
-    """Copy one admitted graduated skill into the curated library verbatim.
-
-    The whole item is copied, ``scripts/`` and ``references/`` included, because
-    that is what the mount would have carried and what the researcher then edits
-    down in place.
-    """
-
-    entry = _entry_name(name or skill)
-    source = _admitted_skill_dir(
-        experiments_root, experiment_id, validate_skill_name(skill)
-    )
-    files: dict[str, bytes] = {}
-    for path in sorted(source.rglob("*")):
-        relative = path.relative_to(source).as_posix()
-        if path.is_symlink():
-            raise ValueError(f"skill symlink is forbidden: {relative}")
-        if path.is_file():
-            files[relative] = path.read_bytes()
-    _install_entry(_library_dir(repo_root), entry, files, replace=False)
-    return _write_result(repo_root, entry, "promoted")
-
-
 def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object]:
-    """The whole operating-memory page in one read."""
+    """The whole operating-memory page in one read: the curated library, and
+    the experiments the page's two inboxes can be narrowed to."""
 
     return {
         "default_mode": DEFAULT_OPERATING_MEMORY,
         "curated": curated_library(repo_root),
-        "graduated": graduated_tier(experiments_root),
+        "experiments": [directory.name for directory in experiment_directories(experiments_root)],
     }
 
 
@@ -665,9 +394,6 @@ __all__ = [
     "delete_curated_entry",
     "experiment_memory",
     "experiment_memory_entry",
-    "graduated_entry",
-    "graduated_tier",
     "memory_overview",
-    "promote_curated_entry",
     "update_curated_entry",
 ]

@@ -1,8 +1,9 @@
 """The sealed-stage content check for shared skills.
 
-Shared skills can reach other experiments through the graduated memory layer,
-so every skill write refuses Held-out mentions, forward-period figures and
-forward-period-based selection.
+Shared skills outlive the session that writes them -- they are published as
+the experiment's skills generation, and a researcher may copy one into the
+curated library every later experiment mounts -- so every skill write refuses
+Held-out mentions, forward-period figures and forward-period-based selection.
 """
 
 from __future__ import annotations

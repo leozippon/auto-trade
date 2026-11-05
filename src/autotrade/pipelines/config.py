@@ -651,9 +651,8 @@ class RollingExperimentConfig:
     # session's workspace/refs/. Empty copies nothing; a set path must exist and
     # be a directory.
     workspace_reference: str = ""
-    # Which cross-experiment memory tiers mount read-only into every session:
-    # the curated repository library alone, plus the skills of every graduated
-    # experiment, or nothing.
+    # Whether the curated repository library mounts read-only into every
+    # session (``curated``) or nothing does (``none``).
     operating_memory: str = DEFAULT_OPERATING_MEMORY
     # Also record failed validation attempts as lightweight dead-end nodes
     # (no output snapshot) so later sessions can see what was already tried.

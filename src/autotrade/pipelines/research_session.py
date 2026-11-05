@@ -946,25 +946,13 @@ class LLMResearchDeveloper:
             self.experiment_dir,
             mode=self.operating_memory,
             repo_root=self.repo_root,
-            experiments_root=self.experiment_dir.parent,
         )
         # The mounted memory and refs are re-copied on a resume (their content
         # is fixed); the skills tree is the Agent's own work and stays.
         _remove_mounted_tree(workspace_root / OPERATING_MEMORY_DIRNAME)
-        mounted_memory, refused_memory = install_operating_memory(
-            workspace_root,
-            self.experiment_dir,
-            research_end=request.validation.end,
-        )
+        mounted_memory = install_operating_memory(workspace_root, self.experiment_dir)
         manifest.update(
-            operating_memory=_operating_memory_record(memory_snapshot, mounted_memory),
-            # Host audit only (not on the Agent-visible allowlist): naming a
-            # refused source and its Held-out end would tell the session that
-            # an arm graduated on the window this one is graded on.
-            operating_memory_refused=[
-                {**source.to_record(), "heldout_end": source.heldout_end}
-                for source in refused_memory
-            ],
+            operating_memory=_operating_memory_record(memory_snapshot, mounted_memory)
         )
         if resume is None:
             skills_stats = install_workspace_skills(

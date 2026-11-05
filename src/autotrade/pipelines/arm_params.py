@@ -135,7 +135,7 @@ class GeometryParams:
 @dataclass(frozen=True, kw_only=True)
 class PackParams:
     """What the arm's sessions are handed: the directive, the reference pack
-    and the operating-memory tiers."""
+    and whether the curated operating memory mounts."""
 
     research_directive: str = _param(rolling_default("research_directive"))
     workspace_reference: str = _param(rolling_default("workspace_reference"))

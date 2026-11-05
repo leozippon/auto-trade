@@ -178,7 +178,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # Derived from SandboxConfig.fit_timeout_seconds; packs promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
-    "operating_memory": "curated+graduated",
+    "operating_memory": "curated",
     "initial_control_mode": "auto",
     "reasoning_effort": "xhigh",
     "inference_time": "08:30",
@@ -700,6 +700,14 @@ RETIRED_IDS: frozenset[str] = frozenset(
         # Withdrawn from round 20261102's queue before it was created, when the
         # round was narrowed to Astra experiments alone.
         "memory_200k_10y_argon_local_20261102",
+        # Every arm of round 20261102 and the two memory arms of round
+        # 20261103, whose file, arms and memory packs left the tree on
+        # 2026-11-05 with the memory machinery. All ended and stay on disk.
+        "memory_200k_10y_astra_local_20261102",
+        "memory_200k_10y_astra_local_20261102b",
+        "memory_200k_10y_astra_local_20261102c",
+        "memory_200k_10y_astra_local_20261103a",
+        "memory_200k_10y_astra_local_20261103b",
     }
 )
 

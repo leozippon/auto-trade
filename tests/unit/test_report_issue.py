@@ -51,11 +51,6 @@ from autotrade.webui import issues
 from autotrade.webui import skill_feedback as skill_projection
 from autotrade.webui.server import create_app
 
-from .test_operating_memory import (
-    _experiment_with_skill,
-    _repo_with_library,
-    _workspace,
-)
 from .test_skill_feedback import _filed
 
 SESSION_KEY = "s1"
@@ -226,33 +221,6 @@ def test_the_reader_fails_fast_on_a_foreign_schema(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="schema_version"):
         read_issue_reports(path)
-
-
-# ---- never an Agent input --------------------------------------------------
-
-
-def test_reports_never_reach_a_mounted_session_workspace(tmp_path: Path) -> None:
-    """The graduated tier mounts other experiments' skills; the reports of an
-    admitted experiment must not ride along into any session input."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    source = _experiment_with_skill(experiments, "adopted")
-    append_issue_report(
-        issue_reports_path(source),
-        {"category": "environment", "summary": "宿主争用导致回放超时。", "evidence": "复现步骤。"},
-    )
-    repo = _repo_with_library(tmp_path)
-    root = tmp_path / "session"
-    root.mkdir()
-    workspace, mounted = _workspace(
-        root, mode="curated+graduated", repo_root=repo, experiments_root=experiments
-    )
-    assert mounted  # the source experiment's skills did mount
-    assert not list(workspace.rglob(ISSUE_REPORTS_NAME))
-    for path in workspace.rglob("*"):
-        if path.is_file():
-            assert "宿主争用" not in path.read_text(encoding="utf-8", errors="ignore")
 
 
 # ---- console projection ----------------------------------------------------

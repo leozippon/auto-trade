@@ -297,9 +297,9 @@ def experiment_verdict(
     status (:data:`ARM_END_STATUSES`) when research ended without a freeze,
     else None.
 
-    The single source for the terminal status, the console, the graduated
-    memory tier and Paper: a voided arm is terminal, is no graduate to any of
-    them, and keeps its forward record's own reasons beside the void.
+    The single source for the terminal status, the console and Paper: a
+    voided arm is terminal, is no graduate to any of them, and keeps its
+    forward record's own reasons beside the void.
     """
 
     forward = forward_record(records)

@@ -1542,12 +1542,6 @@ details.fold.history-day.idle > summary {
  font-size: 0.875rem;
  white-space: nowrap;
 }
-.epoch-head {
- margin: 0.7rem 0.25rem 0.25rem;
- font-size: 0.845rem;
- color: var(--muted);
- font-weight: 600;
-}
 
 .control-bar {
  display: flex;
@@ -2844,14 +2838,11 @@ details.advanced .form-grid {
 .memory-filter {
  flex: 1;
 }
-/* One rhythm for both catalogue sections: the heading owns the gap down to its
-   toolbar or hint, and every list starts one step below that. */
+/* The catalogue's heading owns the gap down to its toolbar, and the list
+   starts one step below that. */
 .memory-nav h4 {
  margin-bottom: 0.75rem;
  white-space: nowrap;
-}
-.memory-nav h4.section-gap {
- margin-top: 1.5rem;
 }
 .memory-nav .control-bar {
  margin-top: 0;
@@ -2859,47 +2850,17 @@ details.advanced .form-grid {
 .memory-nav .hint {
  margin-top: 0.5rem;
 }
-/* Each catalogue section caps itself and scrolls, the way every other list in
-   the console does. The pane itself sizes to content and scrolls with the
-   page, so the sections below it are never fenced off by a viewport-tall
-   sidebar competing for the wheel. */
+/* The catalogue caps itself and scrolls, the way every other list in the
+   console does. The pane itself sizes to content and scrolls with the page,
+   so the sections below it are never fenced off by a viewport-tall sidebar
+   competing for the wheel. */
 .memory-nav .session-list {
  max-height: 20rem;
  margin-top: 0.85rem;
 }
-.memory-nav .epoch-head {
- margin-top: 0.5rem;
-}
 .empty.compact {
  padding: 1rem 0;
  font-size: 0.9rem;
-}
-/* Collapsed, muted, and still there: an experiment the tier does not offer is
-   a different answer from an experiment that is missing. */
-details.memory-aside {
- margin-top: 0.7rem;
- font-size: 0.875rem;
- color: var(--muted);
-}
-details.memory-aside summary {
- cursor: pointer;
- padding: 0.3rem 0;
-}
-.memory-aside-row {
- display: flex;
- align-items: center;
- gap: 0.6rem;
- padding: 0.22rem 0.2rem;
-}
-.memory-aside-row .label {
- flex: 1;
- overflow: hidden;
- text-overflow: ellipsis;
- white-space: nowrap;
-}
-.memory-aside-row .hint {
- margin-top: 0;
- white-space: nowrap;
 }
 /* The right pane keeps its three rows in place — the toolbar exists even with
    no buttons — but takes its height from what it holds: with nothing selected
@@ -3324,7 +3285,6 @@ details.issue-evidence > summary:hover {
  .btn,
  .stepper-row,
  .session-item,
- .memory-aside-row,
  .step-node,
  .stepper.mini .stepper-node,
  .trace-replay-toggle {
@@ -3344,7 +3304,6 @@ details.issue-evidence > summary:hover {
     by becoming a flex box. */
  details.fold > summary,
  details.advanced > summary,
- details.memory-aside > summary,
  details.issue-evidence > summary,
  .compaction-fold > summary,
  .trace-block details > summary {

@@ -6,8 +6,7 @@ The ledger is append-only: this writes one ``verdict_void`` record naming who
 voided the graduation, why and where the evidence is, and never edits the
 forward record the arm produced. From then on the arm reads as voided
 (``ledger.experiment_verdict``): the console shows it voided with the reason,
-the graduated memory tier does not mount its skills into new arms, and no Paper
-book is opened or offered for it.
+and no Paper book is opened or offered for it.
 
 A failed strategy does not stay in Paper: every book trading the arm (its
 ``book.json`` names the experiment, whatever the book id) is deleted in the

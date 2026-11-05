@@ -799,8 +799,8 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
 # lists an archived arm only when asked for the archived ones, the default
 # listing never summarizes it, its experiment page still opens, and the manager
 # never starts its worker again. Lineage, the consistency check
-# (scripts/dev/check_verdicts.py), the round fill queue, operating memory and
-# Paper see the arm as before.
+# (scripts/dev/check_verdicts.py), the round fill queue and Paper see the arm
+# as before.
 
 
 def archive_marker(directory: Path) -> dict[str, object] | None:

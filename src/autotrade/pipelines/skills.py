@@ -29,20 +29,13 @@ from autotrade.environment.tools.skills_policy import (
 )
 from autotrade.environment.tools.workspace import SafeWorkspace
 
-from .ledger import (
-    ExperimentLedger,
-    VerdictStatus,
-    experiment_verdict,
-    forward_record,
-)
-
 SKILLS_DIRNAME = "skills"
 OPERATING_MEMORY_DIRNAME = "memory"
 # Repository-relative library of human-curated cross-experiment entries, in
 # the same format ``write_skill`` produces so a promoted skill copies verbatim.
 OPERATING_MEMORY_LIBRARY = "configs/operating_memory"
-# Reserved mount name of the curated tier; every other mounted source directory
-# is named after the graduated experiment its skills came from.
+# The mount name of the curated library: ``memory/curated/<name>/`` in a
+# session workspace and in an experiment's snapshot.
 CURATED_MEMORY_SOURCE = "curated"
 # One experiment's frozen operating memory, resolved once when the experiment is
 # created and mounted unchanged by every session it runs. The library keeps
@@ -50,8 +43,18 @@ CURATED_MEMORY_SOURCE = "curated"
 OPERATING_MEMORY_SNAPSHOT_DIRNAME = "memory"
 OPERATING_MEMORY_SNAPSHOT_NAME = "memory_snapshot.json"
 OPERATING_MEMORY_SNAPSHOT_SCHEMA = 1
-OPERATING_MEMORY_MODES = ("none", "curated", "curated+graduated")
-DEFAULT_OPERATING_MEMORY = "curated+graduated"
+OPERATING_MEMORY_MODES = ("none", "curated")
+DEFAULT_OPERATING_MEMORY = "curated"
+# The graduated tier -- the skills of every graduated experiment, mounted
+# beside the curated library -- was retired on 2026-11-05. Every arm created
+# before then names this mode, and a snapshot frozen before then may hold
+# entries of this origin. Such an arm reads as ``curated``
+# (:func:`resolve_operating_memory`); such an entry stays in the record and is
+# never mounted (:func:`snapshot_memory_sources`), which changes no arm on
+# disk then, whose mount refused every one of them on its Held-out end; and a
+# new arm cannot name the mode (:func:`create_operating_memory_snapshot`).
+RETIRED_OPERATING_MEMORY_MODE = "curated+graduated"
+RETIRED_MEMORY_ORIGIN = "graduated"
 SKILL_FILENAME = "SKILL.md"
 SKILLS_INDEX_PATH = "inputs/skills_index.json"
 MAX_SKILL_NAME_CHARS = 64
@@ -111,23 +114,18 @@ def validate_skill_name(name: str) -> str:
 
 
 def validate_memory_entry_ref(value: str) -> tuple[str, str]:
-    """Split ``<source>/<name>`` — one mount source and one entry inside it.
+    """Split ``<source>/<name>`` -- the mount source and one entry inside it.
 
-    ``source`` is the mount directory name: the reserved curated tier, or the id
-    of the graduated experiment the entry came from -- the same string the
-    skills index publishes.
+    ``source`` is the mount directory name, which is the curated library's
+    (``CURATED_MEMORY_SOURCE``): the same string the skills index publishes.
     """
 
     text = str(value).strip()
     source, separator, name = text.partition("/")
     if not separator or not source or not name:
         raise ValueError("memory entry reference must be <source>/<name>")
-    if source != CURATED_MEMORY_SOURCE and (
-        Path(source).name != source or source.startswith(".")
-    ):
-        raise ValueError(
-            f"memory entry source must be {CURATED_MEMORY_SOURCE!r} or an experiment id"
-        )
+    if source != CURATED_MEMORY_SOURCE:
+        raise ValueError(f"memory entry source must be {CURATED_MEMORY_SOURCE!r}")
     return source, validate_skill_name(name)
 
 
@@ -305,9 +303,8 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
 
     ``count``/``files``/``bytes`` describe the writable tree alone, because they
     are the published generation's ledger fields; the read-only entries are a
-    separate list, each carrying its ``origin`` (``curated`` or ``graduated``)
-    and its ``source``, so a session can tell what it may rewrite from what it
-    may not and can weigh a graduated experiment's knowledge accordingly.
+    separate list, each carrying its ``origin`` (``curated``) and its
+    ``source``, so a session can tell what it may rewrite from what it may not.
     """
 
     tree = Path(root)
@@ -316,14 +313,13 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
     memory: list[dict[str, object]] = []
     if memory_root.is_dir():
         for source in sorted(memory_root.iterdir(), key=lambda path: path.name):
+            if source.name != CURATED_MEMORY_SOURCE:
+                raise ValueError(f"unknown operating memory source: {source.name}")
             validate_skills_tree(source, require_writable=False)
-            origin = (
-                "curated" if source.name == CURATED_MEMORY_SOURCE else "graduated"
-            )
             for entry in _index_entries(
                 source,
                 directory=f"{OPERATING_MEMORY_DIRNAME}/{source.name}",
-                origin=origin,
+                origin="curated",
             ):
                 entry["source"] = source.name
                 memory.append(entry)
@@ -380,10 +376,6 @@ class MemorySource:
     origin: str
     root: Path
     entries: tuple[str, ...]
-    # A graduated source's Held-out end: the last day its forward verdict
-    # read (the forward record's ``replay.replay_end``). None for the curated
-    # tier, and for a graduated source whose record does not carry one.
-    heldout_end: str | None = None
 
     def to_record(self) -> dict[str, object]:
         return {
@@ -421,25 +413,21 @@ def operating_memory_entries(library: str | Path) -> tuple[str, ...]:
 
 
 def resolve_operating_memory(value: object) -> str:
-    """Validate the create-time mode: ``none``/``curated``/``curated+graduated``."""
+    """An arm's mode: ``none`` or ``curated``, the default.
+
+    An arm created before 2026-11-05 names ``RETIRED_OPERATING_MEMORY_MODE``
+    and reads as ``curated``: its frozen snapshot decides what its sessions
+    mount, and the graduated entries the snapshot holds are never mounted.
+    """
 
     text = str(value).strip() if value not in (None, "") else DEFAULT_OPERATING_MEMORY
+    if text == RETIRED_OPERATING_MEMORY_MODE:
+        return "curated"
     if text not in OPERATING_MEMORY_MODES:
         raise ValueError(
             "operating_memory must be one of " + ", ".join(OPERATING_MEMORY_MODES)
         )
     return text
-
-
-def experiment_graduated(records: Sequence[Mapping[str, object]]) -> bool:
-    """Whether this experiment's forward verdict graduated it.
-
-    ``ledger.experiment_verdict`` is the one aggregator; a running, failed or
-    integrity-flagged experiment has no verdict and never qualifies.
-    """
-
-    verdict = experiment_verdict(records)
-    return verdict is not None and verdict.get("status") == VerdictStatus.GRADUATED
 
 
 def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
@@ -456,108 +444,6 @@ def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
     return MemorySource(CURATED_MEMORY_SOURCE, "curated", library, entries)
 
 
-def graduated_memory_sources(
-    experiments_root: str | Path, *, exclude: str = ""
-) -> tuple[MemorySource, ...]:
-    """Skills of every graduated experiment, read from the experiments on disk.
-
-    The ledgers are the single source of both the verdict and the current skills
-    generation, so there is no second registry to keep in sync. An experiment
-    without a ledger, without a graduated held-out row, or without a published
-    skills generation contributes nothing. A researcher who wants an experiment
-    without the graduated tier creates it with ``operating_memory="curated"``
-    (promoting the graduated skills worth keeping into the curated library).
-    """
-
-    root = Path(experiments_root)
-    if not root.is_dir():
-        return ()
-    sources: list[MemorySource] = []
-    for directory in sorted(root.iterdir(), key=lambda path: path.name):
-        if not directory.is_dir() or directory.name == exclude:
-            continue
-        source = graduated_memory_source(directory)
-        if source is not None:
-            sources.append(source)
-    return tuple(sources)
-
-
-def graduated_memory_source(directory: Path) -> MemorySource | None:
-    """What one experiment contributes to the graduated tier, if anything.
-
-    Everything it reads hangs off the experiment's ledger: the skills
-    generation the ledger names is published immutably before the ledger
-    names it.
-    """
-
-    ledger_path = directory / "ledgers" / "experiment_ledger.jsonl"
-    if not ledger_path.is_file():
-        return None
-    records = ExperimentLedger(ledger_path).read()
-    if not experiment_graduated(records):
-        return None
-    if directory.name == CURATED_MEMORY_SOURCE:
-        raise ValueError(
-            f"experiment id {CURATED_MEMORY_SOURCE!r} is reserved for the "
-            "curated memory tier; rename that experiment"
-        )
-    snapshot = latest_skills_snapshot(records, experiment_dir=directory)
-    if snapshot.root is None or not snapshot.stats.count:
-        return None
-    entries = tuple(sorted(item.name for item in snapshot.root.iterdir()))
-    return MemorySource(
-        directory.name,
-        "graduated",
-        snapshot.root,
-        entries,
-        heldout_end=_verdict_heldout_end(records),
-    )
-
-
-def _trade_date(value: object, what: str) -> str:
-    text = str(value)
-    if not re.fullmatch(r"\d{8}", text):
-        raise ValueError(f"{what} must be a YYYYMMDD date, got {value!r}")
-    return text
-
-
-def _verdict_heldout_end(records: Sequence[Mapping[str, object]]) -> str | None:
-    """The last day a graduated arm's verdict read, from its forward record."""
-
-    replay = (forward_record(records) or {}).get("replay")
-    end = replay.get("replay_end") if isinstance(replay, Mapping) else None
-    return None if end in (None, "") else _trade_date(end, "forward replay_end")
-
-
-def admit_memory_sources(
-    sources: Sequence[MemorySource], research_end: str
-) -> tuple[tuple[MemorySource, ...], tuple[MemorySource, ...]]:
-    """Split sources into what an arm whose research ends at ``research_end``
-    may mount and what it may not.
-
-    Every arm is graded on the forward and Held-out window that follows its
-    research end, and arms share that window. A graduated source was selected
-    by a verdict read on its own window, so its knowledge may reach a session
-    only when that window ended no later than the session's research period;
-    otherwise the selection itself is forward information about the window the
-    session's artifact will be graded on. A graduated source whose Held-out
-    end is unknown cannot be shown to qualify and is refused as well. The
-    curated tier is a human decision and is always admitted.
-    """
-
-    end = _trade_date(research_end, "research_end")
-    admitted: list[MemorySource] = []
-    refused: list[MemorySource] = []
-    for source in sources:
-        if source.origin == "graduated" and (
-            source.heldout_end is None or source.heldout_end > end
-        ):
-            refused.append(source)
-        else:
-            admitted.append(source)
-    return tuple(admitted), tuple(refused)
-
-
 def operating_memory_snapshot_root(experiment_dir: str | Path) -> Path:
     return (
         Path(experiment_dir) / "artifacts" / OPERATING_MEMORY_SNAPSHOT_DIRNAME
@@ -568,50 +454,32 @@ def operating_memory_snapshot_path(experiment_dir: str | Path) -> Path:
     return Path(experiment_dir) / "artifacts" / OPERATING_MEMORY_SNAPSHOT_NAME
 
 
-def _resolve_memory_sources(
-    *,
-    mode: str,
-    repo_root: str | Path | None,
-    experiments_root: str | Path | None,
-    experiment_id: str,
-) -> tuple[MemorySource, ...]:
-    """The live resolution, performed exactly once per experiment."""
-
-    if mode == "none":
-        return ()
-    if repo_root is None:
-        raise ValueError("operating_memory needs a repository root to resolve")
-    sources: list[MemorySource] = []
-    curated = curated_memory_source(repo_root)
-    if curated is not None:
-        sources.append(curated)
-    if mode == "curated+graduated" and experiments_root is not None:
-        sources.extend(
-            graduated_memory_sources(experiments_root, exclude=experiment_id)
-        )
-    return tuple(sources)
-
-
 def create_operating_memory_snapshot(
     experiment_dir: str | Path,
     *,
     mode: str,
     repo_root: str | Path | None = None,
-    experiments_root: str | Path | None = None,
     created_from: str = "creation",
 ) -> dict[str, object]:
     """Freeze what this experiment will mount, once, and record what that was.
 
-    The curated library and the graduated tier keep moving; an experiment does
-    not. Resolving them once at creation is what makes an experiment's own sessions
-    comparable to each other, and what makes a library change something that
-    reaches the *next* experiment rather than the middle of this one.
+    The curated library keeps moving; an experiment does not. Resolving it
+    once at creation is what makes an experiment's own sessions comparable to
+    each other, and what makes a library change something that reaches the
+    *next* experiment rather than the middle of this one. A request that
+    names ``RETIRED_OPERATING_MEMORY_MODE`` is refused.
 
     The copy lands read-only in ``artifacts/memory/<source>/<name>/`` beside the
     experiment's skills generations, so it survives exactly as long as the
     experiment does.
     """
 
+    if str(mode).strip() == RETIRED_OPERATING_MEMORY_MODE:
+        raise ValueError(
+            f"operating_memory {RETIRED_OPERATING_MEMORY_MODE!r} named the graduated "
+            "tier, retired on 2026-11-05; choose one of "
+            + ", ".join(OPERATING_MEMORY_MODES)
+        )
     resolved = resolve_operating_memory(mode)
     root = operating_memory_snapshot_root(experiment_dir)
     record_path = operating_memory_snapshot_path(experiment_dir)
@@ -619,12 +487,13 @@ def create_operating_memory_snapshot(
         raise FileExistsError(
             f"operating memory snapshot already exists: {record_path}"
         )
-    sources = _resolve_memory_sources(
-        mode=resolved,
-        repo_root=repo_root,
-        experiments_root=experiments_root,
-        experiment_id=Path(experiment_dir).name,
-    )
+    if resolved == "none":
+        sources: tuple[MemorySource, ...] = ()
+    elif repo_root is None:
+        raise ValueError("operating_memory needs a repository root to resolve")
+    else:
+        curated = curated_memory_source(repo_root)
+        sources = () if curated is None else (curated,)
     root.parent.mkdir(parents=True, exist_ok=True)
     staging = root.parent / (
         f".{OPERATING_MEMORY_SNAPSHOT_DIRNAME}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
@@ -652,19 +521,8 @@ def create_operating_memory_snapshot(
         "mode": resolved,
         "created_at": utc_now_iso(),
         "created_from": created_from,
-        # A graduated entry carries its source's Held-out end, the input the
-        # mount's admission rule reads (``admit_memory_sources``).
         "entries": [
-            {
-                "origin": source.origin,
-                "source": source.source,
-                "name": name,
-                **(
-                    {"heldout_end": source.heldout_end}
-                    if source.origin == "graduated"
-                    else {}
-                ),
-            }
+            {"origin": source.origin, "source": source.source, "name": name}
             for source in sources
             for name in source.entries
         ],
@@ -692,14 +550,14 @@ def ensure_operating_memory_snapshot(
     *,
     mode: str,
     repo_root: str | Path | None = None,
-    experiments_root: str | Path | None = None,
 ) -> dict[str, object]:
     """The snapshot, taken now if this experiment predates snapshotting.
 
     Experiments created before this existed have no snapshot and must keep
-    running: the first session that needs one resolves the tiers exactly as the
-    old behaviour did and freezes the result, so it happens once rather than at
-    every session, and the manifest says the snapshot came from a session.
+    running: the first session that needs one resolves the library exactly as
+    the old behaviour did and freezes the result, so it happens once rather
+    than at every session, and the manifest says the snapshot came from a
+    session.
     """
 
     existing = read_operating_memory_snapshot(experiment_dir)
@@ -709,7 +567,6 @@ def ensure_operating_memory_snapshot(
         experiment_dir,
         mode=mode,
         repo_root=repo_root,
-        experiments_root=experiments_root,
         created_from="first_session",
     )
 
@@ -717,58 +574,42 @@ def ensure_operating_memory_snapshot(
 def snapshot_memory_sources(
     record: Mapping[str, object], experiment_dir: str | Path
 ) -> tuple[MemorySource, ...]:
-    """The snapshot's entries, grouped back into their mount sources."""
+    """The snapshot's curated entries as the one source they mount from.
 
-    root = operating_memory_snapshot_root(experiment_dir)
-    grouped: dict[str, tuple[str, str | None, list[str]]] = {}
+    An entry of ``RETIRED_MEMORY_ORIGIN`` is accepted and left out; any other
+    entry that is not the curated library's is refused.
+    """
+
+    names: list[str] = []
     for entry in record.get("entries") or ():  # type: ignore[union-attr]
         if not isinstance(entry, Mapping):
             raise ValueError("operating memory snapshot entry must be an object")
-        source = str(entry.get("source") or "")
-        name = validate_skill_name(str(entry.get("name") or ""))
         origin = str(entry.get("origin") or "")
-        if not source or origin not in {"curated", "graduated"}:
+        if origin == RETIRED_MEMORY_ORIGIN:
+            continue
+        name = validate_skill_name(str(entry.get("name") or ""))
+        if origin != "curated" or entry.get("source") != CURATED_MEMORY_SOURCE:
             raise ValueError("operating memory snapshot entry is invalid")
-        # A snapshot taken before entries carried it has no Held-out end; the
-        # admission rule then refuses that graduated source.
-        raw_end = entry.get("heldout_end")
-        heldout_end = (
-            None
-            if raw_end in (None, "")
-            else _trade_date(raw_end, "snapshot heldout_end")
-        )
-        grouped.setdefault(source, (origin, heldout_end, []))[2].append(name)
-    # Curated first, then the graduated experiments by id: the same order the
-    # resolution produced, so a manifest reads the way it always did.
-    return tuple(
-        MemorySource(
-            source, origin, root / source, tuple(sorted(names)), heldout_end
-        )
-        for source, (origin, heldout_end, names) in sorted(
-            grouped.items(),
-            key=lambda item: (item[0] != CURATED_MEMORY_SOURCE, item[0]),
-        )
-    )
+        names.append(name)
+    if not names:
+        return ()
+    root = operating_memory_snapshot_root(experiment_dir) / CURATED_MEMORY_SOURCE
+    return (MemorySource(CURATED_MEMORY_SOURCE, "curated", root, tuple(sorted(names))),)
 
 
 def install_operating_memory(
-    workspace: str | Path, experiment_dir: str | Path, *, research_end: str
-) -> tuple[tuple[MemorySource, ...], tuple[MemorySource, ...]]:
+    workspace: str | Path, experiment_dir: str | Path
+) -> tuple[MemorySource, ...]:
     """Mount this experiment's frozen snapshot read-only beside its skills.
 
     Nothing is resolved here: the snapshot decided what this experiment may
     mount when it was created, so two sessions of one experiment see the same
-    entries however the library moved between them. What it mounts of that is
-    ``admit_memory_sources`` against the arm's own ``research_end``, a fixed
-    rule on fixed inputs, so it too is the same for every session of the arm.
-    Each admitted source lands in ``workspace/memory/<source>/<name>/`` as
-    read-only files, so a session can read them like its own skills but can
-    never change or delete them: the skill tools refuse mounted names and the
-    copy itself is not writable. Nothing mounted here is ever published as this
-    experiment's skills generation.
-
-    Returns ``(mounted, refused)``; the caller records the refused sources on
-    the host, never where the session can read them.
+    entries however the library moved between them. The curated entries land
+    in ``workspace/memory/curated/<name>/`` as read-only files, so a session
+    can read them like its own skills but can never change or delete them: the
+    skill tools refuse mounted names and the copy itself is not writable.
+    Nothing mounted here is ever published as this experiment's skills
+    generation. Returns the sources mounted.
     """
 
     record = read_operating_memory_snapshot(experiment_dir)
@@ -780,11 +621,9 @@ def install_operating_memory(
     destination = Path(workspace) / OPERATING_MEMORY_DIRNAME
     if destination.exists():
         raise FileExistsError(f"workspace memory directory already exists: {destination}")
-    mounted, refused = admit_memory_sources(
-        snapshot_memory_sources(record, experiment_dir), research_end
-    )
+    mounted = snapshot_memory_sources(record, experiment_dir)
     if not mounted:
-        return (), refused
+        return ()
     destination.mkdir()
     for source in mounted:
         shutil.copytree(
@@ -793,7 +632,7 @@ def install_operating_memory(
     chmod_tree(destination, file_mode=0o444, dir_mode=0o555)
     for source in mounted:
         validate_skills_tree(destination / source.source, require_writable=False)
-    return mounted, refused
+    return mounted
 
 
 def _reject_operating_memory_name(workspace_root: Path, name: str) -> None:
@@ -1156,6 +995,8 @@ __all__ = [
     "OPERATING_MEMORY_LIBRARY",
     "OPERATING_MEMORY_MODES",
     "OPERATING_MEMORY_SNAPSHOT_NAME",
+    "RETIRED_MEMORY_ORIGIN",
+    "RETIRED_OPERATING_MEMORY_MODE",
     "SKILLS_INDEX_PATH",
     "DeleteSkillTool",
     "ExperimentSkillsStore",
@@ -1164,14 +1005,10 @@ __all__ = [
     "SkillsSnapshot",
     "SkillsStats",
     "WriteSkillTool",
-    "admit_memory_sources",
     "build_skills_index",
     "create_operating_memory_snapshot",
     "curated_memory_source",
     "ensure_operating_memory_snapshot",
-    "experiment_graduated",
-    "graduated_memory_source",
-    "graduated_memory_sources",
     "install_operating_memory",
     "install_workspace_skills",
     "latest_skills_snapshot",

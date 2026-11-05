@@ -37,7 +37,7 @@ from autotrade.webui import skill_feedback as projection
 
 SESSION_KEY = "research"
 CURATED = "curated/grid-plateau-selection"
-GRADUATED = "momentum_20260101/same-window-parent-control"
+OTHER_CURATED = "curated/validation-readings"
 # A real report: what was tried, what the reading was, what it contradicts.
 EVIDENCE = (
     "条目要求单参数网格不超过四点；本会话把 5 点网格一次提交 batch_validate（node_7f3a），"
@@ -51,13 +51,10 @@ def _mounted() -> dict[str, str]:
     return mounted_skill_refs(
         (
             MemorySource(
-                "curated", "curated", Path("memory/curated"), ("grid-plateau-selection",)
-            ),
-            MemorySource(
-                "momentum_20260101",
-                "graduated",
-                Path("memory/momentum_20260101"),
-                ("same-window-parent-control",),
+                "curated",
+                "curated",
+                Path("memory/curated"),
+                ("grid-plateau-selection", "validation-readings"),
             ),
         )
     )
@@ -136,14 +133,6 @@ def test_a_report_is_one_redacted_line_carrying_the_entry_and_its_origin(
     assert json.dumps(manifest.data, sort_keys=True, default=str) == before
 
 
-def test_a_graduated_entry_files_under_its_own_origin(tmp_path: Path) -> None:
-    tool, _, experiment_dir = _session(tmp_path)
-    _file(tool, skill=GRADUATED, claim="wrong")
-    [record] = read_skill_feedback(skill_feedback_path(experiment_dir))
-    assert record["skill"] == GRADUATED and record["origin"] == "graduated"
-    assert record["claim"] == "wrong"
-
-
 # ---- what the channel refuses ----------------------------------------------
 
 
@@ -157,7 +146,7 @@ def test_an_entry_this_session_does_not_mount_is_refused_with_the_mounted_set(
     with pytest.raises(ToolError) as error:
         _file(tool, skill="curated/no-such-entry")
     assert "unknown mounted skill" in str(error.value)
-    assert CURATED in str(error.value) and GRADUATED in str(error.value)
+    assert CURATED in str(error.value) and OTHER_CURATED in str(error.value)
     assert error.value.error_type == "skill_feedback_policy"
     # A bare entry name is not the mounted reference either.
     with pytest.raises(ToolError):
@@ -212,7 +201,7 @@ def test_one_entry_takes_one_report_per_run(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match="already filed feedback on"):
         _file(tool, claim="wrong")
     # A different entry is still open.
-    _file(tool, skill=GRADUATED)
+    _file(tool, skill=OTHER_CURATED)
     assert len(read_skill_feedback(skill_feedback_path(experiment_dir))) == 2
 
 
@@ -281,8 +270,7 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
     _filed(
         second,
         report_id="skillfb_b",
-        skill=GRADUATED,
-        origin="graduated",
+        skill=OTHER_CURATED,
         claim="wrong",
         session_key="s9",
     )
@@ -302,8 +290,7 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
     assert "/Data2" not in str(labelled["evidence"])
     assert "[host_path]" in str(labelled["evidence"])
     assert rows["expB"]["claim"] == "wrong"
-    assert rows["expB"]["source"] == "momentum_20260101"
-    assert rows["expB"]["origin"] == "graduated"
+    assert rows["expB"]["name"] == "validation-readings"
     # A session key the plan no longer names still lists, just unlabelled.
     assert rows["expB"]["session_label"] == ""
     only = projection.skill_feedback(experiments, experiment_id="expA")
@@ -318,14 +305,19 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
         )
 
 
-def test_a_claim_no_code_can_label_is_named_unreadable(tmp_path: Path) -> None:
-    """A line that passed the version gate but carries a claim no code can
-    label is corruption, and is named rather than guessed at. The rest of the
-    page and the resolver are shared with ``report_issue`` and tested there on
-    both channels."""
+def test_a_claim_or_entry_no_code_can_label_is_named_unreadable(tmp_path: Path) -> None:
+    """A line that passed the version gate but carries a claim, an origin or a
+    mount source no code can label is corruption, and is named rather than
+    guessed at. The rest of the page and the resolver are shared with
+    ``report_issue`` and tested there on both channels."""
 
     experiments = tmp_path / "experiments"
     _filed(_console_experiment(experiments, "expA"), claim="confirmed")
+    _filed(_console_experiment(experiments, "expB"), origin="graduated")
+    _filed(
+        _console_experiment(experiments, "expC"),
+        skill="momentum_20260101/same-window-parent-control",
+    )
     payload = projection.skill_feedback(experiments)
     assert payload["reports"] == []
-    assert [item["experiment_id"] for item in payload["unreadable"]] == ["expA"]
+    assert [item["experiment_id"] for item in payload["unreadable"]] == ["expA", "expB", "expC"]

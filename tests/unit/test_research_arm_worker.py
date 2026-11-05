@@ -406,9 +406,9 @@ def test_the_llm_research_session_mounts_only_the_visible_years_and_freezes(
     Held-out. The session's ``/mnt/snapshot`` is the decision view at the end
     of the visible year, the two snapshot slot mounts stay empty, no replay
     slot appears anywhere in the session's runtime tree, and the strategy the
-    session replayed never saw a bar of the sealed year. A graduated sibling
-    experiment's skills, graded before the visible year ends, are mounted as
-    operating memory and named in the run manifest.
+    session replayed never saw a bar of the sealed year. A finished sibling
+    experiment's skills stay out of the session: it mounts only its own
+    snapshot of the curated library, of which this checkout has none.
     """
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
@@ -420,16 +420,12 @@ def test_the_llm_research_session_mounts_only_the_visible_years_and_freezes(
         _NominatingLLM,
         _NoShellRunner,
     )
-    from tests.unit.test_operating_memory import GRADUATED_SKILL, _experiment_with_skill
+    from tests.unit.test_operating_memory import _finished_experiment
 
     repo, experiment = make_arm(tmp_path, developer_mode="llm", max_replay_years=2)
     # The assertions below read the session tree. A finished arm otherwise deletes it.
     monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
-    _experiment_with_skill(repo / "experiments", "adopted", heldout_end="20230331")
-    # Graduated on a window that reaches past this arm's research end.
-    _experiment_with_skill(
-        repo / "experiments", "graded_on_our_window", heldout_end=GEOMETRY["heldout_end"]
-    )
+    _finished_experiment(repo / "experiments", "adopted")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     # The console's GPU allocation for the research session, one-shot.
     write_control(experiment / "hitl" / "control.json", ControlState(gpu_counts={"research": 3}))
@@ -494,21 +490,11 @@ def test_the_llm_research_session_mounts_only_the_visible_years_and_freezes(
     spec = host_manifest["sandbox_spec"]
     assert (spec["gpu_count"], spec["gpu"], spec["gpu_name_filter"]) == (3, "auto", "L20")
     agent_manifest_text = Path(research_row["run_manifest_ref"]).read_text(encoding="utf-8")
-    memory = json.loads(agent_manifest_text)["operating_memory"]
-    assert {"source": "adopted", "origin": "graduated", "entries": [GRADUATED_SKILL]} in memory["sources"]
-    # The refused source is on the host record only; the session never learns it exists.
-    assert host_manifest["operating_memory_refused"] == [
-        {
-            "source": "graded_on_our_window",
-            "origin": "graduated",
-            "entries": [GRADUATED_SKILL],
-            "heldout_end": GEOMETRY["heldout_end"],
-        }
-    ]
-    assert "graded_on_our_window" not in agent_manifest_text
+    assert json.loads(agent_manifest_text)["operating_memory"]["sources"] == []
+    assert "operating_memory_refused" not in host_manifest
     workspace = options.work_root / options.experiment_id / "research" / "agent" / "workspace"
-    assert not (workspace / "memory" / "graded_on_our_window").exists()
-    assert "graded_on_our_window" not in (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
+    assert not (workspace / "memory").exists()
+    assert "adopted" not in (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
     assert read_control(experiment / "hitl" / "control.json").gpu_counts == {}
 
     # The session's transcript, named by the run's opaque ref, carries what

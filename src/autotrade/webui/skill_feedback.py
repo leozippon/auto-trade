@@ -53,7 +53,7 @@ def _experiment_feedback(directory: Path) -> list[dict[str, object]]:
         # so the page can never address an entry differently from the session.
         source, name = validate_memory_entry_ref(skill)
         origin = str(record.get("origin") or "")
-        if origin not in {"curated", "graduated"}:
+        if origin != "curated":
             raise ValueError(f"unknown skill feedback origin: {origin!r}")
         label = ""
         raw_session = str(record.get("session_key") or "")
