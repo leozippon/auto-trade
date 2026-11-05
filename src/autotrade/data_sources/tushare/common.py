@@ -31,8 +31,12 @@ from autotrade.environment.data.contracts import (  # noqa: F401
     BENCHMARK_INDEXES,
     BOARD_TRADING_DATASETS,
     DOMAIN_STATUS_FILES,
+    REFRESH_NODES,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
+    TEXT_DATASET_REFRESH_NODES,
+    TEXT_NODE,
 )
+from autotrade.environment.data.pit import first_seen_at
 
 from .io import (  # noqa: F401 -- re-exported via this hub (audit.py imports has_pagination_probe, download.py imports inherited_updater_lock_fd from common)
     CorruptSidecarError,
@@ -2666,12 +2670,32 @@ def safe_partition_value(value: str) -> str:
 # announcement/report date. Backfilled history carries collection timestamps
 # (e.g. 2025 rec_time on 2020 announcements) that must not gate PIT visibility.
 # Nor is a time of exactly midnight one: it is a bare date (every 2015 anns_d
-# rec_time, most official-service rows since 2026-09-14), so the row takes the
-# same date-only stamp as a row without a source time.
+# rec_time, most official-service rows since 2026-09-14). Such a row is stamped
+# from the lake's own first receipt when that lies in the same window, else
+# like a row without a source time (see augment_text_frame).
 TEXT_TIME_PLAUSIBLE_BEFORE_DAYS = 1.0
 TEXT_TIME_PLAUSIBLE_AFTER_DAYS = 3.0
 
-def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
+
+def _landing_run(instant: pd.Series, spec: DatasetSpec) -> pd.Series:
+    """The launch of the dataset's latest landing run at or before each CN
+    ``instant``: the cutoff the views release that run's rows at."""
+    (node,) = TEXT_DATASET_REFRESH_NODES.get(spec.api_name, (TEXT_NODE,))
+    start = REFRESH_NODES[node].start
+    launch = instant.dt.normalize() + pd.Timedelta(hours=start.hour, minutes=start.minute, seconds=start.second)
+    return launch.where(launch <= instant, launch - pd.Timedelta(days=1))
+
+
+def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec, first_seen: pd.Series | None = None) -> pd.DataFrame:
+    """Stamp ``available_at`` and ``available_at_rule`` on a text frame.
+
+    A source time within -1..+3 days of the date column is the publication
+    time. A bare date (a source time of exactly 00:00:00) is not; such a row
+    takes the launch of the landing run that first brought it into the lake
+    when ``first_seen`` (per row, when the lake first held the key; NaT where
+    it keeps no such time) puts that in the same window, so a title the 23:15
+    run lands reaches the next morning, and the views still hold it until the
+    instant itself. Every other row is stamped at the end of its date."""
     df = df.copy()
     if "available_at" not in df.columns:
         df["available_at"] = ""
@@ -2681,6 +2705,7 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
         date_value = df[spec.date_column].astype(str).str.strip()
     implausible = pd.Series(False, index=df.index)
     date_only = pd.Series(False, index=df.index)
+    received = pd.Series(False, index=df.index)
     if spec.time_column and spec.time_column in df.columns:
         source_time = df[spec.time_column].map(normalize_source_datetime)
         mask = source_time.ne("") & source_time.ne("nan") & source_time.ne("None")
@@ -2693,9 +2718,17 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
             mask = mask & (base.isna() | plausible.fillna(False))
             date_only = mask & base.notna() & parsed.eq(parsed.dt.normalize())
             mask = mask & ~date_only
+            if first_seen is not None and date_only.any():
+                landed = _landing_run(first_seen, spec)
+                landed_lag = (landed.dt.tz_localize(None) - base).dt.total_seconds() / 86400.0
+                received = date_only & landed_lag.between(
+                    -TEXT_TIME_PLAUSIBLE_BEFORE_DAYS, TEXT_TIME_PLAUSIBLE_AFTER_DAYS
+                ).fillna(False)
+                df.loc[received, "available_at"] = landed[received].dt.strftime("%Y-%m-%d %H:%M:%S+08:00")
+                df.loc[received, "available_at_rule"] = f"first_seen_for_date_only_{spec.time_column}"
         df.loc[mask, "available_at"] = source_time[mask]
         df.loc[mask, "available_at_rule"] = f"source:{spec.time_column}"
-        df.loc[implausible | date_only, "available_at"] = ""
+        df.loc[implausible | (date_only & ~received), "available_at"] = ""
     if date_value is not None:
         mask = (df["available_at"].astype(str).str.strip() == "") & date_value.str.fullmatch(r"\d{8}", na=False)
         suffix = " 22:00:00+08:00" if spec.api_name == "report_rc" else " 23:59:59+08:00"
@@ -2712,10 +2745,11 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec) -> pd.DataFrame:
 
 def _rewrite_available_at(
     dataset_dir: Path,
-    restamp: Callable[[pd.DataFrame], pd.DataFrame],
+    restamp: Callable[[pd.DataFrame, Path], pd.DataFrame],
     key_columns: Sequence[str],
 ) -> tuple[int, int]:
-    """Re-derive the two stamp columns of every partition under ``dataset_dir``.
+    """Re-derive the two stamp columns of every partition under ``dataset_dir``
+    (``restamp`` gets the frame without them and the partition's path).
 
     A partition whose stamp or rule label differs is republished through the
     versioned write path: the restamped rows are a restatement, so the old
@@ -2733,7 +2767,7 @@ def _rewrite_available_at(
         if frame.empty:
             continue
         before = frame.get("available_at", pd.Series("", index=frame.index)).astype(str)
-        repaired = restamp(frame.drop(columns=[c for c in ("available_at", "available_at_rule") if c in frame.columns]))
+        repaired = restamp(frame.drop(columns=[c for c in ("available_at", "available_at_rule") if c in frame.columns]), path)
         meta = parquet_meta(path)
         outcome = publish(
             path,
@@ -2752,6 +2786,16 @@ def _rewrite_available_at(
     return files, changed_rows
 
 
+def _restamp_text(frame: pd.DataFrame, path: Path, *, spec: DatasetSpec) -> pd.DataFrame:
+    """A stored text partition under the current rule; its keys are all held,
+    so their first-seen rows are the whole receipt record."""
+    return augment_text_frame(frame, spec, first_seen_at(path, frame))
+
+
+def _restamp_event(frame: pd.DataFrame, _path: Path, *, spec: DatasetSpec, trading_dates: list[str]) -> pd.DataFrame:
+    return augment_event_frame(frame, spec, trading_dates=trading_dates)
+
+
 def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any]:
     """Re-derive available_at for existing text partitions under the current rule.
 
@@ -2766,7 +2810,7 @@ def repair_text_available_at(raw_dir: str, datasets: list[str]) -> dict[str, Any
         dataset_dir = Path(raw_dir) / dataset
         if not dataset_dir.exists():
             raise RuntimeError(f"missing dataset directory: {dataset_dir}")
-        files, changed_rows = _rewrite_available_at(dataset_dir, partial(augment_text_frame, spec=spec), spec.key_columns)
+        files, changed_rows = _rewrite_available_at(dataset_dir, partial(_restamp_text, spec=spec), spec.key_columns)
         stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}
         stats["files_rewritten"] += files
         stats["rows_changed"] += changed_rows
@@ -2790,7 +2834,7 @@ def repair_event_available_at(raw_dir: str, datasets: list[str]) -> dict[str, An
             raise RuntimeError(f"no partitions under {raw / dataset}")
         open_dates = load_sse_open_dates(raw, partition_date(partitions[0]), latest_sse_calendar_date(raw))
         files, changed_rows = _rewrite_available_at(
-            raw / dataset, partial(augment_event_frame, spec=spec, trading_dates=open_dates), spec.key_columns
+            raw / dataset, partial(_restamp_event, spec=spec, trading_dates=open_dates), spec.key_columns
         )
         stats["datasets"][dataset] = {"files_rewritten": files, "rows_changed": changed_rows}
         stats["files_rewritten"] += files

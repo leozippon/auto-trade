@@ -2473,9 +2473,10 @@ def _anns_filing_rows(rows: pd.DataFrame) -> pd.Series:
     it), else groups with the id-less rows of that title. Normalising folds
     NFKC and strips the tag, the prefix and every non-word character, but no
     摘要/英文版 suffix: those are separate documents. Of a filing's copies the
-    unprefixed title is kept, then the shorter one (a plain title with its own
-    colon, ``H股公告：...``, beside its ``简称：`` copy), then the earliest
-    available_at, then the smallest url.
+    unprefixed title is kept, then the shorter one without edge whitespace (a
+    plain title with its own colon, ``H股公告：...``, beside its ``简称：``
+    copy), then the earliest available_at, then a url with the id, then the
+    smallest url.
     """
     code = rows["ts_code"].fillna("").astype(str)
     title = rows["title"].fillna("").astype(str)
@@ -2497,8 +2498,9 @@ def _anns_filing_rows(rows: pd.DataFrame) -> pd.Series:
     keys = pa.table({
         "filing": filing.to_numpy(dtype=object),
         "prefixed": title.str.contains(f"{_TITLE_TAG}|{_TITLE_PREFIX}", regex=True).to_numpy(),
-        "length": title.str.len().to_numpy(),
+        "length": title.str.strip().str.len().to_numpy(),
         "available_at": rows["available_at"].astype(str).to_numpy(dtype=object),
+        "idless": idless.to_numpy(),
         "url": url.to_numpy(dtype=object),
     })
     # Arrow's stable multi-key sort; pandas sorts these string keys ~7x slower.

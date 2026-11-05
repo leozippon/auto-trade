@@ -20,9 +20,10 @@ import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
-from autotrade.environment.data.pit import concat_rows
+from autotrade.environment.data.pit import concat_rows, first_seen_at, key_strings
 
 from . import common as core
+from . import versions
 from .common import (
     BAK_BASIC_SPEC,
     BOARD_TRADING_SPECS,
@@ -3391,6 +3392,24 @@ def write_text_result(
     )
     return len(df) if outcome in WRITTEN_OUTCOMES else 0
 
+def landing_first_seen(path: Path, answer: pd.DataFrame, key_columns: list[str] | tuple[str, ...]) -> pd.Series:
+    """When the lake first held each row of a vendor answer about to be merged
+    into the partition at ``path`` (CN time, NaT where it keeps no such time):
+    the partition's first-seen row, or now for a key this write lands in a
+    partition of the versioned era. ``publish`` records its own instant for
+    such a key a moment later from the same clock, inside the same landing
+    run, so the stamp a later refresh derives from the recorded row is the
+    same."""
+    seen = first_seen_at(path, answer)
+    if seen is None:
+        seen = pd.Series(pd.NaT, index=answer.index, dtype=f"datetime64[ns, {CN_TZ}]")
+    if versions.records_observations(path):
+        held = key_strings(pd.read_parquet(path, columns=list(key_columns)), key_columns) if path.exists() else pd.Series()
+        landing = seen.isna() & ~key_strings(answer, key_columns).isin(set(held))
+        seen = seen.mask(landing, pd.Timestamp(versions.utc_now()).tz_convert(CN_TZ))
+    return seen
+
+
 def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, windows: list[tuple[str, str, str]], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
     written = 0
     skipped = 0
@@ -3406,7 +3425,8 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: Datase
             meta_params = dict(params)
             meta_params["month"] = month
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            df = augment_text_frame(frame(result), spec)
+            answer = frame(result)
+            df = augment_text_frame(answer, spec, landing_first_seen(path, answer, spec.key_columns))
             did_write, rows = write_window_merged_partition(
                 path,
                 df,

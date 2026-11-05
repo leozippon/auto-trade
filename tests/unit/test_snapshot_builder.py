@@ -2593,7 +2593,8 @@ class SnapshotBuilderTest(unittest.TestCase):
         url form, or an id-less dataclouds copy of the same day and normalised
         title. Distinct ids never merge, nor does a 摘要 beside its report.
         The unprefixed title is kept, then the shorter one, then the earliest
-        available_at, then the smallest url, in any row order."""
+        available_at, then a url with the id, then the smallest url, in any
+        row order."""
         from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 
         # A v15 view holds every copy (v16).
@@ -2646,7 +2647,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 detail("000513.SZ", 1221602397, "2024-11-02"), eod("2024-11-02")),
             ann("000513.SZ", "20241102", "丽珠集团：H股公告：证券变动月报表",
                 page("2024-11-02", 1221602397), eod("2024-11-02")),
-            # Shanghai dataclouds copy with the identical title: the smaller url.
+            # Shanghai dataclouds copy with the identical title: the id url.
             ann("600282.SH", "20210619", sh_title, detail("600282.SH", 1210292241, "2021-06-19"), eod("2021-06-19")),
             ann("600282.SH", "20210619", sh_title,
                 clouds("shgonggao/2021/2021-06-19/2b650a7cd00d11eb88d2fa163e26e5de"), eod("2021-06-19")),
@@ -2715,9 +2716,10 @@ class SnapshotBuilderTest(unittest.TestCase):
                 self.assertEqual(index["text_id"].nunique(), len(index))
             built.append(sorted(bodies.loc[index["text_id"]].tolist()))
         # The same copy survives whatever order the rows come in: here the
-        # dataclouds url of the Shanghai pair, the smaller of the two.
+        # Shanghai pair keeps the url that carries the id, not the dataclouds
+        # one that sorts first.
         self.assertEqual(built[0], built[1])
-        self.assertIn(f"{sh_title}\n{clouds('shgonggao/2021/2021-06-19/2b650a7cd00d11eb88d2fa163e26e5de')}", built[0])
+        self.assertIn(f"{sh_title}\n{detail('600282.SH', 1210292241, '2021-06-19')}", built[0])
 
     def test_investor_qa_uses_question_title_and_question_answer_body(self):
         with tempfile.TemporaryDirectory() as tmp:
