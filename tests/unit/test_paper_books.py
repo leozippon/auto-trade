@@ -94,8 +94,10 @@ def test_one_failing_or_busy_book_does_not_stop_the_others(tmp_path: Path):
 
 def test_a_run_takes_the_books_the_owner_trades_first(tmp_path: Path):
     """The books switched to real fills run before the others, so the sheets
-    the owner trades from are ready first; the order is the books' own state,
-    so a deleted book leaves nothing behind to name."""
+    the owner trades from are ready first; a book that asks for a GPU runs
+    after every book that asks for none, whatever its fills, so its wait for a
+    card never holds one up. The order is the books' own state, so a deleted
+    book leaves nothing behind to name."""
 
     root = paper_root(tmp_path)
     for book in ("alpha", "beta", "gamma", "traded"):
@@ -107,6 +109,9 @@ def test_a_run_takes_the_books_the_owner_trades_first(tmp_path: Path):
     assert run_order(root) == ["beta", "traded", "alpha", "gamma"]
     delete_book(root, "traded")
     assert run_order(root) == ["beta", "alpha", "gamma"]
+    _graduated_book(tmp_path, "aaa")  # asks for a GPU, as its arm did
+    fills.enable(root / "aaa")
+    assert run_order(root) == ["beta", "alpha", "gamma", "aaa"]
 
 
 def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_path: Path):

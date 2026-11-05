@@ -2064,18 +2064,6 @@ def test_pipeline_factory_reuses_replay_and_always_closes(tmp_path: Path):
     assert executor.closed is True
 
 
-_GPU_ROSTER = [
-    {"index": 0, "name": "NVIDIA L20", "memory_free_mib": 8_000, "memory_total_mib": 46_000,
-     "utilization_pct": 80, "temperature_c": 60},
-    {"index": 1, "name": "NVIDIA L20", "memory_free_mib": 45_000, "memory_total_mib": 46_000,
-     "utilization_pct": 0, "temperature_c": 30},
-    {"index": 2, "name": "NVIDIA A100-SXM4-80GB", "memory_free_mib": 80_000,
-     "memory_total_mib": 81_000, "utilization_pct": 0, "temperature_c": 30},
-    {"index": 5, "name": "NVIDIA L20", "memory_free_mib": 40_000, "memory_total_mib": 46_000,
-     "utilization_pct": 5, "temperature_c": 35},
-]
-
-
 def test_the_default_sandbox_spec_asks_for_one_matching_gpu():
     """`gpu="auto"` + `gpu_name_filter="L20"` is the shipped default: one L20,
     to be pinned by whoever starts the container.
@@ -2119,41 +2107,40 @@ def _nvidia_smi(used: dict[int, int]) -> Mock:
     return Mock(return_value=subprocess.CompletedProcess([], 0, stdout=rows, stderr=""))
 
 
-def test_every_reported_card_is_a_candidate_and_a_card_in_use_is_passed_over(tmp_path: Path):
-    """No list of cards: every card nvidia-smi reports is a candidate. On a
-    host shared with other tenants a card somebody holds memory on -- 30 GB
-    of a job, or one CUDA context above the idle threshold -- is passed over
-    for an idle one by a start and the console's free cards; only a caller
-    that opts into sharing takes one, by the free-memory rule."""
+def test_a_card_is_eligible_when_it_keeps_the_floor_free_and_no_running_arm_claims_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """One rule for every caller, read from what nvidia-smi reports: a card is
+    eligible when no running arm claims it and it keeps at least the host's
+    floor free (12 GiB unset), whoever else holds memory on it, the most free
+    first. A card one MiB short of the floor, or claimed, is never taken however
+    few are left, and a refusal names the rule and who holds the rest."""
 
     from autotrade.environment import gpu
 
+    monkeypatch.delenv(gpu.MIN_FREE_GPU_GIB_ENV, raising=False)
     root = tmp_path / "experiments"
-    with patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi({0: 30_000, 1: 0, 2: 300, 3: 0})):
-        assert [row["index"] for row in gpu.list_gpus()] == [0, 1, 2, 3]
-        assert free_gpus(root, require_name="L20") == [1, 3]
-        assert select_gpus(root, 2, require_name="L20") == [1, 3]
-        with pytest.raises(GpuUnavailableError, match=r"requested 3 GPU\(s\), 2 free \(1, 3\)"):
-            select_gpus(root, 3, require_name="L20")
-        assert select_gpus(root, 3, require_name="L20", allow_shared=True) == [1, 3, 2]
-
-
-def test_idle_gpus_never_offers_a_card_anyone_holds_memory_on():
-    """However much of it is free, a card carrying one CUDA context of
-    somebody's is in use; a card outside the name filter is never offered."""
-    from autotrade.environment.gpu import IDLE_GPU_MEMORY_MIB, idle_gpus
-
-    roster = [
-        {**_GPU_ROSTER[0], "memory_used_mib": 38_000},
-        {**_GPU_ROSTER[1], "memory_used_mib": 0},
-        {**_GPU_ROSTER[2], "memory_used_mib": 0},
-        # 40 GiB free, but an idle strategy container's context is on it.
-        {**_GPU_ROSTER[3], "memory_used_mib": 386},
-    ]
-    assert 386 >= IDLE_GPU_MEMORY_MIB
-    with patch("autotrade.environment.gpu.list_gpus", return_value=roster):
-        assert idle_gpus(require_name="L20") == [1]
-        assert idle_gpus() == [1, 2]
+    _running_arm(root, "holder", [3])
+    floor = MIN_FREE_GPU_MEMORY_MIB
+    used = {
+        0: 30_000,  # another user's 30 GB, 16 GB still free
+        1: 0,
+        2: 46_068 - floor,  # exactly the floor free
+        3: 0,  # empty, but a running arm claims it
+        4: 46_068 - floor + 1,  # one MiB short
+    }
+    with patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi(used)):
+        assert [row["index"] for row in gpu.list_gpus()] == [0, 1, 2, 3, 4]
+        assert free_gpus(root, require_name="L20") == [1, 0, 2]
+        assert select_gpus(root, 2, require_name="L20") == [1, 0]
+        with pytest.raises(GpuUnavailableError) as refused:
+            select_gpus(root, 4, require_name="L20")
+        monkeypatch.setenv(gpu.MIN_FREE_GPU_GIB_ENV, "20")  # the host floor moves every selection
+        assert free_gpus(root, require_name="L20") == [1]
+    assert str(refused.value) == (
+        f"requested 4 GPU(s), 3 free (1, 0, 2); a card is free only when it keeps {floor} MiB free "
+        "and no running arm claims it; claimed by running arms: holder [3]"
+    )
 
 
 def _running_arm(root: Path, name: str, devices: list[int] | None, *, state: str = "running_session") -> None:
@@ -2176,11 +2163,10 @@ def _running_arm(root: Path, name: str, devices: list[int] | None, *, state: str
 
 def test_the_one_selection_never_hands_out_a_card_a_running_arm_claims(tmp_path: Path):
     """Whoever asks -- the console for an arm, a Paper run, an operator's
-    replay -- gets whole cards nobody holds memory on and no running arm
-    claims, in ascending order: a claimed card that shows nothing in use is
-    not free, the claim an ended worker left behind holds nothing, and a
-    request the free cards cannot meet is refused naming who holds the rest
-    instead of landing on one of them."""
+    replay -- never gets a card a running arm claims, though it shows nothing
+    in use; the claim an ended worker left behind holds nothing, an arm that
+    asked for no GPU claims none, and a request the eligible cards cannot meet
+    is refused naming who holds the rest instead of landing on one of them."""
 
     root = tmp_path / "experiments"
     _running_arm(root, "holder", [1, 3])
@@ -2188,74 +2174,17 @@ def test_the_one_selection_never_hands_out_a_card_a_running_arm_claims(tmp_path:
     _running_arm(root, "ended", [0], state="stopped")
     assert running_arms(root) == ["cpu_arm", "holder"]
     assert gpu_claims(root) == {"holder": [1, 3]}
-    # Cards 0-3 show nothing in use, card 5 carries another process's memory.
-    with stubbed_gpu_probe([0, 1, 2, 3], busy=[5]):
+    with stubbed_gpu_probe([0, 1, 2, 3]):
         assert free_gpus(root, require_name="L20") == [0, 2]
-        assert select_gpus(root, 1, require_name="L20") == [0]
         assert select_gpus(root, 2, require_name="L20") == [0, 2]
         with pytest.raises(GpuUnavailableError) as refused:
             select_gpus(root, 3, require_name="L20")
         assert "requested 3 GPU(s), 2 free (0, 2)" in str(refused.value)
         assert "claimed by running arms: holder [1, 3]" in str(refused.value)
         assert free_gpus(root, require_name="H100") == []
-    # Every idle card is claimed: nothing is free, whoever asks.
-    with stubbed_gpu_probe([1, 3], busy=[0, 2]):
-        assert free_gpus(root) == []
-        with pytest.raises(GpuUnavailableError, match=r"requested 1 GPU\(s\), 0 free \(none\)"):
-            select_gpus(root, 1)
-    # No experiments at all: every idle card is free.
+    # No experiments at all: every eligible card is free.
     with stubbed_gpu_probe([4]):
         assert select_gpus(tmp_path / "absent", 1) == [4]
-
-
-def test_only_a_caller_that_opts_in_shares_a_card(tmp_path: Path):
-    """With no empty card, a caller that allows sharing (the Paper's morning
-    run) gets the unclaimed matching cards with the most free memory, each
-    keeping the memory a GPU strategy is promised; nobody else shares, a
-    claimed card is never shared, and a request those cards cannot meet is
-    refused saying so."""
-
-    root = tmp_path / "experiments"
-    _running_arm(root, "holder", [2])
-    roster = gpu_roster(idle=(), busy=[1, 2, 3, 4])  # 35,220 MiB free on each
-    roster[0]["memory_free_mib"] = MIN_FREE_GPU_MEMORY_MIB - 1  # card 1: too little
-    roster[2]["memory_free_mib"] = 40_000  # card 3: the most
-    with patch("autotrade.environment.gpu.list_gpus", return_value=roster):
-        with pytest.raises(GpuUnavailableError, match=r"0 free \(none\)"):
-            select_gpus(root, 1, require_name="L20")
-        assert select_gpus(root, 1, require_name="L20", allow_shared=True) == [3]
-        assert select_gpus(root, 2, require_name="L20", allow_shared=True) == [3, 4]
-        shared = rf"fewer than 3 unclaimed card\(s\) keep {MIN_FREE_GPU_MEMORY_MIB} MiB free"
-        with pytest.raises(GpuUnavailableError, match=shared):
-            select_gpus(root, 3, require_name="L20", allow_shared=True)
-        with pytest.raises(GpuUnavailableError):
-            select_gpus(root, 1, require_name="H100", allow_shared=True)
-
-
-def test_an_admission_margin_makes_a_shared_card_takeable_without_opting_in(tmp_path: Path):
-    """A caller whose need is a margin, not the whole card, passes one: cards
-    keeping at least that much free are candidates, the most free first, and the
-    running arms' claims still exclude a card. The boundary is inclusive, a card
-    short of it is never taken however few are left, and without the argument
-    nothing changes."""
-
-    root = tmp_path / "experiments"
-    _running_arm(root, "holder", [3])
-    roster = gpu_roster(idle=(), busy=[1, 2, 3, 4])
-    roster[0]["memory_free_mib"] = MIN_FREE_GPU_MEMORY_MIB  # card 1: exactly the margin
-    roster[1]["memory_free_mib"] = MIN_FREE_GPU_MEMORY_MIB - 1  # card 2: one MiB short
-    roster[2]["memory_free_mib"] = 40_000  # card 3: the most, but claimed
-    roster[3]["memory_free_mib"] = 20_000  # card 4
-    margin = MIN_FREE_GPU_MEMORY_MIB
-    with patch("autotrade.environment.gpu.list_gpus", return_value=roster):
-        assert free_gpus(root, require_name="L20") == []  # whole-card rule unchanged
-        assert free_gpus(root, require_name="L20", min_free_memory_mib=margin) == [4, 1]
-        assert select_gpus(root, 1, require_name="L20", min_free_memory_mib=margin) == [4]
-        assert select_gpus(root, 2, require_name="L20", min_free_memory_mib=margin) == [4, 1]
-        with pytest.raises(GpuUnavailableError) as refused:
-            select_gpus(root, 3, require_name="L20", min_free_memory_mib=margin)
-        assert f"a card is free only when it keeps {margin} MiB free" in str(refused.value)
-        assert "claimed by running arms: holder [3]" in str(refused.value)
 
 
 def test_the_console_gpu_margin_setting_defaults_to_the_promised_memory(
@@ -2281,9 +2210,9 @@ def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A Paper book's strategy container is pinned to cards the one selection
-    gives it -- an empty card, or else one it may share -- never to a card a
-    running arm claims, and a run that starts no container (a session already
-    decided) asks for none. A CPU book never reads the devices."""
+    gives it, never to a card a running arm claims, and a run that starts no
+    container (a session already decided) asks for none. A CPU book never
+    reads the devices."""
     from scripts.paper import run_paper
 
     _running_arm(tmp_path / "experiments", "holder", [0])
@@ -2298,12 +2227,56 @@ def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
         run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
     assert started[-1].spec.gpu == (1,)
     assert book.spec.gpu == GpuMode.AUTO
-    # The only idle card is the arm's: the book cannot decide.
+    # The only eligible card is the arm's: looking once, the book cannot decide.
     with stubbed_gpu_probe([0]), pytest.raises(GpuUnavailableError, match="holder"):
         run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
     with patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("probed")):
         run_paper._executor_on_free_gpus(tmp_path, SandboxConfig(), None, None, None)
     assert len(started) == 2 and started[-1].spec.gpu is None
+
+
+def test_a_gpu_book_waits_for_an_eligible_card_until_the_run_deadline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """With no eligible card as its container starts, a GPU book looks again
+    every poll interval and starts the container on the first card that
+    becomes eligible; when none does by the run's deadline, the last look is
+    at the deadline and the book fails with the selection's own refusal."""
+    from autotrade.environment import gpu
+    from scripts.paper import run_paper
+
+    monkeypatch.delenv(gpu.MIN_FREE_GPU_GIB_ENV, raising=False)
+    monkeypatch.setattr(run_paper, "REPO_ROOT", tmp_path)
+    started: list[SandboxConfig] = []
+    monkeypatch.setattr(
+        run_paper, "docker_executor", lambda path, sandbox, *rest: started.append(sandbox)
+    )
+    book = _strategy_config(gpu=GpuMode.AUTO, gpu_count=1, gpu_name_filter="L20")
+    crowded = gpu_roster(idle=(), busy=[2, 5])
+    for row in crowded:
+        row["memory_free_mib"] = MIN_FREE_GPU_MEMORY_MIB - 1  # other users leave too little
+    freed = [dict(row) for row in crowded]
+    freed[1]["memory_free_mib"] = 20_000  # card 5 frees up on the third look
+    looks = iter([crowded, crowded, freed])
+    now = [0.0]
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    wait = run_paper.CardWait(deadline=600.0, poll_seconds=60.0, clock=lambda: now[0], sleep=sleep)
+    with patch("autotrade.environment.gpu.list_gpus", side_effect=lambda: next(looks)):
+        run_paper._executor_on_free_gpus(tmp_path, book, None, None, None, card_wait=wait)
+    assert started[-1].spec.gpu == (5,) and slept == [60.0, 60.0]
+
+    refusal = r"requested 1 GPU\(s\), 0 free \(none\); .*until the run's deadline"
+    with (
+        patch("autotrade.environment.gpu.list_gpus", return_value=crowded),
+        pytest.raises(GpuUnavailableError, match=refusal),
+    ):
+        run_paper._executor_on_free_gpus(tmp_path, book, None, None, None, card_wait=wait)
+    assert now[0] == 600.0 and len(started) == 1
 
 
 def test_persistent_sandbox_start_attaches_the_devices_it_is_given(tmp_path: Path):

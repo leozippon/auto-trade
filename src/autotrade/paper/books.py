@@ -3,9 +3,9 @@
 Each book is an independent account in its own directory,
 ``<state root>/<book id>/``, holding everything ``create_book`` and the engine
 write for it (``book.json``, state, journals, artifact copy, PIT cache) and its
-own writer lock. A run goes through the books one at a time, the ones the owner
-trades by hand first; one book's failure is reported for that book and never
-stops the others.
+own writer lock. A run goes through the books one at a time, the ones that ask
+for no GPU first and, within each group, the ones the owner trades by hand
+first; one book's failure is reported for that book and never stops the others.
 """
 
 from __future__ import annotations
@@ -16,10 +16,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 from autotrade.common.records import read_json_object
-from autotrade.environment.sandbox import remove_sandbox_tree
+from autotrade.environment.sandbox import GpuMode, remove_sandbox_tree
 from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
 
-from .book import BOOK_NAME, create_book
+from .book import BOOK_NAME, create_book, load_book
 from .engine import writer_lock
 from .fills import FILLS_NAME
 
@@ -80,12 +80,28 @@ def follows_real_fills(book_root: str | Path) -> bool:
     return (Path(book_root) / FILLS_NAME).is_file()
 
 
+def _asks_for_gpu(book_root: str | Path) -> bool:
+    """Whether a run of this book takes a card as its strategy container starts
+    (and may wait for one). A book that cannot be loaded asks for none here:
+    its own run fails and says why."""
+
+    try:
+        return load_book(book_root).sandbox.spec.gpu == GpuMode.AUTO
+    except Exception:  # noqa: BLE001 - one unreadable book must not stop ordering the others
+        return False
+
+
 def run_order(state_root: str | Path) -> list[str]:
-    """Every book in the order a run takes them: the books that follow real
-    fills first, so the sheets the owner trades from are ready first."""
+    """Every book in the order a run takes them: the books that ask for no GPU
+    first, so one waiting for a card never holds them up; within each group the
+    books that follow real fills first, so the sheets the owner trades from are
+    ready first."""
 
     root = Path(state_root)
-    return sorted(list_books(root), key=lambda book_id: not follows_real_fills(root / book_id))
+    return sorted(
+        list_books(root),
+        key=lambda book_id: (_asks_for_gpu(root / book_id), not follows_real_fills(root / book_id)),
+    )
 
 
 def run_books(

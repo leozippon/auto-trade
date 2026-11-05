@@ -1,22 +1,19 @@
 """GPUs for sandbox containers: what the host has, and what a strategy may count on.
 
 The Environment attaches the devices a container is given and never chooses
-one. Choosing is one selection, ``pipelines.hitl_state.select_gpus``: devices
-no running arm claims that are either empty (``idle_gpus``) or, for a caller
-that names an admission margin, keep that much free (``shareable_gpus``).
-The console takes an arm's cards there when it starts its worker, and every
-container of that worker attaches exactly those; whatever else needs a card
--- a Paper book's morning run, an operator's replay -- takes its cards there
-for one run and pins them the same way.
+one. Choosing is one selection, ``pipelines.hitl_state.select_gpus``, under
+one rule: a card is eligible when no running arm claims it and it keeps at
+least the host's floor free (``host_min_free_gpu_memory_mib``), the most free
+first (``gpus_with_free_memory``). The console takes an arm's cards there when
+it starts its worker, and every container of that worker attaches exactly
+those; whatever else needs a card -- a Paper book's morning run, a round's
+smoke, an operator's replay -- takes its cards there for one run and pins them
+the same way.
 
-A card somebody else holds memory on is not idle, and only a caller that
-names a margin -- the console, by default, with the free memory a GPU strategy
-is promised (``host_min_free_gpu_memory_mib``) -- or that opts into sharing
-(the Paper's morning run, with at least ``MIN_FREE_GPU_MEMORY_MIB`` free) takes
-it. A container that asks for a device and was given none refuses to start.
-Every card nvidia-smi reports is a candidate: no list of cards keeps the
-project off another tenant's card, the margin does, and a running arm's claim
-keeps everybody off the cards it holds.
+Every card nvidia-smi reports is a candidate, whoever else holds memory on it:
+no list of cards keeps the project off another tenant's card, the floor does,
+and a running arm's claim keeps everybody off the cards it holds. A container
+that asks for a device and was given none refuses to start.
 
 The cards are shared -- by a batch's legs, and with services outside this
 project -- and nothing reserves memory on them. A CUDA out-of-memory error
@@ -39,12 +36,12 @@ from collections.abc import Sequence
 # console and its workers share; unset, it is the L20 workstation's.
 GPU_NAME_ENV = "AUTOTRADE_GPU_NAME"
 DEFAULT_GPU_NAME = "L20"
-# The free memory the console requires on a card it places a GPU arm on
+# The free memory every selection requires on a card it takes
 # (``AUTOTRADE_GPU_MIN_FREE_GIB``, a positive whole number of GiB; unset means
-# ``MIN_FREE_GPU_MEMORY_MIB``). It is an admission margin, not a cap: on a host
-# whose cards all carry somebody else's work, an arm still starts on one that
-# keeps this much free, and nothing reserves it. Read where the console makes
-# its selections, because a console only runs the settings it started with.
+# ``MIN_FREE_GPU_MEMORY_MIB``). It is an admission floor, not a cap: on a host
+# whose cards all carry somebody else's work, a GPU arm or book still starts on
+# one that keeps this much free, and nothing reserves it. Read where a selection
+# is made, because a process only runs the settings it started with.
 MIN_FREE_GPU_GIB_ENV = "AUTOTRADE_GPU_MIN_FREE_GIB"
 
 
@@ -55,7 +52,7 @@ def host_gpu_name() -> str:
 
 
 def host_min_free_gpu_memory_mib() -> int:
-    """The free memory a card must keep for the console to place an arm on it."""
+    """The free memory a card must keep for a selection to take it."""
 
     raw = os.environ.get(MIN_FREE_GPU_GIB_ENV, "").strip()
     if not raw:
@@ -76,15 +73,9 @@ def host_min_free_gpu_memory_mib() -> int:
 # (``gpu_memory_contention``), so a batch leg's replay-years are refunded.
 # Nothing reserves it and no strategy is capped at it: it is what one quarterly
 # sequence-model refit on a 46 GiB L20 was measured to need (a 9 GiB peak), and
-# it is also the console's default admission margin for a card it places an arm
-# on (``host_min_free_gpu_memory_mib``) and what the Paper's morning run needs
-# free on a card it shares (``shareable_gpus``).
+# it is also the default floor every selection requires free on a card it takes
+# (``host_min_free_gpu_memory_mib``).
 MIN_FREE_GPU_MEMORY_MIB = 12 * 1024
-# Memory a device may show in use and still be idle. Any process that opened a
-# CUDA context on it holds more (an idle strategy container's context is about
-# 390 MiB on an L20, and an unused L20 reports 0), so a card above this carries
-# somebody's work, however much of it is free.
-IDLE_GPU_MEMORY_MIB = 256
 
 
 def device_request(indices: Sequence[int]) -> str:
@@ -137,36 +128,17 @@ def list_gpus() -> list[dict[str, object]]:
     return gpus
 
 
-def idle_gpus(*, require_name: str | None = None) -> list[int]:
-    """Indexes of the matching devices nobody holds memory on, ascending.
-
-    A card in use by anyone -- another tenant, the local model service, an
-    operator's replay -- is not idle however much of it is free. The converse is the caller's to
-    know: a running arm whose card shows nothing between its batches still
-    holds it (``pipelines.hitl_state.gpu_claims``).
-    """
-    return sorted(
-        int(gpu["index"])
-        for gpu in list_gpus()
-        if (not require_name or require_name.lower() in str(gpu["name"]).lower())
-        and int(gpu["memory_used_mib"]) < IDLE_GPU_MEMORY_MIB
-    )
-
-
-def shareable_gpus(
-    *, require_name: str | None = None, min_free_memory_mib: int | None = None
-) -> list[int]:
-    """Indexes of the matching devices that keep ``min_free_memory_mib`` free
-    (``MIN_FREE_GPU_MEMORY_MIB`` when it is not given), the most free first:
-    the cards a caller may share with somebody else's work and still have that
-    much to work with. Whether a caller may share at all is the selection's to
-    decide, as is whether a running arm claims the card."""
-    floor = MIN_FREE_GPU_MEMORY_MIB if min_free_memory_mib is None else min_free_memory_mib
+def gpus_with_free_memory(min_free_memory_mib: int, *, require_name: str | None = None) -> list[int]:
+    """Indexes of the matching devices that keep at least ``min_free_memory_mib``
+    free, the most free first, whoever else holds memory on them. Whether a
+    running arm claims one is the selection's to know: a running arm whose card
+    shows nothing between its batches still holds it
+    (``pipelines.hitl_state.gpu_claims``)."""
     rows = [
         gpu
         for gpu in list_gpus()
         if (not require_name or require_name.lower() in str(gpu["name"]).lower())
-        and int(gpu["memory_free_mib"]) >= floor
+        and int(gpu["memory_free_mib"]) >= min_free_memory_mib
     ]
     rows.sort(key=lambda gpu: (-int(gpu["memory_free_mib"]), int(gpu["index"])))
     return [int(gpu["index"]) for gpu in rows]
