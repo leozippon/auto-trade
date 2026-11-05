@@ -93,6 +93,8 @@ def _tool(
         snapshot=snapshot,
         decision_time=datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC),
         years=(ReplaySpan("Y1", "valid", DAYS[0], DAYS[-1], snapshot),),
+        validation=ReplaySpan("validation", "valid", "20260101", "20261231", snapshot),
+        decision_view_at=lambda _anchor: snapshot,
         window_months=24,
         max_llm_calls=200,
         deadline_seconds=1200.0,
@@ -335,7 +337,7 @@ def test_smoke_backtest_is_registered_for_fold_sessions() -> None:
     description = SmokeBacktestTool.spec.description
     assert "UNOFFICIAL" in description
     assert "DIRECTORY of parquet parts" in description
-    assert "before batch_validate" in description
+    assert "before validate" in description
 
 
 def test_result_json_is_not_left_behind_for_a_ledger_to_find(tmp_path: Path) -> None:

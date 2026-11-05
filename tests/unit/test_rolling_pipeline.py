@@ -43,6 +43,7 @@ from autotrade.pipelines.experiment import (
 )
 from autotrade.pipelines.ledger import (
     INTERRUPTED_RUN_ERROR,
+    TEST_STEP_RECORD_TYPE,
     UNKNOWN_MARKER_LINK_KEY,
     UNREADABLE_RUN_MARKER_ERROR,
     ExperimentLedger,
@@ -244,6 +245,9 @@ class Developer:
         node_id = extra.get("node_id")
         if outcome == "freeze" and node_id is None:
             node_id = steps[extra.get("nominee", 0)].step_id
+        # The plan's ``freeze`` in the session's own terms: a session whose
+        # last test took the nominee.
+        outcome = {"freeze": "completed"}.get(outcome, outcome)
         return ResearchSessionResult(
             f"conversation_{request.run_id}",
             tuple(steps),
@@ -373,35 +377,22 @@ def test_a_freeze_registers_and_records_the_frozen_block(tmp_path: Path):
         pipeline.run_research_session()
 
 
-def test_a_nomination_that_does_not_register_ends_the_arm_without_a_deliverable(tmp_path: Path):
-    pipeline, *_rest, ledger = _pipeline(
-        tmp_path, {1: ([0.0012, 0.0002], "freeze", {"nominee": 1, "controls": (1,)})}
-    )
-    record = pipeline.run_research_session()
-    assert record["frozen"] is None
-    assert record["freeze_gate"] == {"passed": False, "reasons": ["freeze_nominee_is_control"]}
-    assert record["arm_end"] == {
-        "status": "no_deliverable",
-        "reason": "freeze refused at registration (freeze_nominee_is_control)",
-    }
-    assert research_over(ledger.read())
-    assert experiment_verdict(ledger.read())["status"] == "no_deliverable"
-    with pytest.raises(RuntimeError, match="research is over"):
-        pipeline.run_research_session()
+def test_a_completed_session_whose_candidate_does_not_register_fails_the_attempt(tmp_path: Path):
+    """``test`` refused every candidate that does not register, so a completed
+    session names one that does; a candidate that no longer registers is a
+    broken invariant, failed loudly and recorded as a failed attempt rather
+    than frozen or quietly ended."""
 
-
-def test_a_nominee_with_nothing_to_read_is_refused_while_the_session_is_open(tmp_path: Path):
-    """An all-zero active series has a plain reading but no residual one,
-    which the freeze would record: registration refuses it as unmeasurable,
-    so a freeze that registers is never left half done."""
-
-    pipeline, *_rest, ledger = _pipeline(tmp_path, {1: (["flat"], "freeze", {})})
-    record = pipeline.run_research_session()
-    gate = record["freeze_gate"]
-    assert (gate["passed"], gate["reasons"]) == (False, ["freeze_unmeasurable"])
-    assert "explain the series exactly" in gate["error"]
-    assert record["frozen"] is None and record["arm_end"]["status"] == "no_deliverable"
-    assert [row["record_type"] for row in ledger.read()] == ["research_session"]
+    for reason, plan in (
+        ("freeze_nominee_is_control", {1: ([0.0012, 0.0002], "freeze", {"nominee": 1, "controls": (1,)})}),
+        # An all-zero active series has a plain reading but no residual one.
+        ("freeze_unmeasurable", {1: (["flat"], "freeze", {})}),
+    ):
+        pipeline, *_rest, ledger = _pipeline(tmp_path / reason, plan)
+        with pytest.raises(RuntimeError, match=f"no longer registers: {reason}"):
+            pipeline.run_research_session()
+        assert [row["record_type"] for row in ledger.read()] == ["attempt_failed"]
+        assert not research_over(ledger.read())
 
 
 def test_a_freeze_is_terminal_whatever_the_nominee_read(tmp_path: Path):
@@ -425,25 +416,36 @@ def test_the_ledger_refuses_a_second_freeze(tmp_path: Path):
         ledger.append({**frozen, "run_id": "run_again"})
 
 
-def test_no_edge_ends_the_arm_without_a_deliverable(tmp_path: Path):
-    pipeline, *_rest, ledger = _pipeline(
-        tmp_path, {1: ([0.0], "no_edge", {"reason": "the pack's termination rule fired"})}
-    )
-    record = pipeline.run_research_session()
-    assert record["arm_end"] == {
-        "status": "no_deliverable",
-        "reason": "no_edge: the pack's termination rule fired",
-    }
-    assert research_over(ledger.read())
-    assert experiment_verdict(ledger.read()) == {
-        "status": "no_deliverable",
-        "reasons": ["no_edge: the pack's termination rule fired"],
-    }
-    with pytest.raises(RuntimeError, match="needs a frozen artifact"):
-        pipeline.run_forward()
+def test_a_budget_that_ends_before_any_test_freezes_the_last_registrable_candidate(tmp_path: Path):
+    """The host completes what the session did not: the last full-span,
+    non-control Step that registers is frozen, and the rolling record is
+    filled from one replay of it over the whole validation period, each step
+    read off that replay's window and marked as the host's completion."""
+
+    for name, plan, frozen_step in (
+        ("last", {1: ([0.0012, 0.0002], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}, 1),
+        ("control_skipped", {1: ([0.0012, 0.0002], "deadline", {"controls": (1,)})}, 0),
+    ):
+        pipeline, _snapshots, evaluator, _developer, ledger = _pipeline(tmp_path / name, plan)
+        record = pipeline.run_research_session()
+        assert (record["outcome"], record["arm_end"]) == ("deadline", None)
+        assert record["frozen"]["source_step_id"] == f"research_step_{frozen_step}"
+        assert record["freeze_gate"]["passed"] is True
+        steps = pipeline.validation_steps()
+        rows = [row for row in ledger.read() if row["record_type"] == TEST_STEP_RECORD_TYPE]
+        assert [row["step"] for row in rows] == list(range(1, steps.count + 1))
+        assert [row["frontier"] for row in rows] == [steps.frontier_after(k) for k in range(1, steps.count + 1)]
+        assert {row["source"] for row in rows} == {"host_completion"}
+        assert {row["candidate"]["step_id"] for row in rows} == {f"research_step_{frozen_step}"}
+        assert (record["frontier"], record["steps_tested"]) == (steps.end, steps.count)
+        # One replay filled every entry, over the validation span as one book.
+        completion = evaluator.requests[-1]
+        assert (completion.start, completion.end) == (steps.start, steps.end)
+        assert len({row["replay"]["result_ref"] for row in rows}) == 1
+        assert research_over(ledger.read())
+        assert experiment_verdict(ledger.read()) is None
 
 
-# The host tree a dead session container is named after, as the worker sees it.
 HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/arm/research"
 
 
@@ -563,7 +565,7 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
 
 def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path: Path):
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
-        tmp_path, {1: ([0.0], "no_edge", {"reason": "nothing survived the second look"})}
+        tmp_path, {1: ([], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
     )
     _interrupted_attempt(pipeline, ledger, summary=None, test_replays=0, node=False)
     record = pipeline.run_research_session()
@@ -640,15 +642,20 @@ def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path:
             load_recorded_steps(experiment)
 
 
-def test_an_exhausted_budget_ends_the_arm_without_a_deliverable(tmp_path: Path):
+def test_an_exhausted_budget_without_a_registrable_candidate_ends_the_arm_without_a_deliverable(
+    tmp_path: Path,
+):
     pipeline, *_rest, ledger = _pipeline(
-        tmp_path, {1: ([0.0], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
+        tmp_path, {1: ([], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
     )
     record = pipeline.run_research_session()
     assert (record["outcome"], record["frozen"]) == ("deadline", None)
     assert record["arm_end"] == {
         "status": "no_deliverable",
-        "reason": "research budget exhausted without a freeze (llm_call_budget_exhausted)",
+        "reason": (
+            "research budget exhausted before any test, with no registrable full-span "
+            "candidate (llm_call_budget_exhausted)"
+        ),
     }
     assert research_over(ledger.read())
     assert experiment_verdict(ledger.read())["status"] == "no_deliverable"

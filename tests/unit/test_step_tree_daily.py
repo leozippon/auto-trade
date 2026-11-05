@@ -5,9 +5,9 @@ from pathlib import Path
 
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ToolRegistry
-from autotrade.environment.tools.finish_session import FinishSessionTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
+from tests.unit.terminal_tool import TerminalTool
 
 
 def _passing_gate(
@@ -55,12 +55,12 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     assert stat.S_IMODE((work_models / "weights.bin").stat().st_mode) == 0o666
     assert stat.S_IMODE(tree.node_models_dir(node).stat().st_mode) == 0o555
     assert stat.S_IMODE((tree.node_models_dir(node) / "weights.bin").stat().st_mode) == 0o444
-    finished = FinishSessionTool(tree, session_ref="fold_2026Q1", registration=_passing_gate).invoke({"outcome": "freeze"})
-    assert finished.finish and finished.value["revision_id"] == "revision_a"
+    finished = TerminalTool(tree, session_ref="fold_2026Q1").invoke({"candidate": node})
+    assert finished.finish and finished.value["candidate"]["node_id"] == node
 
 
 def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path):
-    """Another session's node is evidence only, exactly as finish_session treats it; an earlier attempt's is this session's.
+    """Another session's node is evidence only, exactly as test treats it; an earlier attempt's is this session's.
 
     The experiment-level tree is handed whole to every session, so a foreign
     ``node_id`` is readable; restoring one would rebase this session's work
@@ -94,12 +94,7 @@ def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path
     work = tmp_path / "work"
     work.mkdir()
     (work / "main.py").write_text("current work copy", encoding="utf-8")
-    registry = ToolRegistry(
-        [
-            StepRollbackTool(tree, work, session_ref="fold_2026Q1"),
-            FinishSessionTool(tree, session_ref="fold_2026Q1", registration=_passing_gate),
-        ]
-    )
+    registry = ToolRegistry([StepRollbackTool(tree, work, session_ref="fold_2026Q1")])
     position = tree.current_node_id
 
     result = registry.invoke("step_rollback", {"node_id": foreign_fold})
@@ -107,25 +102,17 @@ def test_step_rollback_refuses_a_node_outside_the_current_session(tmp_path: Path
     assert "current session" in result.error
     assert (work / "main.py").read_text(encoding="utf-8") == "current work copy"
     assert StepTree(tmp_path / "steps").current_node_id == position
-    finished = registry.invoke("finish_session", {"outcome": "freeze", "node_id": foreign_fold})
-    assert not finished.ok
-    assert "not a Step of this session" in finished.error
-    # An absent node is shaped like its finish_session sibling: a typed tool error
-    # the model can act on, not an untyped ValueError leaking through.
-    for tool, arguments in (
-        ("step_rollback", {"node_id": "step_missing"}),
-        ("finish_session", {"outcome": "freeze", "node_id": "step_missing"}),
-    ):
-        absent = registry.invoke(tool, arguments)
-        assert not absent.ok, tool
-        assert absent.value["error_type"] == "unknown_node", tool
-        assert "neither a node_id nor the short handle" in absent.error, tool
+    # An absent node is a typed tool error the model can act on, not an
+    # untyped ValueError leaking through.
+    absent = registry.invoke("step_rollback", {"node_id": "step_missing"})
+    assert not absent.ok
+    assert absent.value["error_type"] == "unknown_node"
+    assert "neither a node_id nor the short handle" in absent.error
 
     # A node an interrupted attempt of this session recorded is this
-    # session's: the resumed attempt may restore and nominate it.
+    # session's: the resumed attempt may restore it.
     assert registry.invoke("step_rollback", {"node_id": earlier_run}).ok
     assert "generate_orders" in (work / "main.py").read_text(encoding="utf-8")
-    assert registry.invoke("finish_session", {"outcome": "freeze", "node_id": earlier_run}).ok
 
 
 def test_modification_check_keeps_daily_json_entry(tmp_path: Path):

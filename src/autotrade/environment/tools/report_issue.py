@@ -131,7 +131,7 @@ class ReportIssueTool:
         mutating=False,
         example={
             "category": "tool_output",
-            "summary": "batch_validate 的失败行把宿主争用错误报成候选代码异常。",
+            "summary": "validate 的失败行把宿主争用错误报成候选代码异常。",
             "evidence": (
                 "同一候选目录连续两次提交：第一次整批返回 candidate error，"
                 "第二次原样通过；失败行的原文是超时而非策略栈异常。"

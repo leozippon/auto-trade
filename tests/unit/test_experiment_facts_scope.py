@@ -160,7 +160,7 @@ def test_the_session_is_told_deadline_seconds_is_pausable_effective_time() -> No
 
     expected = (
         "`deadline_seconds` 统计可暂停的有效推理时间；"
-        "`smoke_backtest`、`batch_validate` 和 `run_null_control` "
+        "`smoke_backtest`、`validate` 和 `run_null_control` "
         "调用期间暂停计时，"
         "因此会话总墙钟可能更长。"
     )

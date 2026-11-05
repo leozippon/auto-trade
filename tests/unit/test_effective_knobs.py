@@ -105,8 +105,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             SnapshotBundle,
         )
         from autotrade.pipelines.session_tools import (
-            BatchValidateTool,
             SessionValidations,
+            ValidateTool,
         )
 
         output = _artifact(root / "output")
@@ -120,6 +120,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             snapshot=snapshot,
             decision_time=datetime(2025, 6, 30, 23, 59, 59, tzinfo=UTC),
             years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
+            validation=ReplaySpan("validation", "valid", "20220701", "20230630", snapshot),
+            decision_view_at=lambda _anchor: snapshot,
             window_months=24,
             max_llm_calls=200,
             deadline_seconds=1200.0,
@@ -147,7 +149,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             ref_store=AgentRefStore(root / "experiment"),
             ledger=ExperimentLedger(root / "ledger.jsonl"),
         )
-        batch = BatchValidateTool(
+        batch = ValidateTool(
             backtest=backtest,
             workspace=SafeWorkspace(root),
             modification_check_factory=lambda directory: PassingModificationCheck(

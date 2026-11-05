@@ -42,7 +42,7 @@ class ModificationCheckTool:
     spec = ToolSpec(
         "modification_check",
         "Validate the daily JSON strategy and bounded artifact changes. "
-        "smoke_backtest and batch_validate run this check themselves before they "
+        "smoke_backtest and validate run this check themselves before they "
         "replay anything, so call it to read the current state early, not to "
         "clear a replay.",
         {"type": "object", "properties": {}, "required": [], "additionalProperties": False},
@@ -76,7 +76,7 @@ class ModificationCheckTool:
         # rewritten contract file is restored from there instead of blocking
         # every replay behind bytes the Agent is not allowed to produce. A
         # candidate directory gets no seed -- it is the Agent's own layout of
-        # the artifact it asks to freeze, batch_validate supplies the file
+        # the artifact it asks to freeze, validate supplies the file
         # where it is absent, and a candidate carrying different bytes must
         # still be refused rather than corrected.
         self.readonly_seed = Path(readonly_seed) if readonly_seed is not None else None
@@ -140,7 +140,7 @@ class ModificationCheckTool:
         allowed, reasons = constraints.evaluate(delta, model_delta)
         if not allowed:
             # The read-only violations travel structurally: a caller that has
-            # to tell this rejection class from the others (``batch_validate``
+            # to tell this rejection class from the others (``validate``
             # bounds a repeating one) must not parse the sentence, whose text
             # carries digests and therefore changes with the file's content.
             raise ToolError(

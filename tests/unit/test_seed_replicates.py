@@ -30,7 +30,10 @@ from autotrade.pipelines.config import (
     acceptance_for,
     research_span,
 )
-from autotrade.pipelines.experiment import RollingExperimentPipeline
+from autotrade.pipelines.experiment import (
+    RollingExperimentPipeline,
+    freeze_registration,
+)
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
     experiment_verdict,
@@ -151,9 +154,9 @@ class SeedEvaluator:
 
 
 class SeedDeveloper:
-    """Validates each scripted ``(source, span)`` and freezes ``nominee`` with
-    the candidates ``replicates`` names as its seed replicates and the one
-    ``ablation`` names as its ablation."""
+    """Validates each scripted ``(source, span)``; a ``completed`` session
+    tested ``nominee`` with the candidates ``replicates`` names as its seed
+    replicates, a ``deadline`` one ran out of budget before any test."""
 
     def __init__(
         self,
@@ -164,7 +167,7 @@ class SeedDeveloper:
         nominee: int,
         replicates,
         deterministic: bool,
-        ablation: int | None = None,
+        outcome: str = "completed",
     ):
         self.store = store
         self.evaluator = evaluator
@@ -172,7 +175,7 @@ class SeedDeveloper:
         self.nominee = nominee
         self.replicates = tuple(replicates)
         self.deterministic = deterministic
-        self.ablation = ablation
+        self.outcome = outcome
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         steps = []
@@ -188,10 +191,15 @@ class SeedDeveloper:
             steps.append(
                 StepResult(f"research_step_{number}", typed.revision_id, validation, span=replayed.label)
             )
+        if self.outcome != "completed":
+            return ResearchSessionResult(
+                f"conversation_{request.run_id}", tuple(steps), self.outcome,
+                finish_reason="llm_call_budget_exhausted",
+            )
         return ResearchSessionResult(
             f"conversation_{request.run_id}",
             tuple(steps),
-            "freeze",
+            "completed",
             node_id=steps[self.nominee].step_id,
             seed_replicates=tuple(steps[index].step_id for index in self.replicates),
             deterministic=self.deterministic,
@@ -205,6 +213,7 @@ def _arm(
     nominee=0,
     replicates=(),
     deterministic=False,
+    outcome="completed",
     **replays,
 ):
     config = RollingExperimentConfig(
@@ -227,6 +236,7 @@ def _arm(
             nominee=nominee,
             replicates=replicates,
             deterministic=deterministic,
+            outcome=outcome,
         ),
         trading_days=DAYS,
         ledger=ExperimentLedger(config.ledger_path),
@@ -319,12 +329,26 @@ def test_seeds_that_agree_forward_graduate_together(tmp_path: Path):
     assert forward["verdict"]["status"] == "graduated"
 
 
-def _refused(tmp_path: Path, candidates, **arm) -> dict[str, object]:
-    pipeline, _evaluator = _arm(tmp_path, candidates, **arm)
+def _refused(
+    tmp_path: Path, candidates, *, nominee: int = 0, replicates=(), deterministic: bool = False
+) -> dict[str, object]:
+    """The registration ``test`` reads for ``nominee`` with ``replicates``,
+    off the arm's recorded Validations. The session ends on its budget
+    before any test, and a nominee that trains a model owes a replicate no
+    host can name, so the arm itself freezes nothing."""
+
+    pipeline, _evaluator = _arm(tmp_path, candidates, outcome="deadline")
     record = pipeline.run_research_session()
     assert record["frozen"] is None
     assert record["arm_end"]["status"] == "no_deliverable"
-    return record["freeze_gate"]
+    rows = record["steps"]
+    return freeze_registration(
+        rows[nominee],
+        experiment_dir=pipeline.config.experiment_dir,
+        acceptance=pipeline.config.acceptance,
+        seed_replicates=[rows[index] for index in replicates],
+        deterministic=deterministic,
+    )
 
 
 def test_a_model_nominee_without_a_replicate_is_refused(tmp_path: Path):

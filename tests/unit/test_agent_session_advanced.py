@@ -43,7 +43,6 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
     CompactTool,
-    FinishSessionTool,
     ReadFileTool,
     SafeWorkspace,
     SandboxShellTool,
@@ -54,6 +53,7 @@ from autotrade.environment.tools import (
     WriteFileTool,
 )
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
+from tests.unit.terminal_tool import TerminalTool
 
 
 def _passing_gate(
@@ -67,10 +67,10 @@ def _passing_gate(
 
 
 
-def finish_session_tool(root: Path) -> tuple[FinishSessionTool, str]:
+def finish_session_tool(root: Path) -> tuple[TerminalTool, str]:
     """A terminal tool over a real step tree carrying one validated node.
 
-    ``finish_session`` is the Fold session's terminal tool; these are generic
+    ``test`` is the Fold session's terminal tool; these are generic
     session-runner tests, so what matters is that a terminal tool ends the
     session and cancels later mutating calls in the same turn."""
     output = root / "output"
@@ -88,7 +88,7 @@ def finish_session_tool(root: Path) -> tuple[FinishSessionTool, str]:
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return FinishSessionTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
+    return TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
 
 
 class DeclaredReadOnlyShell:
@@ -244,7 +244,7 @@ def _compact_call(summary: str = SUMMARY) -> ProviderResponse:
 
 def _finish_call(node_id: str) -> ProviderResponse:
     return ProviderResponse(
-        tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+        tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
     )
 
 
@@ -339,7 +339,7 @@ def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_pat
     assert note.content == "continue from the note"
     start = next(payload for event, payload in events if event == "session_start")
     assert start["preamble"] == [checkpoint.content]
-    assert [candidate["node_id"] for candidate in runner._finalization_candidates()] == [node_id]
+    assert [candidate["node_id"] for candidate in runner._complete_validation_nodes] == [node_id]
 
 
 def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
@@ -562,7 +562,7 @@ def test_session_tracks_calls_and_finish_value(tmp_path: Path):
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )
@@ -574,9 +574,9 @@ def test_session_tracks_calls_and_finish_value(tmp_path: Path):
     )
     result = runner.run("finish the validated strategy")
     assert result.status == "finished"
-    assert result.finish_value["node_id"] == node_id
-    assert result.finish_value["status"] == "session_finished"
-    assert result.finish_value["outcome"] == "freeze"
+    assert result.finish_value["candidate"]["node_id"] == node_id
+    assert result.finish_value["status"] == "step_recorded"
+    assert result.finish_value["outcome"] == "completed"
     assert result.llm_calls == 1
 
 
@@ -588,13 +588,13 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("bad", "finish_session", {"outcome": "freeze", "node_id": "missing"}),)
+                tool_calls=(ToolCall("bad", "test", {"outcome": "freeze", "node_id": "missing"}),)
             ),
             ProviderResponse(
                 tool_calls=(
                     ToolCall(
                         "f",
-                        "finish_session",
+                        "test",
                         {
                             "outcome": "freeze",
                             "node_id": node_id,
@@ -615,7 +615,7 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
     assert runner.run("finish").status == "finished"
     end = [payload for event, payload in events if event == "session_end"][-1]
     assert end["status"] == "finished" and end["tool_failures"] == 1
-    assert end["finish"]["reason"] == "H2 untestable here: the events domain is empty in this window"
+    assert end["finish"]["candidate"]["node_id"] == node_id
 
 
 def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
@@ -663,10 +663,10 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
                 ),
                 ProviderResponse(content="等子代理返回。"),
                 ProviderResponse(
-                    tool_calls=(ToolCall("bad", "finish_session", {"outcome": "freeze", "node_id": "missing"}),)
+                    tool_calls=(ToolCall("bad", "test", {"outcome": "freeze", "node_id": "missing"}),)
                 ),
                 ProviderResponse(
-                    tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                    tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
                 ),
             ]
         ),
@@ -695,7 +695,7 @@ def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path)
         [
             ProviderResponse(content="I should act next."),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -722,7 +722,7 @@ def test_fold_session_replays_reasoning_with_tool_call_on_next_round(tmp_path: P
                 reasoning_content="inspect before finishing",
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -753,7 +753,7 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
                 tool_calls=(ToolCall("shell-1", "shell", {"argv": ["rg", "x"]}),)
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("finish-1", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("finish-1", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ],
         context_window_tokens=3_000,
@@ -888,7 +888,7 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
                     reasoning_content="先复核 Validation",
                 )
             return ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             )
 
     llm = MalformedThenFinish()
@@ -947,7 +947,7 @@ def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
     ]
     responses.append(
         ProviderResponse(
-            tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+            tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
         )
     )
     llm = ScriptedLLM(responses)
@@ -1007,7 +1007,7 @@ def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
                 tool_calls=(ToolCall("s3", "shell", {"argv": ["rg", "c"]}),)
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
@@ -1079,7 +1079,7 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
         ]
         + [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
             )
         ]
     )
@@ -1162,7 +1162,7 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("f", "finish_session", {"outcome": "freeze", "node_id": node_id}),
+                    ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),
                     ToolCall(
                         "w",
                         "write_file",
@@ -1327,10 +1327,10 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
                 config=AgentSessionConfig(),
             )
 
-    with pytest.raises(ValueError, match="batch_validate requires finish_session"):
+    with pytest.raises(ValueError, match="a session with validate requires test"):
         AgentSessionRunner(
             llm=ScriptedLLM([]),
-            tools=ToolRegistry([StubTool("batch_validate")]),
+            tools=ToolRegistry([StubTool("validate")]),
             system_prompt="session",
             config=AgentSessionConfig(),
         )
@@ -1452,16 +1452,18 @@ def _all_registrable_tool_names() -> set[str]:
     from autotrade.environment.tools import SafeWorkspace, SearchRoots
     from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
     from autotrade.pipelines.session_tools import (
-        BatchValidateTool,
         NullControlTool,
         SmokeBacktestTool,
+        TestTool,
+        ValidateTool,
     )
 
     # The backtest tools are constructed per session in research_session rather than
     # exported from the tools package, so read their names off the classes: a
     # rename must not silently drop one from this set.
     names = {
-        BatchValidateTool.spec.name,
+        ValidateTool.spec.name,
+        TestTool.spec.name,
         NullControlTool.spec.name,
         SmokeBacktestTool.spec.name,
     }

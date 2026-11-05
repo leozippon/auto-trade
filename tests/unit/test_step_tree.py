@@ -245,7 +245,7 @@ RESEARCH_MANIFEST = {
         "spans": "full (every year), one year such as Y1, or contiguous years such as Y1..Y3",
     },
     "start": {"kind": "step_node", "node_id": "research__session_ref_x__run_ref_y__valid_003"},
-    "arm": {"frozen": False, "freezes_per_arm": 1, "validations_to_date": 5, "full_span_validations_to_date": 2},
+    "arm": {"validations_to_date": 5, "full_span_validations_to_date": 2},
     "snapshot_config": {
         "decision_windows": {
             "daily_months": 24,
@@ -257,7 +257,7 @@ RESEARCH_MANIFEST = {
         }
     },
     "acceptance_rules": {"min_return": 0.0, **REQUIRED_RULES},
-    "budgets": {"max_null_controls": 3, "deadline_seconds": 43800.0},
+    "budgets": {"max_null_controls": 3, "deadline_seconds": 43800.0, "validates_per_step": 6},
 }
 
 
@@ -284,7 +284,7 @@ class SessionFactsTest(unittest.TestCase):
         self.assertNotIn("session", facts["identity"])
         self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
         self.assertEqual(facts["arm"]["validations_to_date"], 5)
-        self.assertIs(facts["arm"]["frozen"], False)
+        self.assertEqual(facts["arm"]["full_span_validations_to_date"], 2)
         self.assertEqual(facts["budgets"]["max_null_controls"], 3)
         self.assertIn("cause: environment", facts["budgets"]["validation_failure_note"])
         self.assertEqual(

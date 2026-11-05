@@ -305,7 +305,7 @@ class AcceptanceRulesTest(unittest.TestCase):
             (validation["research_years"], validation["test_step_months"], validation["validates_per_step"]),
             (5, 1, 4),
         )
-        self.assertIn("at most 4 batch_validate calls", validation["validates_per_step_rule"])
+        self.assertIn("at most 4 validate calls", validation["validates_per_step_rule"])
         self.assertIn("no action that ends the session earlier", validation["end"])
         registration = facts["registration"]
         self.assertEqual(
@@ -1330,7 +1330,11 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
     from datetime import UTC, datetime
 
     from autotrade.environment.artifacts import ModificationConstraints
-    from autotrade.pipelines.config import ResearchSessionRequest, SnapshotBundle
+    from autotrade.pipelines.config import (
+        ReplaySpan,
+        ResearchSessionRequest,
+        SnapshotBundle,
+    )
 
     config = make_config(
         tmp_path,
@@ -1355,6 +1359,8 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
         snapshot=SnapshotBundle("snap", "decision", "replay"),
         decision_time=datetime(2025, 6, 30, tzinfo=UTC),
         years=(),
+        validation=ReplaySpan("validation", "valid", "20250701", "20260630", SnapshotBundle("v", "d", "r")),
+        decision_view_at=lambda _anchor: SnapshotBundle("snap", "decision", ""),
     )
 
     assert (

@@ -30,7 +30,6 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
-    FinishSessionTool,
     SafeWorkspace,
     StepRollbackTool,
     ToolRegistry,
@@ -51,10 +50,11 @@ from autotrade.pipelines.research_session import (
     session_role_quotas,
 )
 from autotrade.pipelines.session_tools import (
-    BatchValidateTool,
     SessionValidations,
+    ValidateTool,
 )
 from tests.unit.acceptance_fixture import RULES
+from tests.unit.terminal_tool import TerminalTool
 
 from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
@@ -148,6 +148,8 @@ def _research_request() -> ResearchSessionRequest:
         snapshot=snapshot,
         decision_time=moment,
         years=(ReplaySpan("Y1", "valid", "20240701", "20250630", snapshot),),
+        validation=ReplaySpan("validation", "valid", "20250701", "20260630", snapshot),
+        decision_view_at=lambda _anchor: snapshot,
         window_months=24,
         max_llm_calls=3,
         deadline_seconds=2.0,
@@ -214,20 +216,20 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             {"name": "working_copy", "hypothesis": "h", "path": "output", "control": False}
         ],
     }
-    batch = BatchValidateTool(
+    batch = ValidateTool(
         backtest=backtest,
         workspace=SafeWorkspace(tmp_path),
         modification_check_factory=lambda directory: PassingCheck(directory, models),
     )
     scripted = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("bad", "batch_validate", working_copy),)),
-            ProviderResponse(tool_calls=(ToolCall("fixed", "batch_validate", working_copy),)),
+            ProviderResponse(tool_calls=(ToolCall("bad", "validate", working_copy),)),
+            ProviderResponse(tool_calls=(ToolCall("fixed", "validate", working_copy),)),
             ProviderResponse(
                 tool_calls=(
                     ToolCall(
                         "done",
-                        "finish_session",
+                        "test",
                         {
                             "outcome": "freeze",
                             "node_id": (
@@ -249,14 +251,13 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         tools=ToolRegistry(
             [
                 batch,
-                FinishSessionTool(tree, session_ref=fold_ref, registration=_passing_gate),
+                TerminalTool(tree, session_ref=fold_ref, registration=_passing_gate),
             ]
         ),
         system_prompt="repair a failed validation and finish",
         config=AgentSessionConfig(
             max_llm_calls=3,
             deadline_seconds=2.0,
-            finalize_before_deadline_seconds=1.0,
         ),
         time_budget=time_budget,
         event_sink=AgentTraceWriter(
@@ -297,7 +298,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         event
         for event in events
         if event.get("event_type") == "tool_call"
-        and event.get("tool") == "batch_validate"
+        and event.get("tool") == "validate"
         and event["result"]["ok"]
     )
     # The reference names the step-tree attachment that actually holds the full
@@ -308,142 +309,6 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         f"research__{fold_ref}__{run_ref}__valid_002/validation/result.json"
     )
     assert (tree.root / row["result_ref"]).is_file()
-
-
-def test_complete_node_enters_hard_finalization_without_compaction_or_research(
-    tmp_path: Path,
-) -> None:
-    clock = FakeClock()
-    time_budget = InferenceTimeBudget(duration_seconds=10.0, clock=clock)
-    output = tmp_path / "output"
-    models = tmp_path / "models"
-    output.mkdir()
-    models.mkdir()
-    snapshot = tmp_path / "snapshot"
-    snapshot.mkdir()
-    (snapshot / "main.py").write_text(
-        "def generate_orders(context):\n    return []\n", encoding="utf-8"
-    )
-    (output / "main.py").write_text(
-        "def generate_orders(context):\n    return []\n", encoding="utf-8"
-    )
-    tree = StepTree(tmp_path / "steps")
-    node_id = tree.record_step(
-        snapshot,
-        epoch_id="epoch_001",
-        session_ref="session_ref_current",
-        run_id="run_current",
-        result_name="valid_001",
-        revision_id="revision_current",
-        metrics={"total_return": 0.03, "max_drawdown": 0.12},
-    )
-
-    class ExistingValidation:
-        spec = ToolSpec(
-            "batch_validate",
-            "return one completed current-run validation",
-            {"type": "object", "properties": {}, "required": []},
-        )
-
-        def invoke(self, _arguments):
-            (output / "main.py").write_text("workspace drift\n", encoding="utf-8")
-            return ToolResult(
-                True,
-                value={"candidates": [{
-                    "node_id": node_id,
-                    "revision_id": "revision_current",
-                    "stats": {"total_return": 0.03, "max_drawdown": 0.12},
-                }]},
-            )
-
-    shell = RecordingShell()
-    scripted = ScriptedLLM(
-        [
-            ProviderResponse(
-                tool_calls=(
-                    ToolCall("valid", "batch_validate", {}),
-                    ToolCall("research", "shell", {}),
-                )
-            ),
-            ProviderResponse(
-                tool_calls=(ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
-            ),
-        ]
-    )
-    compact_scripted = ScriptedLLM(
-        [ProviderResponse(content="## 目标\nshould not run")]
-    )
-    shared = SessionCallBudget(max_calls=6, time_budget=time_budget)
-    main = SessionBudgetLLM(
-        ScheduledTimedLLM(scripted, clock, [5.0, 0.1, 0.1]), budget=shared
-    )
-    compact = SessionBudgetLLM(compact_scripted, budget=shared)
-    compactor = ContextCompactor(
-        compact,
-        ContextCompactionConfig(
-            token_threshold=1,
-            min_messages=5,
-            keep_recent_messages=1,
-            max_response_tokens=200,
-        ),
-    )
-    events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=main,
-        tools=ToolRegistry(
-            [
-                ExistingValidation(),
-                shell,
-                StepRollbackTool(
-                    tree,
-                    output,
-                    models,
-                    session_ref="session_ref_current",
-                ),
-                FinishSessionTool(tree, session_ref="session_ref_current", registration=_passing_gate),
-            ]
-        ),
-        system_prompt="research before finishing",
-        config=AgentSessionConfig(
-            max_llm_calls=3,
-            deadline_seconds=10.0,
-            finalize_before_deadline_seconds=6.0,
-            # No trailing wrap-up grace: this 10s budget would otherwise sit
-            # entirely inside the default grace window and never reach hard
-            # finalization.
-            deadline_grace_seconds=0.0,
-            max_response_tokens=500,
-        ),
-        compactor=compactor,
-        time_budget=time_budget,
-        event_sink=lambda event, payload: events.append((event, payload)),
-    )
-
-    result = runner.run("validate and continue researching")
-
-    assert result.status == "finished"
-    assert result.finish_value["node_id"] == node_id
-    assert shell.calls == 0
-    assert compact_scripted.calls == []
-    # The working copy drifted after the Validation and is not restored: the
-    # nomination names the node's revision, which is what freezes.
-    assert (output / "main.py").read_text(encoding="utf-8") == "workspace drift\n"
-    final_tools = {item["function"]["name"] for item in scripted.calls[1]["tools"]}
-    assert final_tools == {"finish_session"}
-    assert len(scripted.calls[1]["messages"]) == 2
-    final_payload = json.loads(scripted.calls[1]["messages"][1].content or "{}")
-    assert final_payload["complete_validation_candidates"][0]["node_id"] == node_id
-    assert any(
-        event == "hard_finalization_started"
-        and payload["candidate_node_ids"] == [node_id]
-        for event, payload in events
-    )
-    assert any(
-        event == "tool_call"
-        and payload["tool"] == "shell"
-        and "unavailable" in str(payload["result"])
-        for event, payload in events
-    )
 
 
 def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
@@ -480,7 +345,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
 
     class SlowValidation:
         spec = ToolSpec(
-            "batch_validate",
+            "validate",
             "complete Validation",
             {"type": "object", "properties": {}, "additionalProperties": False},
             mutating=True,
@@ -501,8 +366,8 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
 
     scripted = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("b1", "batch_validate", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "finish_session", {"outcome": "freeze", "node_id": node_id}),)),
+            ProviderResponse(tool_calls=(ToolCall("b1", "validate", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "test", {"outcome": "freeze", "node_id": node_id}),)),
         ],
         context_window_tokens=128_000,
     )
@@ -512,7 +377,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
         tools=ToolRegistry(
             [
                 SlowValidation(),
-                FinishSessionTool(tree, session_ref="fold_grace", registration=_passing_gate),
+                TerminalTool(tree, session_ref="fold_grace", registration=_passing_gate),
             ]
         ),
         system_prompt="fold system prompt",
@@ -520,7 +385,6 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
             max_llm_calls=4,
             deadline_seconds=budget_seconds,
             deadline_grace_seconds=grace_seconds,
-            finalize_before_deadline_seconds=300.0,
         ),
         time_budget=time_budget,
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -578,7 +442,6 @@ def test_reserve_without_complete_node_keeps_research_and_compaction_available()
         config=AgentSessionConfig(
             max_llm_calls=2,
             deadline_seconds=10.0,
-            finalize_before_deadline_seconds=6.0,
             max_response_tokens=500,
         ),
         compactor=compactor,
@@ -761,13 +624,13 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         budget=SessionCallBudget(max_calls=2, time_budget=main_budget),
     )
 
-    batch = BatchValidateTool(
+    batch = ValidateTool(
         backtest=backtest,
         workspace=SafeWorkspace(tmp_path),
         modification_check_factory=lambda directory: PassingCheck(directory, models),
     )
     with pytest.raises(
-        ValueError, match="tool:batch_validate is bound to another budget"
+        ValueError, match="tool:validate is bound to another budget"
     ):
         AgentSessionRunner(
             llm=main,
@@ -862,135 +725,6 @@ def _no_op_strategy(path: Path) -> Path:
     return path
 
 
-def test_hard_finalization_lists_every_candidate_without_a_gate_reading(
-    tmp_path: Path,
-) -> None:
-    """The finalize window lists the session's complete Validations by id
-    and handle and carries no gate reading of any kind; the node_id enum
-    covers exactly those Validations, and the registration refuses a node
-    that does not register."""
-
-    clock = FakeClock()
-    time_budget = InferenceTimeBudget(duration_seconds=10.0, clock=clock)
-    output = _no_op_strategy(tmp_path / "output")
-    models = tmp_path / "models"
-    models.mkdir()
-    tree = StepTree(tmp_path / "steps")
-    weak_id = tree.record_step(
-        _no_op_strategy(tmp_path / "weak"),
-        epoch_id="research",
-        session_ref="session_ref_current",
-        run_id="run_current",
-        result_name="valid_001",
-        revision_id="revision_weak",
-        metrics={"total_return": -0.02, "max_drawdown": 0.11, "sharpe": -0.1},
-    )
-    strong_id = tree.record_step(
-        _no_op_strategy(tmp_path / "strong"),
-        epoch_id="research",
-        session_ref="session_ref_current",
-        run_id="run_current",
-        result_name="valid_002",
-        revision_id="revision_strong",
-        metrics={"total_return": 0.3, "max_drawdown": 0.08, "sharpe": 1.4},
-    )
-
-    class TwoValidations:
-        spec = ToolSpec(
-            "batch_validate",
-            "return two completed current-run validations",
-            {"type": "object", "properties": {}, "required": []},
-        )
-
-        def invoke(self, _arguments):
-            return ToolResult(
-                True,
-                value={
-                    "candidates": [
-                        {"node_id": weak_id, "revision_id": "revision_weak", "stats": {"sharpe": -0.1}},
-                        {"node_id": strong_id, "revision_id": "revision_strong", "stats": {"sharpe": 1.4}},
-                    ]
-                },
-            )
-
-    def gate(
-        node_id: str,
-        seed_replicates: tuple[str, ...] = (),
-        deterministic: bool = False,
-        ablation: str | None = None,
-    ) -> dict[str, object]:
-        if node_id == strong_id:
-            return {"passed": True, "reasons": []}
-        return {"passed": False, "reasons": ["freeze_needs_full_span_validation"]}
-
-    scripted = ScriptedLLM(
-        [
-            ProviderResponse(tool_calls=(ToolCall("valid", "batch_validate", {}),)),
-            ProviderResponse(
-                tool_calls=(
-                    # Named by its short handle: the finalize window takes it too.
-                    ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": "valid_002"}),
-                )
-            ),
-        ]
-    )
-    shared = SessionCallBudget(max_calls=4, time_budget=time_budget)
-    main = SessionBudgetLLM(ScheduledTimedLLM(scripted, clock, [5.0, 0.1]), budget=shared)
-    events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=main,
-        tools=ToolRegistry(
-            [
-                TwoValidations(),
-                StepRollbackTool(tree, output, models, session_ref="session_ref_current"),
-                FinishSessionTool(tree, session_ref="session_ref_current", registration=gate),
-            ]
-        ),
-        system_prompt="finish this session",
-        config=AgentSessionConfig(
-            max_llm_calls=2,
-            deadline_seconds=10.0,
-            finalize_before_deadline_seconds=6.0,
-            deadline_grace_seconds=0.0,
-            max_response_tokens=500,
-        ),
-        time_budget=time_budget,
-        event_sink=lambda event, payload: events.append((event, payload)),
-    )
-
-    result = runner.run("finish")
-
-    assert result.status == "finished"
-    assert result.finish_value["node_id"] == strong_id
-    payload = json.loads(scripted.calls[1]["messages"][1].content or "{}")
-    assert payload["observation"] == "session_hard_finalization"
-    candidates = payload["complete_validation_candidates"]
-    assert [candidate["node_id"] for candidate in candidates] == [weak_id, strong_id]
-    assert not any(
-        key in candidate
-        for candidate in candidates
-        for key in ("passes_freeze_gate", "freeze_gate_reasons", "residual_reading")
-    )
-    finish_schema = next(
-        item
-        for item in scripted.calls[1]["tools"]
-        if item["function"]["name"] == "finish_session"
-    )
-    # Each candidate may be named by its full id or its unique short handle.
-    assert [candidate["handle"] for candidate in candidates] == ["valid_001", "valid_002"]
-    assert finish_schema["function"]["parameters"]["properties"]["node_id"]["enum"] == [
-        weak_id,
-        strong_id,
-        "valid_001",
-        "valid_002",
-    ]
-    assert any(
-        event == "hard_finalization_started"
-        and payload["candidate_node_ids"] == [weak_id, strong_id]
-        for event, payload in events
-    )
-
-
 class CountingChildLLM:
     """A child model that records every call it is asked to make."""
 
@@ -1008,11 +742,10 @@ class CountingChildLLM:
 
 
 def _reserved_fold_config() -> AgentSessionConfig:
-    """A session whose finalization tail is 200s of a 1000s budget."""
+    """A session whose wrap-up tail is 100s of a 1000s budget."""
 
     return AgentSessionConfig(
         deadline_seconds=1000.0,
-        finalize_before_deadline_seconds=100.0,
         deadline_grace_seconds=100.0,
         max_llm_calls=8,
         max_response_tokens=500,
@@ -1025,7 +758,7 @@ def test_a_child_is_bounded_by_the_parents_finalization_tail(tmp_path: Path) -> 
 
     The reviewed Fold's last developer child ran until the session deadline and
     was cancelled there, having spent shared LLM calls on a report nobody could
-    receive. Its share now ends ``finalize + grace`` before the session's does.
+    receive. Its share now ends the wrap-up grace before the session's does.
     """
 
     del tmp_path
@@ -1045,7 +778,7 @@ def test_a_child_is_bounded_by_the_parents_finalization_tail(tmp_path: Path) -> 
         subagent=engine,
         time_budget=time_budget,
     )
-    assert engine.parent_reserve_seconds == 200.0
+    assert engine.parent_reserve_seconds == 100.0
 
     # Outside the tail the child runs normally.
     clock.advance(400.0)
@@ -1053,10 +786,10 @@ def test_a_child_is_bounded_by_the_parents_finalization_tail(tmp_path: Path) -> 
     early = runner._wait_subagent_jobs()[-1]
     assert early["value"]["status"] == "completed" and child_llm.calls == 1
 
-    # 150s left is inside the 200s tail: the child stops without spending a
+    # 50s left is inside the 100s tail: the child stops without spending a
     # call, even though the session clock still shows time.
-    clock.advance(450.0)
-    assert time_budget.remaining() == 150.0
+    clock.advance(550.0)
+    assert time_budget.remaining() == 50.0
     assert runner.tools.invoke("agent", {"agent": "Explore", "task": "late"}).ok
     late = runner._wait_subagent_jobs()[-1]
     assert late["value"]["status"] == "timeout"
@@ -1068,7 +801,7 @@ def test_a_short_session_keeps_no_tail_it_cannot_afford() -> None:
     its own wrap-up window; withholding the tail there would leave children no
     time at all."""
 
-    time_budget = InferenceTimeBudget(duration_seconds=150.0, clock=FakeClock())
+    time_budget = InferenceTimeBudget(duration_seconds=100.0, clock=FakeClock())
     engine = SubAgentEngine(
         llm=CountingChildLLM(),
         tools=ToolRegistry([RecordingShell()]),
@@ -1118,7 +851,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
 
     class ExistingValidation:
         spec = ToolSpec(
-            "batch_validate",
+            "validate",
             "return one completed current-run validation",
             {"type": "object", "properties": {}, "required": []},
         )
@@ -1149,7 +882,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
 
     scripted = ScriptedLLM(
         [
-            ProviderResponse(tool_calls=(ToolCall("valid", "batch_validate", {}),)),
+            ProviderResponse(tool_calls=(ToolCall("valid", "validate", {}),)),
             ProviderResponse(
                 tool_calls=(
                     ToolCall("spawn", "agent", {"agent": "general-purpose", "task": "slow"}),
@@ -1158,13 +891,13 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
             # A turn of pure text while the child is still running: the trap.
             ProviderResponse(content="等子代理返回后再收尾"),
             ProviderResponse(
-                tool_calls=(ToolCall("finish", "finish_session", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("finish", "test", {"outcome": "freeze", "node_id": node_id}),)
             ),
         ]
     )
     shared = SessionCallBudget(max_calls=8, time_budget=time_budget)
     main = SessionBudgetLLM(
-        ScheduledTimedLLM(scripted, clock, [10.0, 690.0, 150.0, 1.0]), budget=shared
+        ScheduledTimedLLM(scripted, clock, [10.0, 690.0, 250.0, 1.0]), budget=shared
     )
     engine = SubAgentEngine(
         llm=BlockingChildLLM(),
@@ -1183,7 +916,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
                     models,
                     session_ref="session_ref_current",
                 ),
-                FinishSessionTool(tree, session_ref="session_ref_current", registration=_passing_gate),
+                TerminalTool(tree, session_ref="session_ref_current", registration=_passing_gate),
             ]
         ),
         system_prompt="fold",
@@ -1202,10 +935,8 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
 
     assert started.is_set()
     assert result.status == "finished"
-    assert result.finish_value["node_id"] == node_id
+    assert result.finish_value["candidate"]["node_id"] == node_id
     # The child is released only after the session returned, so finishing
     # quickly is the proof that the parent never yielded the tail to it.
     assert elapsed < 3.0
     assert [event for event, _ in events if event == "subagent_wait_started"] == []
-    # Having kept its tail, the loop reached its next top and finalized there.
-    assert any(event == "hard_finalization_started" for event, _ in events)

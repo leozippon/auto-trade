@@ -4,7 +4,7 @@ This tool fans a pre-registered set out under one shared parent and one span
 of the research period, so the numbers are comparable; it is the only
 Validation tool, so one candidate is a round too: same static gate, same
 immutable revision, same replay-year budget, same selection path through
-``step_rollback`` plus ``finish_session`` at every width.
+``step_rollback`` plus ``test`` at every width.
 
 These tests cover the refusals that must happen before anything runs, the
 spans a batch may replay on a multi-year research period, the per-candidate
@@ -51,7 +51,6 @@ from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import ToolError, ToolRegistry
-from autotrade.environment.tools.finish_session import FinishSessionTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.environment.tools.workspace import (
@@ -82,12 +81,11 @@ from autotrade.pipelines.session_tools import (
     BATCH_HYPOTHESIS_MAX_CHARS,
     BATCH_REJECTION_ESCALATE_AT,
     BATCH_VALIDATE_MAX_CANDIDATES,
-    BatchValidateTool,
     EnvironmentBlocked,
     NullControlTool,
     SessionValidations,
+    ValidateTool,
     leg_cards,
-    session_budget_status,
 )
 from autotrade.pipelines.verdict import (
     ACTIVE_DAILY_COLUMNS,
@@ -98,6 +96,7 @@ from autotrade.pipelines.verdict import (
     residual_statistics,
 )
 from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.terminal_tool import TerminalTool
 
 PARENT_SOURCE ="def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.
@@ -107,6 +106,9 @@ YEARS = (
     ("Y3", "20230701", "20240630"),
     ("Y4", "20240701", "20250630"),
 )
+# The validation year the frontier reveals one test at a time; a span may
+# name it only once the frontier has entered it.
+VALIDATION_YEAR = ("Y5", "20250701", "20260630")
 TEMPLATE_README = "# Strategy output contract\n\nRead-only template text.\n"
 
 
@@ -372,8 +374,12 @@ class _Session:
                     end,
                     SnapshotBundle(f"snap_{label}", f"decision_{label}", f"replay_{label}"),
                 )
-                for label, start, end in YEARS
+                for label, start, end in (*YEARS, VALIDATION_YEAR)
             ),
+            validation=ReplaySpan(
+                "validation", "valid", VALIDATION_YEAR[1], VALIDATION_YEAR[2], SnapshotBundle("snap_v", "decision_v", "replay_v")
+            ),
+            decision_view_at=lambda _anchor: snapshot,
             window_months=60,
             max_llm_calls=10,
             deadline_seconds=deadline_seconds,
@@ -420,7 +426,7 @@ class _Session:
             experiment_dir=experiment_dir,
         )
         self.workspace = SafeWorkspace(self.workspace_root)
-        self.batch = BatchValidateTool(
+        self.batch = ValidateTool(
             backtest=self.backtest,
             workspace=self.workspace,
             modification_check_factory=self._check,
@@ -437,11 +443,10 @@ class _Session:
             self.models,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
         )
-        self.finish = FinishSessionTool(
+        self.finish = TerminalTool(
             self.tree,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
             registration=self.backtest.registration,
-            budget_status=lambda: session_budget_status(self.backtest),
         )
 
     def _check(self, directory: Path) -> ModificationCheckTool:
@@ -578,7 +583,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
                 session.call(*[f"c{index}" for index in range(BATCH_VALIDATE_MAX_CANDIDATES + 1)])
 
     def test_a_hypothesis_over_the_cap_is_refused_and_the_schema_states_it(self) -> None:
-        field = BatchValidateTool.spec.input_schema["properties"]["candidates"]["items"][
+        field = ValidateTool.spec.input_schema["properties"]["candidates"]["items"][
             "properties"
         ]["hypothesis"]
         # The cap has to hold a pre-registration with its falsification clause.
@@ -665,13 +670,16 @@ class BatchValidateSpanTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("1"))
-            # Six refusals: the seventh identical one would start costing
-            # replay-years (RepeatedRejectionTest).
-            for label in ("Y0", "Y5", "Y3..Y2", "Y2..Y5", "F", "heldout"):
+            for label in ("Y0", "Y6", "Y3..Y2", "Y2..Y6", "F", "heldout"):
                 with self.assertRaises(ToolError) as caught:
                     session.call("a", span=label)
                 self.assertIn("span must be full", str(caught.exception))
                 self.assertEqual(caught.exception.error_type, "schema_error")
+            # The validation year is a year of the geometry, but the frontier
+            # has not entered it: refused by name until a test moves it.
+            with self.assertRaises(ToolError) as caught:
+                session.call("a", span="Y5")
+            self.assertIn("after the frontier 20250630", str(caught.exception))
             self.assertEqual(session.evaluator.calls, 0)
 
     def test_the_null_control_ranks_a_node_over_its_own_span(self) -> None:
@@ -684,30 +692,29 @@ class BatchValidateSpanTest(unittest.TestCase):
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20230701", "20240630"))
 
 
-class FreezeThroughTheRegistrationTest(unittest.TestCase):
-    """The finish tool reads the Pipeline's own registration over the session's
-    Steps, and a freeze that registers ends the session whatever it read."""
+class RegistrationTest(unittest.TestCase):
+    """``test`` reads the Pipeline's own registration over the session's Steps
+    (its refusal is pinned in test_rolling_validation); here, what registers."""
 
     def test_a_sub_span_node_does_not_register_and_a_lone_full_span_one_does(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             year = session.validate_one("year", _strategy("1"), span="Y2")["node_id"]
-            with self.assertRaises(ToolError) as sub_span:
-                session.finish.invoke({"outcome": "freeze", "node_id": year})
-            self.assertIn("freeze_needs_full_span_validation", str(sub_span.exception))
-            self.assertEqual(sub_span.exception.error_type, "freeze_registration_refused")
+            registration = session.backtest.registration(year)
+            self.assertFalse(registration["passed"])
+            self.assertIn("freeze_needs_full_span_validation", registration["reasons"])
             # One full-span validation is enough: no count of validations, no
-            # score and no other node's reading stands between it and a freeze.
+            # score and no other node's reading stands between it and a test.
             full = session.validate_one("full", _strategy("22"))["node_id"]
-            finished = session.finish.invoke({"outcome": "freeze", "node_id": full})
-            self.assertTrue(finished.finish)
+            registration = session.backtest.registration(full)
+            self.assertEqual((registration["passed"], registration["reasons"]), (True, []))
 
-    def test_a_full_span_winner_among_two_freezes_without_restoring_the_working_copy(
+    def test_a_full_span_winner_among_two_is_tested_without_restoring_the_working_copy(
         self,
     ) -> None:
-        """The Pipeline freezes the nominated revision, not output/, so a
-        winner is nominated as it is: the working copy still holds the start
-        and no step_rollback comes first."""
+        """The Pipeline tests the nominated revision, not output/, so a winner
+        is tested as it is: the working copy still holds the start and no
+        step_rollback comes first."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.evaluator.summary_extra = COSTED
@@ -717,19 +724,8 @@ class FreezeThroughTheRegistrationTest(unittest.TestCase):
             winner = value["candidates"][1]["node_id"]
             registration = session.backtest.registration(str(winner))
             self.assertTrue(registration["passed"], registration)
-            finished = session.finish.invoke(
-                {
-                    "outcome": "freeze",
-                    "node_id": winner,
-                    "reason": "both full-period candidates resolve the only hypothesis this test registers",
-                }
-            )
-            self.assertTrue(finished.finish)
-            self.assertEqual(finished.value["node_id"], winner)
-            self.assertEqual(
-                finished.value["revision_id"],
-                str(session.tree.get_node(winner)["revision_id"]),
-            )
+            tested = session.finish.invoke({"candidate": winner})
+            self.assertEqual(tested.value["candidate"]["node_id"], winner)
             self.assertEqual(
                 (session.output / "main.py").read_text(encoding="utf-8"),
                 PARENT_SOURCE,
@@ -737,8 +733,7 @@ class FreezeThroughTheRegistrationTest(unittest.TestCase):
 
 
 class ControlsTest(unittest.TestCase):
-    """A registered control is recorded, costs its replay-years and never
-    nominates."""
+    """A registered control is recorded and never registers for a test."""
 
     def test_a_control_is_recorded_and_can_never_be_nominated(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -759,19 +754,16 @@ class ControlsTest(unittest.TestCase):
                     (ledger_row["control"], ledger_row["batch_id"]),
                     (row["control"], value["batch_id"]),
                 )
-            with self.assertRaises(ToolError) as refused:
-                session.finish.invoke(
-                    {"outcome": "freeze", "node_id": control["node_id"], "reason": "x" * 40}
-                )
-            self.assertEqual(refused.exception.error_type, "freeze_registration_refused")
-            self.assertIn("freeze_nominee_is_control", str(refused.exception))
+            registration = session.backtest.registration(str(control["node_id"]))
+            self.assertFalse(registration["passed"])
+            self.assertIn("freeze_nominee_is_control", registration["reasons"])
             # Rows name a node by the short handle the tools accept.
             self.assertEqual(cand["handle"], cand["result_name"])
 
     def test_a_registration_without_its_control_flag_is_refused_before_anything_runs(
         self,
     ) -> None:
-        schema = BatchValidateTool.spec.input_schema
+        schema = ValidateTool.spec.input_schema
         # Offline screens are no longer declared: nothing in the schema asks.
         self.assertNotIn("offline_trials", schema["properties"])
         self.assertEqual(schema["required"], ["candidates"])
@@ -1412,6 +1404,8 @@ class BatchValidateRunTest(unittest.TestCase):
                     "complete_validations",
                     "failed",
                     "result_root",
+                    "validates_in_step",
+                    "validates_per_step",
                 },
             )
             # The working copy is untouched by the batch.
@@ -1469,7 +1463,7 @@ class EnvironmentBlockedTest(unittest.TestCase):
             self.assertEqual({node["metadata"]["cause"] for node in dead_ends}, {"environment"})
             self.assertEqual(
                 [payload for event, payload in trace if event == "environment_blocked"],
-                [{"tool": "batch_validate", "span": "full", "batches": 2, "reason": reason}],
+                [{"tool": "validate", "span": "full", "batches": 2, "reason": reason}],
             )
 
     def test_a_batch_with_a_candidate_that_raised_in_its_own_code_never_counts(self) -> None:
@@ -1626,18 +1620,18 @@ class BatchValidateContractTest(unittest.TestCase):
         )
         from autotrade.environment.tools.base import is_sequential_tool
 
-        name = BatchValidateTool.spec.name
-        self.assertTrue(BatchValidateTool.spec.mutating)
-        self.assertTrue(is_sequential_tool(BatchValidateTool.spec))
+        name = ValidateTool.spec.name
+        self.assertTrue(ValidateTool.spec.mutating)
+        self.assertTrue(is_sequential_tool(ValidateTool.spec))
         self.assertIn(name, _PHASE_GATE_TOOLS)
         self.assertIn(name, _SESSION_TOOLS)
 
     def test_the_description_states_the_selection_path(self) -> None:
-        description = BatchValidateTool.spec.description
+        description = ValidateTool.spec.description
         self.assertIn("step_rollback", description)
-        self.assertIn("finish_session", description)
+        self.assertIn("test", description)
         self.assertIn("hypothesis", description)
-        self.assertIn("span", BatchValidateTool.spec.input_schema["properties"])
+        self.assertIn("span", ValidateTool.spec.input_schema["properties"])
         for retired in ("Fold", "parent strategy", "backtest budget", "Step budget"):
             self.assertNotIn(retired, description)
 
@@ -1645,7 +1639,7 @@ class BatchValidateContractTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             registry = ToolRegistry([session.batch])
-            result = registry.invoke("batch_validate", {"candidate": []})
+            result = registry.invoke("validate", {"candidate": []})
             self.assertFalse(result.ok)
             self.assertIn("unknown argument", result.error)
             self.assertIn("correct call example", result.error)

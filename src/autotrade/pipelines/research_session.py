@@ -3,7 +3,7 @@ it composes, its shared call and time budget, the workspace it seeds and
 mounts, and the facts and records it publishes.
 
 The Agent-facing tools a research session runs on (``smoke_backtest``,
-``batch_validate``, ``run_null_control``) and the Validation engine behind them
+``validate``, ``run_null_control``) and the Validation engine behind them
 live in :mod:`autotrade.pipelines.session_tools`; this module composes them.
 """
 
@@ -47,7 +47,11 @@ from autotrade.environment.llm.model_profiles import (
     token_prices,
 )
 from autotrade.environment.llm.pricing import FREE, ApiSpendExhausted, billed_tokens
-from autotrade.environment.runtime import RunManifest, chmod_tree
+from autotrade.environment.runtime import (
+    RunManifest,
+    chmod_tree,
+    rmtree_keeping_file_modes,
+)
 from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
@@ -69,7 +73,6 @@ from autotrade.environment.tools.base import (
 )
 from autotrade.environment.tools.compact import CompactTool
 from autotrade.environment.tools.files import EditFileTool, WriteFileTool
-from autotrade.environment.tools.finish_session import FinishSessionTool
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.report_issue import (
     ReportIssueTool,
@@ -102,6 +105,7 @@ from .calendar import (
     MACRO_HISTORY_START,
     Slot,
     anchor_before,
+    anchor_on,
     months_before,
     step_windows,
     yyyymmdd,
@@ -114,19 +118,20 @@ from .config import (
     ResearchSessionRequest,
     ResearchSessionResult,
     SessionResume,
+    SnapshotBundle,
     StepResult,
     positive_spend_cap,
 )
 from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage
 from .session_tools import (
-    BatchValidateTool,
     EnvironmentBlocked,
     NullControlTool,
     SessionValidations,
     SmokeBacktestTool,
+    TestTool,
+    ValidateTool,
     batch_candidate_resources,
     batch_candidate_stats,
-    session_budget_status,
 )
 from .skills import (
     OPERATING_MEMORY_DIRNAME,
@@ -424,6 +429,78 @@ def _strategy_sandbox(evaluator: object) -> SandboxConfig:
     sandbox = getattr(evaluator, "sandbox", None)
     return sandbox if isinstance(sandbox, SandboxConfig) else SandboxConfig()
 
+class _SessionView:
+    """What the session sees of the data: the mounted decision view, the facts
+    file and the container that reads them.
+
+    A test advances the frontier by one step; :meth:`advance` then stops the
+    session container, mounts the decision view at the new frontier over the
+    same workspace, rewrites the run facts with the new frontier and the steps
+    tested, and starts the container again, so the session goes on where it
+    was with one more step of data in view.
+    """
+
+    def __init__(
+        self,
+        developer: LLMResearchDeveloper,
+        local: LocalSandbox,
+        request: ResearchSessionRequest,
+        manifest: RunManifest,
+        *,
+        inputs_dir: Path,
+        models_dir: Path,
+    ) -> None:
+        self.developer = developer
+        self.local = local
+        self.request = request
+        self.manifest = manifest
+        self.inputs_dir = inputs_dir
+        self.models_dir = models_dir
+        self.sandbox: DockerSandbox | None = None
+        self.paths = local.paths
+        self.steps_tested = len(request.tests_before)
+
+    def write_facts(self, paths) -> dict[str, object]:
+        """Write the read-only facts file from the manifest as it stands."""
+
+        self.paths = paths
+        if self.inputs_dir.exists():
+            chmod_tree(self.inputs_dir, file_mode=0o644, dir_mode=0o755)
+        facts = self.developer._session_facts(
+            self.request, manifest=self.manifest, paths=paths, models_dir=self.models_dir
+        )
+        write_json_atomic(self.inputs_dir / SESSION_CONTEXT_NAME, facts)
+        chmod_tree(self.inputs_dir, file_mode=0o444, dir_mode=0o555)
+        return facts
+
+    def advance(self, snapshot: SnapshotBundle, frontier: str) -> None:
+        """Mount ``snapshot``, the decision view at ``frontier``, and restart
+        the session container on it."""
+
+        request = self.request
+        if self.sandbox is not None:
+            self.sandbox.stop()
+        self.steps_tested += 1
+        self.developer._install_snapshot_view(
+            self.local, snapshot, frontier=frontier, window_months=request.window_months,
+            session_key=request.session_key,
+        )
+        self.manifest.update(
+            research=research_geometry_record(
+                request.years,
+                research_years=request.research_years,
+                test_step_months=int(request.acceptance_rules["test_step_months"]),  # type: ignore[call-overload]
+                steps_tested=self.steps_tested,
+                window_months=request.window_months,
+                decision_time=anchor_on(frontier).isoformat(),
+            ),
+            snapshots={"decision_input": {"snapshot_id": snapshot.snapshot_id}},
+        )
+        self.write_facts(self.paths)
+        if self.sandbox is not None:
+            self.sandbox.start()
+
+
 class LLMResearchDeveloper:
     """Adapter from the native Agent loop to ``ResearchDeveloper``."""
 
@@ -559,6 +636,7 @@ class LLMResearchDeveloper:
         tree = self._install_step_tree(paths)
         sandbox: DockerSandbox | None = None
         emit_event = trace.emit
+        view = _SessionView(self, local, request, manifest, inputs_dir=inputs_dir, models_dir=models_dir)
         try:
             if self.command_runner_factory is not None:
                 command_runner = self.command_runner_factory(workspace_root)
@@ -587,15 +665,9 @@ class LLMResearchDeveloper:
                     ),
                 )
                 sandbox.start()
+                view.sandbox = sandbox
                 command_runner = PersistentCommandRunner(sandbox)
-            facts = self._session_facts(
-                request,
-                manifest=manifest,
-                paths=paths,
-                models_dir=models_dir,
-            )
-            write_json_atomic(inputs_dir / SESSION_CONTEXT_NAME, facts)
-            chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
+            facts = view.write_facts(paths)
 
             modification = ModificationCheckTool(
                 output_dir,
@@ -639,6 +711,7 @@ class LLMResearchDeveloper:
                 session_ref=session_ref,
                 trace=trace,
                 time_budget=time_budget,
+                view=view,
             )
 
             def budget_used_now() -> dict[str, object]:
@@ -651,7 +724,7 @@ class LLMResearchDeveloper:
                     main_calls=shared_budget.main_calls,
                     subagent_calls=shared_budget.subagent_calls,
                     compact_calls=shared_budget.compact_calls,
-                    test_replays=int(used.test_replays),
+                    test_replays=backtest.test_replays,
                     null_controls=(
                         null_control_tool.used
                         if null_control_tool is not None
@@ -832,7 +905,7 @@ class LLMResearchDeveloper:
                     request.years,
                     research_years=request.research_years,
                     test_step_months=int(request.acceptance_rules["test_step_months"]),  # type: ignore[call-overload]
-                    steps_tested=0,
+                    steps_tested=len(request.tests_before),
                     window_months=request.window_months,
                     decision_time=request.decision_time.isoformat(),
                 ),
@@ -873,7 +946,7 @@ class LLMResearchDeveloper:
                     # The CPU quota and memory ceiling of that container.
                     "strategy_cpus": self.strategy_cpus,
                     "strategy_memory_bytes": self.strategy_memory_bytes,
-                    # How many replays one batch_validate call runs at once,
+                    # How many replays one validate call runs at once,
                     # and so the factor both wall clocks above are scaled by.
                     "batch_validate_max_concurrency": request.batch_validate_max_concurrency,
                     # The totals above are the arm's; what earlier attempts
@@ -991,10 +1064,8 @@ class LLMResearchDeveloper:
         )
         _environment_phase(request.progress_hook, "pit_view", request.run_id)
         self._install_snapshot_view(
-            local,
-            request,
-            start=months_before(request.full_span.end, request.window_months),
-            end=request.full_span.end,
+            local, request.snapshot, frontier=request.frontier, window_months=request.window_months,
+            session_key=request.session_key,
         )
         return mounted_memory
 
@@ -1019,10 +1090,12 @@ class LLMResearchDeveloper:
         session_ref: str,
         trace: AgentTraceWriter,
         time_budget: InferenceTimeBudget,
+        view: _SessionView,
     ) -> tuple[SessionValidations, SmokeBacktestTool, list[Tool], NullControlTool | None]:
         """The parent session's tools over the session's Validations; returns
         the Validations, the smoke tool, the tool list and the null-control
-        tool (None when the arm allows no null controls)."""
+        tool (None when the arm allows no null controls). ``view`` is what a
+        test advances after it records its step."""
 
         backtest = SessionValidations(
             request=request,
@@ -1096,7 +1169,7 @@ class LLMResearchDeveloper:
             CompactTool(),
             modification,
             smoke,
-            BatchValidateTool(
+            ValidateTool(
                 backtest=backtest,
                 workspace=safe,
                 modification_check_factory=check_for,
@@ -1115,17 +1188,9 @@ class LLMResearchDeveloper:
         tools.append(
             StepRollbackTool(tree, output_dir, models_dir, session_ref=session_ref)
         )
-        # Matches the opaque session ref the step tree stores, so the
-        # current-session check compares like with like. ``finish_session``
-        # refuses a nomination that does not register with it.
-        tools.append(
-            FinishSessionTool(
-                tree,
-                session_ref=session_ref,
-                registration=backtest.registration,
-                budget_status=lambda: session_budget_status(backtest),
-            )
-        )
+        # The one way forward and the one way the session ends: a test records
+        # its step in the ledger, then the view advances to the new frontier.
+        tools.append(TestTool(backtest, advance_view=view.advance, trace_emit=trace.emit))
         return backtest, smoke, tools, null_control_tool
 
     def _session_runner(
@@ -1239,8 +1304,8 @@ class LLMResearchDeveloper:
     ) -> tuple[str, str, str | None, tuple[str, ...], bool, str, str]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the nominated node, its seed replicates, whether it was declared
-        deterministic, the reason and the finish reason."""
+        the frozen candidate (the last test's), its seed replicates, whether
+        it was declared deterministic, the reason and the finish reason."""
 
         from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
@@ -1296,9 +1361,9 @@ class LLMResearchDeveloper:
             )
             conversation_id = result.conversation_id
             outcome, node_id, reason = _session_outcome(result.finish_value)
-            replicates = _seed_replicates(result.finish_value) if outcome == "freeze" else ()
-            deterministic = outcome == "freeze" and _deterministic(result.finish_value)
-            finish_reason = "llm_agent_finish_session"
+            replicates = _seed_replicates(result.finish_value)
+            deterministic = _deterministic(result.finish_value)
+            finish_reason = "validation_period_complete"
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace,
             # its model calls or its API spend); the Validations it completed
@@ -1363,10 +1428,9 @@ class LLMResearchDeveloper:
         steps = tuple(backtest.steps)
         recorded = {step.step_id for step in steps}
         named = {node_id, *seed_replicates}
-        if outcome == "freeze" and not named <= recorded:
+        if outcome == "completed" and not named <= recorded:
             raise RuntimeError(
-                "finish_session nominated a node or seed replicate absent "
-                "from this session's Validations"
+                "the last test took a node or seed replicate absent from this session's Validations"
             )
         manifest.update(
             conversation_id=conversation_id,
@@ -1414,15 +1478,20 @@ class LLMResearchDeveloper:
     def _install_snapshot_view(
         self,
         local: LocalSandbox,
-        request: ResearchSessionRequest,
+        snapshot: SnapshotBundle,
         *,
-        start: str,
-        end: str,
+        frontier: str,
+        window_months: int,
+        session_key: str,
     ) -> None:
-        source = Path(request.snapshot.decision_ref).resolve(strict=True)
+        """Mount the decision view ``snapshot`` as the session's ``/mnt/snapshot``:
+        the view at ``frontier``, re-mounted over whatever the attempt or the
+        test before left there (a resumed attempt mounts the frontier's view,
+        a test the next one)."""
+
+        source = Path(snapshot.decision_ref).resolve(strict=True)
         target = local.paths.current_snapshot
-        # The view is fixed for the session: a resumed attempt re-mounts the
-        # same decision view over the read-only one the interrupted attempt left.
+        start, end = months_before(frontier, window_months), frontier
         _remove_mounted_tree(target)
         if source.is_dir():
             local.bind_snapshot_view(source)
@@ -1440,7 +1509,7 @@ class LLMResearchDeveloper:
             write_json_atomic(
                 target / "manifest.json",
                 {
-                    "snapshot_id": request.snapshot.snapshot_id,
+                    "snapshot_id": snapshot.snapshot_id,
                     "kind": "local_daily",
                     "period_start": yyyymmdd(start),
                     "period_end": yyyymmdd(end),
@@ -1454,7 +1523,7 @@ class LLMResearchDeveloper:
         install_agent_data_contract(
             local.paths,
             kind=Stage.RESEARCH,
-            session_ref=self.ref_store.get_or_create("session", request.session_key),
+            session_ref=self.ref_store.get_or_create("session", session_key),
             views={"snapshot": (target, "/mnt/snapshot")},
         )
 
@@ -1594,13 +1663,10 @@ def start_record() -> dict[str, object]:
 
 
 def arm_record(steps: Sequence[StepResult]) -> dict[str, object]:
-    """The arm's state when the attempt starts: nothing frozen yet (a session
-    only runs while nothing is), one freeze per arm, and the Validations the
-    session's earlier attempts recorded."""
+    """The Validations the session's earlier attempts recorded, as the attempt
+    starts; the steps tested so far are the research geometry's fact."""
 
     return {
-        "frozen": False,
-        "freezes_per_arm": 1,
         "validations_to_date": len(steps),
         "full_span_validations_to_date": sum(1 for step in steps if step.span == FULL_SPAN),
     }
@@ -1622,29 +1688,33 @@ SESSION_FORBIDDEN = [
 
 
 def _seed_replicates(finish: Mapping[str, object]) -> tuple[str, ...]:
-    """The seed replicates a ``finish_session`` freeze registered (full node ids)."""
+    """The seed replicates the last test registered (full node ids)."""
 
-    return tuple(str(item) for item in finish.get("seed_replicates") or ())  # type: ignore[union-attr]
+    candidate = finish.get("candidate")
+    block = candidate if isinstance(candidate, Mapping) else {}
+    return tuple(str(item) for item in block.get("seed_replicates") or ())  # type: ignore[union-attr]
 
 
 def _deterministic(finish: Mapping[str, object]) -> bool:
-    """Whether a ``finish_session`` freeze declared its package deterministic."""
+    """Whether the last test declared its candidate's package deterministic."""
 
-    return finish.get("deterministic") is True
+    candidate = finish.get("candidate")
+    return isinstance(candidate, Mapping) and candidate.get("deterministic") is True
 
 
 
 def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:
-    """``finish_session``'s finish as the research session's outcome."""
+    """The last test's finish as the research session's outcome: ``completed``
+    with the candidate it took."""
 
     outcome = str(finish.get("outcome") or "")
-    reason = str(finish.get("reason") or "")
-    node_id = str(finish.get("node_id") or "") or None
-    if outcome == "freeze" and node_id is None:
-        raise RuntimeError("research session Agent froze without naming a node")
-    if outcome not in ("freeze", "no_edge"):
-        raise RuntimeError(f"research session Agent finished with {outcome!r}")
-    return outcome, node_id if outcome == "freeze" else None, reason
+    candidate = finish.get("candidate")
+    node_id = str(candidate.get("node_id") or "") if isinstance(candidate, Mapping) else ""
+    if outcome != "completed":
+        raise RuntimeError(f"research session finished with {outcome!r}")
+    if not node_id:
+        raise RuntimeError("the last test finished the session without naming its candidate")
+    return outcome, node_id, ""
 
 
 _WORKSPACE_REFS_DIR = "refs"
@@ -1779,11 +1849,13 @@ def seed_output_from_starter(
 
 
 def _remove_mounted_tree(path: Path) -> None:
-    """Drop a read-only mount an earlier attempt left, so it can be re-copied."""
+    """Drop a read-only mount an earlier attempt or test left, so it can be
+    re-copied. The payload files may be hardlinks to a published PIT view
+    (``LocalSandbox.bind_snapshot_view``), so only the directories are made
+    writable: a chmod on the files would unfreeze the view every replay
+    opens on."""
 
-    if path.exists():
-        chmod_tree(path, file_mode=0o644, dir_mode=0o755)
-        shutil.rmtree(path)
+    rmtree_keeping_file_modes(path)
 
 
 def _skip_workspace_reference_name(name: str) -> bool:
@@ -1850,10 +1922,11 @@ def _agent_event_sink(
         if event_type == TraceEvent.LLM_CALL_STARTED:
             stage = "llm_call"
         elif event_type == TraceEvent.TOOL_CALL_STARTED:
+            tool = payload.get("tool")
             stage = (
                 "backtest"
-                if payload.get("tool") in ("batch_validate", "smoke_backtest")
-                else "tool_call"
+                if tool in ("validate", "smoke_backtest")
+                else "test" if tool == "test" else "tool_call"
             )
         elif event_type == TraceEvent.SUBAGENT_WAIT_STARTED:
             # The parent is idle waiting on a child. Without its own stage the

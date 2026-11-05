@@ -3,7 +3,7 @@
 
 An independent reading of a node: its recorded revision, checked file by file
 against the revision manifest and the fingerprint the arm's ledger recorded,
-is replayed by the evaluator a session's ``batch_validate`` calls, assembled
+is replayed by the evaluator a session's ``validate`` calls, assembled
 from the arm's own ``hitl/params.json`` exactly as the round smoke assembles a
 scratch experiment (``_round._smoke_replays``): the arm's PIT view seed
 hardlinked in, the arm's own sandbox image and pretrained-store pin, cards

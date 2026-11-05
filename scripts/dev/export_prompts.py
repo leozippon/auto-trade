@@ -25,7 +25,6 @@ add_repo_src(__file__)
 from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.prompts import (
     EXPERIMENT_FACTS_HEADER,
-    HARD_FINALIZATION_SYSTEM_PROMPT,
     SESSION_DEFAULT_INSTRUCTION,
     SESSION_DYNAMIC_CONTEXT_HEADER,
     SESSION_PREAMBLE,
@@ -122,14 +121,6 @@ def render() -> str:
         _block(WRAP_UP_PROMPT),
         "",
         "到达主截止时注入一次。",
-        "",
-        "### 2.2 有完整节点时的硬收尾",
-        "",
-        "进入 deadline 收尾窗口且当前 run 已有至少一个完整验证节点后，Runner 不再把 `WRAP_UP_PROMPT` 叠加到原长对话，而是切换到独立的最小收尾上下文。其系统提示为：",
-        "",
-        _block(HARD_FINALIZATION_SYSTEM_PROMPT),
-        "",
-        "用户消息由 Runner 确定性生成，只包含候选节点、revision 与有界验证指标，不带任何检验结论。工具面只保留 `finish_session`；模型仍自行选择结局，Runner 不排名或自动提交。尚无完整节点时不会进入该状态。是否调用过 `agent` 不影响进入硬收尾。这一机制随 Runner 不再提供结束动作而删除。",
         "",
         "## 3. agent 工具与子代理系统提示词",
         "",

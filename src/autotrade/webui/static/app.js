@@ -21,6 +21,7 @@ const STATE_LABELS = {
 // How the research session ended (pipelines/config.py SESSION_OUTCOMES). A
 // session that ended the arm says it in the arm's own ending word below.
 const OUTCOME_LABELS = {
+  completed: "验证期完成",
   freeze: "提名定版",
   no_edge: "未发现超额",
   deadline: "预算耗尽",
@@ -154,6 +155,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
   freezing: "定版策略",
+  completing_record: "宿主补完滚动记录",
   sealed_replay: "封存研究年回测",
   forward_replay: "前推与 Held-out 连续回测",
   verdict: "裁决",
@@ -168,6 +170,7 @@ const ENVIRONMENT_STAGE_ICONS = {
   backtest: "📊",
   agent_complete: "🤖",
   freezing: "❄",
+  completing_record: "▶",
   sealed_replay: "▶",
   forward_replay: "▶",
   verdict: "⚖",
@@ -181,6 +184,7 @@ const PREP_ENVIRONMENT_STAGES = new Set([
   "sandbox_layout",
   "pit_view",
   "sandbox_start",
+  "completing_record",
   "sealed_replay",
   "forward_replay",
   "verdict",
@@ -4515,7 +4519,8 @@ async function openInitialPrompt(detail, session) {
    trace/stats. Compact uses compact_ops, not the event-type chip map. */
 const STAT_CHIPS = [
   ["llm_call", "🤖 LLM"],
-  ["batch_validate", "📊 验证"],
+  ["validate", "📊 验证"],
+  ["test", "🧪 测试"],
   ["shell", "🖥 Shell"],
   ["read_file", "📄 读取"],
 ];
@@ -5594,7 +5599,7 @@ function toolRowsNode(tools) {
 /* ---------------- Step 产物树 ---------------- */
 
 /* Lineage of validated step artifacts across the arm's research sessions.
-   Branches appear when the Agent used step_rollback or batch_validate, or a
+   Branches appear when the Agent used step_rollback or validate, or a
    session started from the node its predecessor handed on. Built for large trees: collapsible subtrees, text filter,
    one shared viewport-clamped tooltip (never clipped by the scroll box),
    inline download on every node with a snapshot. */

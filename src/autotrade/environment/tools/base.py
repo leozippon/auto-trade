@@ -166,11 +166,10 @@ class Tool(Protocol):
 # first ``no_edge`` refused for a reason of 519-554 characters.
 AGENT_JUSTIFICATION_MAX_CHARS = 1_000
 
-# The tool whose calls must run in order even though its spec is not mutating:
-# it finishes the session.
-# Tools that must run in order even though their spec is not mutating: the
-# finish ends the turn and ``compact`` rebuilds the conversation after it.
-SEQUENTIAL_TOOL_NAMES = frozenset({"finish_session", "compact"})
+# Tools that must run in order even though their spec is not mutating:
+# ``compact`` rebuilds the conversation after its turn's results are in. (The
+# finishing tool, ``test``, is mutating and sequential by its spec.)
+SEQUENTIAL_TOOL_NAMES = frozenset({"compact"})
 
 
 def is_sequential_tool(spec: ToolSpec | None) -> bool:

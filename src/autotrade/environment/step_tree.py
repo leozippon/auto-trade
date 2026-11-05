@@ -10,7 +10,7 @@ the experiment after each recorded Validation and a resumed attempt continues
 it, so the Agent can read where it stands in the search history and branch
 from any validated node via the ``step_rollback`` tool.
 
-``batch_validate`` appends one node per finished candidate under the current
+``validate`` appends one node per finished candidate under the current
 position and repositions the tree between records, so a round's candidates are
 siblings of one parent rather than a chain, which is what makes their numbers
 comparable.

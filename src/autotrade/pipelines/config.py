@@ -76,7 +76,7 @@ DEFAULT_MAX_LLM_CALLS = 6400
 # What one arm's research session may spend on hosted model APIs, in USD at the
 # catalog's list prices (``environment.llm.pricing``); the local model is free.
 DEFAULT_MAX_API_SPEND_USD = 50.0
-# ``batch_validate``: one formal step that fans out a pre-registered candidate
+# ``validate``: one formal step that fans out a pre-registered candidate
 # set over one span. Audited sessions reached at most two formal Validations
 # each when every candidate was its own serial step, each branching off the
 # last, which made the evidence per decision too thin. A batch fixes the parent
@@ -258,7 +258,7 @@ class AcceptanceRules:
     # validate calls an interval between tests may make.
     test_step_months: int = _rule(3, "Months the validation frontier advances per test (1 or 3).")
     validates_per_step: int = _rule(
-        6, "batch_validate calls allowed before the first test and between consecutive tests."
+        6, "validate calls allowed before the first test and between consecutive tests."
     )
 
     def __post_init__(self) -> None:
@@ -408,7 +408,7 @@ class AcceptanceRules:
                     verdict.residual_bar(float(validation_years), self.alpha), 3
                 ),
                 "on_spans": (
-                    "every batch_validate row reports it over its own span (residual_reading) "
+                    "every validate row reports it over its own span (residual_reading) "
                     "with the bar for that span's length; every test reports it over the "
                     "rolling record so far with the bar for the record's length"
                 ),
@@ -427,7 +427,7 @@ class AcceptanceRules:
                     "candidate must register (registration below) and may change at any step"
                 ),
                 "validates_per_step_rule": (
-                    f"at most {self.validates_per_step} batch_validate calls before the first "
+                    f"at most {self.validates_per_step} validate calls before the first "
                     "test and between two tests; a further call is refused until the next test"
                 ),
                 "end": (
@@ -632,7 +632,7 @@ class RollingExperimentConfig:
     # ``run_null_control`` (``null_control.PANEL_DRAWS`` replays each); the
     # frozen node's block is reused at freeze. 0 leaves the tool out.
     max_null_controls: int = DEFAULT_MAX_NULL_CONTROLS
-    # Replays one ``batch_validate`` call runs at once (see
+    # Replays one ``validate`` call runs at once (see
     # ``DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY``).
     batch_validate_max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
@@ -926,7 +926,7 @@ def research_span(
         first = last = 0
     if not 1 <= first <= last <= count:
         raise ValueError(
-            f"span must be {FULL_SPAN}, one research year Y1..Y{count} or contiguous "
+            f"span must be {FULL_SPAN}, one year Y1..Y{count} or contiguous "
             f"years such as Y1..Y{count}; got {label!r}"
         )
     chosen = years[first - 1 : last]
@@ -974,7 +974,7 @@ class StepResult:
     span: str
     # Registered by the Agent as a comparison leg: never nominated.
     control: bool = False
-    # The ``batch_validate`` call that recorded it.
+    # The ``validate`` call that recorded it.
     batch_id: str | None = None
     # The artifact fingerprint of the bytes the revision holds. ``None`` where
     # the caller did not commit the revision through a session (the host's
@@ -1054,13 +1054,14 @@ class SessionResume:
     transcripts: tuple[str, ...]
 
 
-# How the research session ended. ``freeze`` nominates a node that registered
-# for the freeze, ``no_edge`` ends the arm without a deliverable, ``deadline`` is a
-# session whose budget (the wrap-up grace, the model-call budget or the API
-# spend cap) ran out before it finished, and ``environment_blocked`` one the
-# host ended because its replays on one span kept failing on the environment
-# (``session_tools.EnvironmentBlocked``).
-SESSION_OUTCOMES = ("freeze", "no_edge", "deadline", ENVIRONMENT_BLOCKED)
+# How the research session ended. ``completed`` is a session whose last test
+# reached the end of the validation years (its candidate is the frozen
+# strategy), ``deadline`` one whose budget (the wrap-up grace, the model-call
+# budget or the API spend cap) ran out first (the host completes the record),
+# and ``environment_blocked`` one the host ended because its replays kept
+# failing on the environment (``session_tools.EnvironmentBlocked``), which
+# ends the attempt, not the research, until the attempts are spent.
+SESSION_OUTCOMES = ("completed", "deadline", ENVIRONMENT_BLOCKED)
 
 
 @dataclass(frozen=True)
@@ -1098,6 +1099,18 @@ class ResearchSessionRequest:
     # The arm's ``AcceptanceRules.to_record()``; no default, as the rules
     # carry required keys.
     acceptance_rules: Mapping[str, object] = field(kw_only=True)
+    # The validation years as one span (``experiment.validation_span``): what
+    # a test replays from its first day to the new frontier, and the host
+    # completes a record over.
+    validation: ReplaySpan = field(kw_only=True)
+    # The decision view at a step boundary, for the session to mount after a
+    # test: the pipeline's provider, which refuses a view the seed lacks.
+    decision_view_at: Callable[[datetime], SnapshotBundle] = field(
+        kw_only=True, repr=False, compare=False
+    )
+    # The arm's ``test_step`` ledger records so far (``rolling_record``): the
+    # frontier the attempt opens at and the record it continues.
+    tests_before: tuple[Mapping[str, object], ...] = ()
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
     )
@@ -1106,7 +1119,7 @@ class ResearchSessionRequest:
     # Cap on the session's own ``run_null_control`` calls; the experiment default
     # is the single source (RollingExperimentConfig.max_null_controls).
     max_null_controls: int = RollingExperimentConfig.max_null_controls
-    # Replays one ``batch_validate`` call runs at once
+    # Replays one ``validate`` call runs at once
     # (RollingExperimentConfig.batch_validate_max_concurrency).
     batch_validate_max_concurrency: int = (
         RollingExperimentConfig.batch_validate_max_concurrency
@@ -1171,6 +1184,13 @@ class ResearchSessionRequest:
         return int(self.acceptance_rules["research_years"])  # type: ignore[call-overload]
 
     @property
+    def frontier(self) -> str:
+        """The last day the session may read when the attempt opens: the day
+        of ``decision_time``."""
+
+        return self.decision_time.strftime("%Y%m%d")
+
+    @property
     def full_span(self) -> ReplaySpan:
         """The research years as one span: what ``full`` names."""
 
@@ -1186,9 +1206,10 @@ class ResearchSessionResult:
     # Keyword-only from here: independent optional fields, so a new one can
     # never land in an older field's positional slot.
     _: KW_ONLY
-    # ``freeze``: the nominated Step, the Steps it registered as its seed
-    # replicates and whether it declared its package deterministic
-    # (``experiment.freeze_registration``).
+    # The frozen candidate: the Step the last test took, the Steps it
+    # registered as its seed replicates and whether it declared its package
+    # deterministic (``experiment.freeze_registration``). None when no test
+    # ran (``deadline`` before the first test, or ``environment_blocked``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
     deterministic: bool = False

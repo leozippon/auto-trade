@@ -739,10 +739,7 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     the sealed gate's, S, and the validity conditions, F1, H1 and R1 (no
     frozen book raised after the freeze); no registration condition has a
     code. The only optional conditions are the tracking mandate's, which its
-    cap turns on. The Environment's copy of the seed reasons (it cannot import
-    the Pipeline) is the table's."""
-
-    from autotrade.environment.tools.finish_session import SEED_REASONS
+    cap turns on."""
 
     reasons = [condition.reason for condition in verdict.CONDITIONS]
     assert len(reasons) == len(set(reasons))
@@ -757,7 +754,10 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     }
     assert not any(c.code for c in verdict.CONDITIONS if c.stage not in ("sealed", "validity"))
     assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
-    assert {condition.reason for condition in stages["seeds"]} == SEED_REASONS
+    assert {condition.reason for condition in stages["seeds"]} == {
+        "freeze_seed_replicate_invalid",
+        "freeze_too_few_seed_replicates",
+    }
 def test_the_sealed_gate_holds_the_residual_ir_to_its_bar_and_leads_the_verdict():
     """The sealed gate reads the frozen book's active series over the sealed
     years through the residual statistic at the rules' alpha: a book whose

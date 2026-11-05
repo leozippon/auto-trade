@@ -837,11 +837,11 @@ class _NoShellRunner:
 
 
 
-# The working copy as a one-candidate batch_validate round: the scripted
+# The working copy as a one-candidate validate round: the scripted
 # sessions write output/ through a child and validate it as it stands.
 VALIDATE_WORKING_COPY = ToolCall(
     "valid",
-    "batch_validate",
+    "validate",
     {
         "candidates": [
             {
@@ -856,9 +856,12 @@ VALIDATE_WORKING_COPY = ToolCall(
 
 
 
-# A scripted finish that names the working-copy row it has just read: node ids
+# A scripted test that names the working-copy row it has just read: node ids
 # carry the session's opaque run ref, which a script cannot know in advance.
 LAST_WORKING_COPY_NODE = "<working copy node>"
+TEST_WORKING_COPY = ToolCall("test", "test", {"candidate": LAST_WORKING_COPY_NODE})
+# The arguments a scripted call may name the last working-copy node in.
+_NODE_ARGUMENTS = ("candidate", "node_id")
 
 
 
@@ -866,8 +869,9 @@ class _NominatingLLM(ScriptedLLM):
     def complete(self, messages, **kwargs):
         response = super().complete(messages, **kwargs)
         if not any(
-            call.arguments.get("node_id") == LAST_WORKING_COPY_NODE
+            call.arguments.get(key) == LAST_WORKING_COPY_NODE
             for call in response.tool_calls
+            for key in _NODE_ARGUMENTS
         ):
             return response
         rows = re.findall(
@@ -877,9 +881,14 @@ class _NominatingLLM(ScriptedLLM):
         )
         return ProviderResponse(
             tool_calls=tuple(
-                ToolCall(call.id, call.name, {**call.arguments, "node_id": rows[-1]})
-                if call.arguments.get("node_id") == LAST_WORKING_COPY_NODE
-                else call
+                ToolCall(
+                    call.id,
+                    call.name,
+                    {
+                        key: rows[-1] if value == LAST_WORKING_COPY_NODE and key in _NODE_ARGUMENTS else value
+                        for key, value in call.arguments.items()
+                    },
+                )
                 for call in response.tool_calls
             )
         )

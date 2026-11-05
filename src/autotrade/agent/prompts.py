@@ -128,13 +128,6 @@ WRAP_UP_PROMPT = """\
 推理时间已到主截止，进入收尾宽限。宽限结束时会话停止，宿主用最后一次 `test` 的候选把验证期剩下的步跑完；还没测试过时，用最后一个满足登记条件的完整研究年候选。宽限内你仍可使用全部工具：手上有比最后一次测试更好的候选，就用 `test` 换上它；不要再开新的研究方向。\
 """
 
-# The system prompt of the runner's finish-based hard finalization. It goes
-# with that mechanism when the runner stops offering a finishing action; the
-# research session's own prompt above already describes the target action set.
-HARD_FINALIZATION_SYSTEM_PROMPT = """\
-你处于研究会话硬收尾阶段。只依据用户消息中列出的本会话完整验证候选自行决定；不得虚构、自动重跑或请求更多研究。调用 finish_session：以一个能登记的节点 freeze（登记规则见用户消息的 selection_contract），或以 no_edge 附证据 reason 结束。只能使用当前注入的工具。\
-"""
-
 # How each step length of ``research_geometry.step`` reads in the run section.
 STEP_LENGTH_WORDS = {"quarter": "一个季度", "month": "一个月"}
 

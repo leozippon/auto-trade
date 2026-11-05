@@ -66,7 +66,7 @@ class StepRollbackTool:
             offered=self._restorable(),
         )
         node = self.tree.get_node(node_id)
-        # Same session rule as finish_session: the tree carries earlier
+        # Same session rule as test: the tree carries earlier
         # sessions' nodes as read-only evidence, and restoring one would rebase
         # this session's work copy and lineage onto a node it may not select.
         if not node_in_session(node, session_ref=self.session_ref):

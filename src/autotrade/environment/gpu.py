@@ -210,6 +210,5 @@ def gpu_memory_contention(error_text: str) -> str | None:
         f"CUDA out of memory with {available:.0f} MiB available to this call "
         f"(device free plus its own PyTorch pool), under {MIN_FREE_GPU_MEMORY_MIB} MiB: "
         "other processes on the card, the batch's other legs included, held the rest, so "
-        "the failure is classed as the environment's, not the strategy's (a batch_validate "
-        "leg's replay-years are refunded)"
+        "the failure is classed as the environment's, not the strategy's"
     )

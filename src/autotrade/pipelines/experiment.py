@@ -55,7 +55,7 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.trace import agent_trace_path
 
 from .agent_inbox import expire_experiment_session_inbox
-from .calendar import FULL_SPAN, VALIDATION_SPAN, Slot
+from .calendar import FULL_SPAN, VALIDATION_SPAN, Slot, anchor_on
 from .config import (
     AcceptanceRules,
     ArtifactStore,
@@ -66,6 +66,7 @@ from .config import (
     ReplaySpan,
     ResearchDeveloper,
     ResearchSessionRequest,
+    ResearchSessionResult,
     RollingExperimentConfig,
     SnapshotBundle,
     SnapshotProvider,
@@ -94,6 +95,14 @@ from .ledger import (
     research_records,
 )
 from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
+from .rolling_record import (
+    SOURCE_HOST_COMPLETION,
+    ValidationSteps,
+    frontier_after,
+    step_entry,
+    test_step_record,
+    test_step_records,
+)
 from .session_resume import (
     REVISIONS_DIR,
     load_recorded_steps,
@@ -127,6 +136,13 @@ from .verdict import (
 # default research budget (config.max_research_minutes), enough headroom for
 # one slow session without letting it run unattended for weeks.
 _MAX_DEADLINE_OVERRIDE_MINUTES = 4800
+
+
+class EnvironmentBlockedAttempt(RuntimeError):
+    """The research session's attempt ended on an environment block
+    (``session_tools.EnvironmentBlocked``) while the arm still has attempts:
+    recorded as a failed attempt, which the runner retries from the frontier
+    and the record."""
 
 
 class DailyStrategyPipeline:
@@ -275,24 +291,43 @@ class RollingExperimentPipeline:
             )
         return tuple(spans)
 
-    def research_inputs(self) -> tuple[SnapshotBundle, tuple[ReplaySpan, ...]]:
-        """The decision view at the validation start and every year of the
+    def research_inputs(
+        self, records: Sequence[Mapping[str, object]] = ()
+    ) -> tuple[SnapshotBundle, tuple[ReplaySpan, ...]]:
+        """The decision view at the arm's frontier and every year of the
         geometry as :meth:`research_spans`: what a research session gets.
 
         The first ``research_years`` of the arm's rules are the research years
-        (``ResearchGeometry.split_research``): the session's view is anchored
-        the day before the first validation year, and the spans a Validation
-        may replay are bounded by the frontier in the session
-        (``session_tools.SessionValidations.span``), so no row past it reaches
-        a research session. The tests replay the validation years
+        (``ResearchGeometry.split_research``); the frontier is the validation
+        start before any test and the end of the last step the ledger
+        ``records`` hold afterwards (``rolling_record.frontier_after``). The
+        spans a Validation may replay are bounded by the frontier in the
+        session (``session_tools.SessionValidations.span``), so no row past it
+        reaches a research session; the tests replay the validation years
         (:meth:`validation_span`).
         """
+
+        years = self.research_spans(self.config.geometry.research_years)
+        frontier = frontier_after(records, self.validation_steps())
+        return self.decision_view_at(anchor_on(frontier)), years
+
+    def validation_steps(self) -> ValidationSteps:
+        """The validation years tiled into the arm's test steps."""
 
         _research, validation = self.config.geometry.split_research(
             self.config.acceptance.research_years
         )
-        years = self.research_spans(self.config.geometry.research_years)
-        return self.snapshots.prepare_decision(decision_time=validation[0].anchor), years
+        return ValidationSteps.of(validation, self.config.acceptance.test_step_months)
+
+    def decision_view_at(self, decision_time) -> SnapshotBundle:
+        """The decision view a session mounts at a frontier: one the provider
+        already holds where it can tell (``require_decision_view``, which
+        refuses a view the seed lacks by name), else prepared."""
+
+        require = getattr(self.snapshots, "require_decision_view", None)
+        if callable(require):
+            return require(decision_time=decision_time)
+        return self.snapshots.prepare_decision(decision_time=decision_time)
 
     def validation_span(self) -> ReplaySpan:
         """The validation years as one span, replayed as one book from the
@@ -310,16 +345,21 @@ class RollingExperimentPipeline:
     ) -> dict[str, object]:
         """Run the arm's one research session and record its outcome.
 
-        The session sees the visible research years only (:meth:`research_inputs`)
-        and ends by freezing its nominee or ending the arm. A freeze is checked
-        for registration alone (:func:`freeze_registration`), never for a
-        score: the sealed years are read in the forward stage. A nomination
-        that does not register, ``no_edge`` and an exhausted budget all end the
-        arm without a deliverable, so the record always carries ``frozen`` or
+        The session sees the data up to its frontier (:meth:`research_inputs`)
+        and ends when its tests reach the end of the validation years
+        (``completed``): the last test's candidate is frozen, checked for
+        registration alone (:func:`freeze_registration`), never for a score.
+        A session whose budget ran out (``deadline``) is completed by the
+        host: the last tested candidate is frozen, or before any test the last
+        registrable full-span candidate; with none the arm ends without a
+        deliverable. An environment block ends the attempt, not the research,
+        until the arm's attempts are spent, when it ends ``environment_blocked``
+        with nothing frozen. The record always carries ``frozen`` or
         ``arm_end`` and research is over once it is written. An attempt that
         failed before that record is continued, not repeated: the next attempt
-        starts from the budget, the compaction summary and the Validations the
-        interrupted ones left in the trace and the step tree.
+        starts from the budget, the compaction summary, the Validations and
+        the test steps the interrupted ones left in the trace, the step tree
+        and the ledger.
         """
 
         records = self.ledger.read()
@@ -350,18 +390,20 @@ class RollingExperimentPipeline:
         self.run_markers.begin(attempt)
         try:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.RESEARCH)
-            decision, years = self.research_inputs()
-            _research, validation = self.config.geometry.split_research(
-                self.config.acceptance.research_years
-            )
+            decision, years = self.research_inputs(records)
+            tests_before = tuple(test_step_records(records))
+            frontier = frontier_after(records, self.validation_steps())
             session = self.developer(
                 ResearchSessionRequest.for_arm(
                     self.config,
                     budgets=budgets,
                     run_id=run_id,
                     snapshot=decision,
-                    decision_time=validation[0].anchor,
+                    decision_time=anchor_on(frontier),
                     years=years,
+                    validation=self.validation_span(),
+                    decision_view_at=self.decision_view_at,
+                    tests_before=tests_before,
                     directive=str(context.get("directive") or ""),
                     sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
                     snapshot_config=_snapshot_config_record(self.snapshots),
@@ -382,43 +424,12 @@ class RollingExperimentPipeline:
             gate: dict[str, object] | None = None
             frozen: dict[str, object] | None = None
             arm_end: dict[str, object] | None = None
-            if session.outcome == "freeze":
-                by_step = {str(row["step_id"]): row for row in step_rows}
-                named = (session.node_id, *session.seed_replicates)
-                missing = [step_id for step_id in named if step_id not in by_step]
-                if missing:
-                    raise RuntimeError(
-                        f"the nominated node or seed replicate {missing[0]!r} is "
-                        "not a Step of this session"
-                    )
-                nominee = by_step[str(session.node_id)]
-                gate = freeze_registration(
-                    nominee,
-                    experiment_dir=self.config.experiment_dir,
-                    acceptance=self.config.acceptance,
-                    seed_replicates=[by_step[step_id] for step_id in session.seed_replicates],
-                    deterministic=session.deterministic,
-                )
-                if gate["passed"]:
-                    _publish_progress(progress, "freezing", run_id=run_id)
-                    steps = {step.step_id: step for step in session.steps}
-                    frozen = self._freeze(
-                        steps[str(nominee["step_id"])],
-                        gate=gate,
-                        run_id=run_id,
-                        null_controls=session.null_controls,
-                        seed_replicates=[steps[step_id] for step_id in session.seed_replicates],
-                    )
-                    frozen_id = str(frozen["artifact_id"])
-                else:
-                    reasons = ", ".join(str(reason) for reason in gate["reasons"])
-                    arm_end = {
-                        "status": VerdictStatus.NO_DELIVERABLE,
-                        "reason": f"freeze refused at registration ({reasons})",
-                    }
-            elif session.outcome == "no_edge":
-                arm_end = {"status": VerdictStatus.NO_DELIVERABLE, "reason": f"no_edge: {session.reason}"}
-            elif session.outcome == ENVIRONMENT_BLOCKED:
+            tests = test_step_records(self.ledger.read())
+            if session.outcome == ENVIRONMENT_BLOCKED:
+                if session.attempt < self.config.session_max_attempts:
+                    # The attempt ends, the research does not: the next one
+                    # resumes from the frontier and the record.
+                    raise EnvironmentBlockedAttempt(session.reason)
                 arm_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
                 # The worker log is the operator's other place to see it.
                 print(
@@ -428,13 +439,46 @@ class RollingExperimentPipeline:
                     flush=True,
                 )
             else:
-                arm_end = {
-                    "status": VerdictStatus.NO_DELIVERABLE,
-                    "reason": (
-                        "research budget exhausted without a freeze "
-                        f"({session.finish_reason})"
-                    ),
-                }
+                by_step = {str(row["step_id"]): row for row in step_rows}
+                steps = {step.step_id: step for step in session.steps}
+                candidate = self._frozen_candidate(session, tests, by_step)
+                if candidate is None:
+                    arm_end = {
+                        "status": VerdictStatus.NO_DELIVERABLE,
+                        "reason": (
+                            "research budget exhausted before any test, with no registrable "
+                            f"full-span candidate ({session.finish_reason})"
+                        ),
+                    }
+                else:
+                    node_id, replicates, deterministic = candidate
+                    gate = freeze_registration(
+                        by_step[node_id],
+                        experiment_dir=self.config.experiment_dir,
+                        acceptance=self.config.acceptance,
+                        seed_replicates=[by_step[step_id] for step_id in replicates],
+                        deterministic=deterministic,
+                    )
+                    if not gate["passed"]:
+                        # Every test checked this registration already.
+                        raise RuntimeError(
+                            f"the frozen candidate {node_id} no longer registers: "
+                            + ", ".join(str(reason) for reason in gate["reasons"])
+                        )
+                    _publish_progress(progress, "freezing", run_id=run_id)
+                    frozen = self._freeze(
+                        steps[node_id],
+                        gate=gate,
+                        run_id=run_id,
+                        null_controls=session.null_controls,
+                        seed_replicates=[steps[step_id] for step_id in replicates],
+                    )
+                    frozen_id = str(frozen["artifact_id"])
+                    if session.outcome == "deadline":
+                        _publish_progress(progress, "completing_record", run_id=run_id)
+                        self.complete_record(
+                            frozen, gate, tests, fingerprint=str(by_step[node_id]["fingerprint"]), run_id=run_id
+                        )
             _publish_progress(progress, "publishing", run_id=run_id)
             skills = self._publish_or_keep_skills(
                 session.skills_source_ref,
@@ -451,7 +495,7 @@ class RollingExperimentPipeline:
                 "finish_reason": session.finish_reason,
                 "outcome": session.outcome,
                 "reason": session.reason or None,
-                "nominated_step_id": session.node_id if session.outcome == "freeze" else None,
+                "nominated_step_id": str(frozen["source_step_id"]) if frozen else None,
                 "steps": step_rows,
                 **self._account_record(),
                 "freeze_gate": gate,
@@ -467,6 +511,8 @@ class RollingExperimentPipeline:
                     "decision": decision.snapshot_id,
                     "research_span": years[0].snapshot.snapshot_id,
                 },
+                "frontier": frontier_after(self.ledger.read(), self.validation_steps()),
+                "steps_tested": len(test_step_records(self.ledger.read())),
                 "attempts": session.attempt,
                 "budget_used": session.budget_used.to_record(),
                 **_session_timing(context, run_started),
@@ -508,6 +554,115 @@ class RollingExperimentPipeline:
             # it stays for the next worker start to record.
             if wrote_ledger_record:
                 self.run_markers.finish(run_id)
+
+    def _frozen_candidate(
+        self,
+        session: ResearchSessionResult,
+        tests: Sequence[Mapping[str, object]],
+        by_step: Mapping[str, Mapping[str, object]],
+    ) -> tuple[str, tuple[str, ...], bool] | None:
+        """The Step the arm freezes, with its seed replicates and declaration.
+
+        A completed session froze its last test's candidate; a session whose
+        budget ran out after a test freezes the last tested candidate as that
+        test registered it; one that never tested freezes the last full-span,
+        non-control Step that registers on its own (a strategy that trains a
+        model owes a replicate no host can name, so it does not); none means
+        no deliverable.
+        """
+
+        if session.outcome == "completed":
+            if session.node_id is None:
+                raise RuntimeError("a completed session names no frozen candidate")
+            return session.node_id, tuple(session.seed_replicates), session.deterministic
+        if tests:
+            candidate = dict(tests[-1]["candidate"])  # type: ignore[arg-type]
+            return (
+                str(candidate["step_id"]),
+                tuple(str(item) for item in candidate.get("seed_replicates") or ()),
+                bool(candidate.get("deterministic")),
+            )
+        for step in reversed(session.steps):
+            row = by_step.get(step.step_id)
+            if row is None or step.control or step.span != FULL_SPAN:
+                continue
+            gate = freeze_registration(
+                row, experiment_dir=self.config.experiment_dir, acceptance=self.config.acceptance
+            )
+            if gate["passed"]:
+                return step.step_id, (), False
+        return None
+
+    def complete_record(
+        self,
+        frozen: Mapping[str, object],
+        gate: Mapping[str, object],
+        tests: Sequence[Mapping[str, object]],
+        *,
+        fingerprint: str,
+        run_id: str,
+    ) -> list[dict[str, object]]:
+        """Fill the rolling record's remaining steps from one host replay of
+        the frozen strategy over the whole validation period.
+
+        The replay is the one a test would have run at the last step: the
+        validation span as one fresh book with its matched panel, opened on
+        the seed's warm start. Each step after the ``tests`` already recorded
+        gets a ``test_step`` record of the same shape, read off that replay's
+        window for the step and marked ``host_completion``; the records are
+        appended in step order and returned. A frozen strategy whose own code
+        raises here fails the attempt: the record it would fill cannot be
+        read off nothing.
+        """
+
+        steps = self.validation_steps()
+        done = len(tests)
+        if done >= steps.count:
+            return []
+        artifact = self._frozen_artifact(frozen)
+        span = self.validation_span()
+        request = span.request(
+            _frozen_revision(artifact),
+            schedule=self.config.schedule,
+            broker_profile=self.config.broker_profile,
+        )
+        require_warm = getattr(self.evaluator, "require_warm_start", None)
+        if callable(require_warm):
+            require_warm(request)
+        result = self.evaluator.evaluate(request)
+        replay, analysis = replay_and_analysis(result.result_ref)
+        head = {
+            "experiment_id": self.config.experiment_id,
+            "epoch_id": Stage.RESEARCH,
+            "fold_id": SessionKind.RESEARCH,
+            "run_id": run_id,
+            "session_key": SessionKind.RESEARCH,
+        }
+        candidate = {
+            "step_id": str(frozen["source_step_id"]),
+            "revision_id": str(frozen["revision_id"]),
+            "fingerprint": fingerprint,
+            "seed_replicates": [
+                str(item["source_step_id"]) for item in frozen.get("seed_replicates") or ()  # type: ignore[union-attr]
+            ],
+            "deterministic": bool(frozen.get("deterministic")),
+        }
+        appended = []
+        for step in range(done + 1, steps.count + 1):
+            first, last = steps.window(step)
+            record = test_step_record(
+                head=head,
+                steps=steps,
+                step=step,
+                candidate=candidate,
+                replay={"start": span.start, "end": span.end, "result_ref": result.result_ref},
+                entry=step_entry(replay, analysis, start=first, end=last),
+                registration=gate,
+                source=SOURCE_HOST_COMPLETION,
+            )
+            self.ledger.append(record)
+            appended.append(record)
+        return appended
 
     def _freeze(
         self,
@@ -1762,6 +1917,7 @@ def _session_budgets(
 
 __all__ = [
     "DailyStrategyPipeline",
+    "EnvironmentBlockedAttempt",
     "RollingExperimentPipeline",
     "completed_rows",
     "freeze_registration",

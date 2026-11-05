@@ -26,8 +26,9 @@ import pandas as pd
 
 from autotrade.environment.llm import LOCAL_QWEN_MODEL
 from autotrade.environment.runtime import chmod_tree
-from autotrade.environment.strategy import CN_TZ
+from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBundle
+from autotrade.pipelines.pit_backend import prebuild_asof_stash
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 GENERATION = "synthetic_generation"
@@ -180,6 +181,20 @@ class SyntheticPITProvider:
                     "domains": {"corporate_actions": {"rows": 0}},
                 },
             )
+            if phase == "valid":
+                # The warm start the seed prebuilds for a research slot
+                # (scripts/data/prebuild_pit_views_seed.py): a test's replay
+                # opens on it, and the backend refuses a slot without one.
+                prebuild_asof_stash(
+                    snapshot_dir=bundle.decision_ref,
+                    replay_dir=replay,
+                    schedule=StrategySchedule(),
+                    phase=phase,
+                    generation_id=GENERATION,
+                    start=start,
+                    end=end,
+                    host_dir=self.cache_root / ".prebuild_host",
+                )
         return SnapshotBundle(
             snapshot_id=bundle.snapshot_id,
             decision_ref=bundle.decision_ref,

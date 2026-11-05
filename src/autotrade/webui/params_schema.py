@@ -489,7 +489,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "每步验证调用上限",
         "type": "int",
         "min": 1,
-        "help": "首次 test 之前以及相邻两次 test 之间允许的 batch_validate 调用次数；超出即拒绝，直到下一次 test。默认 6。",
+        "help": "首次 test 之前以及相邻两次 test 之间允许的 validate 调用次数；超出即拒绝，直到下一次 test。默认 6。",
     },
     {
         "key": "alpha",
@@ -557,7 +557,7 @@ _FIELDS: list[dict[str, object]] = [
      "help": "每个研究会话与正式回测 Sandbox 默认分配的 GPU 数量（0–4）；0 表示 CPU-only，不占用 L20。大于 0 时控制台在启动 Worker 前为本实验认领同样多张卡：显存余量不低于准入门槛（`AUTOTRADE_GPU_MIN_FREE_GIB`，未设时取默认门槛），且没有被别的在跑实验认领；卡上可以有其他进程在用，门槛只是准入余量，不独占也不预留显存。本实验的会话与回测只用这些卡；逐会话设置可覆盖此默认值。"},
     {"key": "batch_validate_max_concurrency", "group": "运行控制", "label": "批验证并发回测数", "type": "int",
      "min": 1, "max": BATCH_VALIDATE_MAX_CANDIDATES, "advanced": True,
-     "help": f"一次 batch_validate 同时回测的候选数（1–{BATCH_VALIDATE_MAX_CANDIDATES}）。每路各起自己的策略容器（声明 fit 的候选两个），GPU 实验的这些容器共用本实验认领的卡；单次 fit 与单日推断的超时按本批实际路数成倍放大。"},
+     "help": f"一次 validate 同时回测的候选数（1–{BATCH_VALIDATE_MAX_CANDIDATES}）。每路各起自己的策略容器（声明 fit 的候选两个），GPU 实验的这些容器共用本实验认领的卡；单次 fit 与单日推断的超时按本批实际路数成倍放大。"},
     # 模型与上下文
     {
         "key": "model",

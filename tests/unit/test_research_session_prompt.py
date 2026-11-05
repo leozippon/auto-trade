@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent import prompts
-from autotrade.agent.runner import _FINALIZATION_TOOLS, _SESSION_TOOLS, _TERMINAL_TOOLS
+from autotrade.agent.runner import _SESSION_TOOLS, _TERMINAL_TOOLS
 from autotrade.agent.subagent import (
     AGENT_TOOL_DESCRIPTION,
     SUBAGENT_ROLES,
@@ -91,7 +91,6 @@ def _tool_descriptions() -> dict[str, str]:
     from autotrade.environment.tools import (
         CompactTool,
         EditFileTool,
-        FinishSessionTool,
         GlobTool,
         GrepTool,
         ModificationCheckTool,
@@ -105,9 +104,10 @@ def _tool_descriptions() -> dict[str, str]:
         WriteFileTool,
     )
     from autotrade.pipelines.session_tools import (
-        BatchValidateTool,
         NullControlTool,
         SmokeBacktestTool,
+        TestTool,
+        ValidateTool,
     )
     from autotrade.pipelines.skills import DeleteSkillTool, WriteSkillTool
 
@@ -125,8 +125,8 @@ def _tool_descriptions() -> dict[str, str]:
             StepRollbackTool,
             ReportIssueTool,
             SkillFeedbackTool,
-            FinishSessionTool,
-            BatchValidateTool,
+            ValidateTool,
+            TestTool,
             SmokeBacktestTool,
             WriteSkillTool,
             DeleteSkillTool,
@@ -145,7 +145,6 @@ def _tool_descriptions() -> dict[str, str]:
         "system_prompt",
         "default_instruction",
         "wrap_up",
-        "hard_finalization",
         *(f"subagent:{role}" for role in SUBAGENT_ROLES),
     ],
 )
@@ -154,7 +153,6 @@ def test_no_session_surface_carries_fold_or_meta_vocabulary(surface: str) -> Non
         "system_prompt": _full_prompt(),
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
         "wrap_up": prompts.WRAP_UP_PROMPT,
-        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
     }.get(surface) or subagent_system_prompt(surface.split(":", 1)[1])
     assert retired_vocabulary(text) == [], surface
 
@@ -168,22 +166,21 @@ def test_retired_tools_are_absent_from_every_role() -> None:
     surfaces = {
         "session": _SESSION_TOOLS,
         "terminal": _TERMINAL_TOOLS,
-        "finalization": _FINALIZATION_TOOLS,
         "sequential": SEQUENTIAL_TOOL_NAMES,
         **{f"subagent:{role}": allowed_subagent_tools(role) for role in SUBAGENT_ROLES},
     }
     for surface, names in surfaces.items():
         for retired in RETIRED_TOOLS:
             assert retired not in names, (surface, retired)
-    assert _TERMINAL_TOOLS == _FINALIZATION_TOOLS == {"finish_session"}
-    # The finish and the Agent's own compaction rebuild or end the turn, so
-    # neither runs beside other calls.
-    assert SEQUENTIAL_TOOL_NAMES == {"finish_session", "compact"}
+    assert _TERMINAL_TOOLS == {"test"}
+    # The Agent's own compaction rebuilds the turn, so it never runs beside
+    # other calls; test is mutating and so sequential by its spec.
+    assert SEQUENTIAL_TOOL_NAMES == {"compact"}
     # Sub-agents never finish, validate, roll back or compact the parent.
     for role in SUBAGENT_ROLES:
         assert not allowed_subagent_tools(role) & {
-            "finish_session",
-            "batch_validate",
+            "test",
+            "validate",
             "run_null_control",
             "step_rollback",
             "agent",
@@ -236,9 +233,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
     # The retired action set and its wording are gone from every surface the
     # session reads under this contract: no freeze or finishing action, no
-    # "no excess" outcome, no pass/fail verdict, no replay-year budget. (The
-    # runner's finish-based hard finalization keeps its own prompt until that
-    # mechanism goes.)
+    # "no excess" outcome, no pass/fail verdict, no replay-year budget.
     surfaces = {
         "system_prompt": prompt,
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
@@ -308,9 +303,9 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "500 字符",
     ):
         assert statement not in stable, statement
-    from autotrade.pipelines.session_tools import BatchValidateTool
+    from autotrade.pipelines.session_tools import ValidateTool
 
-    assert "offline_trials" not in BatchValidateTool.spec.input_schema["properties"]
+    assert "offline_trials" not in ValidateTool.spec.input_schema["properties"]
     # Round 20260927 wrote 296 skills, most re-deriving one data contract,
     # because every finishing text asked for them first; none does now.
     for surface in surfaces.values():
@@ -335,7 +330,6 @@ def test_the_session_surfaces_word_the_experiment_the_current_way() -> None:
         "system_prompt": _full_prompt(),
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
         "wrap_up": prompts.WRAP_UP_PROMPT,
-        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
         **{f"subagent:{role}": subagent_system_prompt(role) for role in SUBAGENT_ROLES},
         **_tool_descriptions(),
     }
@@ -367,7 +361,6 @@ def _contract_texts() -> dict[str, str]:
         "system_prompt": prompts.PROTOCOL_INSTRUCTION,
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,
         "wrap_up": prompts.WRAP_UP_PROMPT,
-        "hard_finalization": prompts.HARD_FINALIZATION_SYSTEM_PROMPT,
         **{
             f"memory:{path.parent.name}": path.read_text(encoding="utf-8")
             for path in sorted(library.glob("*/SKILL.md"))

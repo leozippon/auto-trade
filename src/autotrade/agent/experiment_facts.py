@@ -29,7 +29,7 @@ EXPERIMENT_FACTS_SCHEMA_VERSION = 2
 # while shell and sub-agent waits do not and must not be named here.
 DEADLINE_SECONDS_NOTE = (
     "`deadline_seconds` 统计可暂停的有效推理时间；"
-    "`smoke_backtest`、`batch_validate` 和 `run_null_control` "
+    "`smoke_backtest`、`validate` 和 `run_null_control` "
     "调用期间暂停计时，"
     "因此会话总墙钟可能更长。"
 )
@@ -38,13 +38,13 @@ DEADLINE_SECONDS_NOTE = (
 # environment, not the strategy, creates the contention a batch adds, so both
 # caps move with it (pipelines.session_tools._batch_replay_timeouts).
 BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
-    "`batch_validate` 并发回测期间，`strategy_fit_timeout_seconds` 与单次推断上限"
+    "`validate` 并发回测期间，`strategy_fit_timeout_seconds` 与单次推断上限"
     "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（路数取本批候选数与 "
     "`batch_validate_max_concurrency` 中较小的一个，3 路即 3 倍），"
     "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
 )
 
-# How a failed candidate's replay is read (pipelines.session_tools.BatchValidateTool).
+# How a failed candidate's replay is read (pipelines.session_tools.ValidateTool).
 VALIDATION_FAILURE_NOTE = (
     "回测失败的候选按失败归属记录：策略自身抛错，以及策略容器越过内存上限 `strategy_memory_bytes` "
     "被 OOM kill（exit 137，那次回测没有峰值读数），都是策略自己的失败（行内 `cause: strategy`）；"
@@ -79,7 +79,7 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
         f"内存上限 {memory_gib:g} GiB（`strategy_memory_bytes`），"
         "并挂本实验的 `strategy_gpu_count` 张卡（为 0 时全在 CPU 上）：卡型与每张的显存在会话里用 `nvidia-smi` 看，"
         "显存与同卡的其他腿、会话里起的进程共用。"
-        "一次 `batch_validate` 至多同时回测 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
+        "一次 `validate` 至多同时回测 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
         "单独的回测挂全部卡，并排回测的候选轮流各挂一张，多于卡数时几条腿同卡。"
     )
 
@@ -401,7 +401,7 @@ def _budget_facts(
                 if cpus is not None and memory_bytes is not None
                 else None
             ),
-            # Replays one batch_validate call runs at once (the arm's
+            # Replays one validate call runs at once (the arm's
             # ``batch_validate_max_concurrency``), each with its own strategy
             # container (two when the candidate declares fit). The host is
             # shared with the other running experiments, so wall clock per

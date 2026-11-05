@@ -131,7 +131,7 @@ class SkillFeedbackTool:
             "claim": "outdated",
             "evidence": (
                 "条目把单参数网格限死在四点；本会话把同一机制的 5 点网格一次提交 "
-                "batch_validate（node_7f3a），replay-year 与单日耗时都在限额内。"
+                "validate（node_7f3a），单日耗时在限额内。"
                 "四点上限来自已废弃的 daily_backtest，不是当前工具的约束。"
             ),
         },

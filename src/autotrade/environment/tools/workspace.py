@@ -29,7 +29,7 @@ ROOT_RELATIVE_PATH_RULE = (
 # intermediates, and a naive full-market minute concatenation would need about
 # 490 GB. A full disk would fail the nightly data update, other arms' ledger
 # appends and the host's result writes at once, so the two calls that write in
-# bulk -- ``shell`` and ``batch_validate`` -- are refused below this floor.
+# bulk -- ``shell`` and ``validate`` -- are refused below this floor.
 WORKSPACE_MIN_FREE_BYTES = 50 * 1024**3
 LOW_DISK_SPACE = "low_disk_space"
 # Below the floor ``shell`` still runs these, sent as an argv array (not as a

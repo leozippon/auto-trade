@@ -1132,7 +1132,7 @@ def test_a_dead_runs_open_tool_calls_read_as_interrupted(tmp_path: Path) -> None
         {"event_type": "llm_call", "content": "plan"},
         {"event_type": "tool_call_started", "tool": "read_file", "tool_call_id": "c1"},
         {"event_type": "tool_call", "tool": "read_file", "tool_call_id": "c1", "result": {"ok": True}},
-        {"event_type": "tool_call_started", "tool": "batch_validate", "tool_call_id": "c2"},
+        {"event_type": "tool_call_started", "tool": "validate", "tool_call_id": "c2"},
         # A content-free round: an event after the open call that draws no block.
         {"event_type": "llm_call"},
     ]
@@ -1152,7 +1152,7 @@ def test_a_dead_runs_open_tool_calls_read_as_interrupted(tmp_path: Path) -> None
     ended = group(dead)
     assert (ended["count"], ended["ok"], ended["running"], ended["interrupted"]) == (2, 1, 0, 1)
     rows = {row["name"]: row for row in ended["tools"]}
-    assert (rows["batch_validate"]["running"], rows["batch_validate"]["interrupted"]) == (0, 1)
+    assert (rows["validate"]["running"], rows["validate"]["interrupted"]) == (0, 1)
     assert "interrupted" not in rows["read_file"]
     partial = traces.read_trace_blocks(trace, offset=0, max_bytes=short, writer_alive=False)
     assert partial["eof"] is False and group(partial)["running"] == 1
