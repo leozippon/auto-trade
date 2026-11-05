@@ -559,21 +559,21 @@ def test_worker_refuses_a_gpt6_conversation_that_could_outgrow_the_short_tier(
     # Derived from the windows (null): the local compaction model, at the
     # default 10,000-token compaction budget, bounds the gpt-6 parent at
     # 262,144 - 10,000 - 8,192 = 243,952, past the priced tier.
-    with pytest.raises(ValueError, match=r"compact_token_threshold must be at most 221,184 .*main.*gpt-6\.1-sol.*243,952"):
-        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=None)
+    with pytest.raises(ValueError, match=r"compact_token_threshold must be at most 221,184 .*main.*gpt-6-astra.*243,952"):
+        load(model="gpt-6-astra", compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=None)
     assert load(compact_token_threshold=221_184).compaction.token_threshold == 221_184
     with pytest.raises(ValueError, match="compact_token_threshold must be at most"):
         load(compact_token_threshold=221_185)
     # A sub-agent conversation on gpt-6, or a gpt-6 compaction model reading a
     # DeepSeek conversation, is held to the same bound.
-    with pytest.raises(ValueError, match=r"subagent conversation runs on or is compacted by gpt-6-luna"):
-        load(model="deepseek-flash", subagent_model="gpt-6-luna", compact_token_threshold=None)
+    with pytest.raises(ValueError, match=r"subagent conversation runs on or is compacted by gpt-6-astra"):
+        load(model="deepseek-flash", subagent_model="gpt-6-astra", compact_token_threshold=None)
     with pytest.raises(ValueError, match=r"main conversation runs on or is compacted by gpt-6-astra"):
         load(subagent_model="deepseek-flash", compact_model="gpt-6-astra")
     assert load(compact_token_threshold=200_000).compaction.token_threshold == 200_000
     # Without compaction nothing keeps a gpt-6 conversation below the tier.
     with pytest.raises(ValueError, match="disable_context_compact"):
-        load(model="gpt-6.1-sol", compact_model=LOCAL_QWEN_MODEL, disable_context_compact=True)
+        load(model="gpt-6-astra", compact_model=LOCAL_QWEN_MODEL, disable_context_compact=True)
 
 
 def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(

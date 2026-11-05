@@ -85,7 +85,7 @@ CACHE_WRITE_USAGES = {
         },
     },
     # The relay's responses dialect, after its parse adds the shared names.
-    "gpt-6.1-sol": {
+    "gpt-6-astra": {
         "input_tokens": 1_000,
         "output_tokens": 300,
         "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
@@ -100,8 +100,8 @@ CACHE_WRITE_USAGES = {
     [
         # 100 x 4 + 600 x 0.2 + 300 x 20 + 300 x 5.0 (1.25 x 4), per million.
         ("claude-opus-5-5", 0.008020),
-        # 100 x 2 + 600 x 0.1 + 300 x 10 + 300 x 2.5, per million.
-        ("gpt-6.1-sol", 0.004010),
+        # 100 x 10 + 600 x 1 + 300 x 50 + 300 x 12.5, per million.
+        ("gpt-6-astra", 0.020350),
     ],
 )
 def test_cache_writes_are_billed_apart_at_the_write_price(model, spend):

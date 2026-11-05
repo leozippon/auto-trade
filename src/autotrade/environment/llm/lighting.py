@@ -60,7 +60,7 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 
 # (relay model id, request dialect, context window, max output tokens, list
 # prices). Every relay id declares a 1M window, with the relay's own completion
-# ceilings; for the gpt-6 ids that is the project owner's figure (2026-10-14),
+# ceilings; for gpt-6-astra that is the project owner's figure (2026-10-14),
 # backed by the relay pricing a tier past 272k but, as of that date, not probed
 # with such a request, and gemini-4-argon's upstream refuses a maxOutputTokens
 # above 1,048,576 (probed 2026-10-26), more than the window, which bounds it
@@ -68,7 +68,7 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # Prices are USD per million uncached prompt / cached prompt / completion /
 # cache-write tokens from the relay's public
 # ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
-# gemini-4-argon's and the gpt-6-astra and gpt-6-luna cache writes as of
+# gemini-4-argon's prices and gpt-6-astra's cache write as of
 # 2026-10-26 (``pricing_version`` a42d372c): a dated snapshot, refreshed by
 # hand when the relay's ``pricing_version`` moves. The gpt-6 ids bill a
 # request by its length: up to 272,000 prompt tokens at the short-context tier
@@ -83,9 +83,7 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # no cache-write term, so it stays at the uncached prompt; DeepSeek reports
 # none.
 MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
-    ("gpt-6.1-sol", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0, 2.5)),
     ("gpt-6-astra", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 1.0, 50.0, 12.5)),
-    ("gpt-6-luna", RESPONSES_DIALECT, 1_000_000, 128_000, TokenPrices(0.1, 0.01, 0.5, 0.125)),
     ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0, 12.5)),
     ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0, 2.5)),
     ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0, 5.0)),
@@ -199,7 +197,7 @@ def build_gateway(
                 # hosted Claude ids accept no reasoning control at all,
                 # gemini-4-argon thinks at its upstream default, and the
                 # responses dialect sends no field when thinking is off (the
-                # gpt-6 family has no "none" tier except gpt-6-luna).
+                # relay's gpt-6-astra has no "none" tier).
                 reasoning_effort=(
                     reasoning_effort
                     if thinking_enabled
