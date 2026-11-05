@@ -25,10 +25,12 @@ from autotrade.environment.dividend_tax import (
 )
 from autotrade.environment.strategy import StrategyOrder
 
-# A-share prices are quoted to 0.01 CNY, so a ``pre_close`` that differs from
-# the last close by more than half a tick is an exchange price reset (an
-# ex-date), never rounding.
-EX_DATE_PRICE_TOLERANCE = 0.005
+# A-share prices are quoted to 0.01 CNY, so two quotes closer than half a tick
+# are one price.
+QUOTE_HALF_TICK = 0.005
+# A ``pre_close`` that differs from the last close by more than half a tick is
+# therefore an exchange price reset (an ex-date), never rounding.
+EX_DATE_PRICE_TOLERANCE = QUOTE_HALF_TICK
 # The assets (CNY) an individual account needs before the exchange lets it buy
 # on each board: none for the main board, 100,000 for ChiNext, 500,000 for the
 # STAR Market and the Beijing exchange. Each also asks two years of trading
@@ -251,9 +253,13 @@ class Execution:
     realized_pnl: float | None = None
     reason: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
+    # The order's session and limit price (``StrategyOrder``), recorded only
+    # when it named them: the zero-skill panel replays them.
+    session: str | None = None
+    limit_price: float | None = None
 
     def to_record(self) -> dict[str, object]:
-        return {
+        record = {
             "symbol": self.symbol,
             "action": self.action,
             "quantity": self.quantity,
@@ -268,6 +274,11 @@ class Execution:
             "reason": self.reason,
             "metadata": dict(self.metadata),
         }
+        if self.session is not None:
+            record["session"] = self.session
+        if self.limit_price is not None:
+            record["limit_price"] = self.limit_price
+        return record
 
 
 class DailyBroker:
@@ -558,16 +569,24 @@ class DailyBroker:
         matched_at: datetime,
         raw_price: object,
     ) -> Execution:
+        """Fill ``order`` whole against its trading day's ``bar``, or record why not.
+
+        ``raw_price`` is the market price the order meets
+        (``replay.engine.resolve_execution_price``): the price at its exact
+        ``execute_at`` minute, or a session order's ``session_price``. An
+        order that does not fill is recorded as rejected with its reason; an
+        unfilled session order (``unfilled_*``) simply expires with its day.
+        """
         reason = self._reject_reason(order, bar, raw_price=raw_price)
         if reason is not None:
             return self._record(order, matched_at, status="rejected", reason=reason)
         assert bar is not None
         base_price = _price(raw_price)
         assert base_price is not None
-        fill_price = self.profile.fill_price(base_price, action=order.action)
-        limit_reason = _price_limit_reject(order.action, fill_price, bar)
-        if limit_reason is not None:
-            return self._record(order, matched_at, status="rejected", reason=limit_reason)
+        fill_price, reason = self._fill_price(order, bar, base_price)
+        if reason is not None:
+            return self._record(order, matched_at, status="rejected", reason=reason)
+        assert fill_price is not None
         notional = fill_price * order.quantity
         if self._current_day is None:
             raise RuntimeError("open_day must set the trading day before an order is executed")
@@ -622,6 +641,45 @@ class DailyBroker:
             dividend_tax=dividend_tax,
             realized_pnl=realized_pnl,
         )
+
+    def _fill_price(
+        self, order: StrategyOrder, bar: Mapping[str, object], base_price: float
+    ) -> tuple[float | None, str | None]:
+        """The price ``order`` fills at from ``base_price``, or why it does not fill.
+
+        A buy is held against the day's upper price limit and a sale against
+        its lower one, the adverse limit. An order without a session, or an
+        open or close order, fills at ``base_price`` plus slippage unless that
+        reaches the limit. An intraday order does not fill on a day locked at
+        the limit (high and low both on it). Otherwise, without a limit price
+        it fills at the day's average price plus slippage, held at the limit
+        the day traded inside of; with one it fills at ``base_price`` without
+        slippage once the day's low (buy) or high (sale) reaches its limit.
+        """
+
+        buy = order.action == "buy"
+        limit = _price(bar.get("up_limit" if buy else "down_limit"))
+        if limit is None:
+            return None, "missing_daily_price_limit"
+        if order.session != "intraday":
+            price = self.profile.fill_price(base_price, action=order.action)
+            if _reaches_limit(price, limit, buy=buy):
+                return None, "daily_price_limit" if order.session is None else "unfilled_price_limit"
+            return price, None
+        high, low = _price(bar.get("high")), _price(bar.get("low"))
+        if high is None or low is None:
+            return None, "missing_execution_price"
+        if abs(high - limit) < QUOTE_HALF_TICK and abs(low - limit) < QUOTE_HALF_TICK:
+            return None, "unfilled_locked"
+        if order.limit_price is None:
+            price = self.profile.fill_price(base_price, action=order.action)
+            return (min(price, limit) if buy else max(price, limit)), None
+        reached = (
+            low <= order.limit_price + QUOTE_HALF_TICK
+            if buy
+            else high >= order.limit_price - QUOTE_HALF_TICK
+        )
+        return (base_price, None) if reached else (None, "unfilled_limit")
 
     def _reject_reason(
         self,
@@ -700,9 +758,34 @@ class DailyBroker:
             realized_pnl=realized_pnl,
             reason=reason,
             metadata=order.metadata,
+            session=order.session,
+            limit_price=order.limit_price,
         )
         self.executions.append(execution)
         return execution
+
+
+def session_price(order: StrategyOrder, bar: Mapping[str, object]) -> float | None:
+    """The price a session order meets on its trading day's bar, before
+    slippage and the Broker's gates; None when the bar lacks a field it reads.
+
+    ``open`` and ``close`` meet the day's auction prices. ``intraday`` meets
+    the day's volume-weighted average price, ``amount / vol`` (CNY over shares
+    in the normalized bar). With a ``limit_price`` it is a day limit order,
+    which, if it trades, trades at the better of the open and its limit: a buy
+    at the lower, a sale at the higher, so an open that gaps through the limit
+    fills at the open.
+    """
+
+    if order.session in ("open", "close"):
+        return _price(bar.get(order.session))
+    if order.limit_price is None:
+        amount, volume = _price(bar.get("amount")), _price(bar.get("vol"))
+        return None if amount is None or volume is None else amount / volume
+    opening = _price(bar.get("open"))
+    if opening is None:
+        return None
+    return min(opening, order.limit_price) if order.action == "buy" else max(opening, order.limit_price)
 
 
 def _price(value: object) -> float | None:
@@ -768,21 +851,13 @@ def ex_date_shares(quantity: int, ratio: float) -> int:
 _PRICE_LIMIT_TOLERANCE = 1e-9
 
 
-def _price_limit_reject(action: str, price: float, bar: Mapping[str, object]) -> str | None:
-    field = "up_limit" if action == "buy" else "down_limit"
-    limit = _price(bar.get(field))
-    if limit is None:
-        return "missing_daily_price_limit"
-    blocked = (
-        price >= limit - _PRICE_LIMIT_TOLERANCE
-        if action == "buy"
-        else price <= limit + _PRICE_LIMIT_TOLERANCE
-    )
-    return "daily_price_limit" if blocked else None
+def _reaches_limit(price: float, limit: float, *, buy: bool) -> bool:
+    return price >= limit - _PRICE_LIMIT_TOLERANCE if buy else price <= limit + _PRICE_LIMIT_TOLERANCE
 
 
 __all__ = [
     "EX_DATE_PRICE_TOLERANCE",
+    "QUOTE_HALF_TICK",
     "BrokerProfile",
     "CorporateAction",
     "DailyBroker",
@@ -791,4 +866,5 @@ __all__ = [
     "Position",
     "ex_date_share_multiplier",
     "ex_date_shares",
+    "session_price",
 ]

@@ -57,7 +57,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "include_events": True,
     "include_intraday": False,
     "include_text": True,
-    "inference_time": "08:30",
+    "inference_time": "08:00",
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
     # The research session's budgets: replay-years of batch_validate, minutes

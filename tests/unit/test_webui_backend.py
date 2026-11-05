@@ -131,7 +131,7 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     for key, value in DEFAULT_RESEARCH_GEOMETRY.to_record().items():
         assert fields[key]["default"] == value
     assert fields["strategy_period"]["choices"] == ["day", "month", "quarter", "year"]
-    assert fields["inference_time"]["default"] == "08:30"
+    assert fields["inference_time"]["default"] == "08:00"
     assert fields["daily_window_months"]["optional"] is True
     assert fields["include_intraday"]["default"] is WEB_CREATE_DEFAULTS["include_intraday"]
     assert fields["fundamental_datasets"]["type"] == "multi"

@@ -48,7 +48,7 @@ def _sample_null_orders(skeleton, frame: pd.DataFrame, seed: int, draw: int) -> 
 
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe) for trip in skeleton]
-    return _orders_from_pools(skeleton, pools, seed, draw, _sellable(universe, frame))[0]
+    return _orders_from_pools(skeleton, pools, seed, draw, _sellable(universe, frame), universe.carried_limit)[0]
 
 
 def _sellable(universe, frame: pd.DataFrame, corporate_actions=None):
@@ -287,7 +287,9 @@ def _board_draws(permitted_boards, draws: int, seed: int) -> list[list[tuple[str
     pools = [_candidate_pool(trip, universe, None, permitted_boards) for trip in _BOARD_SKELETON]
     result = []
     for draw in range(draws):
-        orders, _dropped = _orders_from_pools(_BOARD_SKELETON, pools, seed, draw, _sellable(universe, frame))
+        orders, _dropped = _orders_from_pools(
+            _BOARD_SKELETON, pools, seed, draw, _sellable(universe, frame), universe.carried_limit
+        )
         result.append(
             [(order["symbol"], order["action"], order["quantity"]) for day in sorted(orders) for order in orders[day]]
         )
@@ -349,7 +351,7 @@ def _replacement_names(skeleton, frame: pd.DataFrame, seed: int) -> list[dict[st
     sellable = _sellable(universe, frame)
     names = []
     for draw in range(PANEL_DRAWS):
-        orders, _dropped = _orders_from_pools(skeleton, pools, seed, draw, sellable)
+        orders, _dropped = _orders_from_pools(skeleton, pools, seed, draw, sellable, universe.carried_limit)
         names.append(
             {
                 str(order["execute_at"]): str(order["symbol"])
@@ -422,7 +424,7 @@ def test_a_round_trip_draws_uniformly_and_afresh_in_every_draw():
     assert len(pool) == 8
 
     picks = [
-        _orders_from_pools([trip], [pool], 13, draw, sellable)[0][trip.entry_date][0]["symbol"]
+        _orders_from_pools([trip], [pool], 13, draw, sellable, universe.carried_limit)[0][trip.entry_date][0]["symbol"]
         for draw in range(1600)
     ]
     counts = Counter(picks)
@@ -440,7 +442,10 @@ def test_a_round_trip_draws_uniformly_and_afresh_in_every_draw():
     )
     pools = [_candidate_pool(half, universe) for half in halves]
     pairs = [
-        tuple(order["symbol"] for order in _orders_from_pools(halves, pools, 13, draw, sellable)[0][DAYS[0]])
+        tuple(
+            order["symbol"]
+            for order in _orders_from_pools(halves, pools, 13, draw, sellable, universe.carried_limit)[0][DAYS[0]]
+        )
         for draw in range(PANEL_DRAWS)
     ]
     assert all(len(pair) == 2 for pair in pairs)
@@ -537,7 +542,7 @@ def test_affordability_is_settled_in_the_pool_so_an_expensive_name_drops_no_trip
     assert _pools(skeleton, frame) == [(("000002.SZ", 900),)]
     for draw in range(20):
         orders, dropped = _orders_from_pools(
-            skeleton, _pools(skeleton, frame), 5, draw, _sellable(_Universe(frame), frame)
+            skeleton, _pools(skeleton, frame), 5, draw, _sellable(_Universe(frame), frame), _Universe(frame).carried_limit
         )
         assert dropped == 0
         assert orders[DAYS[1]][0]["symbol"] == "000002.SZ"
@@ -824,7 +829,7 @@ def test_a_null_exit_sells_the_bonus_shares_its_replacement_earned():
     single = [RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[2], "09:30"), _at(DAYS[8], "15:00"))]
     pools = _pools(single, frame)
     assert pools == [(("000002.SZ", 100),)]
-    orders, _ = _orders_from_pools(single, pools, 1, 0, sellable)
+    orders, _ = _orders_from_pools(single, pools, 1, 0, sellable, universe.carried_limit)
     assert [order["quantity"] for order in orders[DAYS[8]]] == [130]
     run = replay(orders)
     assert [record["status"] for record in run.executions] == ["filled", "filled"]
@@ -838,7 +843,7 @@ def test_a_null_exit_sells_the_bonus_shares_its_replacement_earned():
         RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[3], "09:30"), _at(DAYS[10], "15:00")),
     ]
     orders, _ = _orders_from_pools(
-        overlapping, _pools(overlapping, frame), 1, 0, sellable
+        overlapping, _pools(overlapping, frame), 1, 0, sellable, universe.carried_limit
     )
     assert [order["quantity"] for order in orders[DAYS[8]]] == [100]
     assert [order["quantity"] for order in orders[DAYS[10]]] == [100]
@@ -846,3 +851,42 @@ def test_a_null_exit_sells_the_bonus_shares_its_replacement_earned():
     assert all(record["status"] == "filled" for record in run.executions)
     # 200 shares became 260; the merged 60-share tail is what stays behind.
     assert run.equity_curve[-1]["positions"] == {"000002.SZ": 60}
+
+
+def test_a_replacement_meets_the_market_in_its_originals_session_and_limit():
+    """Both legs keep their session, and a limit price moves to the drawn name
+    at the same distance from its own previous close, on a whole tick; the
+    draw then replays under the same rules."""
+
+    frame = _frame().assign(
+        high=lambda rows: rows["open"] * 1.02,
+        low=lambda rows: rows["open"] * 0.98,
+        vol=1.0e6,
+        amount=lambda rows: rows["open"] * 1.0e6,
+    )
+    [trip], _unpaired = trade_skeleton(
+        [
+            {**_fill("000001.SZ", "buy", 1000, DAYS[2], "09:30", 10.2), "session": "intraday", "limit_price": 10.2},
+            {**_fill("000001.SZ", "sell", 1000, DAYS[9], "15:00", 11.0), "session": "close"},
+        ]
+    )
+    assert (trip.entry_session, trip.entry_limit, trip.exit_session, trip.exit_limit) == (
+        "intraday", 10.2, "close", None
+    )
+    universe = _Universe(frame)
+    orders, _dropped = _orders_from_pools(
+        [trip], [_candidate_pool(trip, universe)], 3, 0, _sellable(universe, frame), universe.carried_limit
+    )
+    [buy], [sell] = orders[DAYS[2]], orders[DAYS[9]]
+    pre_close = frame.set_index(["ts_code", "trade_date"])["pre_close"]
+    carried = 10.2 / pre_close["000001.SZ", DAYS[2]] * pre_close[buy["symbol"], DAYS[2]]
+    assert buy["session"] == "intraday"
+    assert buy["limit_price"] == round(carried, 2) and abs(buy["limit_price"] - carried) <= 0.005
+    assert sell["session"] == "close" and "limit_price" not in sell
+    run = run_daily_replay(
+        daily=frame,
+        strategy=_scripted_strategy(orders),
+        schedule=StrategySchedule("year", "08:00"),
+        profile=BrokerProfile(),
+    )
+    assert [(row["session"], row["status"]) for row in run.executions] == [("intraday", "filled"), ("close", "filled")]

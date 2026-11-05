@@ -25,9 +25,9 @@ A dataset's landing jobs are the refresh nodes the replay gates it on
 days its window moves: every calendar day for a job whose window is the
 calendar day, and only SSE sessions for one whose window ends on a session
 (``end_date_mode: sse_open_on_or_before`` in the schedule), whose runs on
-other days are skipped as already done. So an 08:30 decision needs the
+other days are skipped as already done. So an 08:00 decision needs the
 evening job of the previous session and the 09:45 disclosure job of the
-previous day, never the run of its own morning after 08:30.
+previous day, never the run of its own morning after 08:00.
 """
 
 from __future__ import annotations

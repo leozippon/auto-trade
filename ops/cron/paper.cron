@@ -3,7 +3,8 @@
 #
 # Books live in data/trading/paper/<book>/ (run_paper.py init). Each run goes
 # through every book in turn: it settles the sessions whose data has been
-# committed, decides today's session at its 08:30 inference time and writes
+# committed, decides today's session at its inference time (08:00 unless the
+# book's experiment set another) and writes
 # logs/paper/<book>/<date>_orders.md plus that book's latest_orders.md. A book
 # that cannot decide writes the reason to the same files and the run continues
 # with the next book, exiting non-zero if any book failed. Weekday holidays
@@ -20,8 +21,9 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
 # The operator places the sheet's orders by hand: an order that fills at the
 # open goes into the 09:15-09:25 opening call auction, one that fills at the
-# close into the 14:57-15:00 closing call auction. The morning batch is the
-# deadline, so the three runs all have to land before 09:15.
+# close into the 14:57-15:00 closing call auction. A sheet is due ten minutes
+# after its decision, 08:10 for the default 08:00 one, so the three runs all
+# start before then.
 #
 # 05:40 is the first, after the nightly chain has committed the previous
 # session: the evening update (23:35, visible from 03:05), the intraday-flow
@@ -32,14 +34,15 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # min, capped at the fit timeout init froze into that book's book.json from its
 # experiment's strategy_fit_timeout_seconds. Books run one after another.
 #
-# 07:40 and 08:35 are retries for a morning whose data landed late or whose
+# 07:40 and 08:05 are retries for a morning whose data landed late or whose
 # first run was slow: flock skips a retry while an earlier run is still
 # working, and a book whose session is already decided is a no-op re-render,
-# never a second decision. 08:35 is the last one that still leaves the sheet in
-# the operator's hands before the auction closes. The PIT event build is the
-# part of the chain that can push past 05:40 under load (03:35-05:32 on a quiet
-# night, 03:35-07:14 on 2026-09-16 with four arms running); a night where it
-# runs past 08:35 needs the arms throttled, not another retry.
+# never a second decision. 07:40 follows the latest the PIT event build has
+# run; 08:05 is the last one that still starts before the sheet is due. The
+# PIT event build is the part of the chain that can push past 05:40 under load
+# (03:35-05:32 on a quiet night, 03:35-07:14 on 2026-09-16 with four arms
+# running); a night where it runs past 08:05 needs the arms throttled, not
+# another retry.
 #
 # A GPU book takes its card only as its strategy container starts; with no
 # eligible card it looks again every 60 s until 180 min after its run began
@@ -50,4 +53,4 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # run_paper.py run --book <book>.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-35 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+5 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1

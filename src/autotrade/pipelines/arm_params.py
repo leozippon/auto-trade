@@ -149,7 +149,7 @@ class ScheduleParams:
     """When the strategy decides and what it is measured against."""
 
     strategy_period: str = _param("day")
-    inference_time: str = _param("08:30")
+    inference_time: str = _param("08:00")
     # Sets nothing since the approval mode was removed; still written because
     # the round launcher pins it (scripts/experiments/_round.py).
     initial_control_mode: str = _param("auto")

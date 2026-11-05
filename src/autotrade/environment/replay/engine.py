@@ -8,7 +8,7 @@ from datetime import date, datetime, time
 from time import perf_counter
 
 from autotrade.common.time import CN_TZ
-from autotrade.environment.broker import BrokerProfile, DailyBroker
+from autotrade.environment.broker import BrokerProfile, DailyBroker, session_price
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     FittableStrategyExecutor,
@@ -18,6 +18,8 @@ from autotrade.environment.executor import (
     StrategyRaised,
 )
 from autotrade.environment.strategy import (
+    MARKET_CLOSE,
+    MARKET_OPEN,
     AccountSnapshot,
     StrategyContext,
     StrategyOrder,
@@ -27,9 +29,6 @@ from autotrade.environment.strategy import (
 
 from .market import DailyMarketData
 from .stats import PhaseTimer, ReplayResult
-
-MARKET_OPEN = time(9, 30)
-MARKET_CLOSE = time(15, 0)
 
 
 class BacktestError(RuntimeError):
@@ -266,16 +265,20 @@ def resolve_execution_price(
     *,
     execution_price: ExecutionPriceProvider | None,
 ) -> tuple[Mapping[str, object] | None, object | None]:
-    """Resolve only the price at the order's requested timestamp.
+    """The order's trading-day bar and the market price the order meets.
 
-    Daily open and close are exact observations at 09:30 and 15:00. Every
-    other time requires an injected static price source; the engine never
-    rounds or delays an order to one of the daily endpoints.
+    A session order meets its session's price on that day's bar
+    (``broker.session_price``). Any other order is priced at its requested
+    timestamp only: daily open and close are exact observations at 09:30 and
+    15:00, and every other time requires an injected static price source; the
+    engine never rounds or delays an order to one of the daily endpoints.
     """
 
     when = order.execute_at.astimezone(CN_TZ)
     trade_date = when.strftime("%Y%m%d")
     bar = market.bars_for_day(trade_date).get(order.symbol)
+    if order.session is not None:
+        return bar, session_price(order, bar) if bar is not None else None
     local_time = when.timetz().replace(tzinfo=None)
     if local_time == MARKET_OPEN:
         return bar, bar.get("open") if bar is not None else None

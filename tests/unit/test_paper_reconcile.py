@@ -63,6 +63,7 @@ def _bars(days) -> pd.DataFrame:
             rows.append({
                 "trade_date": day, "symbol": symbol, "open": base, "close": base + 0.05,
                 "pre_close": base - 0.05, "up_limit": round(base * 1.1, 2), "down_limit": round(base * 0.9, 2),
+                "high": base + 0.1, "low": base - 0.1, "vol": 1.0e6, "amount": (base + 0.02) * 1.0e6,
             })
     return pd.DataFrame(rows)
 
@@ -183,6 +184,30 @@ def test_confirming_every_session_as_simulated_reproduces_the_simulated_book(tmp
         _without_ids(simulated.journal("equity_daily.jsonl"))
     )
     assert real.journal("corrections.jsonl") == []
+
+
+def test_a_limit_order_confirmed_as_simulated_books_the_simulated_fill_with_its_session(
+    tmp_path: Path, monkeypatch
+):
+    """The recorded fill is a known price: the day limit order's 15.00 (the
+    open was 15.10, the low 15.00) books without the bar its rule reads."""
+
+    source = """def generate_orders(context):
+    if context.inference_at.strftime("%Y%m%d") != "20260105":
+        return []
+    return [{"symbol": "600000.SH", "action": "buy", "quantity": 300, "execute_at": "2026-01-05T09:30:00+08:00",
+             "session": "intraday", "limit_price": 15.0}]
+"""
+    simulated = _book(tmp_path, monkeypatch, source=source, real=False, name="simulated")
+    real = _book(tmp_path, monkeypatch, source=source, name="real")
+    for day in SESSIONS[1:3]:
+        simulated.run(day)
+        real.run(day)
+        real.record(_session(day))
+    assert real.state()["account"] == simulated.state()["account"]
+    [row] = _without_ids(real.journal("executions_20260105.jsonl"))
+    assert row == _without_ids(simulated.journal("executions_20260105.jsonl"))[0]
+    assert (row["session"], row["limit_price"], row["status"], row["price"]) == ("intraday", 15.0, "filled", 15.0)
 
 
 def test_a_recorded_price_and_quantity_move_cash_and_position_as_the_arithmetic_says(tmp_path: Path, monkeypatch):

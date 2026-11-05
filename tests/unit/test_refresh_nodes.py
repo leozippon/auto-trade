@@ -40,6 +40,7 @@ from autotrade.environment.data.contracts import (
     visible_cutoff,
 )
 from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
+from autotrade.environment.strategy import StrategySchedule
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -261,6 +262,22 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         self.assertGreater(launch, max(paper))
         self.assertGreater(launch, max(at for at in others if at < noon))
         self.assertLess(launch, min(at for at in others if at >= noon))
+
+    def test_every_paper_run_starts_before_the_default_decisions_sheet_is_due(self) -> None:
+        # The first run follows the nightly chain at 05:40; the operator needs
+        # the sheet ten minutes after the decision, so the last retry has to
+        # start before then.
+        paper = sorted(
+            time(int(hour), int(minute))
+            for minute, hour in re.findall(
+                r"^(\d{1,2})\s+(\d{1,2})\s+.*run_paper\.py run", PAPER_CRONTAB.read_text(encoding="utf-8"), re.MULTILINE
+            )
+        )
+        decision = StrategySchedule().at("20261106")
+        self.assertEqual(decision.strftime("%H:%M"), "08:00")
+        due = (decision + timedelta(minutes=10)).time()
+        self.assertEqual(paper[0], time(5, 40))
+        self.assertLess(paper[-1], due)
 
     def test_managed_jobs_log_through_the_runner_only(self) -> None:
         # Every run writes its own log via the runner; cron lines carry no

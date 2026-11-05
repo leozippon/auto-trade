@@ -2,15 +2,17 @@
 
 Rendered from the book's own state and order journal, so the sheet, the
 console and the account can never disagree. Reference prices are the previous
-close; each order fills at the price of the time it names (the session's open
-or close), so notionals are estimates.
+close; each order fills at its own session's price, so notionals are estimates.
 
 Every order names the window the operator places it in, read off its own
-``execute_at`` exactly as the fill model reads it (``resolve_execution_price``):
-09:30 fills at the open, which the 09:15-09:25 opening call auction sets; 15:00
-fills at the close, which the 14:57-15:00 closing call auction sets; any other
-minute is continuous trading at that minute. Nothing here assumes which side
-uses which window: a strategy may sell at the close and buy at the next open.
+session, or else its ``execute_at``, exactly as the fill model reads them
+(``resolve_execution_price``): an open order, or one at 09:30, fills at the
+open, which the 09:15-09:25 opening call auction sets; a close order, or one at
+15:00, fills at the close, which the 14:57-15:00 closing call auction sets; an
+intraday order with a limit is a day limit order entered from 09:15, and one
+without is worked through the day toward its average price; any other minute
+is continuous trading at that minute. Nothing here assumes which side uses
+which window: a strategy may sell at the close and buy at the next open.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from pathlib import Path
 
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
-from autotrade.environment.replay.engine import MARKET_CLOSE, MARKET_OPEN
+from autotrade.environment.strategy import MARKET_CLOSE, MARKET_OPEN
 
 from .book import Book
 from .engine import (
@@ -35,13 +37,17 @@ from .storage import read_jsonl
 WEEKDAYS = "一二三四五六日"
 LATEST_NAME = "latest_orders.md"
 DISCLAIMER = (
-    "参考价为前一交易日收盘价；模拟账户按每笔订单自己的时点撮合：开盘竞价的按当日开盘价，"
-    "收盘竞价的按当日收盘价，均另计滑点；涨跌停、停牌或资金不足时订单会被拒。"
+    "参考价为前一交易日收盘价；模拟账户按每笔订单自己的场次或时点撮合：开盘竞价的按当日开盘价，"
+    "收盘竞价的按当日收盘价，盘中分批的按全天成交均价，指定分钟的按该分钟的价格，均另计滑点；"
+    "当日限价单在当日价格触及限价时按限价或更优的开盘价成交，不计滑点。"
+    "涨跌停、停牌、资金不足或限价未触及时订单不成交，当日失效。"
     "金额与现金均为按参考价的估算，未计佣金、印花税与滑点。"
 )
 OPEN_AUCTION = "open_auction"
 CLOSE_AUCTION = "close_auction"
 CONTINUOUS = "continuous"
+DAY_LIMIT = "day_limit"
+INTRADAY = "intraday"
 # (name, declaration span, what the fill price is, how the window works). The
 # one wording of every place the operator reads a window: the Markdown sheet,
 # the console's sheet and the copied text, which take it from the payload.
@@ -54,7 +60,27 @@ _WINDOWS = {
         "收盘集合竞价", "14:57–15:00", "按收盘价成交",
         "14:57–15:00 申报，申报后不能撤单；15:00 按单一价格撮合出收盘价。",
     ),
+    DAY_LIMIT: (
+        "当日限价单", "09:15–09:25", "触及限价时按限价或更优的开盘价成交",
+        (
+            "09:15–09:25 按表中限价申报当日有效的限价单：它先参加开盘集合竞价，没成交的部分留在连续竞价里直到收盘。"
+            "模拟账户在当日最低价（买入）或最高价（卖出）触及限价时成交，开盘价比限价更优时按开盘价，不计滑点；"
+            "没触及就当日失效，涨停封死（买入）或跌停封死（卖出）的一天也不成交。"
+        ),
+    ),
+    INTRADAY: (
+        "盘中分批", "09:30–15:00", "按全天成交均价成交",
+        (
+            "09:30–15:00 在连续竞价里分批下单，尽量贴近全天的成交均价；模拟账户按当日成交额除以成交量的均价"
+            "另计滑点成交，只在涨停封死（买入）或跌停封死（卖出）的一天不成交。"
+        ),
+    ),
 }
+# The sheet's session column: the session each window meets the market in; an
+# order at any other minute shows its minute.
+_SESSION_CELLS = {OPEN_AUCTION: "开盘", DAY_LIMIT: "盘中", INTRADAY: "盘中", CLOSE_AUCTION: "收盘"}
+# The batches of one execution time in the order an operator places them.
+_WINDOW_ORDER = {OPEN_AUCTION: 0, DAY_LIMIT: 1, INTRADAY: 2, CONTINUOUS: 3, CLOSE_AUCTION: 4}
 LIMIT_GUIDANCE = (
     "限价怎么填：集合竞价按单一价格撮合，买入限价不低于、卖出限价不高于撮合价的申报都按撮合价成交，"
     "成交价是撮合价而不是你填的限价。模拟账户按开盘价或收盘价成交（另计滑点），只在撮合价触及涨停（买入）"
@@ -69,14 +95,18 @@ def orders_file_name(trade_date: str) -> str:
     return f"{trade_date}_orders.md"
 
 
-def order_window(execute_at: datetime) -> str:
-    """One order's declaration window, from the time it asks to fill at.
+def order_window(execute_at: datetime, session: str | None = None, limit_price: float | None = None) -> str:
+    """One order's declaration window, from its session or the time it asks to fill at.
 
-    The same comparison the fill model makes (``resolve_execution_price``):
-    exactly 09:30 is the day's open, exactly 15:00 its close; any other minute
-    is continuous trading at that minute.
+    The same reading the fill model makes (``resolve_execution_price``): an
+    intraday order is a day limit order with a limit and worked through the
+    day without one; otherwise exactly 09:30 is the day's open (where an open
+    order sits), exactly 15:00 its close (a close order's), and any other
+    minute is continuous trading at that minute.
     """
 
+    if session == "intraday":
+        return INTRADAY if limit_price is None else DAY_LIMIT
     local = execute_at.astimezone(CN_TZ).time()
     if local == MARKET_OPEN:
         return OPEN_AUCTION
@@ -85,21 +115,23 @@ def order_window(execute_at: datetime) -> str:
     return CONTINUOUS
 
 
-def window_text(execute_at: datetime, sheet_day: str) -> tuple[str, str, str]:
+def window_text(
+    execute_at: datetime, sheet_day: str, session: str | None = None, limit_price: float | None = None
+) -> tuple[str, str, str]:
     """(short label, heading, how the window works) of one order's window, in
     plain words. An order dated for another session than the sheet's says which."""
 
     local = execute_at.astimezone(CN_TZ)
     clock = local.strftime("%H:%M")
-    window = order_window(local)
+    window = order_window(local, session, limit_price)
     name, span, fill, how = _WINDOWS.get(window) or (
         "连续竞价", clock, "按该分钟的价格成交",
         f"在 {clock} 前后的连续竞价里下单；模拟账户按这一分钟的收盘价撮合。",
     )
-    half = "上午" if local.hour < 12 else "下午"
-    session = local.strftime("%Y%m%d")
-    if session != sheet_day:
-        half = f"{_day(session)}{half}"
+    half = "全天" if window == INTRADAY else "上午" if local.hour < 12 else "下午"
+    day = local.strftime("%Y%m%d")
+    if day != sheet_day:
+        half = f"{_day(day)}{half}"
     return f"{half} {name} {span}", f"{half} · {name} {span} 申报 · {fill}", how
 
 
@@ -160,21 +192,29 @@ def order_sheet(
 
     orders = []
     flows = {"buy": 0.0, "sell": 0.0}
-    # Placement order: the strategy's own order within one execution time.
-    for row in sorted(rows, key=lambda item: datetime.fromisoformat(str(item["execute_at"]))):
+
+    def placement(row: Mapping[str, object]) -> tuple[datetime, int]:
+        """Placement order: by execution time, then the batch an operator
+        places first; the strategy's own order within one batch."""
+
+        execute_at = datetime.fromisoformat(str(row["execute_at"]))
+        return execute_at, _WINDOW_ORDER[order_window(execute_at, row.get("session"), row.get("limit_price"))]
+
+    for row in sorted(rows, key=placement):
         symbol, quantity, action = str(row["symbol"]), int(row["quantity"]), str(row["action"])
         quote = price(symbol)
         notional = quote * quantity if quote is not None else None
         if notional is not None:
             flows[action] += notional
         execute_at = datetime.fromisoformat(str(row["execute_at"])).astimezone(CN_TZ)
-        label, title, how = window_text(execute_at, trade_date)
+        session, limit = row.get("session"), row.get("limit_price")
+        label, title, how = window_text(execute_at, trade_date, session, limit)
         orders.append({
             "execute_at": str(row["execute_at"]), "session": execute_at.strftime("%Y%m%d"),
-            "time": execute_at.strftime("%H:%M"), "window": order_window(execute_at),
+            "time": execute_at.strftime("%H:%M"), "window": order_window(execute_at, session, limit),
             "window_label": label, "window_title": title, "window_how": how,
             "symbol": symbol, "name": name(symbol), "action": action,
-            "quantity": quantity, "reference_price": quote, "notional": notional,
+            "quantity": quantity, "limit_price": limit, "reference_price": quote, "notional": notional,
         })
     target = []
     for symbol, quantity in _positions_after(held, rows).items():
@@ -244,17 +284,17 @@ def render_orders(book: Book, trade_date: str) -> str:
                 "",
                 group["how"],
                 "",
-                "| 方向 | 代码 | 名称 | 股数 | 参考价 | 约计金额 | 下单时段 |",
-                "| --- | --- | --- | ---: | ---: | ---: | --- |",
+                "| 方向 | 代码 | 名称 | 股数 | 场次 | 限价 | 参考价 | 约计金额 | 下单时段 |",
+                "| --- | --- | --- | ---: | --- | ---: | ---: | ---: | --- |",
             ]
             for row in members:
                 lines.append(
-                    f"| {_action(row)} | {row['symbol']} | {row['name']} "
-                    f"| {row['quantity']:,} | {_price(row['reference_price'])} | {_money(row['notional'])} "
-                    f"| {row['window_label']} |"
+                    f"| {_action(row)} | {row['symbol']} | {row['name']} | {row['quantity']:,} "
+                    f"| {_SESSION_CELLS.get(row['window'], row['time'])} | {_price(row['limit_price'])} "
+                    f"| {_price(row['reference_price'])} | {_money(row['notional'])} | {row['window_label']} |"
                 )
             lines += ["", _flows_line(group["flows"]), ""]
-        if any(row["window"] != CONTINUOUS for row in rows):
+        if any(row["window"] in (OPEN_AUCTION, CLOSE_AUCTION) for row in rows):
             lines += [LIMIT_GUIDANCE, ""]
         if sheet["skipped_lines"]:
             lines += [f"订单日志有 {sheet['skipped_lines']} 行无法解析，已跳过；请检查 orders_{trade_date}.jsonl。", ""]
@@ -458,6 +498,8 @@ def _price(value: float | None) -> str:
 __all__ = [
     "CLOSE_AUCTION",
     "CONTINUOUS",
+    "DAY_LIMIT",
+    "INTRADAY",
     "LATEST_NAME",
     "LIMIT_GUIDANCE",
     "OPEN_AUCTION",

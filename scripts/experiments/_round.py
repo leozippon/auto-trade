@@ -181,7 +181,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "operating_memory": "curated",
     "initial_control_mode": "auto",
     "reasoning_effort": "xhigh",
-    "inference_time": "08:30",
+    "inference_time": "08:00",
     "strategy_period": "day",
     # Every model role, as the console defaults it: the relay's gpt-6-astra
     # for the main conversation, its DeepSeek-V4.1-Flash for the sub-agents
