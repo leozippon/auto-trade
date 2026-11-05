@@ -1427,7 +1427,7 @@
       "official_update": "LPR贷款基础利率；权限表为每日12:00。",
       "cron_policy": "evening_rolling_update",
       "history_repull": "window_only",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=204"
+      "doc_ref": "https://tushare.pro/document/2?doc_id=151"
     },
     {
       "dataset": "repo_daily",
