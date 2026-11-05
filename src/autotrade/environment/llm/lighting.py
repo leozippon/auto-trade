@@ -111,15 +111,6 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ),
 )
 MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)
-# The ids billed past 272,000 prompt tokens at the long-context tier above.
-# Only compaction keeps a conversation below it, so a conversation on one, or
-# compacted by one, must compact at or below the local arms' threshold
-# (262,144 - 32,768 - 8,192), which leaves 50,816 tokens under the boundary
-# for the prompt estimate's error; the worker refuses a larger one.
-LONG_CONTEXT_TIER_MODELS = tuple(
-    model for model in MODEL_CHOICES if model.startswith("gpt-6")
-)
-SHORT_TIER_MAX_COMPACTION_THRESHOLD = 221_184
 # The Anthropic ids. Their upstream caches only a prefix that ends at an
 # explicit ``cache_control`` breakpoint (the relay's other ids cache on their
 # own), so their requests mark one (see ``_mark_cache_breakpoint``).
@@ -838,11 +829,9 @@ __all__ = [
     "GPT_ASTRA_MODEL",
     "GPT_LONG_CONTEXT_TIER",
     "LLM_KEY_ENVS",
-    "LONG_CONTEXT_TIER_MODELS",
     "MODEL_CHOICES",
     "MODEL_PROFILES",
     "PROVIDER_TEMPERATURE_MODELS",
-    "SHORT_TIER_MAX_COMPACTION_THRESHOLD",
     "LightingProxy",
     "build_gateway",
     "is_credential_failure",

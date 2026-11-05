@@ -38,10 +38,6 @@ from autotrade.environment.llm import (
     effective_max_output_tokens,
     model_profile,
 )
-from autotrade.environment.llm.lighting import (
-    LONG_CONTEXT_TIER_MODELS,
-    SHORT_TIER_MAX_COMPACTION_THRESHOLD,
-)
 from autotrade.environment.pretrained import pretrained_pin
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import (
@@ -133,7 +129,8 @@ class LLMWorkerSettings:
     # The session parent conversation's compaction budget; ``compaction_for``
     # derives the other conversation roles' from the same knobs.
     compaction: ContextCompactionConfig
-    # The console's ``compact_token_threshold``; None = derived per role.
+    # The arm's ``compact_token_threshold``; None = each role's bound
+    # (``compaction_for``).
     compact_token_threshold: int | None = None
     # The arm's ``llm_key``: which relay credential every role starts on.
     llm_key: str = "primary"
@@ -204,18 +201,19 @@ class LLMWorkerSettings:
     def compaction_for(self, role: str) -> ContextCompactionConfig:
         """One conversation role's compaction budget (main or subagent).
 
-        Its threshold is ``window − that role's output budget −
+        Its bound is ``window − that role's output budget −
         COMPACTION_SAFETY_MARGIN_TOKENS`` for the role's own model, so prompt
         plus output never exceeds the window, and the same bound for the
-        compaction model, which must read the whole conversation; a configured
-        ``compact_token_threshold`` is clamped to them. The value reaches the
-        run facts (parents) and the compaction events (children). Only a
-        window with no room for the output budget at all is a launch error.
+        compaction model, which must read the whole conversation. The
+        threshold is that bound unless the arm's ``compact_token_threshold``
+        names a lower one; a higher one is refused, as is a window with no
+        room for the output budget at all. The value reaches the run facts
+        (parents) and the compaction events (children).
         """
 
         if role not in {"main", "subagent"}:
             raise ValueError(f"unknown conversation role: {role}")
-        bounds = [self.compact_token_threshold] if self.compact_token_threshold else []
+        bounds: list[int] = []
         for bound_role in (role, "compact") if self.compact_enabled else (role,):
             window = model_profile(self.model_for(bound_role)).context_window_tokens
             if window is None:
@@ -230,12 +228,21 @@ class LLMWorkerSettings:
                     f"{bound_role} model output budget leaves no context capacity"
                 )
             bounds.append(bound)
-        if not bounds:
+        bound = min(bounds, default=None)
+        threshold = self.compact_token_threshold or bound
+        if threshold is None:
             raise ValueError(
                 "compact_token_threshold is required when no model role declares "
                 "a context window"
             )
-        return replace(self.compaction, token_threshold=min(bounds))
+        if bound is not None and threshold > bound:
+            raise ValueError(
+                f"compact_token_threshold {threshold:,} exceeds the {role} conversation's "
+                f"bound {bound:,}: the context window of its model and of the compaction "
+                f"model, less each one's output budget and "
+                f"{COMPACTION_SAFETY_MARGIN_TOKENS:,} tokens"
+            )
+        return replace(self.compaction, token_threshold=threshold)
 
 
 @dataclass(frozen=True)
@@ -1254,11 +1261,10 @@ def _llm_settings(
             "the Agent's grep tool runs ripgrep on this host, and 'rg' is not on PATH: "
             "install ripgrep"
         )
-    # Every conversation role must leave room for its output budget; the
-    # session parent's derived budget becomes the settings' own.
+    # Every conversation role's threshold is held to its bound (create
+    # pre-flight included); the session parent's becomes the settings' own.
     settings.compaction_for("subagent")
     settings = replace(settings, compaction=settings.compaction_for("main"))
-    _require_short_tier_compaction(settings)
     gpu_count = _gpu_count(read_param(params, "gpu_count"))
     # One boundary with the strategy container: the arm's strategy CPUs and
     # memory, unless the internal agent_sandbox_* knobs name others; an arm that
@@ -1286,41 +1292,6 @@ def _llm_settings(
 # so the margin lets one such addition ride along without a forced
 # compaction; the gateway keeps its own 2,048-token tokenizer slack on top.
 COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
-
-
-def _require_short_tier_compaction(settings: LLMWorkerSettings) -> None:
-    """Refuse a conversation that could outgrow the relay's priced gpt-6 tier.
-
-    The spend cap prices a gpt-6 request at its short-context tier only;
-    compaction is what keeps a conversation, and the compaction request that
-    reads it, below 272,000 prompt tokens. So a main or sub-agent
-    conversation running on a gpt-6 id, or compacted by one, must compact at
-    or below SHORT_TIER_MAX_COMPACTION_THRESHOLD.
-    """
-
-    for role in ("main", "subagent"):
-        models = {settings.model_for(role)}
-        if settings.compact_enabled:
-            models.add(settings.compact_model)
-        tiered = sorted(models & set(LONG_CONTEXT_TIER_MODELS))
-        if not tiered:
-            continue
-        if not settings.compact_enabled:
-            raise ValueError(
-                f"disable_context_compact cannot be set while the {role} conversation "
-                f"runs on {tiered[0]}: the relay bills its requests past 272,000 prompt "
-                "tokens at a tier max_api_spend_usd does not price, and only compaction "
-                "keeps them below it"
-            )
-        threshold = settings.compaction_for(role).token_threshold
-        if threshold > SHORT_TIER_MAX_COMPACTION_THRESHOLD:
-            raise ValueError(
-                f"compact_token_threshold must be at most "
-                f"{SHORT_TIER_MAX_COMPACTION_THRESHOLD:,} when the {role} conversation "
-                f"runs on or is compacted by {', '.join(tiered)} (it is {threshold:,}): "
-                "the relay bills a request past 272,000 prompt tokens at a tier "
-                "max_api_spend_usd does not price"
-            )
 
 
 def _pit_views_seed(

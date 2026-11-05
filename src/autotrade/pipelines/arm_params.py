@@ -44,7 +44,6 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm.lighting import (
     DEEPSEEK_FLASH_MODEL,
     GPT_ASTRA_MODEL,
-    SHORT_TIER_MAX_COMPACTION_THRESHOLD,
 )
 from autotrade.environment.llm.model_profiles import (
     AGENT_MAX_OUTPUT_TOKENS,
@@ -263,11 +262,11 @@ class AgentParams:
     reasoning_effort: str = _param("xhigh")
     no_thinking: bool = _param(False)
     disable_context_compact: bool = _param(False)
-    # The value the local model's window derives (262,144 - 32,768 - 8,192),
-    # which is also the most a conversation touching the relay's gpt-6 tier may
-    # use: with the 1M-window default roles the derived bound would be 959,040.
-    # Null still derives it per role.
-    compact_token_threshold: int | None = _param(SHORT_TIER_MAX_COMPACTION_THRESHOLD)
+    # Null: each conversation role compacts at its bound, its model's and the
+    # compaction model's window less the output budget and a margin
+    # (``worker.LLMWorkerSettings.compaction_for``). A value is a lower
+    # threshold; one above the bound is refused.
+    compact_token_threshold: int | None = _param()
     compact_keep_recent_messages: int = _param(10)
     compact_max_tokens: int = _param(10_000)
     compact_max_calls: int = _param(10)

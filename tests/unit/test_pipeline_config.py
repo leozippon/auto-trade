@@ -45,8 +45,8 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_keep_recent_messages": 10,
     "compact_max_calls": 10,
     "compact_max_tokens": 10_000,
-    # The local window's derived value; empty would derive it per role.
-    "compact_token_threshold": 221_184,
+    # Null: each conversation role compacts at its bound.
+    "compact_token_threshold": None,
     # Four July-June research years, a forward year, a Held-out quarter.
     "research_start": "20210701",
     "research_end": "20250630",

@@ -262,8 +262,9 @@ def add_model_arguments(parser: argparse.ArgumentParser) -> None:
         default=WEB_CREATE_DEFAULTS["compact_token_threshold"],
         help=(
             "Estimated context tokens that trigger semantic compaction; defaults "
-            "to the console's value. The worker clamps it per conversation role "
-            "to that role's model window minus its output budget and margin."
+            "to the console's value. Unset, each conversation role compacts at its "
+            "bound, its model's and the compaction model's window minus the output "
+            "budget and margin; a value above that bound is refused."
         ),
     )
     parser.add_argument(
