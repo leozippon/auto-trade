@@ -21,6 +21,7 @@ from .openai_compatible import (
 )
 from .pricing import (
     ApiSpendExhausted,
+    LongContextTier,
     TokenPrices,
     billed_tokens,
     cache_write_tokens,
@@ -64,6 +65,7 @@ __all__ = [
     "DeepSeekProxy",
     "LLMProxy",
     "LLMProxyError",
+    "LongContextTier",
     "MalformedToolCallError",
     "OpenAICompatibleConfig",
     "OpenAICompatibleProxy",

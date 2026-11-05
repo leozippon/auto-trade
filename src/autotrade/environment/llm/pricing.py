@@ -2,38 +2,65 @@
 
 The research session's API spend cap (``pipelines.research_session``) charges
 every response its role gateways return at the configured catalog model's
-list prices (``ModelProfile.prices``). The providers report usage in four
-shapes, read here into one ``(uncached prompt, cached prompt, completion,
-cache write)`` count; a count a response did not report is estimated, never
-taken as zero. Completion tokens include reasoning tokens for every catalog
+list prices (``ModelProfile.prices``), at the provider's long-context tier
+when the model has one and the call's prompt passes it. The providers report
+usage in four shapes, read here into one ``(uncached prompt, cached prompt,
+completion, cache write)`` count; a count a response did not report is
+estimated, never taken as zero. Completion tokens include reasoning tokens for every catalog
 provider.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import NamedTuple
 
 from .proxy import ChatMessage, ProviderResponse, estimate_chat_request_tokens
 
 
-class TokenPrices(NamedTuple):
+class LongContextTier(NamedTuple):
+    """A provider's request-length tier: a call whose whole prompt (uncached,
+    cached and written) exceeds ``above_prompt_tokens`` is billed entirely at
+    ``prompt_multiplier`` times every prompt price and
+    ``completion_multiplier`` times the completion price."""
+
+    above_prompt_tokens: int
+    prompt_multiplier: float
+    completion_multiplier: float
+
+
+@dataclass(frozen=True)
+class TokenPrices:
     """List prices in USD per million tokens, in ``billed_tokens`` order.
 
     ``cache_write`` prices the prompt tokens a call wrote to the provider's
     cache. A provider that reports no write lists its uncached prompt price
-    there, which its write count of zero never reaches.
+    there, which its write count of zero never reaches. ``long_context`` is
+    the provider's length tier, None where one price holds at any length.
     """
 
     uncached_prompt: float
     cached_prompt: float
     completion: float
     cache_write: float
+    long_context: LongContextTier | None = None
 
     def cost_usd(self, tokens: tuple[int, int, int, int]) -> float:
-        """The cost of ``billed_tokens`` at these prices."""
+        """The cost of ``billed_tokens`` at these prices, at the long-context
+        tier when the call's prompt is past it."""
 
-        return sum(count * price for count, price in zip(tokens, self, strict=True)) / 1_000_000
+        uncached, cached, completion, written = tokens
+        prompt_rate = completion_rate = 1.0
+        tier = self.long_context
+        if tier is not None and uncached + cached + written > tier.above_prompt_tokens:
+            prompt_rate, completion_rate = tier.prompt_multiplier, tier.completion_multiplier
+        prompt = (
+            uncached * self.uncached_prompt
+            + cached * self.cached_prompt
+            + written * self.cache_write
+        )
+        return (prompt_rate * prompt + completion_rate * completion * self.completion) / 1_000_000
 
 
 # A locally served model and the injected test double cost nothing.
@@ -137,6 +164,7 @@ def billed_tokens(
 __all__ = [
     "FREE",
     "ApiSpendExhausted",
+    "LongContextTier",
     "TokenPrices",
     "billed_tokens",
     "cache_write_tokens",
