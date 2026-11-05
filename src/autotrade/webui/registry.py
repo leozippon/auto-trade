@@ -43,10 +43,10 @@ from autotrade.environment.tools.report_issue import (
     issue_reports_path,
     read_issue_reports,
 )
+from autotrade.pipelines import rolling_record
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.arm_params import PARAMETERS
 from autotrade.pipelines.calendar import (
-    FULL_SPAN,
     GEOMETRY_PARAMETERS,
     ResearchGeometry,
 )
@@ -89,8 +89,6 @@ from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.session_tools import BATCH_FAILURE_ENVIRONMENT
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
-    null_p_value,
-    panel_return,
     pooled_reading,
     residual_bar,
     summary_excess_at_cost_stress,
@@ -360,7 +358,7 @@ def arm_stage(records: Sequence[Mapping[str, object]]) -> str:
     """Which of :data:`STAGES` the arm is in, read off the ledger alone."""
 
     if experiment_verdict(records) is not None:
-        return "verdict"
+        return "readout"
     if frozen_record(records) is not None:
         return "forward"
     return "research"
@@ -523,8 +521,9 @@ def _result_name(reference: object) -> str | None:
 def _forward_view(
     identity: PublicIdentity, record: Mapping[str, object] | None
 ) -> dict[str, object] | None:
-    """The forward record: replay span, slice statistics and verdict, as the
-    record stores them, a record from before 2026-10-28 on today's scale
+    """The forward record: replay span, slice statistics and readout, as the
+    record stores them (a record judged under the sealed gate carries its
+    verdict instead), a record from before 2026-10-28 on today's scale
     (:func:`_slice_view`, :func:`_recorded_reasons`). ``None`` until the record
     exists, which is also when the verdict does. A slice recorded before
     slices carried the holder's readings shows none: nothing is read again
@@ -537,7 +536,6 @@ def _forward_view(
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
-        "sealed": _sealed_view(identity, record.get("sealed")),
         "replay": dict(_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
         "slices": {
@@ -552,69 +550,6 @@ def _forward_view(
         # the sealed-gate rules carries its verdict instead.
         "readout": dict(_mapping(record.get("readout"))) or None,
         "verdict": {**verdict, "reasons": _recorded_reasons(verdict.get("reasons"))} if verdict else None,
-    }
-
-
-# What a sealed reading states, as ``verdict.sealed_slice`` records it.
-SEALED_FIELDS = (
-    "start",
-    "end",
-    "days",
-    "years",
-    "residual_information_ratio",
-    "residual_excess",
-    "residual_tracking_error",
-    "market_beta",
-    "size_beta",
-    "value_beta",
-    "bar",
-)
-
-
-def _sealed_view(identity: PublicIdentity, block: object) -> dict[str, object] | None:
-    """The forward record's sealed reading: the frozen book's residual IR on
-    the sealed years against its bar, whether it passed, its seed replicates'
-    readings beside it, or the strategy error that left it unread, and the
-    ablation's increment with its t-statistic, reported and never judged
-    (``None`` where the arm froze no ablation). ``None`` on a record written
-    before the sealed gate."""
-
-    sealed = _mapping(block)
-    if not sealed:
-        return None
-    reading = _mapping(sealed.get("slice"))
-    ablation = _mapping(sealed.get("ablation"))
-    increment = _mapping(ablation.get("increment"))
-    return {
-        "label": sealed.get("label"),
-        "result": _result_name(sealed.get("result_ref")),
-        **{name: reading.get(name) for name in SEALED_FIELDS},
-        "passed": not reading.get("reasons"),
-        "reasons": [str(reason) for reason in reading.get("reasons") or ()],
-        "strategy_error": bool(reading.get("strategy_error")),
-        "unmeasurable": bool(reading.get("unmeasurable")),
-        "error": identity.public_text(str(reading.get("error") or "")) or None,
-        "seed_replicates": [
-            {
-                "source_step_id": entry.get("source_step_id"),
-                "residual_information_ratio": _number(entry.get("residual_information_ratio")),
-                "bar": _number(entry.get("bar")),
-            }
-            for entry in reading.get("seed_replicates") or ()
-            if isinstance(entry, Mapping)
-        ],
-        "ablation": (
-            {
-                "source_step_id": ablation.get("source_step_id"),
-                "residual_information_ratio": _number(increment.get("residual_information_ratio")),
-                "t_statistic": _number(increment.get("t_statistic")),
-                "unmeasured": identity.public_text(str(increment.get("unmeasured") or "")) or None,
-                "strategy_error": bool(ablation.get("strategy_error")),
-                "error": identity.public_text(str(ablation.get("error") or "")) or None,
-            }
-            if ablation
-            else None
-        ),
     }
 
 
@@ -633,7 +568,7 @@ def _verdict_view(
 
 
 def _paper_candidate_view(records: list[dict[str, object]]) -> dict[str, object] | None:
-    """The frozen artifact a graduate's Paper book is opened from."""
+    """The frozen artifact the arm's Paper book is opened from."""
     candidate = paper_candidate(records)
     if candidate is None:
         return None
@@ -657,7 +592,6 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         )
         if raw_status is not None:
             summary["status"] = status
-        best = _research_best(directory, records, running=bool(state.get("worker_alive")))
         forward = _forward_view(identity, forward_record(records))
         ending = arm_ending(identity, records, state, forward)
         summary.update(
@@ -666,8 +600,8 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "skills": {"count": skills.count, "files": skills.files, "bytes": skills.bytes},
                 "stage": arm_stage(records),
                 "frozen_session": _frozen_session(records),
-                "research_best": best,
-                "research_result": _research_result(records, best),
+                "record": _record_view(records, params),
+                "research_result": _research_result(records),
                 "research_outcome": next(
                     (row.get("outcome") for row in research_records(records)), None
                 ),
@@ -876,7 +810,8 @@ def _listing(
 def experiment_listing(
     root: Path, kept: str | None = None, *, archived: bool = False
 ) -> dict[str, object]:
-    """The home page's listing: every row in order, the best experiment,
+    """The home page's listing: every row in order, the ranking of the frozen
+    strategies with a readout,
     ``archived``, how many arms are archived, and ``kept``, the digest of the
     rows that change only when their files do (every arm without a live
     worker) and of which arms are archived. With ``archived`` the rows are the
@@ -894,7 +829,7 @@ def experiment_listing(
     rows, fresh, digest, shelved = _listing(Path(root), archived=archived)
     payload: dict[str, object] = {
         "experiments": rows,
-        "best": best_experiment(rows),
+        "ranking": ranking(rows),
         "kept": digest,
         "archived": shelved,
     }
@@ -904,29 +839,40 @@ def experiment_listing(
     return payload
 
 
-def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The homepage's best experiment: the graduate with the highest forward
-    bootstrap lower bound.
+def ranking(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
+    """The frozen strategies with a readout, ranked by their rolling record's
+    residual IR (a record the instrument could not read sorts last), each with
+    its forward reading and whether a Paper book may be opened from it.
 
-    Only a graduate is offered. Every other ending is an arm the pipeline
-    refused, and an arm still researching has no out-of-sample evidence at all,
-    so with no graduate the homepage names no best experiment rather than
-    crowning the least bad ending. Research-period numbers never rank. Ties
-    keep the listing order.
+    Research-period numbers never rank, and an arm without a forward record is
+    not listed: the record and the forward reading are the whole evidence.
+    Ties keep the listing order.
     """
 
-    ranked: list[tuple[float, int, Mapping[str, object]]] = []
+    ranked: list[tuple[int, float, int, dict[str, object]]] = []
     for position, row in enumerate(rows):
-        if _mapping(row.get("ending")).get("state") != "graduated":
+        readout = _mapping(_mapping(row.get("forward")).get("readout"))
+        if not readout:
             continue
-        forward = _mapping(_mapping(_mapping(row.get("forward")).get("slices")).get("forward"))
-        bound = _number(forward.get("lower_bound"))
-        if bound is not None:
-            ranked.append((-bound, position, row))
-    if not ranked:
-        return None
-    _bound, _position, row = min(ranked, key=lambda item: (item[0], item[1]))
-    return {"experiment_id": row["experiment_id"]}
+        record = _mapping(readout.get("record"))
+        ratio = _number(record.get("residual_information_ratio"))
+        ranked.append(
+            (
+                ratio is None,
+                -(ratio or 0.0),
+                position,
+                {
+                    "experiment_id": row["experiment_id"],
+                    "record": {
+                        key: record.get(key)
+                        for key in ("residual_information_ratio", "p_value", "years", "steps", "candidate_changes", "start", "end")
+                    },
+                    "forward": dict(_mapping(readout.get("forward"))),
+                    "paper_candidate": row.get("paper_candidate") is not None,
+                },
+            )
+        )
+    return [entry for *_order, entry in sorted(ranked, key=lambda item: item[:3])]
 
 
 def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
@@ -996,155 +942,18 @@ class ValidationView:
         )
 
 
-@dataclass(frozen=True)
-class BestCandidate:
-    """A research session's best full-span Validation: the listing's
-    ``research_best`` and a research record's ``best``. Served flat: the
-    session, the Validation's figures, then the fields below."""
-
-    session_key: object
-    validation: ValidationView
-    # The replay result the Validation recorded.
-    result: str | None
-    # What the zero-skill panel earned over the span, read while the session
-    # still runs; None otherwise.
-    panel_return: float | None = None
-    # A session recorded under the retired deflated-Sharpe gate (before
-    # 2026-11-03) stored these for the node it nominated; None otherwise.
-    deflated_sharpe_probability: float | None = None
-    trials: object = None
-
-    def to_record(self) -> dict[str, object]:
-        record = dataclass_record(self)
-        return {"session_key": record.pop("session_key"), **record.pop("validation"), **record}  # type: ignore[dict-item]
-
-
-def _best_row(steps: Sequence[Mapping[str, object]]) -> Mapping[str, object] | None:
-    """A session's full-span Validation with the highest active IR, or
-    ``None`` when it ran no measurable one."""
-
-    full = [
-        row
-        for row in steps
-        if row.get("span") == FULL_SPAN
-        # A control can never be nominated, so it is never the arm's best.
-        and row.get("control") is not True
-        and _number(_mapping(row.get("graded")).get("information_ratio")) is not None
-    ]
-    return max(
-        full,
-        key=lambda row: float(row["graded"]["information_ratio"]),  # type: ignore[index]
-        default=None,
-    )
-
-
-def _live_candidate(
-    directory: Path, steps: Sequence[Mapping[str, object]], *, running: bool
-) -> BestCandidate | None:
-    """An unrecorded session's best Validation so far and, while its worker
-    is ``running``, what its zero-skill panel earned. No gate is read: a
-    freeze is a registration, and the one performance reading, on the sealed
-    years, exists only after the session has ended. A session whose worker
-    no longer runs is read off its own files alone."""
-
-    best = _best_row(steps)
-    if best is None:
-        return None
-    sidecar: Mapping[str, object] = {}
-    if running:
-        try:
-            sidecar = read_json_object(
-                Path(str(best["validation_result_ref"])).parent / STYLE_ARTIFACT_NAME
-            )
-        except (OSError, ValueError):
-            pass
-    return BestCandidate(
-        session_key=SessionKind.RESEARCH,
-        validation=ValidationView.of(best, _cost_stress_multiplier(directory)),
-        result=_result_name(best.get("validation_result_ref")),
-        # What the zero-skill panel itself earned over the same span.
-        panel_return=panel_return(sidecar) if running else None,
-    )
-
-
-def _recorded_best(directory: Path, record: Mapping[str, object]) -> BestCandidate | None:
-    """A recorded research session's best Validation, read off its ledger
-    record alone, for the listing and the experiment page alike.
-
-    Its figures are the ones the record stores, or on a row recorded before
-    rows carried graded figures, the ones its own sidecar gives
-    (:func:`_graded_rows`); its deflated Sharpe probability and trials are
-    those the session's own freeze gate recorded, which exist only where the
-    session nominated this node. No gate is read again: a gate re-read under
-    today's code would state numbers the session never saw, so a figure the
-    record does not hold is shown as none.
-    """
-
-    best = _best_row(
-        _graded_rows(directory, [row for row in record.get("steps") or () if isinstance(row, Mapping)])
-    )
-    if best is None:
-        return None
-    gate = _mapping(record.get("freeze_gate"))
-    nominated = best.get("step_id") == record.get("nominated_step_id")
-    dsr = _mapping(gate.get("deflated_sharpe")) if nominated else {}
-    return BestCandidate(
-        session_key=record.get("session_key"),
-        validation=ValidationView.of(best, _cost_stress_multiplier(directory)),
-        result=_result_name(best.get("validation_result_ref")),
-        deflated_sharpe_probability=_number(dsr.get("deflated_sharpe_probability")),
-        trials=dsr.get("trials"),
-    )
-
-
-def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
-    """The research session that froze the arm's artifact, or ``None``.
-
-    The listing's one fact about the freeze: the experiment card draws the
-    freeze step from it instead of inferring a freeze from the stage and the
-    verdict.
-    """
-
-    row = frozen_record(records)
-    return str(row["session_key"]) if row is not None else None
-
-
-def _research_best(
-    directory: Path, records: Sequence[Mapping[str, object]], *, running: bool
-) -> dict[str, object] | None:
-    """The arm's best full-span candidate so far, for the listing.
-
-    The recorded research session's, read off its record as the experiment
-    page reads it (:func:`_recorded_best`), so both surfaces name one number;
-    before the session is recorded, the same choice over the Validations it
-    has recorded so far (:func:`_live_steps`), so the card, the tiles and
-    the curve follow the research as it happens. ``None`` while no
-    measurable full-span Validation exists — the card then shows no research
-    evidence rather than a dash.
-    """
-
-    research = research_records(records)
-    recorded = (_recorded_best(directory, record) for record in reversed(research))
-    best = next((item for item in recorded if item is not None), None)
-    if best is None and not research:
-        best = _live_best(directory, running=running)
-    return best.to_record() if best is not None else None
-
-
 # A recorded Validation is immutable: its sidecar and its result's style file
-# are read once per node and kept for the process lifetime, and the best
-# candidate is kept per node set, so a listing poll of a running arm re-reads
-# nothing until the session records another node.
+# are read once per node and kept for the process lifetime, so a listing poll
+# of a running arm re-reads nothing until the session records another node.
 _LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
-_LIVE_BEST_CACHE: dict[tuple[str, bool, tuple[str, ...]], BestCandidate | None] = {}
 
 
 def _live_steps(directory: Path) -> list[dict[str, object]]:
     """The research session's Validations recorded so far, from the host
     sidecars ``session_resume.record_step_sidecar`` writes, shaped like the
     ledger's step rows with the graded figures the Pipeline records
-    (``experiment.validation_statistics``), so the same selection applies to
-    both."""
+    (``experiment.validation_statistics``): what names a running session's
+    results to the console before the session is recorded."""
 
     root = directory / STEP_SIDECAR_DIR
     if not root.is_dir():
@@ -1171,8 +980,6 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
                 "summary": dict(_mapping(record.get("summary"))),
                 "validation_result_ref": reference,
                 "graded": figures,
-                # A control is never the arm's best; absent on a sidecar
-                # written before controls were registered.
                 **{name: record.get(name) for name in ("control", "batch_id")},
             }
             _LIVE_STEP_CACHE[key] = row
@@ -1180,24 +987,102 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _live_best(directory: Path, *, running: bool) -> BestCandidate | None:
-    steps = _live_steps(directory)
-    key = (str(directory), running, tuple(sorted(str(row.get("step_id")) for row in steps)))
-    if key not in _LIVE_BEST_CACHE:
-        _LIVE_BEST_CACHE[key] = _live_candidate(directory, steps, running=running)
-    return _LIVE_BEST_CACHE[key]
+def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
+    """The research session that froze the arm's artifact, or ``None``.
 
-
-def _research_result(
-    records: Sequence[Mapping[str, object]], best: Mapping[str, object] | None
-) -> str | None:
-    """The research-period result the console draws: the frozen artifact's own
-    validation once the arm froze, else the best full-span candidate's."""
+    The listing's one fact about the freeze: the experiment card draws the
+    freeze step from it instead of inferring a freeze from the stage and the
+    verdict.
+    """
 
     row = frozen_record(records)
-    if row is not None:
-        return _result_name(_mapping(row.get("frozen")).get("research_result_ref"))
-    return str(best["result"]) if best and best.get("result") else None
+    return str(row["session_key"]) if row is not None else None
+
+
+def _research_result(records: Sequence[Mapping[str, object]]) -> str | None:
+    """The research-period result the console draws beside the forward replay:
+    the frozen strategy's own validation, once the arm froze."""
+
+    row = frozen_record(records)
+    if row is None:
+        return None
+    return _result_name(_mapping(row.get("frozen")).get("research_result_ref"))
+
+
+def _record_alpha(params: Mapping[str, object]) -> float:
+    """The level the arm's record is read at, from its own stamped rules; an
+    arm with a record was created under the rolling validation, whose rules
+    state it."""
+
+    return acceptance_for(params).alpha
+
+
+def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, object]) -> dict[str, object] | None:
+    """The arm's rolling record so far, read as one series: the steps the
+    ledger holds, the frontier they reached, the instrument over them
+    (``rolling_record.record_instrument``) and how often the candidate
+    changed. ``None`` before the first step is recorded: nothing is read off a
+    replay the ledger does not name."""
+
+    tests = rolling_record.test_step_records(records)
+    if not tests:
+        return None
+    instrument = rolling_record.record_instrument([row["entry"] for row in tests], alpha=_record_alpha(params))  # type: ignore[misc]
+    return {
+        **instrument,
+        "start": str(tests[0]["window"]["start"]),  # type: ignore[index]
+        "end": str(tests[-1]["window"]["end"]),  # type: ignore[index]
+        "frontier": str(tests[-1]["frontier"]),
+        "candidate_changes": rolling_record.candidate_changes(records),
+    }
+
+
+def _record_detail(
+    identity: PublicIdentity, records: Sequence[Mapping[str, object]], params: Mapping[str, object]
+) -> dict[str, object] | None:
+    """The record for the experiment page: :func:`_record_view` with one row per
+    step (its window, frontier, candidate by public ref, source and entry
+    without the daily rows) and the daily curve the stitched entries give --
+    the book and its zero-skill panel compounded, with each step's bounds and
+    whether its candidate changed, for the chart's markers."""
+
+    view = _record_view(records, params)
+    if view is None:
+        return None
+    tests = rolling_record.test_step_records(records)
+    rows: list[dict[str, object]] = []
+    dates: list[str] = []
+    book: list[float] = []
+    panel: list[float] = []
+    steps: list[dict[str, object]] = []
+    book_level = panel_level = 1.0
+    previous: str | None = None
+    for record in tests:
+        candidate = _mapping(record.get("candidate"))
+        entry = _mapping(record.get("entry"))
+        fingerprint = str(candidate.get("fingerprint") or "")
+        changed = previous is not None and fingerprint != previous
+        previous = fingerprint
+        rows.append(
+            {
+                "step": record.get("step"),
+                "window": dict(_mapping(record.get("window"))),
+                "frontier": record.get("frontier"),
+                "candidate": identity.public_text(str(candidate.get("step_id") or "")),
+                "changed": changed,
+                "source": record.get("source"),
+                **{key: value for key, value in entry.items() if key != "daily"},
+            }
+        )
+        for day, strategy, panel_value, *_legs in entry.get("daily") or ():  # type: ignore[misc]
+            book_level *= 1.0 + float(strategy)
+            panel_level *= 1.0 + float(panel_value)
+            dates.append(str(day))
+            book.append(book_level - 1.0)
+            panel.append(panel_level - 1.0)
+        window = _mapping(record.get("window"))
+        steps.append({"step": record.get("step"), "start": window.get("start"), "end": window.get("end"), "changed": changed})
+    return {**view, "rows": rows, "curve": {"dates": dates, "book": book, "panel": panel, "steps": steps}}
 
 
 def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
@@ -1252,26 +1137,27 @@ def _arm_forward_records(root: Path) -> tuple[list[tuple[str, Mapping[str, objec
     return found, unreadable
 
 
-def _forward_readouts(root: Path, record: Mapping[str, object] | None) -> dict[str, object] | None:
-    """What every arm under ``root`` read over this arm's sealed and forward
-    windows, beside its own forward record; ``None`` before that record, or
-    for a record written before the sealed gate.
+def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[str, object] | None:
+    """What every arm under ``root`` read over this arm's validation window and
+    forward months, beside its own forward ``record``; ``None`` before that
+    record, or for a record judged under the sealed gate.
 
-    ``sealed_window``: every frozen nominee's sealed reading over the same
-    sealed years, its residual IR, years and one-sided null p-value
-    (``verdict.null_p_value``), and how many there are. No reading is
-    adjusted for the others and no bar moves with their count; the count is
-    what a p-value is weighed against. ``forward_pool``: every frozen
-    nominee's residual reading over the same forward months, pooled
-    (``verdict.pooled_reading``): one forward year cannot certify a strategy.
-    A nominee that raised in its forward replay has no reading, and is
-    counted under ``raised`` rather than left out silently.
+    ``validation_window``: every frozen strategy's rolling record over the
+    same validation period -- its residual IR, years, one-sided null p-value
+    (``verdict.null_p_value``), steps and candidate changes -- and how many
+    there are. No reading is adjusted for the others and no bar moves with
+    their count; the count is what a p-value is weighed against.
+    ``forward_pool``: every frozen strategy's residual reading over the same
+    forward months, pooled (``verdict.pooled_reading``): one forward year
+    cannot certify a strategy. A strategy that raised in its forward replay
+    has no reading, and is counted under ``raised`` rather than left out
+    silently.
     """
 
-    sealed = _mapping(_mapping(record).get("sealed"))
-    if not sealed:
+    mine = _mapping(_mapping(record).get("readout"))
+    if not mine:
         return None
-    window = _mapping(sealed.get("slice"))
+    window = _mapping(mine.get("record"))
 
     def forward_months(row: Mapping[str, object]) -> tuple[object, object]:
         replay = _mapping(row.get("replay"))
@@ -1283,27 +1169,31 @@ def _forward_readouts(root: Path, record: Mapping[str, object] | None) -> dict[s
     pooled: list[dict[str, object]] = []
     raised = 0
     for experiment_id, other in records:
-        block = _mapping(_mapping(other.get("sealed")).get("slice"))
-        if block and (block.get("start"), block.get("end")) == (window.get("start"), window.get("end")):
+        readout = _mapping(other.get("readout"))
+        if not readout:
+            continue
+        block = _mapping(readout.get("record"))
+        if (block.get("start"), block.get("end")) == (window.get("start"), window.get("end")):
             ratio, years = _number(block.get("residual_information_ratio")), _number(block.get("years"))
             readings.append(
                 {
                     "experiment_id": experiment_id,
                     "residual_information_ratio": ratio,
                     "years": years,
-                    "passed": not block.get("reasons"),
-                    "p_value": None if ratio is None or not years else null_p_value(ratio, years),
+                    "p_value": _number(block.get("p_value")),
+                    "steps": block.get("steps"),
+                    "candidate_changes": block.get("candidate_changes"),
                 }
             )
-        if other.get("sealed") and forward_months(other) == months:
-            mine = _mapping(_mapping(other.get("slices")).get("forward"))
-            if mine:
-                pooled.append(dict(_mapping(mine.get("residual_reading"))))
+        if forward_months(other) == months:
+            slice_reading = _mapping(_mapping(readout.get("forward")).get("residual_reading"))
+            if slice_reading:
+                pooled.append(dict(slice_reading))
             else:
                 raised += 1
     readings.sort(key=lambda row: (row["p_value"] is None, row["p_value"] or 0.0))
     return {
-        "sealed_window": {
+        "validation_window": {
             "start": window.get("start"),
             "end": window.get("end"),
             "count": len(readings),
@@ -1427,7 +1317,6 @@ def _research_session_view(
         if isinstance(record.get("arm_end"), Mapping)
         else None,
         "validations": [dataclass_record(ValidationView.of(row, multiplier)) for row in steps],
-        "best": best.to_record() if (best := _recorded_best(directory, record)) is not None else None,
         "attempts": record.get("attempts"),
         "budget_used": _mapping(record.get("budget_used")) or None,
     }
@@ -1569,7 +1458,8 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         ),
         "sessions": sessions,
         "frozen": _frozen_view(directory, identity, records),
-        "readouts": _forward_readouts(root, forward_record(records)),
+        "record": _record_detail(identity, records, params),
+        "readouts": _record_readouts(root, forward_record(records)),
         # Two different failures, kept apart: a forward replay attempt that
         # raised before its record -- selected by the pipeline's stage, not by
         # the provider phase the replay reads (``FORWARD_PHASE``) -- and a

@@ -163,7 +163,8 @@ def record_instrument(entries: Sequence[Mapping[str, object]], *, alpha: float) 
     ``return`` and ``max_drawdown`` compound the stitched book, ``turnover``
     sums the entries' own. A record the statistic cannot read yet (too few
     days, or legs that explain it exactly) says why under ``unmeasured`` and
-    carries the compounded figures alone.
+    carries the compounded figures alone; one it read carries ``unmeasured``
+    as None, so every reader sees one shape.
     """
 
     daily = [row for entry in entries for row in entry.get("daily") or ()]
@@ -191,6 +192,7 @@ def record_instrument(entries: Sequence[Mapping[str, object]], *, alpha: float) 
         **figures,
         **reading,
         "p_value": null_p_value(float(reading["residual_information_ratio"]), float(reading["years"])),  # type: ignore[arg-type]
+        "unmeasured": None,
     }
 
 
@@ -258,7 +260,8 @@ def readout(
     over the Forward year, the slice ``verdict.forward_slice`` read: its
     lower bound and residual reading; a book that raised in its own code
     during the replay has ``strategy_error`` there instead (the slice it
-    raised in and the error), which is a reading too.
+    raised in and the error), which is a reading too. The block has one shape
+    either way, with None where a reading does not exist.
     """
 
     tests = test_step_records(records)
@@ -275,11 +278,12 @@ def readout(
         block["forward"] = {
             "lower_bound": forward.get("lower_bound"),
             "residual_reading": dict(forward["residual_reading"]),  # type: ignore[arg-type]
+            "strategy_error": None,
         }
     else:
         if strategy_error is None:
             raise ValueError("a readout without a forward slice names the strategy error that left it unread")
-        block["forward"] = {"strategy_error": dict(strategy_error)}
+        block["forward"] = {"lower_bound": None, "residual_reading": None, "strategy_error": dict(strategy_error)}
     return block
 
 

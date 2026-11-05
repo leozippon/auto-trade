@@ -452,8 +452,7 @@ def build_arm(
         record_analysis = _analysis(record_ref)
         for step in range(1, plan.count + 1):
             first, last = plan.window(step)
-            records.append(
-                rolling_record.test_step_record(
+            step_record = rolling_record.test_step_record(
                     head={
                         "experiment_id": experiment_id,
                         "epoch_id": "research",
@@ -475,7 +474,9 @@ def build_arm(
                     registration=gate,
                     source=rolling_record.SOURCE_HOST_COMPLETION,
                 )
-            )
+            # The session record is already in the ledger: the steps follow it.
+            records.append(step_record)
+            ledger.append(step_record)
     if stage in ("frozen_with_record", "graduated", "discarded"):
         edge = 0.002 if stage in ("frozen_with_record", "graduated") else -0.002
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)

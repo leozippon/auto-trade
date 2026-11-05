@@ -142,7 +142,7 @@ def test_the_instrument_reads_the_stitched_entries_with_the_bar_for_their_length
     assert stitched["series"] == "active"
     assert stitched["years"] == pytest.approx(stitched["days"] / 244)
     assert stitched["bar"] == pytest.approx(1.6449 / math.sqrt(stitched["years"]), abs=1e-3)
-    assert 0 < stitched["p_value"] < 1
+    assert 0 < stitched["p_value"] < 1 and stitched["unmeasured"] is None
     # The stitched reading equals the one whole-span reading over the same days.
     whole = step_entry(replay, analysis, start=steps.windows[0][0], end=steps.windows[2][1])
     alone = record_instrument([whole], alpha=0.05)

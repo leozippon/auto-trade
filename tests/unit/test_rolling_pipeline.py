@@ -838,6 +838,7 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     assert readout["forward"] == {
         "lower_bound": forward["lower_bound"],
         "residual_reading": forward["residual_reading"],
+        "strategy_error": None,
     }
     assert experiment_verdict(ledger.read()) == {"status": "frozen_with_record", "reasons": []}
     assert paper_candidate(ledger.read())["artifact_id"] == frozen["artifact_id"]
@@ -956,8 +957,8 @@ def test_a_strategy_error_names_the_slice_it_raised_in_and_is_a_reading(
     assert readout["state"] == "frozen_with_record"
     assert readout["forward"]["strategy_error"]["slice"] == "heldout"
     assert str(cause) in readout["forward"]["strategy_error"]["error"]
-    assert "lower_bound" not in readout["forward"]
-    assert readout["record"]["steps"] == 0 and "unmeasured" in readout["record"]
+    assert readout["forward"]["lower_bound"] is None and readout["forward"]["residual_reading"] is None
+    assert readout["record"]["steps"] == 0 and readout["record"]["unmeasured"]
     assert experiment_verdict(ledger.read()) == {"status": "frozen_with_record", "reasons": []}
     assert paper_candidate(ledger.read()) is None
 

@@ -33,9 +33,9 @@ from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.webui import registry
 from autotrade.webui.registry import (
     ENDING_STATES,
-    best_experiment,
     experiment_detail,
     experiment_listing,
+    ranking,
     summarize_experiment,
 )
 from autotrade.webui.server import create_app
@@ -78,11 +78,12 @@ def test_a_researching_arm_shows_its_plan_and_nothing_frozen(tmp_path: Path) -> 
     assert detail["sessions"][1]["replay"] == REPLAY
 
 
-def test_the_best_candidate_carries_the_deflated_sharpe_the_gate_gave_the_nominee(
+def test_a_frozen_arm_lists_its_validations_and_the_registration_it_froze_under(
     tmp_path: Path,
 ) -> None:
-    """One source for the number: the session row's probability for its
-    nominee equals the one the freeze gate recorded when it froze."""
+    """A recorded session serves its outcome, attempts, budget, the registration
+    the freeze passed (which carries no score) and every Validation it ran;
+    research results are development evidence, readable as they land."""
 
     build_arm(tmp_path, "arm", "sealed")
     record = experiment_detail(tmp_path, "arm")["sessions"][0]["record"]
@@ -90,19 +91,14 @@ def test_the_best_candidate_carries_the_deflated_sharpe_the_gate_gave_the_nomine
     assert record["froze"] is True
     assert record["attempts"] == 1
     assert record["budget_used"]["test_replays"] == 8
-    assert record["best"]["step_id"] == record["nominated_step_id"]
-    # No trial count and no deflated Sharpe since the sealed gate.
-    assert (record["best"]["trials"], record["best"]["deflated_sharpe_probability"]) == (None, None)
-    # Research results are development evidence: readable as they land.
+    assert "best" not in record
     client = TestClient(create_app(tmp_path, tmp_path))
     name = Path(str(_records(tmp_path / "arm")[0]["steps"][0]["validation_result_ref"])).parent.name
     assert client.get(f"/api/experiments/arm/results/{name}/equity").status_code == 200
     # The record says whether its trace is on disk; this synthetic arm has none.
     assert record["trace"] is False
-    # The freeze is a registration: it passed, and it carries no score.
     assert record["freeze_gate"]["passed"] is True
     assert record["freeze_gate"]["deflated_sharpe_probability"] is None
-    # A sub-span Validation is listed but never the best full-span candidate.
     assert {row["span"] for row in record["validations"]} == {"full", "Y3"}
 
 
@@ -217,10 +213,15 @@ def test_a_moved_arm_serves_its_recorded_paths_from_where_it_now_lives(
 
 
 @pytest.mark.parametrize("status", ["graduated", "discarded"])
-def test_the_verdict_opens_the_forward_replay(tmp_path: Path, status: str) -> None:
+def test_a_sealed_gate_record_still_opens_its_forward_replay(tmp_path: Path, status: str) -> None:
+    """An arm judged under the retired sealed gate keeps its verdict and its
+    replay readable: the record is shown as written, and no readout is read
+    off it."""
+
     build_arm(tmp_path, "arm", status)
     detail = experiment_detail(tmp_path, "arm")
-    assert detail["stage"] == "verdict"
+    assert detail["stage"] == "readout"
+    assert detail["forward"]["readout"] is None and detail["readouts"] is None
     assert detail["verdict"]["status"] == status
     record = _records(tmp_path / "arm")[-1]
     assert detail["verdict"]["reasons"] == record["verdict"]["reasons"]
@@ -251,7 +252,7 @@ def test_the_verdict_opens_the_forward_replay(tmp_path: Path, status: str) -> No
 def test_a_research_that_froze_nothing_has_a_verdict_and_no_replay(tmp_path: Path) -> None:
     build_arm(tmp_path, "arm", "no_deliverable")
     detail = experiment_detail(tmp_path, "arm")
-    assert detail["stage"] == "verdict"
+    assert detail["stage"] == "readout"
     assert detail["verdict"] == {
         "status": "no_deliverable",
         "reasons": ["no_edge: nothing survived"],
@@ -259,7 +260,7 @@ def test_a_research_that_froze_nothing_has_a_verdict_and_no_replay(tmp_path: Pat
     assert detail["frozen"] is None
     assert detail["forward"] is None
     assert detail["sessions"][0]["record"]["arm_end"]["status"] == "no_deliverable"
-    assert detail["sessions"][0]["record"]["best"] is None
+    assert detail["record"] is None
 
 
 def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Path) -> None:
@@ -404,10 +405,9 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
     # Listed in the failures' group, newest first inside it, ahead of the
     # endings nobody decided whatever its date.
     assert [row["experiment_id"] for row in rows] == ["graduated", "withdrawn", "refused", "no_edge"]
-    # Never crowned, even over a lower bound the graduate cannot match.
-    withdrawn["forward"]["slices"]["forward"]["lower_bound"] = 1.0
-    assert best_experiment(rows) == {"experiment_id": "graduated"}
-    assert best_experiment([withdrawn]) is None
+    # Nothing judged under the sealed gate is ranked: the ranking lists frozen
+    # strategies with a readout, and these arms have none.
+    assert ranking(rows) == []
     # The replay's own record stays, and the 裁决 view has the void in full.
     assert withdrawn["forward"]["slices"]["forward"]["raw_readings"]["raw_excess"] is not None
     assert withdrawn["paper_candidate"] is None
@@ -480,10 +480,10 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
         assert reads(name, "seeds") <= set(gate), name
         assert reads(name, "entry") <= set(gate["replicates"][0]), name
     assert "if (!shown.length) return null;" in body("seedReadingsTable")
-    for panel in ("forwardStagePanel", "heldoutStagePanel", "verdictStagePanel"):
+    for panel in ("forwardStagePanel", "heldoutStagePanel", "readoutStagePanel"):
         assert "seedReadingsTable(" in body(panel), panel
     # Never on the home page.
-    for home in ("experimentCard", "heroPanel", "evidenceTiles", "forwardTiles"):
+    for home in ("experimentCard", "rankingPanel", "evidenceTiles"):
         assert "seed" not in body(home), home
 
 
@@ -660,8 +660,6 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     assert rows["researching"]["research_result"] is None
     frozen_ref = _records(tmp_path / "frozen")[0]["frozen"]["research_result_ref"]
     assert rows["frozen"]["research_result"] == Path(str(frozen_ref)).parent.name
-    # This arm nominated its best candidate, so both names agree.
-    assert rows["frozen"]["research_best"]["result"] == rows["frozen"]["research_result"]
 
     # The forward step states how the record will be read: the level, the
     # research and validation years, the step length and the bar over the
@@ -703,68 +701,46 @@ def _sidecar(directory: Path, row: dict[str, object]) -> Path:
     return path
 
 
-def test_a_running_session_serves_its_best_candidate_and_the_record_keeps_it(tmp_path: Path) -> None:
-    """While the one research session runs, the listing reads the Validations
-    it has recorded so far from the host sidecars and names the best
-    full-span candidate, its curve and its result by the rule the recorded
-    session is read with, with the freeze gate read now. Once the record
-    lands the same candidate is read off it alone: its figures stay, and the
-    gate the session never recorded over it is shown as none."""
+def test_a_running_sessions_validations_are_served_off_their_sidecars(tmp_path: Path) -> None:
+    """While the one research session runs, its Validations are known to the
+    console only through the host sidecars: their results are readable, no
+    research-period figure is served as evidence, and the record stays empty
+    until the ledger holds a step."""
 
     directory = build_arm(tmp_path, "arm", "research", alive=True)
     steps = [
         _step(directory, "research", 0, edge=0.0005, seed=1),
         _step(directory, "research", 1, edge=0.002, seed=3),
-        _step(directory, "research", 2, edge=0.001, seed=4, span="Y3"),
     ]
     for row in steps:
         _sidecar(directory, row)
     live = summarize_experiment(directory)
-    assert live["research_best"]["step_id"] == steps[1]["step_id"]
-    assert live["research_best"]["session_key"] == "research"
-    # No gate is read over a running session, and none is served.
-    assert (live["research_best"]["trials"], live["research_best"]["deflated_sharpe_probability"]) == (None, None)
-    assert live["research_best"]["panel_return"] is None  # these sidecars carry no panel
-    assert live["research_result"] == Path(str(steps[1]["validation_result_ref"])).parent.name
+    assert live["record"] is None and live["research_result"] is None
+    assert "research_best" not in live
     client = TestClient(create_app(tmp_path, tmp_path))
-    assert client.get(f"/api/experiments/arm/results/{live['research_result']}/equity").status_code == 200
-    # The replay stays sealed: a result no record or sidecar names is absent.
+    for row in steps:
+        name = Path(str(row["validation_result_ref"])).parent.name
+        assert client.get(f"/api/experiments/arm/results/{name}/equity").status_code == 200
+    # A result no record or sidecar names is absent.
     assert client.get("/api/experiments/arm/results/heldout_nope/equity").status_code == 404
-
-    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
-        _session_record(
-            "arm",
-            outcome="no_edge",
-            steps=steps,
-            trials_to_date=3,
-            arm_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
-        )
-    )
-    recorded = summarize_experiment(directory)
-    gated = ("deflated_sharpe_probability", "trials", "panel_return")
-    assert {key: value for key, value in recorded["research_best"].items() if key not in gated} == {
-        key: value for key, value in live["research_best"].items() if key not in gated
-    }
-    assert (recorded["research_best"]["deflated_sharpe_probability"], recorded["research_best"]["trials"]) == (None, None)
-    assert recorded["research_result"] == live["research_result"]
 
 
 def test_a_recorded_node_is_read_once_across_listings(tmp_path: Path) -> None:
     """A Validation is immutable once recorded: its sidecar and style file are
-    read on the first listing and never again, and the best candidate is kept
-    per node set, so a poll re-reads nothing until another node is recorded."""
+    read on the first listing and never again, so a poll re-reads nothing
+    until another node is recorded."""
 
     directory = build_arm(tmp_path, "arm", "research", alive=True)
     first = _step(directory, "research", 0, edge=0.002, seed=3)
     _sidecar(directory, first)
-    before = summarize_experiment(directory)["research_best"]
+    [before] = registry._live_steps(directory)
     assert before["step_id"] == first["step_id"]
     (Path(str(first["validation_result_ref"])).parent / "style_analysis.json").unlink()
-    assert summarize_experiment(directory)["research_best"] == before
-    # A newly recorded node is read, and the best is chosen over the new set.
+    assert registry._live_steps(directory) == [before]
+    # A newly recorded node is read beside the kept one.
     second = _step(directory, "research", 1, edge=0.004, seed=5)
     _sidecar(directory, second)
-    assert summarize_experiment(directory)["research_best"]["step_id"] == second["step_id"]
+    assert [row["step_id"] for row in registry._live_steps(directory)] == [first["step_id"], second["step_id"]]
 
 
 def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
@@ -772,82 +748,44 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
 ) -> None:
     """A recorded research session and a forward record are what an ended arm
     shows: a cold console lists every such arm and opens its page without
-    calling the freeze gate or reading any replay's series, and the numbers it
-    serves are the ledger's own -- the nominee's deflated Sharpe as its gate
-    recorded it, and no gate at all over a best candidate the session never
-    nominated. Only a running session's live Validations are gated, now."""
+    reading any replay's series again, and the numbers it serves are the
+    ledger's own -- a sealed-gate record's slices and verdict key for key, and
+    a readout as the forward record states it."""
 
     root = tmp_path / "experiments"
     for experiment_id, stage in (
         ("frozen", "sealed"),
+        ("recorded", "frozen_with_record"),
         ("graduate", "graduated"),
         ("refused", "discarded"),
         ("no_edge", "no_deliverable"),
-        # Stopped mid-session: Validations on disk, no session record.
-        ("stopped", "research"),
     ):
         build_arm(root, experiment_id, stage)
-    _sidecar(root / "stopped", _step(root / "stopped", "research", 0, edge=0.002, seed=3))
-    no_edge = root / "no_edge"
-    steps = [
-        _step(no_edge, "research", 0, edge=0.0005, seed=1),
-        _step(no_edge, "research", 1, edge=0.002, seed=3),
-    ]
-    ledger = ExperimentLedger(no_edge / "ledgers/experiment_ledger.jsonl")
-    records = ledger.read()
-    records[0]["steps"] = steps
-    ledger.rewrite(records)
     for directory in root.iterdir():
-        if directory.name == "stopped":
-            continue  # its Validations are read off their own files
         for result in (directory / "artifacts/results").glob("*/style_analysis.json"):
             result.unlink()
 
     calls: list[str] = []
-    panel = registry.panel_return
+    statistics = registry.validation_statistics
 
-    def paneled(*args: object, **kwargs: object) -> object:
-        calls.append("panel_return")
-        return panel(*args, **kwargs)
+    def counted(*args: object, **kwargs: object) -> object:
+        calls.append("validation_statistics")
+        return statistics(*args, **kwargs)
 
-    monkeypatch.setattr(registry, "panel_return", paneled)
+    monkeypatch.setattr(registry, "validation_statistics", counted)
     monkeypatch.setattr(registry, "_SUMMARY_CACHE", {})
     client = TestClient(create_app(tmp_path, root))
     rows = {row["experiment_id"]: row for row in client.get("/api/experiments").json()["experiments"]}
     details = {name: client.get(f"/api/experiments/{name}").json() for name in rows}
     assert calls == []
     assert all(row.get("state") != "unreadable" for row in rows.values())
-
-    # The nominee is the best candidate; registration recorded no score of it.
-    stored = _records(root / "frozen")[0]
-    best = rows["frozen"]["research_best"]
-    assert best["step_id"] == stored["nominated_step_id"]
-    assert (best["deflated_sharpe_probability"], best["trials"]) == (None, None)
-    assert best["information_ratio"] == stored["steps"][1]["graded"]["information_ratio"]
-    assert {"session_key": "research", **details["frozen"]["sessions"][0]["record"]["best"]} == best
-    # A session that nominated nothing recorded no gate over its best, and
-    # one stopped before its record has none either.
-    unnominated = rows["no_edge"]["research_best"]
-    assert unnominated["step_id"] == steps[1]["step_id"]
-    assert (unnominated.get("deflated_sharpe_probability"), unnominated.get("trials")) == (None, None)
-    stopped = rows["stopped"]["research_best"]
-    assert stopped["information_ratio"] is not None
-    assert (stopped["trials"], stopped["deflated_sharpe_probability"]) == (None, None)
-    # The forward slices and verdict are the record's, key for key.
     for name in ("graduate", "refused"):
         forward = _records(root / name)[-1]
         assert details[name]["forward"]["slices"] == forward["slices"]
         assert details[name]["forward"]["verdict"] == forward["verdict"]
-
-    # A running session reads its best candidate and what its panel earned,
-    # and no gate.
-    running = build_arm(root, "running", "research", alive=True)
-    _sidecar(running, _step(running, "research", 0, edge=0.002, seed=3))
-    live = client.get("/api/experiments").json()
-    assert calls[:1] == ["panel_return"]
-    running_best = next(row for row in live["experiments"] if row["experiment_id"] == "running")["research_best"]
-    assert running_best["information_ratio"] is not None
-    assert running_best["deflated_sharpe_probability"] is None
+    recorded = _records(root / "recorded")[-1]
+    assert details["recorded"]["forward"]["readout"] == recorded["readout"]
+    assert rows["recorded"]["record"]["steps"] == recorded["readout"]["record"]["steps"]
 
 
 def test_a_page_poll_keeps_one_request_in_flight() -> None:
@@ -889,9 +827,9 @@ def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Pa
     poll = client.get("/api/experiments", params={"kept": full["kept"]}).json()
     assert [row["experiment_id"] for row in poll["experiments"]] == ["running"]
     assert poll["order"] == order
-    assert (poll["kept"], poll["best"], poll["running"]) == (
+    assert (poll["kept"], poll["ranking"], poll["running"]) == (
         full["kept"],
-        full["best"],
+        full["ranking"],
         full["running"],
     )
     stale = client.get("/api/experiments", params={"kept": "not-the-digest"}).json()
@@ -939,7 +877,7 @@ def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
     shelf = client.get("/api/experiments", params={"archived": 1}).json()
     assert [row["experiment_id"] for row in shelf["experiments"]] == ["shelved"]
     assert shelf["archived"] == 1
-    assert shelf["experiments"][0]["research_best"]["information_ratio"] is not None
+    assert shelf["experiments"][0]["frozen_session"] == "research"
     detail = client.get("/api/experiments/shelved").json()
     assert detail["archived"]["reason"] == "historical" and detail["stage"] == shelf["experiments"][0]["stage"]
     assert client.get("/api/experiments/ended").json()["archived"] is None
@@ -1089,53 +1027,59 @@ def _lower_bound(row: dict[str, object]) -> float:
     return row["forward"]["slices"]["forward"]["lower_bound"]  # type: ignore[index]
 
 
-def test_only_a_graduate_is_the_best_experiment(tmp_path: Path) -> None:
+def test_the_ranking_lists_frozen_strategies_by_their_records_residual_ir(tmp_path: Path) -> None:
+    """Only a frozen strategy with a readout is ranked, by its rolling record's
+    residual IR; a record the instrument could not read sorts last; nothing
+    judged under the sealed gate and nothing still researching is listed."""
+
     for experiment_id, stage in (
-        ("discarded", "discarded"),
+        ("first", "frozen_with_record"),
+        ("second", "frozen_with_record"),
+        ("unread", "frozen_with_record"),
+        ("graduated", "graduated"),
         ("researching", "research"),
         ("no_edge", "no_deliverable"),
-        ("graduated", "graduated"),
     ):
         build_arm(tmp_path, experiment_id, stage)
+
+    def restate(name: str, **record: object) -> None:
+        ledger = tmp_path / name / "ledgers/experiment_ledger.jsonl"
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        rows[-1]["readout"]["record"].update(record)
+        ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+    restate("second", residual_information_ratio=50.0)
+    restate("unread", residual_information_ratio=None, p_value=None, unmeasured="the record has no entry yet")
     rows = experiment_listing(tmp_path)["experiments"]
-    assert best_experiment(rows) == {"experiment_id": "graduated"}
-    # Every other ending is an arm the pipeline refused: with no graduate the
-    # homepage crowns nobody, whatever bound the refused arm carries.
-    without_graduate = [row for row in rows if row["experiment_id"] != "graduated"]
-    assert best_experiment(without_graduate) is None
-    graduated = next(row for row in rows if row["experiment_id"] == "graduated")
-    discarded = next(row for row in rows if row["experiment_id"] == "discarded")
-    discarded["forward"]["slices"]["forward"]["lower_bound"] = _lower_bound(graduated) + 1
-    assert best_experiment([discarded, graduated])["experiment_id"] == "graduated"
-    # Two graduates: the higher lower bound wins.
-    second = json.loads(json.dumps(graduated))
-    second["experiment_id"] = "graduated_better"
-    second["forward"]["slices"]["forward"]["lower_bound"] = _lower_bound(graduated) + 0.1
-    assert best_experiment([graduated, second])["experiment_id"] == "graduated_better"
-    # A stopped arm without a verdict never ranks on research numbers.
-    researching = [row for row in rows if row["experiment_id"] == "researching"]
-    assert best_experiment(researching) is None
+    ranked = ranking(rows)
+    assert [row["experiment_id"] for row in ranked] == ["second", "first", "unread"]
+    assert ranked[0]["record"]["residual_information_ratio"] == 50.0
+    assert all(row["paper_candidate"] for row in ranked)
+    readout = _records(tmp_path / "first")[-1]["readout"]
+    assert ranked[1]["record"]["p_value"] == readout["record"]["p_value"]
+    assert ranked[1]["forward"] == readout["forward"]
+    # The home page serves the same ranking with its listing.
+    listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
+    assert listed["ranking"] == ranked
 
 
-def test_a_running_arm_is_never_the_best_experiment(tmp_path: Path) -> None:
-    """Ranking running arms by how far they had got crowned one of a field that
-    had produced no out-of-sample evidence at all. With nothing judged the
-    homepage names no best experiment."""
+def test_an_arm_without_a_readout_is_not_ranked(tmp_path: Path) -> None:
+    """Ranking running arms by how far they had got would crown one of a field
+    that has produced no out-of-sample reading at all: with no readout the
+    ranking is empty, and the homepage draws no ranking panel."""
 
     build_arm(tmp_path, "early", "research", alive=True)
-    build_arm(tmp_path, "sealed", "sealed", alive=True)
+    build_arm(tmp_path, "frozen", "sealed", alive=True)
     rows = experiment_listing(tmp_path)["experiments"]
-    assert best_experiment(rows) is None
+    assert ranking(rows) == []
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
-    assert listed["best"] is None
-    # …and the homepage draws no hero for a null answer, rather than an empty
-    # crowned panel above the listing.
+    assert listed["ranking"] == []
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    assert "if (!best) return null;" in script.split("function bestRow(", 1)[1]
+    assert "if (!rows.length) return null;" in script.split("function rankingPanel(", 1)[1]
     home = script.split("function homeView(", 1)[1].split("\nfunction ", 1)[0]
-    assert "if (best)" in home and "heroPanel(best)" in home
+    assert "rankingPanel(payload)" in home and "heroPanel" not in script
 
 
 def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
@@ -1153,26 +1097,23 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
         return script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
 
     joined = re.compile(r"\$\{[^}]*\} ?/ ?\$\{")
-    for name in ("forwardTiles", "accountTiles", "evidenceTiles"):
+    for name in ("accountTiles", "evidenceTiles", "rankingPanel"):
         assert not joined.search(body(name)), name
     card = body("experimentCard")
     assert "fraction: false" in card and "{ mini: true }" in card
-    assert "evidenceTiles(item)" in card and "forwardTiles(item)" in body("heroPanel")
+    assert "evidenceTiles(item)" in card
     # The fraction and the limit are left out of the card's lines only.
     assert "fraction && Number.isFinite(done)" in body("activityNode")
     budget = re.sub(r"\s+", " ", body("budgetBars"))
     assert "mini ? row.spent" in budget and "mini ? `${row.label}已用 ${row.spent}`" in budget
     assert "activityNode(fresh.status)" in body("controlPanel")
-    # One vocabulary for the best candidate: the card's two tiles are the
-    # experiment page's first two; a session recorded under the
-    # deflated-Sharpe gate shows its DSR and trial count on its own page.
-    labels = ("最佳候选主动超额", "IR", "DSR", "累计试验")
-    for name, shown in (("evidenceTiles", labels[:2]), ("bestCandidateTiles", labels)):
-        found = [label for label in labels if f'label: "{label}"' in body(name)]
-        assert found == list(shown), name
-    assert "DSR_TITLE" not in body("evidenceTiles") and "TRIALS_TITLE" not in body("evidenceTiles")
-    assert "bestCandidateTiles(best, record.trials_to_date)" in body("researchSessionPanel")
-    assert "bestCandidateTiles(detail.research_best)" in body("sessionDetailPanel")
+    # The card's evidence is the rolling record and the forward reading, never
+    # a research-period figure.
+    labels = ("已测步数", "记录残差 IR", "p 值", "换候选", "前推下界")
+    found = [label for label in labels if f'label: "{label}"' in body("evidenceTiles")]
+    assert found == list(labels)
+    for retired in ("最佳候选", "DSR", "bestCandidateTiles", "research_best"):
+        assert retired not in body("evidenceTiles") and retired not in body("sessionDetailPanel"), retired
     # The gloss says what the figure is; the gate's own limits and measured
     # values stay in the checklist, which reads both from the record.
     [dsr_gloss] = [row for row in script.splitlines() if row.startswith("const DSR_TITLE")]
@@ -1196,8 +1137,7 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
         assert script.count(f"const {name} = ") == 1, name
     for opening, glosses in (
         ("function evidenceTiles(", ("IR_TITLE",)),
-        ("function forwardTiles(", ("PLAIN_SELECTION_TITLE", "IR_TITLE")),
-        ("function bestCandidateTiles(", ("IR_TITLE", "DSR_TITLE", "TRIALS_TITLE")),
+        ("function evidenceTiles(", ("RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")),
         ("function researchSessionPanel(", ("IR_TITLE", "EXCESS_TITLE")),
         ("function frozenPanel(", ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
         ("function freezeGateChecklist(", ("DSR_TITLE",)),
@@ -1225,55 +1165,51 @@ def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
     assert script.count("endingReason(") == 3
 
 
-def test_the_three_replay_stage_views_read_the_sealed_gate_alone() -> None:
-    """前推回放, Held-out and 裁决 judge nothing of their own: the verdict
-    draws the sealed gate's one S row as the 前推 view does, so its bar is
-    spelled once, and the two slice views say their readings are reported,
-    never judged."""
+def test_the_three_replay_stage_views_judge_nothing() -> None:
+    """前推回测, Held-out and 读出 judge nothing of their own: the two slice
+    views say their readings are reported, never judged, and the readout view
+    draws the record's instrument, the forward reading and every arm's record
+    over the same validation window; nothing of the sealed gate remains."""
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
     bodies = {
         name: script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
-        for name in ("forwardStagePanel", "heldoutStagePanel", "verdictStagePanel")
+        for name in ("forwardStagePanel", "heldoutStagePanel", "readoutStagePanel")
     }
-    verdict = bodies["verdictStagePanel"]
-    assert "checklist([sealedCriterion(forward.sealed), ...validityCriteria(verdict)])" in verdict
-    assert "checklist([sealedCriterion(s)])" in script
+    readout = bodies["readoutStagePanel"]
+    assert "readoutBlock(readout)" in readout and "validationWindowBlock(detail.readouts)" in readout
+    assert "forwardPoolBlock(detail.readouts)" in readout and "paperHandoff(detail)" in readout
     for name in ("forwardStagePanel", "heldoutStagePanel"):
-        assert "只报告，不参与裁决" in bodies[name]
-    assert "forwardCriteria" not in script and "heldoutCriteria" not in script
-    assert "chip" not in verdict and "thresholdChips" not in script
+        assert "只报告，不作判定" in bodies[name]
+    for retired in ("sealedCriterion", "validityCriteria", "sealedReadingBlock", "sealedOnly", "verdictStagePanel"):
+        assert retired not in script, retired
+    assert "chip" not in readout and "thresholdChips" not in script
 
 
-def test_the_listing_carries_the_freeze_and_the_best_candidate_so_far(
-    tmp_path: Path,
-) -> None:
-    """The experiment card draws its freeze step and its research evidence from
-    the listing alone, and must read the same numbers the experiment page does."""
+def test_the_listing_carries_the_freeze_and_the_record_so_far(tmp_path: Path) -> None:
+    """The experiment card draws its freeze step and its evidence from the
+    listing alone, and must read the same numbers the experiment page does."""
 
     build_arm(tmp_path, "researching", "research")
     build_arm(tmp_path, "frozen", "sealed")
+    build_arm(tmp_path, "recorded", "frozen_with_record")
     build_arm(tmp_path, "fresh", "created")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["frozen_session"] is None
     assert rows["frozen"]["frozen_session"] == "research"
-    # An arm without a recorded session has no record to read a candidate off.
-    assert rows["fresh"]["research_best"] is None
-    assert rows["researching"]["research_best"] is None
-    best = rows["frozen"]["research_best"]
-    assert best["session_key"] == "research"
-    session_best = experiment_detail(tmp_path, "frozen")["sessions"][0]["record"]["best"]
-    # The card's four evidence tiles: a measurable candidate carries every
-    # figure, so the card never draws a partial row.
-    evidence = (
-        "plain_excess",
-        "information_ratio",
-    )
-    for field in ("step_id", *evidence):
-        assert best[field] == session_best[field], field
-        assert best[field] is not None, field
+    # An arm without a recorded step has no record to read.
+    assert rows["fresh"]["record"] is None and rows["researching"]["record"] is None
+    record = rows["recorded"]["record"]
+    detail = experiment_detail(tmp_path, "recorded")["record"]
+    for field in ("steps", "residual_information_ratio", "p_value", "candidate_changes", "frontier", "start", "end"):
+        assert record[field] == detail[field], field
+        assert record[field] is not None, field
+    # The page adds the rows and the curve the card does not draw.
+    assert len(detail["rows"]) == record["steps"] == len(detail["curve"]["steps"])
+    assert len(detail["curve"]["dates"]) == len(detail["curve"]["book"]) == len(detail["curve"]["panel"]) > 0
+    assert "rows" not in record and "curve" not in record
 
 
 @pytest.mark.parametrize(
@@ -1405,8 +1341,6 @@ def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path
     detail = experiment_detail(tmp_path, "arm")
     record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
     assert {"excess_return", "plain_excess", "excess_at_cost_stress"} <= set(record["validations"][0])
-    # The ledger holds no reading of the best candidate's panel.
-    assert record["best"]["panel_return"] is None
 
 
 def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path) -> None:
@@ -1494,7 +1428,6 @@ def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(
     assert detail["frozen"]["seed_replicates"]["mean_information_ratio"] is None
     record, recorded = detail["sessions"][0]["record"], current["sessions"][0]["record"]
     assert record["validations"] == recorded["validations"]
-    assert record["best"]["information_ratio"] == recorded["best"]["information_ratio"]
     assert record["freeze_gate"]["information_ratio"] is None
     assert record["freeze_gate"]["seed_replicates"]["mean_information_ratio"] is None
 
@@ -1525,33 +1458,33 @@ def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path
     assert unknown["state"] == "unreadable"
 
 
-def test_every_sealed_reading_of_a_window_is_listed_with_its_p_value_and_count(tmp_path: Path) -> None:
-    """The multiplicity readout: an arm's verdict view lists every frozen
-    nominee's sealed reading over the same sealed years, archived arms
+def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_count(tmp_path: Path) -> None:
+    """The multiplicity readout: an arm's readout view lists every frozen
+    strategy's rolling record over the same validation period, archived arms
     included, with its one-sided null p-value and how many there are, and
     pools the forward-year readings of every frozen strategy over the same
-    forward months. Nothing is adjusted: each arm keeps its own verdict."""
+    forward months. Nothing is adjusted: each arm keeps its own reading."""
 
-    from autotrade.pipelines.verdict import null_p_value, pooled_reading
+    from autotrade.pipelines.verdict import pooled_reading
 
-    build_arm(tmp_path, "good", "graduated")
-    build_arm(tmp_path, "bad", "discarded")
+    build_arm(tmp_path, "good", "frozen_with_record")
+    build_arm(tmp_path, "other", "frozen_with_record")
+    build_arm(tmp_path, "legacy", "graduated")
     build_arm(tmp_path, "early", "research")
     readouts = experiment_detail(tmp_path, "good")["readouts"]
-    window = readouts["sealed_window"]
+    window = readouts["validation_window"]
     assert window["count"] == 2 and readouts["unreadable_arms"] == 0
     by_arm = {row["experiment_id"]: row for row in window["readings"]}
-    assert set(by_arm) == {"good", "bad"}
-    for name in ("good", "bad"):
-        block = _records(tmp_path / name)[-1]["sealed"]["slice"]
-        assert by_arm[name]["p_value"] == pytest.approx(
-            null_p_value(block["residual_information_ratio"], block["years"])
-        )
-        assert by_arm[name]["passed"] is (block["reasons"] == [])
+    assert set(by_arm) == {"good", "other"}
+    for name in ("good", "other"):
+        block = _records(tmp_path / name)[-1]["readout"]["record"]
+        assert (window["start"], window["end"]) == (block["start"], block["end"])
+        assert by_arm[name]["p_value"] == block["p_value"]
+        assert (by_arm[name]["steps"], by_arm[name]["candidate_changes"]) == (block["steps"], block["candidate_changes"])
     # Most significant first.
     assert [row["p_value"] for row in window["readings"]] == sorted(row["p_value"] for row in window["readings"])
     pooled = pooled_reading(
-        [_records(tmp_path / name)[-1]["slices"]["forward"]["residual_reading"] for name in ("bad", "good")]
+        [_records(tmp_path / name)[-1]["slices"]["forward"]["residual_reading"] for name in ("good", "other")]
     )
     assert readouts["forward_pool"] == {
         "start": REPLAY["start"],
@@ -1559,38 +1492,23 @@ def test_every_sealed_reading_of_a_window_is_listed_with_its_p_value_and_count(t
         **{key: pytest.approx(value) for key, value in pooled.items()},
         "raised": 0,
     }
-    # A nominee that raised in its forward replay has no reading to pool and
+    # A strategy that raised in its forward replay has no reading to pool and
     # is counted, never left out silently.
-    crashed = build_arm(tmp_path, "crashed", "discarded")
+    crashed = build_arm(tmp_path, "crashed", "frozen_with_record")
     ledger = crashed / "ledgers/experiment_ledger.jsonl"
     lines = ledger.read_text(encoding="utf-8").splitlines()
-    record = {**json.loads(lines[-1]), "status": "strategy_error", "strategy_error": "forward", "slices": None}
+    record = json.loads(lines[-1])
+    record.update(status="strategy_error", strategy_error="forward", slices=None)
+    record["readout"]["forward"] = {
+        "lower_bound": None,
+        "residual_reading": None,
+        "strategy_error": {"slice": "forward", "error": "StrategyRaised: boom"},
+    }
     ledger.write_text("\n".join([*lines[:-1], json.dumps(record)]) + "\n", encoding="utf-8")
     pool = experiment_detail(tmp_path, "good")["readouts"]["forward_pool"]
     assert (pool["count"], pool["raised"]) == (2, 1)
-    # An arm without a forward record has no readout.
+    # An arm without a forward record, or one judged under the sealed gate, has no readout.
     assert experiment_detail(tmp_path, "early")["readouts"] is None
+    assert experiment_detail(tmp_path, "legacy")["readouts"] is None
 
 
-def test_a_best_candidate_has_one_shape_running_or_recorded() -> None:
-    """The listing's ``research_best`` and a research record's ``best`` are one
-    record: a figure a session does not have is served as None, never left
-    out, so the page reads the same keys from either."""
-
-    from dataclasses import fields
-
-    from autotrade.webui.registry import BestCandidate, ValidationView
-
-    view = ValidationView.of({"step_id": "s", "span": "full", "summary": {}, "graded": {}}, 2.0)
-    running = BestCandidate("research", view, "valid_001", panel_return=0.01).to_record()
-    recorded = BestCandidate("research", view, "valid_001", deflated_sharpe_probability=0.9, trials=4).to_record()
-
-    assert list(running) == list(recorded) == [
-        "session_key",
-        *(item.name for item in fields(ValidationView)),
-        "result",
-        "panel_return",
-        "deflated_sharpe_probability",
-        "trials",
-    ]
-    assert (running["trials"], recorded["panel_return"]) == (None, None)
