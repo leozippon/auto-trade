@@ -3143,7 +3143,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(record["status"], "error")
 
     def test_lost_official_access_leaves_the_lake_committed_and_the_job_failed(self):
-        # Losing TUSHARE_TOKEN_TMP must stop the official datasets alone: their
+        # Losing TUSHARE_TOKEN_TMP must stop only the jobs that need it: such a
         # job wrote nothing, so the generation every other job and consumer
         # needs stays committed, while the job reports an error every night.
         config_path = self.root / "anns_schedule.json"
@@ -3227,9 +3227,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
     def test_each_text_dataset_goes_to_its_own_endpoint_with_its_own_token(self):
-        # Through the real SDK, stopping only at the HTTP call: anns_d goes to
-        # the official service with TUSHARE_TOKEN_TMP, report_rc stays on the
-        # relay with TUSHARE_TOKEN. Dummy tokens only.
+        # Through the real SDK, stopping only at the HTTP call: anns_d and
+        # cctv_news go to the official service with TUSHARE_TOKEN_TMP,
+        # report_rc stays on the relay with TUSHARE_TOKEN. Dummy tokens only.
         sent = []
 
         def post(url, **kwargs):
@@ -3247,10 +3247,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(common.requests, "post", side_effect=post),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(download.download_text(self._text_args(["anns_d", "report_rc"])), 0)
+            self.assertEqual(download.download_text(self._text_args(["anns_d", "cctv_news", "report_rc"])), 0)
         routes = {(url.rsplit("/", 1)[0], api, token) for url, api, token in sent}
         self.assertEqual(routes, {
             (common.OFFICIAL_TUSHARE_URL, "anns_d", "official-dummy"),
+            (common.OFFICIAL_TUSHARE_URL, "cctv_news", "official-dummy"),
             ("https://relay.example", "report_rc", "relay-dummy"),
         })
         self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
@@ -4347,11 +4348,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # resolves a new end date instead of skipping as an unchanged range.
         self.assertNotIn("end_date_mode", text_job)
         self.assertNotIn("end_date_mode", jobs["cn_nightly_text_audit"])
-        # Scope is report_rc alone: every other text interface is frozen, and
-        # naming one fails the run and leaves the raw lake dirty.
+        # Every text dataset but anns_d, which has its own job.
+        self.assertEqual(text_job["extra_args"][0], "--datasets")
+        self.assertEqual(text_job["extra_args"][-1], "--force")
         self.assertEqual(
-            text_job["extra_args"], ["--datasets", "report_rc", "--force"]
+            sorted(text_job["extra_args"][1:-1]),
+            sorted(set(common.TEXT_DATASETS) - {"anns_d"}),
         )
+        self.assertEqual(jobs["cn_nightly_anns_full"]["extra_args"], ["--datasets", "anns_d", "--force"])
         # The global tier and the ann-date disclosure tables are natural-day
         # domains too: overseas sessions and weekend announcements must not
         # wait for the next trading evening.
@@ -6423,28 +6427,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             [f["check"] for f in landed["findings"] if f["severity"] == "error"],
         )
 
-    def test_frozen_text_interface_expects_nothing_past_its_last_day(self):
-        # irm_qa_sh lost vendor access on 2026-09-10 and stops at 20260813.
-        # A window running past that must stay clean: an accepted, documented
-        # loss reported as an error that grows by one day every night buries
-        # the findings that still mean something.
-        self.assertEqual(common.TEXT_SPECS["irm_qa_sh"].frozen_through, "20260813")
-        qa = pd.DataFrame([{
-            "trade_date": "20260813", "ts_code": "000001.SZ", "q": "问题", "a": "回答",
-            "pub_time": "2026-08-13 18:00:00",
-        }])
-        for day in ("20260812", "20260813"):
-            common.write_parquet(
-                self.raw_dir / "irm_qa_sh" / f"date={day}.parquet",
-                qa, api_name="irm_qa_sh", params={}, fields=list(qa.columns),
-            )
-        status = self._audit_text_window("20260812", "20260820", "text_status_frozen.json")
-        partitions = next(f for f in status["findings"] if f["check"] == "irm_qa_sh_text_partitions")
-        self.assertEqual(partitions["details"]["missing_expected_files"], 0)
-        self.assertEqual(partitions["details"]["extra_files"], 0)
-        scope = next(f for f in status["findings"] if f["check"] == "text_expected_scope")
-        self.assertEqual(scope["details"]["frozen_through"], {"irm_qa_sh": "20260813"})
-
     def test_board_trading_download_and_audit_use_dedicated_dimension(self):
         self._write_trade_cal("20231101")
         args = argparse.Namespace(
@@ -7533,7 +7515,9 @@ class TuShareClientTest(unittest.TestCase):
         self.assertEqual(client.endpoint, common.OFFICIAL_TUSHARE_URL)
         self.assertEqual(client._token, "official-dummy")
         self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
-        self.assertEqual([n for n, s in common.TEXT_SPECS.items() if s.official], ["anns_d"])
+        self.assertEqual(
+            [n for n, s in common.TEXT_SPECS.items() if not s.official], ["report_rc"]
+        )
 
     def test_a_request_carries_the_sdk_payload_to_the_pinned_endpoint(self) -> None:
         _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"], "items": [["000001.SZ", 10.5]]}})]
@@ -7995,33 +7979,6 @@ class UuidCommitIdentityTest(unittest.TestCase):
         scheduled = {item["dataset"] for item in schedule["interfaces"]}
         selectable = set().union(*SELECTABLE_DATASETS.values())
         self.assertEqual(selectable - scheduled, set())
-
-    def test_frozen_text_interfaces_agree_across_registries(self) -> None:
-        # Two registries state the same fact: the spec drives the download
-        # default and the audit's expectations, the schedule row drives the
-        # operator/console view. A dataset frozen in one and live in the other
-        # means either a scheduled job that always fails or an audit that
-        # expects partitions nobody can fetch.
-        root = Path(__file__).resolve().parents[2]
-        schedule = json.loads(
-            (root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8")
-        )
-        registry = {
-            row["dataset"]: row.get("frozen_through", "")
-            for row in schedule["interfaces"]
-            if row["domain"] == "text_evidence"
-        }
-        specs = {name: spec.frozen_through for name, spec in common.TEXT_SPECS.items()}
-        self.assertEqual(registry, specs)
-        self.assertEqual(common.TEXT_FETCHABLE_DATASETS, ["anns_d", "report_rc"])
-        for row in schedule["interfaces"]:
-            frozen = bool(row.get("frozen_through"))
-            self.assertEqual(
-                frozen,
-                row["cron_policy"] == "frozen_history_no_refresh",
-                row["dataset"],
-            )
-            self.assertEqual(frozen, bool(row.get("status")), row["dataset"])
 
     def test_active_macro_registries_are_consistent(self) -> None:
         root = Path(__file__).resolve().parents[2]

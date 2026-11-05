@@ -19,11 +19,12 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # of the evening update (the jobs serialize on the updater lock). The
 # ann-date disclosure tables are natural-day too, but land at the end of the
 # chain (09:45, below).
-# 23:15 text evidence -- report_rc only since 2026-09-10, the one text
-#       interface the token still holds.
+# 23:15 text evidence -- every text dataset but anns_d: report_rc from the
+#       relay, the other seven from the official service with
+#       TUSHARE_TOKEN_TMP.
 # 23:15 announcement titles (anns_d) from the official service with
-#       TUSHARE_TOKEN_TMP, on their own job so that losing that token stops
-#       anns_d alone. Same minute as the text job (the updater lock serialises
+#       TUSHARE_TOKEN_TMP, on their own job so that no other text dataset can
+#       fail them. Same minute as the text job (the updater lock serialises
 #       the two), so anns_d keeps the 23:15 visibility cutoff it always had.
 # 23:25 global tier (overseas indices, FX, US rates, economic calendar) --
 #       overseas sessions keep trading through A-share holidays.
@@ -89,9 +90,9 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 0 5 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_text_audit
 
 # Pre-open refresh for sources whose official/current availability is better
-# in the next-morning window than in the prior evening run. The 08:55 short-text
-# backfill was retired on 2026-09-10: the token lost access to cctv_news and
-# news, so nothing lands between the evening text job and the open.
+# in the next-morning window than in the prior evening run. There is no
+# pre-open text job (the 08:55 short-text backfill was retired on 2026-09-10),
+# so nothing lands between the evening text jobs and the open.
 50 8 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_board_backfill_0850
 
 # Pre-open forced backfill for same-day margin eligibility and T+1 margin

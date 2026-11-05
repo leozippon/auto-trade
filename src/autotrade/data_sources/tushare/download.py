@@ -58,7 +58,6 @@ from .common import (
     STK_MINS_PAGE_LIMIT,
     STK_MINS_QUOTA_MARKER,
     STK_MINS_REQUIRED_COLUMNS,
-    TEXT_FETCHABLE_DATASETS,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
     WRITTEN_OUTCOMES,
@@ -3260,12 +3259,11 @@ def official_text_client(datasets: list[str], repo_root: Path, args: argparse.Na
 def download_text(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
-    # The tier default is what the tokens can still fetch; the frozen
-    # interfaces stay nameable so a historical repair can still target one.
-    datasets = selected_text_datasets(args.datasets, news_src=args.news_src, default=TEXT_FETCHABLE_DATASETS)
+    datasets = selected_text_datasets(args.datasets, news_src=args.news_src)
     official = [dataset for dataset in datasets if TEXT_SPECS[dataset].official]
     # One client per source, keyed by ``spec.official``; each reads only its
-    # own token, so losing one token stops only the datasets that use it.
+    # own token. A run that cannot prove official access writes nothing, the
+    # relay datasets it names included, so a job's datasets land together.
     clients: dict[bool, TuShareClient] = {}
     if len(official) < len(datasets):
         clients[False] = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
@@ -3517,7 +3515,7 @@ def download_selected_tier(args: argparse.Namespace) -> int:
         "intraday": (download_intraday, lambda: list(INTRADAY_DATASETS)),
         "event_flow": (download_event_flow, lambda: selected_event_flow_download_datasets(args)),
         "board_trading": (download_board_trading, lambda: selected_board_trading_datasets(args)),
-        "text_evidence": (download_text, lambda: selected_text_datasets(args.datasets, news_src=args.news_src, default=TEXT_FETCHABLE_DATASETS)),
+        "text_evidence": (download_text, lambda: selected_text_datasets(args.datasets, news_src=args.news_src)),
         "macro": (download_macro, lambda: selected_macro_datasets(args)),
         "global": (download_macro, lambda: selected_macro_datasets(args)),
     }
