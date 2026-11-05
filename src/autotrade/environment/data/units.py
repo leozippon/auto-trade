@@ -20,7 +20,7 @@ Projections (never maintained by hand elsewhere): the snapshot conversion
 tables derive from factor rules; audit
 report metadata selects by each domain's dataset list; ``unit_reference.json``
 (written next to data_summary.json) enumerates every column of the live
-snapshot; ``docs/units-reference.md`` renders the registry for humans.
+snapshot; ``docs/UNITS_REFERENCE.md`` renders the registry for humans.
 
 Rule declarations live in ``unit_rules.py``; this module owns resolution,
 schema validation, unit conversion, and Agent artifact generation.

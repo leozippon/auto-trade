@@ -92,7 +92,7 @@ class BrokerProfile:
     # creation stamps every new arm's boards (``default_permitted_boards``).
     permitted_boards: tuple[str, ...] | None = None
     profile_id: str = "gjzq_cash"
-    source: str = "docs/environment-design.md §3.4"
+    source: str = "docs/ENVIRONMENT_DESIGN.md §3.4"
 
     def __post_init__(self) -> None:
         if isinstance(self.initial_cash, bool) or not math.isfinite(self.initial_cash) or self.initial_cash <= 0:

@@ -3393,7 +3393,7 @@ function verdictStagePanel(detail) {
   );
 }
 
-// The one trading environment with a backend (docs/deployment-documentation.md).
+// The one trading environment with a backend (docs/DEPLOYMENT_DOCUMENTATION.md).
 const PAPER_ENV = "paper";
 
 /* The Paper handoff: the arm's book once one exists — a graduate's, or one an

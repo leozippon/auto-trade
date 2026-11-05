@@ -1,6 +1,6 @@
 """Agent session runner: the main conversation loop of the research session.
 
-docs/agent-design.md plus docs/environment-design.md §2.2 define the Agent
+docs/AGENT_DESIGN.md plus docs/ENVIRONMENT_DESIGN.md §2.2 define the Agent
 session and tool-entrypoint contract: one conversation per session attempt,
 Steps share the session, only documented tools are callable, and the session
 budget is the master constraint. The budget the pipeline hands over includes
@@ -14,7 +14,7 @@ status ``deadline_exceeded``, ``call_budget_exhausted`` or
 instead of failing the run. Inside the finalize window
 a complete Validation instead switches to the restricted hard-finalization
 capability view. Main conversation calls and compactions are logged in the
-Agent trace (docs/environment-design.md §2.4 and §4.2).
+Agent trace (docs/ENVIRONMENT_DESIGN.md §2.4 and §4.2).
 """
 
 from __future__ import annotations

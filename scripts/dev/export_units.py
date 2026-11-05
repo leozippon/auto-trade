@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Render the unit registry to docs/units-reference.md; refresh the schema inventory.
+"""Render the unit registry to docs/UNITS_REFERENCE.md; refresh the schema inventory.
 
 ``FIELD_RULES`` in src/autotrade/environment/data/unit_rules.py defines the unit
 rules. This exporter renders the reference document; a freshness test regenerates
@@ -36,7 +36,7 @@ from autotrade.environment.data.units import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DOC_PATH = REPO_ROOT / "docs" / "units-reference.md"
+DOC_PATH = REPO_ROOT / "docs" / "UNITS_REFERENCE.md"
 INVENTORY_PATH = REPO_ROOT / "configs" / "data" / "snapshot_columns.json"
 
 FILE_TITLES = {
@@ -63,9 +63,9 @@ _DATASET_NOT_DEFAULT = "该数据集默认不加载，可在创建实验时通�
 _COLUMNS_NOT_IN_SNAPSHOT = "这些字段不进入快照，只保留在原始湖与数据审计中"
 
 DOC_REFERENCE_LINKS = {
-    "data docs §1.3": "[数据文档 §1.3](data-documentation.md#13-核心行情与基础维表)",
-    "data docs §3.3": "[数据文档 §3.3](data-documentation.md#33-原始数据何时可见)",
-    "data docs §4": "[数据文档 §4](data-documentation.md#4-已知数据风险与限制)",
+    "data docs §1.3": "[数据文档 §1.3](DATA_DOCUMENTATION.md#13-核心行情与基础维表)",
+    "data docs §3.3": "[数据文档 §3.3](DATA_DOCUMENTATION.md#33-原始数据何时可见)",
+    "data docs §4": "[数据文档 §4](DATA_DOCUMENTATION.md#4-已知数据风险与限制)",
 }
 
 
@@ -112,7 +112,7 @@ def render_units_markdown() -> str:
             "`FIELD_RULES` 生成，禁止手工编辑。回归测试会重新生成并与本文件比较。"
         ),
         "",
-        "单位怎样查找、哪些字段可以换算，见 [数据文档 §1.2](data-documentation.md#12-原始单位)。",
+        "单位怎样查找、哪些字段可以换算，见 [数据文档 §1.2](DATA_DOCUMENTATION.md#12-原始单位)。",
         "",
         "## 怎样阅读本表",
         "",
@@ -234,7 +234,7 @@ def main() -> int:
     rendered = render_units_markdown()
     if args.check:
         if not DOC_PATH.exists() or DOC_PATH.read_text(encoding="utf-8") != rendered:
-            print("docs/units-reference.md is stale; run scripts/dev/export_units.py", file=sys.stderr)
+            print("docs/UNITS_REFERENCE.md is stale; run scripts/dev/export_units.py", file=sys.stderr)
             return 1
         return 0
     DOC_PATH.write_text(rendered, encoding="utf-8")

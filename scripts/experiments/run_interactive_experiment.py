@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive (HITL) experiment worker entrypoint (docs/pipeline-design.md).
+"""Interactive (HITL) experiment worker entrypoint (docs/PIPELINE_DESIGN.md).
 
 Runs or resumes one arm (research sessions, then the forward replay) from the parameters in
 ``experiments/<id>/hitl/params.json``, honouring ``control.json`` (pause / step

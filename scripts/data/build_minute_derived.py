@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the minute-derived raw datasets (docs/data-documentation.md §1.7).
+"""Build the minute-derived raw datasets (docs/DATA_DOCUMENTATION.md §1.7).
 
 Reduces each ``stk_mins_1min_by_date`` partition to one PIT-stamped row per
 stock-day for every dataset in ``DERIVED`` -- ``intraday_flow`` (signed order

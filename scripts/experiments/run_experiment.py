@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Experiment pipeline entrypoint (docs/pipeline-design.md).
+"""Experiment pipeline entrypoint (docs/PIPELINE_DESIGN.md).
 
 Runs one scheduled daily strategy experiment against a daily parquet input and
 prints its JSON result. The docs do not prescribe a CLI; this thin wrapper only

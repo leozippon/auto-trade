@@ -104,7 +104,7 @@ DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY = 3
 
 # Research on four July-June years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
-# (docs/pipeline-design.md). The PIT view seed is planned over it.
+# (docs/PIPELINE_DESIGN.md). The PIT view seed is planned over it.
 DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
     research_start="20210701",
     research_end="20250630",
@@ -505,7 +505,7 @@ def acceptance_default(name: str) -> object:
 
 
 # The per-arm on/off switches retired on 2026-10-07, when what they switched on
-# became the only rules (docs/pipeline-design.md §6). Every params.json written
+# became the only rules (docs/PIPELINE_DESIGN.md §6). Every params.json written
 # before then carries them, and the run records of that time state the first
 # four in their acceptance rules and thresholds. Readers accept exactly these
 # keys and derive nothing from them; any other unknown parameter is refused.

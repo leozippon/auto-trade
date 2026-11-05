@@ -2,7 +2,7 @@
 ``environment.trace``).
 
 Trusted logs are produced only by Runner / Execution Gateway / LLM Proxy /
-simulated Broker code paths (docs/environment-design.md §4.1). Agent text
+simulated Broker code paths (docs/ENVIRONMENT_DESIGN.md §4.1). Agent text
 never replaces these records. The durable versioned-JSONL log primitive every
 such record stream is written with also lives here, so the experiment ledger
 and the issue-report log share one implementation of the format.

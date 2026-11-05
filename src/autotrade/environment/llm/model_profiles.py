@@ -50,7 +50,7 @@ _DEEPSEEK_PROFILE = ModelProfile(
     base_url_env="DEEPSEEK_BASE_URL",
     default_base_url="https://api.deepseek.com",
     request_dialect="deepseek",
-    # The weekday-peak list rate as of 2026-10-14 (docs/parameters-reference.md
+    # The weekday-peak list rate as of 2026-10-14 (docs/PARAMETERS_REFERENCE.md
     # §3); off-peak hours bill half, which the cap ignores. DeepSeek reports no
     # cache write.
     prices=TokenPrices(0.30, 0.006, 1.20, 0.30),
@@ -77,7 +77,7 @@ _MIMO_FLASH_PROFILE = ModelProfile(
     default_base_url="https://api.xiaomimimo.com/v1",
     request_dialect="mimo",
     # The domestic real-time list prices as of 2026-10-14
-    # (docs/parameters-reference.md §3), CNY 1.00 / 0.02 / 2.00 converted at
+    # (docs/PARAMETERS_REFERENCE.md §3), CNY 1.00 / 0.02 / 2.00 converted at
     # 7.1. MiMo reports no cache write.
     prices=TokenPrices(0.141, 0.0028, 0.282, 0.141),
     # Flash and Pro published the same request contract (as of 2026-10-02), a

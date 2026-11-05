@@ -5,7 +5,7 @@ renders its default from ``hitl_state.WEB_CREATE_DEFAULTS`` (read off the
 record), so the form can never drift from what a create stamps. Each console
 parameter has a form field here or is named in ``_FORMLESS``; the check below
 refuses either list drifting from the record. Descriptions follow
-docs/parameters-reference.md.
+docs/PARAMETERS_REFERENCE.md.
 
 Deliberately NOT exposed in the form: the managed and host parameters, which
 the console API rejects outright, so they can only be set in a worker-side

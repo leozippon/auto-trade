@@ -70,7 +70,7 @@ from .registry import experiment_state, read_ledger_records, worker_log_ref
 # use about half of that. An arm whose main session and sub-agents are hosted
 # leaves that service almost idle, so only the total limit, which protects the
 # host's page cache and IO, applies to it. Measured rationale:
-# docs/deployment-documentation.md. GPUs are not a count: a GPU arm starts only
+# docs/DEPLOYMENT_DOCUMENTATION.md. GPUs are not a count: a GPU arm starts only
 # on cards no running arm holds that keep the console's admission margin free
 # (``AUTOTRADE_GPU_MIN_FREE_GIB``), and keeps them while its worker lives
 # (hitl_state.select_gpus).

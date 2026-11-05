@@ -53,7 +53,7 @@ def manifest_digest(store: Path | None = None) -> str:
         raise PretrainedStoreError(
             f"the pretrained store at {root} has no readable {MANIFEST_NAME} ({exc}); "
             "copy the store there and verify it with `sha256sum -c` "
-            "(docs/deployment-documentation.md)"
+            "(docs/DEPLOYMENT_DOCUMENTATION.md)"
         ) from exc
     return hashlib.sha256(payload).hexdigest()
 

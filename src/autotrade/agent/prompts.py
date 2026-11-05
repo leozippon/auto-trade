@@ -107,7 +107,7 @@ SESSION_FEEDBACK_SECTION = """\
 """
 
 # Tool-calling cheat sheet for the sub-agent role prompts (the full path
-# contract is docs/agent-design.md §1.2). Example-based because the sub-agent
+# contract is docs/AGENT_DESIGN.md §1.2). Example-based because the sub-agent
 # model kept passing ``shell`` argv as one string and mixing up roots and
 # relative paths despite the curated skills; ``subagent.py`` injects it, so
 # the text has one source. The read-only roles get the path lines only.

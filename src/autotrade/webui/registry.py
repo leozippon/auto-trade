@@ -6,7 +6,7 @@ names. Unparseable experiments still appear in listings so they can be
 deleted; they carry an error note instead of metrics.
 
 An arm researches in sessions, freezes at most once and is then replayed once
-over forward and Held-out (docs/pipeline-design.md). The replay stays sealed by
+over forward and Held-out (docs/PIPELINE_DESIGN.md). The replay stays sealed by
 construction: the console serves a result only when a ledger record names it,
 and the forward record that names the replay is written together with its
 verdict, so nothing of the replay is readable while it runs.
