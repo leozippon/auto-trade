@@ -330,21 +330,29 @@ class EndlessPagedClient:
 
 
 class BoardMemberClient:
-    """dc_member by board over a date range, as the vendor serves it."""
+    """dc_member as the vendor serves it since 2026-11-05: trade_date is
+    required, and a whole day comes ordered by board code (``board_order``
+    overrides the order)."""
 
-    def __init__(self, members):
+    def __init__(self, members, board_order=None):
         self.members = members  # {(board, trade_date): [con_code, ...]}
+        self.board_order = board_order
         self.calls = []
 
     def query(self, api_name, params=None, fields="", retries=5):
         params = dict(params or {})
-        self.calls.append((api_name, params))
+        self.calls.append(params)
+        if "trade_date" not in params:
+            raise RuntimeError(f"{api_name} answered code 50101: 必填参数, trade_date")
+        if params["offset"] > common.VENDOR_MAX_OFFSET:
+            raise RuntimeError(f"{api_name} answered code 50101: offset不能大于{common.VENDOR_MAX_OFFSET}")
         names = fields.split(",")
+        boards = self.board_order or sorted({board for board, _ in self.members})
         served = [
-            {"trade_date": day, "ts_code": board, "con_code": code, "name": "x"}
-            for (board, day), codes in sorted(self.members.items(), reverse=True)
-            if board == params["ts_code"] and params["start_date"] <= day <= params["end_date"]
-            for code in codes
+            {"trade_date": params["trade_date"], "ts_code": board, "con_code": code, "name": "x"}
+            for board in boards
+            if params.get("ts_code", board) == board
+            for code in self.members.get((board, params["trade_date"]), [])
         ]
         page = served[params["offset"]:params["offset"] + params["limit"]]
         return common.ApiResult(names, [[row[name] for name in names] for row in page])
@@ -460,46 +468,60 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             rows, api_name=dataset, params={"trade_date": trade_date}, fields=list(rows.columns),
         )
 
-    def test_dc_member_lands_every_board_per_trade_date_without_a_whole_day_request(self):
-        spec = common.BOARD_TRADING_SPECS["dc_member"]
-        self.assertIs(spec.strategy, common.FetchStrategy.BOARD_DATE_RANGE)
-        # dc_index quotes BK1 on both days and BK2 on the second; the lake's
-        # 20261102 partition also holds BK3, a board dc_index did not quote.
-        self._write_board_partition("dc_index", "20261102", [("BK1.DC", "")])
-        self._write_board_partition("dc_index", "20261103", [("BK1.DC", ""), ("BK2.DC", "")])
-        self._write_board_partition("dc_member", "20261102", [("BK1.DC", "000001.SZ"), ("BK3.DC", "000003.SZ")])
-        client = BoardMemberClient({
-            ("BK1.DC", "20261102"): [f"{index:06d}.SZ" for index in range(5)],
-            ("BK1.DC", "20261103"): [f"{index:06d}.SZ" for index in range(6)],
-            ("BK2.DC", "20261103"): ["600000.SH"],
-            ("BK3.DC", "20261102"): ["000003.SZ"],
-        })
-        with redirect_stdout(io.StringIO()):
-            download.download_board_members_by_board(
-                client, self.raw_dir, spec, ["20261102", "20261103"], True, 4, str(self.root / "ledger.jsonl"),
+    def _dc_member_past_the_cap(self, client, trade_dates):
+        # A cap of offset 8 at 4 rows a page: the whole-day pages reach 12 rows.
+        with patch.object(common, "VENDOR_MAX_OFFSET", 8), redirect_stdout(io.StringIO()):
+            download.download_board_members_by_date(
+                client, self.raw_dir, common.BOARD_TRADING_SPECS["dc_member"], trade_dates, True, 4,
+                str(self.root / "ledger.jsonl"),
             )
 
-        def landed(trade_date):
+    def test_dc_member_pages_the_day_and_fetches_the_boards_past_the_cap_one_by_one(self):
+        self.assertIs(common.BOARD_TRADING_SPECS["dc_member"].strategy, common.FetchStrategy.TRADE_DATE_BOARD_TAIL)
+        # 20261103 holds 16 rows: the pages stop inside BK3. BK4 is a new
+        # board dc_index first quotes on 20261104; the lake's file still names
+        # BK9, which the vendor no longer serves. 20261104 fits in the pages.
+        self._write_board_partition("dc_index", "20261103", [("BK1.DC", ""), ("BK2.DC", ""), ("BK3.DC", "")])
+        self._write_board_partition("dc_index", "20261104", [("BK1.DC", ""), ("BK4.DC", "")])
+        self._write_board_partition("dc_member", "20261103", [("BK1.DC", "000001.SZ"), ("BK9.DC", "000009.SZ")])
+        members = {
+            ("BK1.DC", "20261103"): [f"{index:06d}.SZ" for index in range(5)],
+            ("BK2.DC", "20261103"): [f"{index:06d}.SZ" for index in range(10, 15)],
+            ("BK3.DC", "20261103"): [f"{index:06d}.SZ" for index in range(20, 24)],
+            ("BK4.DC", "20261103"): ["600000.SH", "600004.SH"],
+            ("BK1.DC", "20261104"): ["000001.SZ", "000002.SZ", "000003.SZ"],
+            ("BK4.DC", "20261104"): ["600000.SH", "600004.SH"],
+        }
+        client = BoardMemberClient(members)
+        self._dc_member_past_the_cap(client, ["20261103", "20261104"])
+
+        for trade_date in ("20261103", "20261104"):
             frame = pd.read_parquet(self.raw_dir / "dc_member" / f"trade_date={trade_date}.parquet")
-            self.assertTrue((frame["available_at"] == f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:]} 20:00:00+08:00").all())
-            return sorted(zip(frame["ts_code"], frame["con_code"], strict=True))
-
-        self.assertEqual(landed("20261102"), [("BK1.DC", f"{index:06d}.SZ") for index in range(5)] + [("BK3.DC", "000003.SZ")])
-        self.assertEqual(landed("20261103"), [("BK1.DC", f"{index:06d}.SZ") for index in range(6)] + [("BK2.DC", "600000.SH")])
-        # One paged series per board over the whole run, never a whole-day request.
+            expected = sorted((board, code) for (board, day), codes in members.items() if day == trade_date for code in codes)
+            self.assertEqual(sorted(zip(frame["ts_code"], frame["con_code"], strict=True)), expected)
+        self.assertTrue(all("trade_date" in params and params["offset"] <= 8 for params in client.calls))
         self.assertEqual(
-            sorted({(params["ts_code"], params["start_date"], params["end_date"]) for _, params in client.calls}),
-            [("BK1.DC", "20261102", "20261103"), ("BK2.DC", "20261102", "20261103"), ("BK3.DC", "20261102", "20261103")],
+            sorted({(params["trade_date"], params["ts_code"]) for params in client.calls if "ts_code" in params}),
+            [("20261103", "BK3.DC"), ("20261103", "BK4.DC"), ("20261103", "BK9.DC")],
         )
-        self.assertTrue(all("trade_date" not in params for _, params in client.calls))
 
-    def test_dc_member_refuses_a_trade_date_without_its_dc_index(self):
-        client = BoardMemberClient({})
-        with self.assertRaisesRegex(RuntimeError, "needs the dc_index partition for 20261103"):
-            download.download_board_members_by_board(
-                client, self.raw_dir, common.BOARD_TRADING_SPECS["dc_member"], ["20261103"], True, 4, None,
-            )
-        self.assertEqual(client.calls, [])
+    def test_dc_member_refuses_a_day_past_the_cap_it_cannot_split(self):
+        members = {(board, "20261103"): [f"{index:06d}.SZ" for index in range(5)] for board in ("BK1.DC", "BK2.DC", "BK3.DC")}
+        self._write_board_partition("dc_index", "20261103", [("BK1.DC", ""), ("BK2.DC", ""), ("BK3.DC", "")])
+        cases = (
+            # Out of board order the pages prove no board complete.
+            ("unsorted", BoardMemberClient(members, board_order=["BK3.DC", "BK1.DC", "BK2.DC"]), "20261103: the whole-day pages are not ordered by board code"),
+            # Without dc_index the boards past the cap are unknown.
+            ("no dc_index", BoardMemberClient(members), "20261103 runs past the vendor's offset cap and needs the dc_index partition"),
+        )
+        for label, client, message in cases:
+            with self.subTest(label):
+                if label == "no dc_index":
+                    (self.raw_dir / "dc_index" / "trade_date=20261103.parquet").unlink()
+                with self.assertRaisesRegex(RuntimeError, message):
+                    self._dc_member_past_the_cap(client, ["20261103"])
+                self.assertFalse(any("ts_code" in params for params in client.calls))
+                self.assertFalse((self.raw_dir / "dc_member" / "trade_date=20261103.parquet").exists())
 
     def test_trade_cal_helpers_normalize_date_strings(self):
         path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2026.parquet"
@@ -4319,7 +4341,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             macro_datasets=["cn_gdp"],
             global_datasets=["index_global"],
             event_datasets=[],
-            include_board_trading=False,
+            include_board_trading=True,
+            board_datasets=None,
             include_intraday=False,
             include_share_float_complete=False,
             include_text=True,
@@ -4349,6 +4372,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(seen["global"].start_date, "20260504")
         self.assertEqual(seen["global"].macro_start_date, "20200101")
         self.assertIn("text_evidence", seen)
+        # Board datasets run after the fundamentals Paper needs, so a vendor
+        # change to one of them cannot stop the fundamental refresh.
+        self.assertEqual(list(seen)[-2:], ["fundamental", "board_trading"])
 
     def test_evening_update_excludes_the_natural_day_text_tier(self):
         # Text is landed by its own calendar-day job; running it inside the

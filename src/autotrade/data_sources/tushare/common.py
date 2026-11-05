@@ -91,7 +91,7 @@ MIN_REQUEST_INTERVAL_SECONDS = 0.80
 # The largest offset the vendor serves: a request past it is refused (code
 # 50101, "offset不能大于100000"), so offset paging reaches at most this offset
 # plus one page. dc_member's whole-day answer outgrew it on 20261103 (105,452
-# rows at 8,000 a page); query_paged stops before requesting past it.
+# rows at 8,000 a page); query_paged never requests past it.
 VENDOR_MAX_OFFSET = 100_000
 
 REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
@@ -552,8 +552,9 @@ class FetchStrategy(StrEnum):
     TRADE_DATE_BY_LIMIT_TYPE = "trade_date_by_limit_type"
     TRADE_DATE_BY_MARKET = "trade_date_by_market"
     TRADE_DATE_BY_MARKET_HOT_TYPE = "trade_date_by_market_hot_type"
-    # One request per board over a run of trade dates, landed per trade date.
-    BOARD_DATE_RANGE = "board_date_range"
+    # Whole-day pages up to the vendor's offset cap, then one request per
+    # board for the boards past it; one file per trade date.
+    TRADE_DATE_BOARD_TAIL = "trade_date_board_tail"
     PERIOD = "period"
     ANN_MONTH = "ann_month"
     TS_CODE = "ts_code"
@@ -1412,12 +1413,12 @@ BOARD_TRADING_SPECS = {
         availability=OFFICIAL_20,
         date_column="trade_date",
     ),
-    # A whole trade date no longer fits under VENDOR_MAX_OFFSET (105,452 rows
-    # on 20261103), so the members are fetched per board (the vendor's
-    # documented "loop by date and code").
+    # A whole trade date can outgrow VENDOR_MAX_OFFSET (105,452 rows on
+    # 20261103) and the vendor requires trade_date on every request (since
+    # 2026-11-05), so the boards past the cap are fetched one by one.
     "dc_member": DatasetSpec(
         api_name="dc_member",
-        strategy=FetchStrategy.BOARD_DATE_RANGE,
+        strategy=FetchStrategy.TRADE_DATE_BOARD_TAIL,
         fields="trade_date,ts_code,con_code,name",
         page_limit=8000,
         key_columns=("trade_date", "ts_code", "con_code"),
@@ -1711,7 +1712,12 @@ def load_relay_url() -> str:
 def frame(result: ApiResult) -> pd.DataFrame:
     return pd.DataFrame(result.items, columns=result.fields)
 
-def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fields: str = "", page_limit: int | None = 10000, allow_repeated_pages: bool = False) -> tuple[ApiResult, int]:
+def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fields: str = "", page_limit: int | None = 10000, allow_repeated_pages: bool = False, stop_at_offset_cap: bool = False) -> tuple[ApiResult, int]:
+    """Every row the vendor serves for ``params``, by offset paging.
+
+    An answer that runs past VENDOR_MAX_OFFSET raises, unless
+    ``stop_at_offset_cap``: then the pages read so far are returned, all of
+    them full, and the caller owns fetching the rest by narrower params."""
     page_limit = page_limit or 10000
     all_items: list[list[Any]] = []
     result_fields: list[str] = []
@@ -1759,6 +1765,8 @@ def query_paged(client: TuShareClient, api_name: str, params: dict[str, Any], fi
             break
         offset += page_limit
         if offset > VENDOR_MAX_OFFSET:
+            if stop_at_offset_cap:
+                break
             # The vendor would refuse the next page and the rows past it are
             # unreachable with these params: fail instead of retrying a refusal.
             raise RuntimeError(

@@ -2617,7 +2617,7 @@ def expected_board_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_
     if start > end_date:
         return set()
     trade_dates = load_sse_open_dates(raw_dir, start, end_date)
-    if spec.strategy in {FetchStrategy.TRADE_DATE, FetchStrategy.BOARD_DATE_RANGE}:
+    if spec.strategy in {FetchStrategy.TRADE_DATE, FetchStrategy.TRADE_DATE_BOARD_TAIL}:
         return {raw_dir / spec.api_name / f"trade_date={trade_date}.parquet" for trade_date in trade_dates}
     if spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
         return {
@@ -2666,7 +2666,7 @@ def audit_board_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         # Flat trade-date datasets get the trailing-zero stale-feed detector;
         # nested tag/market strategies stay opted out (an individual pool or
         # tag legitimately goes quiet for long stretches).
-        zero_rows_ok=spec.zero_rows_ok if spec.strategy in {FetchStrategy.TRADE_DATE, FetchStrategy.BOARD_DATE_RANGE} else None,
+        zero_rows_ok=spec.zero_rows_ok if spec.strategy in {FetchStrategy.TRADE_DATE, FetchStrategy.TRADE_DATE_BOARD_TAIL} else None,
     ))
 
 
