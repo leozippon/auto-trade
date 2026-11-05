@@ -80,16 +80,18 @@ FUND_TITLE_EIGHT_YEAR: dict[str, object] = {**FUND_EIGHT_YEAR, "include_text": T
 # Round 20261005's 100k bars on that geometry.
 FUND_TITLE_EIGHT_YEAR_100K: dict[str, object] = {**FUND_EIGHT_YEAR_100K, **FUND_TITLE_EIGHT_YEAR}
 
-# Its seed at snapshot cache format 14 (observed-era visibility) on release
-# b50c220f... (logs/data/seed_8y_fundanns_20261024/).
-FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261024"
+# Its seed at snapshot cache format 15 (fina_indicator rows no earlier than
+# their period's latest statement) on release 56b289cf...
+# (logs/data/seed_build_20261104_8y.log).
+FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261104"
 
 # The same selection on ten August-July research years from 2015-08 (rounds
 # 20261031 and 20261102): the twelve forward months after them, a Held-out
 # quarter the replay clips to the release end, and decision views reaching 132
 # months back from the research end, the ten years plus the one their start
 # reads, a window every domain inherits. Part of the seed's contract, like
-# EIGHT_YEAR; the seed is prebuilt from release 65fd45b510dd4d0787eabcb1c4c092db.
+# EIGHT_YEAR; the seed is prebuilt at snapshot cache format 15 from release
+# 56b289cf02db41e68a33abf66de49016, the eight-year seed's.
 FUND_TITLE_TEN_YEAR: dict[str, object] = {
     **FUND_TITLE_EIGHT_YEAR,
     "research_start": "20150801",
@@ -98,7 +100,7 @@ FUND_TITLE_TEN_YEAR: dict[str, object] = {
     "heldout_end": "20261031",
     "window_months": 132,
 }
-FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_fundanns_20261031"
+FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_fundanns_20261104"
 
 # That selection graded against CSI 1000 under the sealed gate: the drawdown
 # limits round 20261005 set for the index (FUND_EIGHT_YEAR_100K), without the
