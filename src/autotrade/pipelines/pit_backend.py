@@ -221,9 +221,9 @@ class ResearchPITSnapshotProvider:
     def prepare_decision(self, *, decision_time: datetime) -> SnapshotBundle:
         """The decision view at ``decision_time`` alone, with no replay slot.
 
-        A research session reads the view at research end and nothing else:
-        the slot that starts there is the forward period's, so preparing it
-        beside the view would build forward data for a research session.
+        A research session reads the view at its frontier and nothing else:
+        the slot that starts there is the next step's, so preparing it beside
+        the view would build data a research session may not see yet.
         """
 
         decision = _cn_datetime(decision_time)
@@ -235,6 +235,27 @@ class ResearchPITSnapshotProvider:
             replay_ref="",
             generation_id=self.release.generation_id,
         )
+
+    def require_decision_view(self, *, decision_time: datetime) -> SnapshotBundle:
+        """The decision view at ``decision_time`` as :meth:`prepare_decision`
+        returns it, but only if the cache already holds it.
+
+        A test advances the session's frontier by one step, and the view it
+        mounts next is a step-boundary view the PIT view seed carries
+        (``pit_views_seed.plan_seed``); building one in the middle of a
+        session takes hours, so a seed that lacks it is refused by name
+        (``FileNotFoundError``) instead.
+        """
+
+        decision = _cn_datetime(decision_time)
+        decision_dir = self.cache_root / "decision" / _decision_key(decision)
+        if not (decision_dir / "manifest.json").is_file():
+            raise FileNotFoundError(
+                f"the PIT view seed carries no decision view at {decision.isoformat()} "
+                f"({decision_dir.name}); rebuild the seed with the validation years' step "
+                "boundaries (scripts/data/prebuild_pit_views_seed.py)"
+            )
+        return self.prepare_decision(decision_time=decision)
 
     def _bind_cache_contract(self) -> dict[str, object]:
         path = self.cache_root / "provider.json"
@@ -868,6 +889,7 @@ class PITDailyEvaluationBackend:
         *,
         max_days: int | None = None,
         start_day: str | None = None,
+        end_day: str | None = None,
     ) -> EvaluationResult:
         """Replay one revision over its slot, or over a span of slots.
 
@@ -878,14 +900,18 @@ class PITDailyEvaluationBackend:
         to ``request.end`` (the last slot's end), and a slot is opened only
         once the replay reaches it.
 
-        ``start_day`` and ``max_days`` truncate the replay to a window inside
-        the span (``calendar.replay_window``) AFTER the slot identity check, so
-        an unofficial smoke run gets the real as-of view, ABI and executor
-        without being able to pass off a short window as a full Validation (the
-        caller decides what the result is allowed to become; see
-        ``SmokeBacktestTool``). A window that opens late still reads the same
-        rolling as-of view the whole span would have built by then: the view
-        rolls every slot up to the first decision it is asked for.
+        ``start_day``, ``max_days`` and ``end_day`` truncate the replay to a
+        window inside the span (``calendar.replay_window``) AFTER the slot
+        identity check. The first two are the unofficial smoke run's: it gets
+        the real as-of view, ABI and executor without being able to pass off a
+        short window as a full Validation (the caller decides what the result
+        is allowed to become; see ``SmokeBacktestTool``), and draws no
+        zero-skill panel. ``end_day`` is a test's: the window opens on the
+        span's first day, so it writes the span's own as-of parts and is
+        graded against its matched panel like any Validation, and stops at the
+        frontier. A window that opens late still reads the same rolling as-of
+        view the whole span would have built by then: the view rolls every
+        slot up to the first decision it is asked for.
         """
         started_at = utc_now_iso()
         timer = PhaseTimer()
@@ -938,9 +964,9 @@ class PITDailyEvaluationBackend:
             replay_end = yyyymmdd(request.end)
             span_days = sorted(set(_trade_date_keys(daily)))
             trade_days = span_days
-            if max_days is not None or start_day is not None:
+            if max_days is not None or start_day is not None or end_day is not None:
                 trade_days = replay_window(
-                    span_days, start=start_day, max_days=max_days
+                    span_days, start=start_day, max_days=max_days, end=end_day
                 )
                 daily = daily[_trade_date_keys(daily).isin(set(trade_days))].copy()
                 # A truncated replay must not claim it covered the whole span.
@@ -1080,7 +1106,8 @@ class PITDailyEvaluationBackend:
             # The zero-skill panel the verdict grades this replay against, drawn
             # from its completed executions once it is over: every draw runs
             # through a Broker of its own, so nothing here reaches the record
-            # above. A truncated smoke run is not a Validation and gets none.
+            # above. A smoke run is not a Validation and gets none; a test's
+            # window, cut only at the frontier, is graded like any other.
             panel = None
             if max_days is None and start_day is None:
                 panel_failure: Exception | None = None
@@ -1157,6 +1184,29 @@ class PITDailyEvaluationBackend:
             _discard_strategy_state(state_dir)
             if not keep_result_dir:
                 shutil.rmtree(result_dir, ignore_errors=True)
+
+    def require_warm_start(self, request: EvaluationRequest) -> None:
+        """Refuse a replay whose first slot has no prebuilt as-of state.
+
+        A test replays the validation span from its first day, so the span
+        opens on the stash the seed prebuilt for that slot and decision view
+        (``pit_views_seed.plan_seed`` plans one per research-years choice,
+        ``prebuild_asof_stash`` writes it). A seed without it would encode the
+        slot's parts inside the session instead; the missing state is named
+        (``RuntimeError``) so the seed can be rebuilt for this arm's
+        ``research_years``.
+        """
+
+        snapshot_dir = Path(request.snapshot.decision_ref).resolve(strict=True)
+        replay_dir = Path(request.snapshot.replay_ref).resolve(strict=True)
+        stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, request.schedule, request.mode)
+        if not (stash_dir / _STASH_PREBUILD_RECORD).is_file():
+            raise RuntimeError(
+                f"the PIT view seed carries no prebuilt as-of state for decision view "
+                f"{snapshot_dir.name} and replay slot {replay_dir.name} (schedule "
+                f"{request.schedule.to_record()}); rebuild the seed with this arm's "
+                "research_years among its warm starts (scripts/data/prebuild_pit_views_seed.py)"
+            )
 
     def null_control(
         self,

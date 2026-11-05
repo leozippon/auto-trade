@@ -622,6 +622,15 @@ class _FakeProvider:
             generation_id="generation_test",
         )
 
+    def prepare_decision(self, *, decision_time):
+        self.calls.append(("decision", "", "", decision_time.isoformat()))
+        return SnapshotBundle(
+            snapshot_id="snapshot",
+            decision_ref=f"decision/{decision_time:%Y%m%d}",
+            replay_ref="",
+            generation_id="generation_test",
+        )
+
 
 def _run_prebuild(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, argv: list[str]
@@ -665,6 +674,55 @@ def test_the_prebuild_prepares_every_planned_slot_and_stashes_each_chain_head(
     out = capsys.readouterr().out
     assert "on first use: Y2,Y3,Y4" in out and "on first use: H" in out
     assert json.loads(out.strip().splitlines()[-1])["status"] == "ok"
+
+
+def test_the_seed_carries_a_warm_start_and_step_views_for_every_research_years_choice() -> None:
+    """On the ten-year geometry the default choices 5, 6 and 7 add a decision
+    view at every month boundary from the earliest validation start to
+    research end and an as-of chain from each choice's first validation year;
+    a choice the geometry cannot take plans nothing, and the four-year default
+    geometry (no valid default choice) plans exactly what it did."""
+
+    ten = ResearchGeometry("20150801", "20250731", "20260731", "20261031")
+    plan = plan_seed(ten, _release_days("20261031"))
+    assert plan.research_years_choices == (5, 6, 7)
+    step_views = [value.isoformat() for value in plan.step_decision_times]
+    assert len(step_views) == 55 and step_views[0] == _cn("20200831") and step_views[-1] == _cn("20250630")
+    assert _cn("20200731") not in step_views and _cn("20210731") not in step_views
+    assert len(plan.decision_times) == 11 + 55 and list(plan.decision_times) == sorted(plan.decision_times)
+    assert [(decision.isoformat(), chain[0].label, len(chain)) for decision, chain in plan.stash_chains] == [
+        (_cn("20150731"), "Y1", 10),
+        (_cn("20200731"), "Y6", 5),
+        (_cn("20210731"), "Y7", 4),
+        (_cn("20220731"), "Y8", 3),
+        (_cn("20250731"), "F", 2),
+    ]
+    record = json.loads(json.dumps(plan.to_record()))
+    assert record["research_years_choices"] == [5, 6, 7] and len(record["step_decision_views"]) == 55
+    # Choices the geometry cannot take plan nothing; one it can plans one chain.
+    assert plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days()).research_years_choices == ()
+    two = plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days(), research_years_choices=(2, 4, 9))
+    assert two.research_years_choices == (2,)
+    assert [chain[0].label for _decision, chain in two.stash_chains] == ["Y1", "Y3", "F"]
+    assert len(two.step_decision_times) == 22
+    with pytest.raises(ValueError, match="at least one validation year"):
+        pit_views_seed.SeedPlan(DEFAULT_RESEARCH_GEOMETRY, DEFAULT_RESEARCH_GEOMETRY.research_years, (), (4,))
+
+
+def test_the_prebuild_builds_the_step_views_and_stashes_each_validation_chain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    stashed = _run_prebuild(monkeypatch, tmp_path, ["--heldout-end", "20260831", "--research-years", "2,9"])
+    decisions = [call[3] for call in _FakeProvider.calls if call[0] == "decision"]
+    assert len(decisions) == 22 and decisions[0] == _cn("20230731") and decisions[-1] == _cn("20250531")
+    assert [(call["snapshot_dir"], call["replay_dir"]) for call in stashed] == [
+        ("decision/20210630", "replay/valid/20210701_20220630"),
+        ("decision/20230630", "replay/valid/20230701_20240630"),
+        ("decision/20250630", "replay/heldout/20250701_20260630"),
+    ]
+    out = capsys.readouterr().out
+    assert json.loads(out.strip().splitlines()[0])["step_decision_views"] == 22
+    assert "[step view 22/22]" in out and "on first use: Y4" in out
 
 
 def test_the_dry_run_prints_the_plan_and_builds_nothing(

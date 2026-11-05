@@ -75,6 +75,10 @@ class SessionKind(StrEnum):
     FORWARD = "forward"
 
 
+# One step of the arm's rolling record (``pipelines/rolling_record.py``):
+# appended by the session's ``test`` as the step completes, or by the host
+# completing the record after the session; a step is recorded exactly once.
+TEST_STEP_RECORD_TYPE = "test_step"
 # An operator's withdrawal of a recorded graduation (:func:`verdict_void_record`).
 VERDICT_VOID_RECORD_TYPE = "verdict_void"
 # An operator's incubation of one node of a finished arm, recorded before
@@ -106,6 +110,7 @@ ENVIRONMENT_BLOCKED = VerdictStatus.ENVIRONMENT_BLOCKED
 ARM_END_STATUSES = (VerdictStatus.NO_DELIVERABLE, VerdictStatus.ENVIRONMENT_BLOCKED)
 PIPELINE_RECORD_TYPES = (
     "research_session",
+    TEST_STEP_RECORD_TYPE,
     "forward",
     "attempt_failed",
     VERDICT_VOID_RECORD_TYPE,
@@ -376,6 +381,13 @@ class ExperimentLedger:
             and forward_record(self.read()) is not None
         ):
             raise ValueError("the arm already has its forward verdict")
+        if record_type == TEST_STEP_RECORD_TYPE:
+            step = record.get("step")
+            if any(
+                row.get("record_type") == TEST_STEP_RECORD_TYPE and row.get("step") == step
+                for row in self.read()
+            ):
+                raise ValueError(f"the arm already recorded test step {step!r}; a step is replayed once")
         if record_type == VERDICT_VOID_RECORD_TYPE:
             require_voidable(self.read(), record)
         append_versioned_jsonl(

@@ -16,6 +16,7 @@ import pyarrow.parquet as pq
 import pytest
 
 from autotrade.common.records import HOST_PATH_RE
+from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
@@ -1884,9 +1885,9 @@ def generate_orders(context):
         encoding="utf-8",
     )
 
-    def _run(max_days, start_day=None):
+    def _run(max_days, start_day=None, end_day=None):
         return PITDailyEvaluationBackend(
-            tmp_path / f"results_{max_days}_{start_day}", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
+            tmp_path / f"results_{max_days}_{start_day}_{end_day}", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
         ).evaluate(
             EvaluationRequest(
                 ArtifactRevision("revision_layout", revision),
@@ -1904,6 +1905,7 @@ def generate_orders(context):
             ),
             max_days=max_days,
             start_day=start_day,
+            end_day=end_day,
         )
 
     full = _run(None)
@@ -1926,6 +1928,21 @@ def generate_orders(context):
     assert late.summary["decision_calls"] == 1
     late_record = json.loads(Path(late.result_ref).read_text(encoding="utf-8"))
     assert [row["trade_date"] for row in late_record["equity_curve"]] == ["20240103"]
+    # A smoke window, cut by days or opened late, draws no panel.
+    for result in (short, late):
+        sidecar = json.loads((Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
+        assert not sidecar.get("panel_daily")
+
+    # A test's window is cut at the frontier only: it opens on the span's
+    # first day, records the days it covered and is graded against its panel
+    # like the whole span.
+    frontier = _run(None, end_day="20240102")
+    assert frontier.summary["replayed_trade_days"] == 1
+    frontier_record = json.loads(Path(frontier.result_ref).read_text(encoding="utf-8"))
+    assert [row["trade_date"] for row in frontier_record["equity_curve"]] == ["20240102"]
+    assert "asof_date_ranges" not in frontier_record["pit"]
+    sidecar = json.loads((Path(frontier.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
+    assert [day for day, _value in sidecar["panel_daily"]] == ["20240102"]
 
     for days in (0, -1):
         with pytest.raises(ValueError, match="max_days must be a positive integer"):
@@ -2865,3 +2882,38 @@ def test_a_span_prebuild_encodes_the_parts_its_replay_publishes(tmp_path: Path) 
         ("20240104", "20240105", 2),
     ]
     assert prebuild("second")["reused"] is True
+
+
+def test_a_test_replay_needs_the_seeds_warm_start_and_the_frontiers_view(tmp_path: Path) -> None:
+    """A test opens its span on the as-of state the seed prebuilt for the
+    span's first slot and mounts the decision view at the new frontier next;
+    a seed that carries neither is refused by name, before any replay, and a
+    prebuilt one passes."""
+
+    snapshot, slots = _write_span_release(tmp_path)
+    request = _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
+    backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
+    with pytest.raises(RuntimeError, match="no prebuilt as-of state") as refused:
+        backend.require_warm_start(request)
+    assert snapshot.name in str(refused.value) and slots["a"].name in str(refused.value)
+    assert "research_years" in str(refused.value)
+    first = json.loads((slots["a"] / "manifest.json").read_text(encoding="utf-8"))
+    prebuild_asof_stash(
+        snapshot_dir=snapshot,
+        replay_dir=slots["a"],
+        schedule=request.schedule,
+        phase="valid",
+        generation_id=request.snapshot.generation_id,
+        start=str(first["period_start"]),
+        end=str(first["period_end"]),
+        host_dir=tmp_path / "stash_build",
+    )
+    backend.require_warm_start(request)
+
+    provider, _fake = _provider_with_fake_builder(tmp_path / "provider")
+    decision = datetime(2024, 1, 31, 23, 59, 59, tzinfo=CN_TZ)
+    with pytest.raises(FileNotFoundError, match="no decision view at 2024-01-31T23:59:59\\+08:00") as missing:
+        provider.require_decision_view(decision_time=decision)
+    assert "step boundaries" in str(missing.value)
+    built = provider.prepare_decision(decision_time=decision)
+    assert provider.require_decision_view(decision_time=decision) == built

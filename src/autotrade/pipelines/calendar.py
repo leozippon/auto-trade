@@ -54,21 +54,27 @@ def replay_window(
     *,
     start: str | None = None,
     max_days: int | None = None,
+    end: str | None = None,
 ) -> list[str]:
     """The trading days a truncated replay actually covers.
 
-    One definition for both evaluation backends. An unofficial rehearsal runs a
-    short window of a span it must not be able to pass off as a full
-    Validation: ``start`` moves its first day to the first trading day at or
-    after that date and ``max_days`` caps how many days follow. Neither can
-    reach outside the span's own days, and both are applied after the slot
-    identity check, never before it.
+    One definition for both evaluation backends. ``start`` moves the window's
+    first day to the first trading day at or after that date and ``max_days``
+    caps how many days follow: an unofficial rehearsal runs such a short
+    window of a span it must not be able to pass off as a full Validation.
+    ``end`` cuts the window at the last trading day on or before that date:
+    a test replays its span from the first day to the validation frontier.
+    None can reach outside the span's own days, and all are applied after the
+    slot identity check, never before it.
     """
 
     days = sorted(str(day) for day in trade_days)
     if start is not None:
         anchor = yyyymmdd(start)
         days = [day for day in days if day >= anchor]
+    if end is not None:
+        last = yyyymmdd(end)
+        days = [day for day in days if day <= last]
     if max_days is not None:
         days = days[:max_days]
     return days
