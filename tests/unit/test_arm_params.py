@@ -51,9 +51,9 @@ def test_every_console_surface_is_read_off_the_record() -> None:
         *NON_PERSISTABLE_PARAMS,
     }
     assert WEB_REQUIRED_PARAMS == {"experiment_id", *CREATE_RULES, "research_start", "research_end", "forward_end", "heldout_end"}
-    # The rules a create request must state, sealed_years and
-    # ablation_required, have no value anywhere; alpha, the third required
-    # rule, carries the console's value 0.05 and is no create-time requirement.
+    # The rule a create request must state, sealed_years, has no value
+    # anywhere; alpha, the other required rule, carries the console's value
+    # 0.05 and is no create-time requirement.
     assert all(WEB_CREATE_DEFAULTS[name] is None for name in ("experiment_id", *CREATE_RULES))
     assert WEB_CREATE_DEFAULTS["alpha"] == 0.05 and "alpha" not in WEB_REQUIRED_PARAMS
 

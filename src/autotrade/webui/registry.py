@@ -558,17 +558,13 @@ SEALED_FIELDS = (
 def _sealed_view(identity: PublicIdentity, block: object) -> dict[str, object] | None:
     """The forward record's sealed reading: the frozen book's residual IR on
     the sealed years against its bar, whether it passed, its seed replicates'
-    readings beside it, or the strategy error that left it unread, and the
-    ablation's increment with its t-statistic, reported and never judged
-    (``None`` where the arm froze no ablation). ``None`` on a record written
-    before the sealed gate."""
+    readings beside it, or the strategy error that left it unread. ``None``
+    on a record written before the sealed gate."""
 
     sealed = _mapping(block)
     if not sealed:
         return None
     reading = _mapping(sealed.get("slice"))
-    ablation = _mapping(sealed.get("ablation"))
-    increment = _mapping(ablation.get("increment"))
     return {
         "label": sealed.get("label"),
         "result": _result_name(sealed.get("result_ref")),
@@ -587,18 +583,6 @@ def _sealed_view(identity: PublicIdentity, block: object) -> dict[str, object] |
             for entry in reading.get("seed_replicates") or ()
             if isinstance(entry, Mapping)
         ],
-        "ablation": (
-            {
-                "source_step_id": ablation.get("source_step_id"),
-                "residual_information_ratio": _number(increment.get("residual_information_ratio")),
-                "t_statistic": _number(increment.get("t_statistic")),
-                "unmeasured": identity.public_text(str(increment.get("unmeasured") or "")) or None,
-                "strategy_error": bool(ablation.get("strategy_error")),
-                "error": identity.public_text(str(ablation.get("error") or "")) or None,
-            }
-            if ablation
-            else None
-        ),
     }
 
 
@@ -799,8 +783,8 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
 # lists an archived arm only when asked for the archived ones, the default
 # listing never summarizes it, its experiment page still opens, and the manager
 # never starts its worker again. Lineage, the consistency check
-# (scripts/dev/check_verdicts.py), the round fill queue, operating memory and
-# Paper see the arm as before.
+# (scripts/dev/check_verdicts.py), the round fill queue and Paper see the arm
+# as before.
 
 
 def archive_marker(directory: Path) -> dict[str, object] | None:
@@ -1386,19 +1370,6 @@ def _research_session_view(
                 },
                 "seed_replicates": _seed_gate_view(
                     identity, gate.get("seed_replicates"), regressed=_regressed(gate)
-                ),
-                # What registration read of the ablation; absent from a gate
-                # recorded before the rule existed.
-                "ablation": (
-                    {
-                        **_mapping(gate.get("ablation")),
-                        "problem": identity.public_text(
-                            str(_mapping(gate.get("ablation")).get("problem") or "")
-                        )
-                        or None,
-                    }
-                    if gate.get("ablation")
-                    else None
                 ),
             }
             if gate

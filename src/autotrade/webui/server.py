@@ -642,19 +642,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 status_code=404, detail="unknown curated memory entry"
             ) from exc
 
-    @app.get("/api/memory/graduated/{experiment_id}/{skill}")
-    def get_graduated_memory(experiment_id: str, skill: str) -> dict[str, object]:
-        """One graduated candidate's body, behind the same gate as its promotion."""
-
-        try:
-            return memory.graduated_entry(experiment_root, experiment_id, skill)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
-        except (KeyError, OSError) as exc:
-            raise HTTPException(
-                status_code=404, detail="unknown graduated memory entry"
-            ) from exc
-
     @app.post("/api/memory/curated")
     def post_curated_memory(payload: dict = Body(...)) -> dict[str, object]:
         return _memory_write(
@@ -676,22 +663,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.delete("/api/memory/curated/{name}")
     def delete_curated_memory(name: str) -> dict[str, object]:
         return _memory_write(lambda: memory.delete_curated_entry(root, name))
-
-    @app.post("/api/memory/curated/{name}/promote")
-    def post_curated_promotion(
-        name: str, payload: dict = Body(...)
-    ) -> dict[str, object]:
-        """Copy one admitted graduated skill in under the name in the path."""
-
-        return _memory_write(
-            lambda: memory.promote_curated_entry(
-                root,
-                experiment_root,
-                name=name,
-                experiment_id=str(payload.get("experiment_id") or ""),
-                skill=str(payload.get("skill") or ""),
-            )
-        )
 
     @app.get("/api/experiments/{experiment_id}/memory")
     def get_experiment_memory(experiment_id: str) -> dict[str, object]:

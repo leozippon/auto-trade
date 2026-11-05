@@ -101,7 +101,7 @@ STEP_TREE_SECTION = """\
 
 SESSION_FEEDBACK_SECTION = """\
 # 反馈通道
-- 运行记忆（`inputs/skills_index.json` 的 `operating_memory` 段）是别的实验或研究者留下的只读建议，不是规则：依赖某条之前，先用本会话的数据与证据核实；它与你实测的结果相抵触时，用 `skill_feedback` 报一次。
+- 运行记忆（`inputs/skills_index.json` 的 `operating_memory` 段）是研究者整理的只读建议，不是规则：依赖某条之前，先用本会话的数据与证据核实；它与你实测的结果相抵触时，用 `skill_feedback` 报一次。
 - 发现环境、工具输出、数据或文档里可疑的缺陷，用 `report_issue` 如实报告，然后继续工作，不要静默绕过。
 - 本实验的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill；skill 只写挂载的运行记忆与数据引用里还没有的可复用做法，在 `finish_session` 之前写完。\
 """
@@ -249,8 +249,6 @@ def build_sealed_gate_section(experiment_facts: Mapping[str, object]) -> str:
     visible = str(geometry["research_period"])
     sealed = str(geometry["sealed_years"]["period"])  # type: ignore[index]
     years = len(geometry["years"])  # type: ignore[arg-type]
-    registration = rules.get("freeze_registration") if isinstance(rules, Mapping) else None
-    ablation = registration.get("ablation") if isinstance(registration, Mapping) else None
     return (
         "## 封存检验\n"
         f"本实验的研究期分两段。会话只看得到前 {years} 个研究年 {visible}：数据视图、"
@@ -265,15 +263,7 @@ def build_sealed_gate_section(experiment_facts: Mapping[str, object]) -> str:
         "`batch_validate` 在每个可见区间上报告同一个统计量（`residual_reading`）和该区间长度下的门槛："
         f"一年区间约 {gate['bar_over_one_year']}，年数越短，同样的残差信息比率越可能只是运气。"
         "它是读数，不是判决。\n"
-        + (
-            "本实验定版时还须登记一个消融对照（`finish_session` 的 `ablation`）："
-            "提名节点只改一行、关掉其赖以成立的机制的完整可见期验证。它随提名冻结、"
-            "在封存研究年上回放；增量即提名主动序列减消融主动序列的同一统计量，"
-            "连同其 t 统计量只记录，不参与裁决。\n"
-            if isinstance(ablation, Mapping)
-            else ""
-        )
-        + "一次 `freeze` 即结束会话：会话拿不到封存读数，也没有第二次读取。"
+        "一次 `freeze` 即结束会话：会话拿不到封存读数，也没有第二次读取。"
     )
 
 

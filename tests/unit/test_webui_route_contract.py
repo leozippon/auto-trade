@@ -148,12 +148,10 @@ def test_the_extractor_finds_the_routes_the_console_really_calls():
         "/api/experiments/{}/results/{}/style",
         "/api/experiments/{}/trace/initial-prompt",
         # 演化: the page bundle, one entry's body, one experiment's mounts,
-        # and the curated writes the page issues (create, edit, delete, promote).
+        # and the curated writes the page issues (create, edit, delete).
         "/api/memory",
         "/api/memory/curated",
         "/api/memory/curated/{}",
-        "/api/memory/curated/{}/promote",
-        "/api/memory/graduated/{}/{}",
         "/api/experiments/{}/memory",
     ):
         assert expected in paths, sorted(paths)

@@ -56,6 +56,7 @@ from .config import (
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_RESEARCH_GEOMETRY,
     REQUIRED_ACCEPTANCE_KEYS,
+    RETIRED_ABLATION_RULES,
     RETIRED_RULES,
     RETIRED_SWITCHES,
     AcceptanceRules,
@@ -135,7 +136,7 @@ class GeometryParams:
 @dataclass(frozen=True, kw_only=True)
 class PackParams:
     """What the arm's sessions are handed: the directive, the reference pack
-    and the operating-memory tiers."""
+    and whether the curated operating memory mounts."""
 
     research_directive: str = _param(rolling_default("research_directive"))
     workspace_reference: str = _param(rolling_default("workspace_reference"))
@@ -319,13 +320,11 @@ class EnvironmentParams:
 # without a default. The sealed gate's level is one for the whole program, so
 # that every sealed reading is judged at the same level
 # (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many research years are
-# sealed depends on the arm's geometry and whether a freeze registers an
-# ablation on the round's research question, so the console has no value for
-# either: every create request states them.
+# sealed depends on the arm's geometry, so the console has no value for it:
+# every create request states it.
 _REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {
     "alpha": 0.05,
     "sealed_years": None,
-    "ablation_required": None,
 }
 
 
@@ -375,7 +374,9 @@ RetiredParams = make_dataclass(
     "RetiredParams",
     [
         (name, object, _param(surface=Surface.RETIRED))
-        for name in sorted(RETIRED_SWITCHES | RETIRED_RULES | RETIRED_NL_PARAMS)
+        for name in sorted(
+            RETIRED_SWITCHES | RETIRED_RULES | RETIRED_ABLATION_RULES | RETIRED_NL_PARAMS
+        )
     ],
     frozen=True,
     kw_only=True,
@@ -384,7 +385,8 @@ RetiredParams = make_dataclass(
 RetiredParams.__module__ = __name__
 RetiredParams.__doc__ = (
     "Parameters no reader uses any more (``config.RETIRED_SWITCHES``, "
-    "``config.RETIRED_RULES``, ``RETIRED_NL_PARAMS``)."
+    "``config.RETIRED_RULES``, ``config.RETIRED_ABLATION_RULES``, "
+    "``RETIRED_NL_PARAMS``)."
 )
 
 

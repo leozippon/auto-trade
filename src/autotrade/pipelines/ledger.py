@@ -124,6 +124,15 @@ VERDICT_VOID_FIELDS = ("voided_by", "reason", "evidence_ref", "recorded_at")
 # exception: the one replay failure that measures the strategy. Every other
 # failure fails the attempt and never reaches a business record.
 STRATEGY_ERROR = "strategy_error"
+# The key under which an arm frozen between 2026-11-03 and 2026-11-05 recorded
+# the ablation it registered: in its research session record's
+# ``freeze_gate`` and ``frozen`` blocks and its forward record's ``sealed``
+# block. The ablation was retired on 2026-11-05 with its registration, its
+# sealed replay and its increment, and nothing judges or replays it any more.
+# Two readers still name it: the frozen tree it points at is kept from the
+# prune (``experiment._keep_frozen_artifact_ids``), and the readings check
+# leaves it out of its comparison (``scripts/dev/check_verdicts.py``).
+RETIRED_ABLATION_KEY = "ablation"
 DURABLE_SUCCESS_TYPES = ("research_session", "forward")
 _INTEGRITY_RECORD_TYPES = frozenset({"forward"})
 
@@ -297,9 +306,9 @@ def experiment_verdict(
     status (:data:`ARM_END_STATUSES`) when research ended without a freeze,
     else None.
 
-    The single source for the terminal status, the console, the graduated
-    memory tier and Paper: a voided arm is terminal, is no graduate to any of
-    them, and keeps its forward record's own reasons beside the void.
+    The single source for the terminal status, the console and Paper: a
+    voided arm is terminal, is no graduate to any of them, and keeps its
+    forward record's own reasons beside the void.
     """
 
     forward = forward_record(records)

@@ -1,8 +1,8 @@
 """Contradict a mounted operating-memory entry, so the researcher can fix it.
 
-Mounted skills are read-only advice carried in from the curated library or a
-graduated experiment. A session that measures something the entry denies has no
-way to say so: it cannot edit the mount, and the finding dies in the trace.
+Mounted skills are read-only advice carried in from the curated library. A
+session that measures something the entry denies has no way to say so: it
+cannot edit the mount, and the finding dies in the trace.
 ``skill_feedback`` is that return path, and it is deliberately negative only —
 the channel it replaces also let a session endorse an entry, and of its 651
 calls 522 endorsed one, 3 said "outdated" and 0 said "wrong", which is not a
@@ -56,7 +56,7 @@ SKILL_FEEDBACK_LABEL = "skill feedback"
 # paragraph — the reproduction belongs in the skill the session writes.
 MIN_SKILL_EVIDENCE_CHARS = 80
 MAX_SKILL_EVIDENCE_CHARS = 1_000
-# Bounds the refusal hint on a checkout mounting many graduated experiments.
+# Bounds the refusal hint on a session mounting a large library.
 _MAX_HINT_ENTRIES = 20
 SKILL_FEEDBACK_NAME = "skill_feedback.jsonl"
 
@@ -100,7 +100,7 @@ class SkillFeedbackTool:
         "Tell the human operators that one mounted operating-memory entry is "
         "contradicted by what this session measured. skill is the mounted "
         "reference '<source>/<name>' exactly as inputs/skills_index.json lists "
-        "it (source 'curated' or the graduated experiment's id). claim is "
+        "it (source 'curated'). claim is "
         "outdated (the advice no longer matches the current data contract, "
         "tooling or figures) or wrong (this session's own measurements "
         "contradict it). evidence says what was tried and what the data showed "

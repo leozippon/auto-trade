@@ -1,24 +1,19 @@
 #!/usr/bin/env python
-"""The 2026-11-03 round: the first under the sealed gate, an open pack against the memory hypothesis at a CNY 200k account, gpt-6-astra on the local console.
+"""The 2026-11-03 round: the first under the sealed gate, an open pack at a CNY 200k account, gpt-6-astra on the local console.
 
-It asks two questions (logs/research_audit_20261102/round_20261103_design.md).
-Under a gate the session cannot compute before it freezes, how does it
-research, spend and generalize, and what sealed residual reading does it
-reach? And does the pack's mechanism hypothesis matter, read on one sealed
-window? Four experiments, two per pack, identical within a pack but for their
-ids, queued so that a partial start already holds one of each:
+It asks (logs/research_audit_20261102/round_20261103_design.md): under a gate
+the session cannot compute before it freezes, how does it research, spend and
+generalize, and what sealed residual reading does it reach?
+`open_200k_10y_astra_local_20261103a` and `…b`, identical but for their ids,
+mount `open_200k_sealed_20261103`, which asks for a strategy that generalizes
+to the sealed years and frames no mechanism. The round's two memory arms,
+which mounted the memory hypothesis pack, left this file with the memory
+machinery on 2026-11-05; their ids are retired (`_round.RETIRED_IDS`). Every
+arm was created stating `ablation_required` (false), a rule retired with the
+freeze's ablation on 2026-11-05; the stamped value stays in their
+`params.json`, where readers accept and ignore it.
 
-- `open_200k_10y_astra_local_20261103a` and `…b` mount
-  `open_200k_sealed_20261103`, which asks for a strategy that generalizes to
-  the sealed years and frames no mechanism; a freeze registers no ablation
-  (`ablation_required` false).
-- `memory_200k_10y_astra_local_20261103a` and `…b` mount
-  `memory_200k_sealed_20261103`, the memory hypothesis of round 20261102's
-  pack with the owner's note; a freeze must register an ablation, the nominee
-  file with one constant flipped (`ablation_required` true). Its increment on
-  the sealed years is reported, never gated.
-
-The packs state the direction and the host's sealed-gate paragraph states the
+The pack states the direction and the host's sealed-gate paragraph states the
 rule; this file copies neither. Research runs ten August-July years,
 2015-08-01..2025-07-31, of which `sealed_years` 5 are sealed: sessions see
 2015-08..2020-07, and the host replays the frozen node once over
@@ -81,7 +76,6 @@ from scripts.experiments._profiles import (
 from scripts.experiments._round import Round
 
 OPEN_PACK = "configs/workspace_refs/open_200k_sealed_20261103"
-MEMORY_PACK = "configs/workspace_refs/memory_200k_sealed_20261103"
 ASTRA = "gpt-6-astra"
 FLASH = "DeepSeek-V4.1-Flash"
 COMPACT_TOKEN_THRESHOLD = 221_184
@@ -94,15 +88,9 @@ OPEN_DIRECTIVE = (
     "找一个能推广到封存研究年的策略；方向、方法与资源使用由会话自主决定。"
     "数据边界、账户与成本见参考包，验收只看「环境」里的「封存检验」。"
 )
-MEMORY_DIRECTIVE = (
-    "读 `refs/README.md` 与 `refs/memory-framework.md`。"
-    "研究记忆机制能否带来推广到封存研究年的边际：框架是可质疑的工作假说，不是实现清单，"
-    "记忆怎样写入、检索与遗忘由会话决定。"
-    "定版须登记的消融、数据边界、账户与成本见参考包，验收只看「环境」里的「封存检验」。"
-)
 
 
-def _arm(pack: str, directive: str, *, ablation_required: bool) -> dict[str, object]:
+def _arm(pack: str, directive: str) -> dict[str, object]:
     return {
         "model": ASTRA,
         "subagent_model": FLASH,
@@ -111,15 +99,12 @@ def _arm(pack: str, directive: str, *, ablation_required: bool) -> dict[str, obj
         "llm_key": "alternate",
         "workspace_reference": pack,
         "research_directive": directive,
-        "ablation_required": ablation_required,
     }
 
 
 ARMS: dict[str, dict[str, object]] = {
-    "open_200k_10y_astra_local_20261103a": _arm(OPEN_PACK, OPEN_DIRECTIVE, ablation_required=False),
-    "memory_200k_10y_astra_local_20261103a": _arm(MEMORY_PACK, MEMORY_DIRECTIVE, ablation_required=True),
-    "open_200k_10y_astra_local_20261103b": _arm(OPEN_PACK, OPEN_DIRECTIVE, ablation_required=False),
-    "memory_200k_10y_astra_local_20261103b": _arm(MEMORY_PACK, MEMORY_DIRECTIVE, ablation_required=True),
+    "open_200k_10y_astra_local_20261103a": _arm(OPEN_PACK, OPEN_DIRECTIVE),
+    "open_200k_10y_astra_local_20261103b": _arm(OPEN_PACK, OPEN_DIRECTIVE),
 }
 
 ROUND = Round(
@@ -131,9 +116,6 @@ ROUND = Round(
         "permitted_boards": ["main", "gem"],
         # The trailing five research years, 2020-08..2025-07, are sealed.
         "sealed_years": 5,
-        # The shared request must state the rule for the pre-flight's probe;
-        # every arm states its own.
-        "ablation_required": False,
         # This round's defaults. An experiment entry may override them at create.
         "batch_validate_max_concurrency": 3,
         "max_replay_years": 144,

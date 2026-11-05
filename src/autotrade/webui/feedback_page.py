@@ -16,6 +16,22 @@ from pathlib import Path
 from .registry import resolve_experiment_dir
 
 
+def experiment_directories(experiments_root: Path) -> list[Path]:
+    """Every experiment directory the inboxes read, in name order."""
+
+    root = Path(experiments_root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        (
+            directory
+            for directory in root.iterdir()
+            if directory.is_dir() and not directory.name.startswith(".")
+        ),
+        key=lambda path: path.name,
+    )
+
+
 def feedback_page(
     experiments_root: Path,
     *,
@@ -39,19 +55,11 @@ def feedback_page(
     root = Path(experiments_root)
     reports: list[dict[str, object]] = []
     unreadable: list[dict[str, object]] = []
-    if experiment_id is not None:
-        directories = [resolve_experiment_dir(root, experiment_id)]
-    elif root.is_dir():
-        directories = sorted(
-            (
-                directory
-                for directory in root.iterdir()
-                if directory.is_dir() and not directory.name.startswith(".")
-            ),
-            key=lambda path: path.name,
-        )
-    else:
-        directories = []
+    directories = (
+        [resolve_experiment_dir(root, experiment_id)]
+        if experiment_id is not None
+        else experiment_directories(root)
+    )
     for directory in directories:
         try:
             reports.extend(project(directory))
@@ -75,4 +83,4 @@ def feedback_page(
     }
 
 
-__all__ = ["feedback_page"]
+__all__ = ["experiment_directories", "feedback_page"]

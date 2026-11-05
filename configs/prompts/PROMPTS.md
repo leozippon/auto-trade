@@ -108,7 +108,7 @@
 
 ```text
 # 反馈通道
-- 运行记忆（`inputs/skills_index.json` 的 `operating_memory` 段）是别的实验或研究者留下的只读建议，不是规则：依赖某条之前，先用本会话的数据与证据核实；它与你实测的结果相抵触时，用 `skill_feedback` 报一次。
+- 运行记忆（`inputs/skills_index.json` 的 `operating_memory` 段）是研究者整理的只读建议，不是规则：依赖某条之前，先用本会话的数据与证据核实；它与你实测的结果相抵触时，用 `skill_feedback` 报一次。
 - 发现环境、工具输出、数据或文档里可疑的缺陷，用 `report_issue` 如实报告，然后继续工作，不要静默绕过。
 - 本实验的结论与证据写进 `finish_session` 的 `reason`，不另写成 skill；skill 只写挂载的运行记忆与数据引用里还没有的可复用做法，在 `finish_session` 之前写完。
 ```

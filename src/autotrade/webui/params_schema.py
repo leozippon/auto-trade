@@ -476,14 +476,6 @@ _FIELDS: list[dict[str, object]] = [
         "help": "研究期最后这么多个研究年对会话封存：会话只看得到之前的年份，定版后由宿主在封存年份上读一次残差信息比率作为唯一的业绩检验。至少 1，且须留至少一个可见研究年；必填。",
     },
     {
-        "key": "ablation_required",
-        "group": "预算与验收",
-        "label": "定版须登记消融对照",
-        "type": "bool",
-        "required": True,
-        "help": "开启时，定版须同时登记一个消融对照：提名节点只改一行（关掉其赖以成立的机制，如 MECHANISM = False）的完整可见期验证。它随提名冻结、在封存研究年上回放，增量（提名主动序列减消融主动序列的残差信息比率）及其 t 统计量只记录、不参与裁决。检验某一研究假设的轮次开启，开放探索的轮次关闭；必填。",
-    },
-    {
         "key": "alpha",
         "group": "预算与验收",
         "label": "封存检验显著性水平",
@@ -539,14 +531,12 @@ _FIELDS: list[dict[str, object]] = [
         "choices": list(OPERATING_MEMORY_MODES),
         "choice_labels": {
             "none": "不挂载",
-            "curated": "只挂载精选条目",
-            "curated+graduated": "精选条目 + 验收通过实验的 skills",
+            "curated": "挂载精选条目",
         },
         "help": (
-            "把跨实验知识只读挂载进每个研究会话工作区："
-            f"精选库是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验；"
-            "验收层是前推与 Held-out 判定为 graduated（验收通过）的实验自己写下的 skills，"
-            "带来源实验与判定标记，由 Agent 自行取舍。会话不能改写或删除挂载内容。"
+            "把精选库只读挂载进每个研究会话工作区："
+            f"精选库是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验，"
+            "在实验创建时冻结为本实验的快照。会话不能改写或删除挂载内容。"
         ),
     },
     {"key": "gpu_count", "group": "运行控制", "label": "默认 GPU 数量", "type": "int", "min": 0, "max": 4,

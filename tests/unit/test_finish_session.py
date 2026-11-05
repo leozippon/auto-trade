@@ -29,7 +29,6 @@ from autotrade.environment.tools.finish_session import (
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from autotrade.pipelines.config import SESSION_OUTCOMES
 from autotrade.pipelines.research_session import (
-    _ablation,
     _deterministic,
     _seed_replicates,
     _session_outcome,
@@ -71,7 +70,6 @@ class _Gate:
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
         deterministic: bool = False,
-        ablation: str | None = None,
     ) -> dict[str, object]:
         if node_id in self.passing:
             return {"passed": True, "reasons": []}
@@ -154,7 +152,7 @@ def test_a_freeze_that_registers_ends_the_session_whatever_its_readings(tmp_path
     # The retired early-finish account is no parameter, and no schema field
     # declares offline screens any more.
     properties = FinishSessionTool.spec.input_schema["properties"]
-    assert set(properties) == {"outcome", "node_id", "seed_replicates", "deterministic", "ablation", "reason"}
+    assert set(properties) == {"outcome", "node_id", "seed_replicates", "deterministic", "reason"}
 
 
 def test_no_edge_names_no_node_and_needs_a_reason_and_a_validation(tmp_path: Path):
@@ -163,7 +161,7 @@ def test_no_edge_names_no_node_and_needs_a_reason_and_a_validation(tmp_path: Pat
     with pytest.raises(ToolError, match="at least one complete"):
         empty.invoke({"outcome": "no_edge", "reason": REASON})
     node = _node(tree, tmp_path, "a")
-    with pytest.raises(ToolError, match="node_id, seed_replicates and ablation must be absent"):
+    with pytest.raises(ToolError, match="node_id and seed_replicates must be absent"):
         empty.invoke({"outcome": "no_edge", "node_id": node, "reason": REASON})
     with pytest.raises(ToolError, match="requires reason"):
         empty.invoke({"outcome": "no_edge", "reason": "x" * (REASON_MIN_CHARS - 1)})
@@ -283,7 +281,6 @@ def test_seed_replicates_are_resolved_and_go_to_the_registration(tmp_path: Path)
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
         deterministic: bool = False,
-        ablation: str | None = None,
     ) -> dict[str, object]:
         calls.append((node_id, seed_replicates))
         if seed_replicates == (replicate,):
@@ -316,7 +313,7 @@ def test_seed_replicates_are_resolved_and_go_to_the_registration(tmp_path: Path)
     assert finish.ok and finish.finish
     assert calls == [(nominee, (replicate,))]
     assert _seed_replicates(finish.value) == (replicate,)
-    with pytest.raises(ToolError, match="seed_replicates and ablation must be absent"):
+    with pytest.raises(ToolError, match="seed_replicates must be absent"):
         seeded.invoke({"outcome": "no_edge", "reason": REASON, "seed_replicates": [replicate]})
 
 
@@ -336,7 +333,6 @@ def test_a_deterministic_declaration_is_the_nominees_and_reaches_the_pipeline(
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
         deterministic: bool = False,
-        ablation: str | None = None,
     ) -> dict[str, object]:
         calls.append((node_id, deterministic))
         return {
@@ -365,49 +361,25 @@ def test_a_deterministic_declaration_is_the_nominees_and_reaches_the_pipeline(
     assert frozen.value["deterministic"] is True and _deterministic(frozen.value) is True
 
 
-def test_an_ablation_is_resolved_and_goes_to_the_registration(tmp_path: Path):
-    """The tool resolves ablation like node_id and hands it to the
-    registration, which checks it. A nominee refused over its ablation is
-    told what registration read and where an ablation is defined, and the
-    freeze hands the Pipeline its full id."""
+def test_a_freeze_naming_an_ablation_is_refused_as_an_unknown_argument(tmp_path: Path):
+    """The ablation was retired: finish_session declares no such argument, so
+    a call naming one is refused by the schema and reaches no registration."""
 
     tree = StepTree(tmp_path / "steps")
-    nominee = _node(tree, tmp_path, "a")
-    ablation = _node(tree, tmp_path, "b")
-    calls: list[tuple[str, str | None]] = []
+    _node(tree, tmp_path, "a")
+    _node(tree, tmp_path, "b")
+    calls: list[str] = []
 
     def gate(
         node_id: str,
         seed_replicates: tuple[str, ...] = (),
         deterministic: bool = False,
-        ablation_id: str | None = None,
     ) -> dict[str, object]:
-        calls.append((node_id, ablation_id))
-        if ablation_id == ablation:
-            return {"passed": True, "reasons": []}
-        return {
-            "passed": False,
-            "reasons": ["freeze_ablation_missing"],
-            "ablation": {"required": True},
-        }
+        calls.append(node_id)
+        return {"passed": True, "reasons": []}
 
-    finish = _tool(tree, gate)  # type: ignore[arg-type]
-    fact = "acceptance_rules.freeze_registration.ablation"
-    assert fact in str(finish.spec.input_schema["properties"]["ablation"]["description"])
-    with pytest.raises(ToolError) as refused:
-        finish.invoke({"outcome": "freeze", "node_id": nominee})
-    message = str(refused.value)
-    assert "freeze_ablation_missing" in message and fact in message
-    assert "none named, and this arm requires one" in message
-    assert calls == [(nominee, None)]
-    with pytest.raises(ToolError, match="must be absent"):
-        finish.invoke({"outcome": "no_edge", "ablation": ablation, "reason": REASON})
-
-    calls.clear()
-    frozen = ToolRegistry([finish]).invoke(
+    refused = ToolRegistry([_tool(tree, gate)]).invoke(  # type: ignore[arg-type]
         "finish_session", {"outcome": "freeze", "node_id": "valid_a", "ablation": "valid_b"}
     )
-    assert frozen.ok and frozen.finish
-    assert calls == [(nominee, ablation)]
-    assert frozen.value["ablation"] == ablation and _ablation(frozen.value) == ablation
-    assert "and its ablation" in frozen.value["pipeline_outcome"]
+    assert not refused.ok and not refused.finish
+    assert calls == []

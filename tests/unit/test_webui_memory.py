@@ -1,26 +1,22 @@
-"""Operating-memory console model: library, tier gate, mounts, curated CRUD.
+"""Operating-memory console model: the curated library, snapshots, curated CRUD.
 
 The read view's invariants are what it refuses to show and what it refuses to
 invent: a malformed library reports an error rather than an empty shelf, an
-arm without a forward verdict publishes none here, admission is never
-recomputed beside ``skills.graduated_memory_sources``, and nothing crosses the
-HTTP boundary carrying a host path or a raw run identity.
+experiment's block is the snapshot it froze rather than the library now, and
+nothing crosses the HTTP boundary carrying a host path or a raw run identity.
 
-The curated writes add three of their own: an entry a session would refuse never
-reaches the library, the library is never left half-written, and the writes are
-accepted only from the local console — the public edge keeps the read-only page.
+The curated writes add two of their own: an entry a session would refuse never
+reaches the library, and the library is never left half-written.
 
 Every fixture is synthesized in a tempfile repo root exactly as the pipeline
 writes it: a curated library under ``configs/operating_memory/``, experiment
-ledgers with a forward verdict, published skills generations, and a
-collected session's ``host_run_manifest.json``.
+directories with their ledger and console state, and a collected session's
+``host_run_manifest.json``.
 """
 
 from __future__ import annotations
 
 import json
-from collections import Counter
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -37,13 +33,13 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.skills import (
     MAX_SKILL_CHARS,
     OPERATING_MEMORY_LIBRARY,
-    ExperimentSkillsStore,
-    admit_memory_sources,
+    RETIRED_MEMORY_ORIGIN,
+    RETIRED_OPERATING_MEMORY_MODE,
     build_skills_index,
     create_operating_memory_snapshot,
     operating_memory_snapshot_path,
+    operating_memory_snapshot_root,
     read_operating_memory_snapshot,
-    snapshot_memory_sources,
     validate_skills_tree,
 )
 from autotrade.webui import memory
@@ -76,67 +72,22 @@ def _library(repo_root: Path) -> Path:
     return repo_root / OPERATING_MEMORY_LIBRARY
 
 
-def _experiment(
-    experiments_root: Path,
-    name: str,
-    *,
-    verdict: str | None = "graduated",
-    skills: bool = True,
-    reference: str = "",
-    heldout_end: str | None = None,
-) -> Path:
-    """One research arm: its skills generation and, once replayed, its verdict.
-
-    ``heldout_end`` is the last day the forward replay read; without it the
-    record carries none, as records written before the replay end was kept.
-    """
+def _experiment(experiments_root: Path, name: str) -> Path:
+    """One research arm: its ledger's session record and its console state."""
 
     directory = experiments_root / name
     # Before any ledger or artifact exists: the store refuses to initialize
     # beside pre-random-ref artifacts, exactly as it does for a real experiment.
     AgentRefStore(directory)
-    record: dict[str, object] = {
-        "record_type": "research_session",
-        "experiment_id": name,
-        "epoch_id": "research",
-        "fold_id": "s1",
-        "run_id": f"run_{name}",
-    }
-    if skills:
-        source = directory / "artifacts" / f"run_{name}" / "workspace" / "skills"
-        item = source / "same-window-parent-control"
-        item.mkdir(parents=True)
-        (item / "SKILL.md").write_text(
-            "# 同窗父本对照\n\n候选与父本在同一窗口各跑一次再比较。\n", encoding="utf-8"
-        )
-        if reference:
-            (item / "references").mkdir()
-            (item / "references" / "notes.md").write_text(reference, encoding="utf-8")
-        publication = ExperimentSkillsStore(directory).publish(
-            source, generation_id="gen-1"
-        )
-        record |= {
-            "skills_ref": publication.skills_ref,
-            "skills_generation_id": publication.generation_id,
-            **publication.stats.ledger_fields(),
+    ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").append(
+        {
+            "record_type": "research_session",
+            "experiment_id": name,
+            "epoch_id": "research",
+            "fold_id": "s1",
+            "run_id": f"run_{name}",
         }
-    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
-    ledger.append(record)
-    if verdict is not None:
-        ledger.append(
-            {
-                "record_type": "forward",
-                "experiment_id": name,
-                "epoch_id": "forward",
-                "fold_id": "forward",
-                "run_id": f"run_{name}_forward",
-                "verdict": {
-                    "status": verdict,
-                    "reasons": [] if verdict == "graduated" else ["forward_lower_bound_not_positive"],
-                },
-                **({"replay": {"replay_end": heldout_end}} if heldout_end else {}),
-            }
-        )
+    )
     hitl = directory / "hitl"
     hitl.mkdir(parents=True, exist_ok=True)
     (hitl / "schedule.json").write_text(
@@ -154,17 +105,12 @@ def _mounted_run(directory: Path, *, run_dir: str = RUN_ID, **overrides: object)
         "kind": "fold",
         "session_key": SESSION_KEY,
         "operating_memory": {
-            "mode": "curated+graduated",
+            "mode": "curated",
             "sources": [
                 {
                     "source": "curated",
                     "origin": "curated",
                     "entries": ["output-dir-hygiene", "pit-read-budget"],
-                },
-                {
-                    "source": "adopted",
-                    "origin": "graduated",
-                    "entries": ["same-window-parent-control"],
                 },
             ],
         },
@@ -252,293 +198,108 @@ def test_a_curated_body_is_served_verbatim_so_an_edit_round_trips(
     ).read_text(encoding="utf-8") == body
 
 
-# ---- graduated tier -------------------------------------------------------
-
-
-def test_the_tier_lists_every_experiment_and_admits_only_graduated_ones(
-    tmp_path: Path,
-) -> None:
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    _experiment(experiments, "not_adopted", verdict="discarded")
-    _experiment(experiments, "still_running", verdict=None)
-    _experiment(experiments, "adopted_without_skills", skills=False)
-
-    rows = {row["experiment_id"]: row for row in memory.graduated_tier(experiments)["experiments"]}
-    assert set(rows) == {
-        "adopted",
-        "not_adopted",
-        "still_running",
-        "adopted_without_skills",
-    }
-    assert rows["adopted"]["verdict"] == "graduated"
-    assert rows["adopted"]["admitted"] is True
-    assert rows["adopted"]["entries"] == ["same-window-parent-control"]
-    assert rows["not_adopted"]["verdict"] == "discarded"
-    assert rows["not_adopted"]["admitted"] is False
-    # No held-out record yet: no verdict to show, and nothing to admit.
-    assert rows["still_running"]["verdict"] is None
-    assert rows["still_running"]["admitted"] is False
-    # Graduated, but it published no skills generation, so it contributes
-    # nothing — the console must not promise knowledge that will not mount.
-    assert rows["adopted_without_skills"]["verdict"] == "graduated"
-    assert rows["adopted_without_skills"]["admitted"] is False
-    assert rows["adopted_without_skills"]["entries"] == []
-    # ``published`` is the second question the page asks of every row: an
-    # experiment the tier declines to offer may still hold a generation worth
-    # browsing, and one that holds nothing has nothing to list.
-    assert rows["not_adopted"]["published"] == 1
-    assert rows["still_running"]["published"] == 1
-    assert rows["adopted_without_skills"]["published"] == 0
-
-
-def test_held_is_not_mounted_the_page_says_which_arms_mount_a_source(
-    tmp_path: Path,
-) -> None:
-    """The tier holds a graduated experiment's skills, but an arm mounts them
-    only when the source's Held-out ended by that arm's research end, and never
-    when that end is unknown: the tier row carries the end, and one
-    experiment's block marks each snapshot source by the mount's own rule."""
-
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "early", heldout_end="20230930")
-    _experiment(experiments, "late", heldout_end="20260930")
-    _experiment(experiments, "undated")
-    rows = {row["experiment_id"]: row for row in memory.graduated_tier(experiments)["experiments"]}
-    assert all(rows[name]["admitted"] is True for name in ("early", "late", "undated"))
-    assert rows["early"]["heldout_end"] == "20230930"
-    assert rows["late"]["heldout_end"] == "20260930"
-    assert rows["undated"]["heldout_end"] is None
-
-    current = _experiment(experiments, "current", verdict=None, skills=False)
-    _params(current, operating_memory="curated+graduated", research_end="20250630")
-    _snapshot(tmp_path, experiments, "current")
-    sources = {
-        source["source"]: source
-        for source in memory.experiment_memory(experiments, "current")["snapshot"]["sources"]
-    }
-    assert sources["curated"]["mounted"] is True and "heldout_end" not in sources["curated"]
-    assert sources["early"]["mounted"] is True
-    # Its Held-out runs past this arm's research end: forward information.
-    assert sources["late"] == {**sources["late"], "mounted": False, "heldout_end": "20260930"}
-    assert sources["undated"]["mounted"] is False and sources["undated"]["heldout_end"] is None
-    # The same rule the session mount applies, not a second one.
-    record = read_operating_memory_snapshot(current)
-    admitted, refused = admit_memory_sources(
-        snapshot_memory_sources(record, current), "20250630"
-    )
-    assert {source.source for source in refused} == {"late", "undated"}
-    assert {source.source for source in admitted} == {"curated", "early"}
-    # Params without a research end take the pipeline default, as the worker does.
-    _params(current, operating_memory="curated+graduated")
-    payload = memory.experiment_memory(experiments, "current")
-    assert payload["admitted_by"] == DEFAULT_RESEARCH_GEOMETRY.research_end
-    # A sealed arm admits against the end of the years its session sees, as
-    # the session's mount does: a source whose Held-out ended in the sealed
-    # years is refused.
-    _params(current, operating_memory="curated+graduated", sealed_years=2)
-    payload = memory.experiment_memory(experiments, "current")
-    visible_end = DEFAULT_RESEARCH_GEOMETRY.split_sealed(2)[0][-1].end
-    assert payload["admitted_by"] == visible_end == "20230630"
-    sources = {source["source"]: source for source in payload["snapshot"]["sources"]}
-    assert sources["early"]["mounted"] is False and sources["curated"]["mounted"] is True
-
-
-def test_an_arm_without_a_verdict_publishes_none_and_mounts_nothing(
-    tmp_path: Path,
-) -> None:
-    """Before its forward record exists an arm has no verdict to show, and the
-    mount agrees: nothing it wrote is admitted."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "mid_forward", verdict=None)
-    row = memory.graduated_tier(experiments)["experiments"][0]
-    assert "revealed" not in row
-    assert row["verdict"] is None
-    assert row["admitted"] is False
-    assert row["entries"] == []
-    from autotrade.pipelines.skills import graduated_memory_sources
-
-    assert graduated_memory_sources(experiments) == ()
-
-
-def test_an_arm_before_its_first_session_holds_nothing_to_browse(
-    tmp_path: Path,
-) -> None:
-    """A running arm with no ledger yet publishes nothing and admits nothing.
-
-    This is what every arm of a fresh round looks like, and it is why the page
-    omits such rows instead of listing them as unopenable: neither question the
-    catalogue asks has an answer yet."""
-
-    experiments = tmp_path / "experiments"
-    (experiments / "fresh_arm").mkdir(parents=True)
-    row = memory.graduated_tier(experiments)["experiments"][0]
-    assert row["experiment_id"] == "fresh_arm"
-    assert row["verdict"] is None
-    assert row["admitted"] is False
-    assert row["published"] == 0
-    assert row["entries"] == []
-
-
-def test_an_unreadable_ledger_becomes_a_row_and_suspends_admission(
-    tmp_path: Path,
-) -> None:
-    """One broken ledger is also what the mount hits: the tier cannot be
-    resolved, so admission is unknown rather than a "not admitted" the read
-    model cannot stand behind — and the broken experiment is still listed."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    broken = experiments / "broken" / "ledgers"
-    broken.mkdir(parents=True)
-    (broken / "experiment_ledger.jsonl").write_text("{not json\n", encoding="utf-8")
-    payload = memory.graduated_tier(experiments)
-    rows = {row["experiment_id"]: row for row in payload["experiments"]}
-    assert payload["error"].endswith("graduated memory cannot be resolved")
-    assert rows["broken"]["error"].endswith("experiment state is unreadable")
-    assert str(tmp_path) not in rows["broken"]["error"]
-    # Unknown, not zero: the page must keep listing a row it cannot read.
-    assert rows["broken"]["published"] is None
-    assert rows["adopted"]["verdict"] == "graduated"
-    assert rows["adopted"]["admitted"] is None
-    assert rows["adopted"]["entries"] == []
-
-
-def test_a_tier_that_cannot_be_resolved_is_reported_not_hidden(tmp_path: Path) -> None:
-    """``curated`` is the reserved mount name; a graduated experiment holding it
-    breaks the mount for every new session, so the page must say so."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "curated")
-    payload = memory.graduated_tier(experiments)
-    assert payload["error"].endswith("graduated memory cannot be resolved")
-    assert str(tmp_path) not in payload["error"]
-    assert [row["experiment_id"] for row in payload["experiments"]] == ["curated"]
-    assert payload["experiments"][0]["admitted"] is None
-
-
-def test_the_tier_is_read_once_per_ledger_state_and_sees_every_change(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The page reads the tier on every visit, and re-parsing every ledger per
-    request (once per overlapping visitor) starved the console. Each
-    experiment's part is kept while its ledger does not move, so a repeat or
-    concurrent read re-reads nothing — but a verdict landing or an experiment
-    appearing is on the next read, because a row can change only through its
-    experiment's ledger, and that read re-reads those ledgers alone, while
-    running arms append to theirs all the time. What is kept is exactly what
-    a cold read computes."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    arm = _experiment(experiments, "mid_forward", verdict=None)
-    reads: list[Path] = []
-    read = ExperimentLedger.read
-
-    def counted(self: ExperimentLedger, *args: object, **kwargs: object) -> list:
-        reads.append(self.path)
-        return read(self, *args, **kwargs)
-
-    monkeypatch.setattr(ExperimentLedger, "read", counted)
-    with ThreadPoolExecutor(4) as pool:
-        payloads = list(pool.map(lambda _: memory.graduated_tier(experiments), range(4)))
-    # One computation reads each ledger at most twice (admission and its row);
-    # four overlapping misses computing it independently would read it eight.
-    assert set(Counter(reads)) == {
-        experiments / name / "ledgers" / "experiment_ledger.jsonl"
-        for name in ("adopted", "mid_forward")
-    }
-    assert max(Counter(reads).values()) <= 2
-    assert all(payload == payloads[0] for payload in payloads)
-    first = len(reads)
-    assert memory.graduated_tier(experiments) == payloads[0]
-    assert len(reads) == first
-
-    ExperimentLedger(arm / "ledgers" / "experiment_ledger.jsonl").append(
-        {
-            "record_type": "forward",
-            "experiment_id": "mid_forward",
-            "epoch_id": "forward",
-            "fold_id": "forward",
-            "run_id": "run_mid_forward_forward",
-            "verdict": {"status": "graduated", "reasons": []},
-        }
-    )
-    _experiment(experiments, "late", verdict="discarded")
-    reads.clear()
-    payload = memory.graduated_tier(experiments)
-    assert set(reads) == {
-        experiments / name / "ledgers" / "experiment_ledger.jsonl" for name in ("mid_forward", "late")
-    }
-    rows = {row["experiment_id"]: row for row in payload["experiments"]}
-    assert rows["mid_forward"]["verdict"] == "graduated"
-    assert rows["mid_forward"]["admitted"] is True
-    assert rows["mid_forward"]["entries"] == ["same-window-parent-control"]
-    assert rows["late"]["verdict"] == "discarded"
-    assert rows["adopted"] == payloads[0]["experiments"][0]
-    monkeypatch.setattr(memory, "_TIER_CACHE", {})
-    assert memory.graduated_tier(experiments) == payload
-
-
 # ---- the snapshot one experiment froze -------------------------------------
 #
-# Operating memory is fixed per experiment: the tiers are resolved once, when
-# the experiment is created, and every session mounts that same copy. So the
-# block answers one question for the whole experiment, and a library change
-# after the fact belongs to the next experiment.
+# Operating memory is fixed per experiment: the curated library is resolved
+# once, when the experiment is created, and every session mounts that same
+# copy. So the block answers one question for the whole experiment, and a
+# library change after the fact belongs to the next experiment.
 
 
 def _snapshot(
     repo_root: Path,
     experiments: Path,
     experiment_id: str,
-    mode: str = "curated+graduated",
+    mode: str = "curated",
 ) -> dict:
     directory = experiments / experiment_id
     directory.mkdir(parents=True, exist_ok=True)
-    return create_operating_memory_snapshot(
-        directory, mode=mode, repo_root=repo_root, experiments_root=experiments
+    return create_operating_memory_snapshot(directory, mode=mode, repo_root=repo_root)
+
+
+def _retired_tier_snapshot(repo_root: Path, experiments: Path, experiment_id: str) -> None:
+    """The snapshot an arm created before 2026-11-05 froze: the curated
+    library beside one graduated experiment's skills, under the retired mode."""
+
+    directory = experiments / experiment_id
+    _snapshot(repo_root, experiments, experiment_id)
+    root = operating_memory_snapshot_root(directory)
+    root.chmod(0o755)
+    item = root / "adopted" / "same-window-parent-control"
+    item.mkdir(parents=True)
+    (item / "SKILL.md").write_text("# 同窗父本对照\n\n正文。\n", encoding="utf-8")
+    path = operating_memory_snapshot_path(directory)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["mode"] = RETIRED_OPERATING_MEMORY_MODE
+    record["entries"].append(
+        {
+            "origin": RETIRED_MEMORY_ORIGIN,
+            "source": "adopted",
+            "name": "same-window-parent-control",
+            "heldout_end": "20260930",
+        }
     )
+    path.write_text(json.dumps(record), encoding="utf-8")
 
 
 def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> None:
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    _experiment(experiments, "adopted")
-    directory = _experiment(experiments, "current", verdict=None, skills=False)
-    _params(directory, operating_memory="curated+graduated")
+    directory = _experiment(experiments, "current")
+    _params(directory, operating_memory="curated")
     _snapshot(tmp_path, experiments, "current")
     _mounted_run(directory)
 
     payload = memory.experiment_memory(experiments, "current")
-    assert payload["mode"] == "curated+graduated"
+    assert payload["mode"] == "curated"
     assert payload["sessions_seen"] == 1
     snapshot = payload["snapshot"]
     assert snapshot["created_from"] == "creation" and snapshot["created_at"]
-    assert [source["source"] for source in snapshot["sources"]] == [
-        "curated",
-        "adopted",
-    ]
-    assert [source["origin"] for source in snapshot["sources"]] == [
-        "curated",
-        "graduated",
-    ]
-    assert snapshot["sources"][0]["entries"] == [
-        "output-dir-hygiene",
-        "pit-read-budget",
+    assert snapshot["sources"] == [
+        {
+            "source": "curated",
+            "origin": "curated",
+            "entries": ["output-dir-hygiene", "pit-read-budget"],
+        }
     ]
     # Nothing per session is projected any more, and no host identity leaks.
     assert "sessions" not in payload
     assert RUN_ID not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_an_arm_of_the_retired_graduated_tier_lists_what_it_still_mounts(
+    tmp_path: Path,
+) -> None:
+    """Every arm created before the graduated tier's retirement names its mode
+    and may hold graduated entries in its snapshot: the block opens, reads the
+    mode as the curated library it is, keeps the snapshot's own record of the
+    mode, and lists only the curated entries its sessions mount."""
+
+    _library(tmp_path)
+    experiments = tmp_path / "experiments"
+    experiments.mkdir()
+    directory = _experiment(experiments, "current")
+    _params(directory, operating_memory=RETIRED_OPERATING_MEMORY_MODE)
+    _retired_tier_snapshot(tmp_path, experiments, "current")
+
+    payload = memory.experiment_memory(experiments, "current")
+    assert "error" not in payload
+    assert payload["mode"] == "curated"
+    assert payload["snapshot"]["mode"] == RETIRED_OPERATING_MEMORY_MODE
+    assert [source["source"] for source in payload["snapshot"]["sources"]] == ["curated"]
+    client = TestClient(create_app(tmp_path, experiments))
+    assert client.get("/api/experiments/current/memory").status_code == 200
+    assert (
+        client.get("/api/experiments/current/memory/curated/pit-read-budget").status_code
+        == 200
+    )
+    assert (
+        client.get(
+            "/api/experiments/current/memory/adopted/same-window-parent-control"
+        ).status_code
+        == 400
+    )
 
 
 def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> None:
@@ -593,7 +354,7 @@ def test_a_later_library_change_does_not_move_a_frozen_experiment(
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "current", verdict=None, skills=False)
+    directory = _experiment(experiments, "current")
     _params(directory, operating_memory="curated")
     _snapshot(tmp_path, experiments, "current", mode="curated")
     _curated(tmp_path, "added-later", "# 后加的\n\n正文\n")
@@ -611,7 +372,7 @@ def test_an_experiment_without_a_snapshot_says_so(tmp_path: Path) -> None:
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "legacy", verdict=None, skills=False)
+    directory = _experiment(experiments, "legacy")
     _params(directory, operating_memory="curated")
     payload = memory.experiment_memory(experiments, "legacy")
     assert payload["snapshot"] is None and payload["sessions_seen"] == 0
@@ -622,7 +383,7 @@ def test_an_unreadable_snapshot_is_reported_not_hidden(tmp_path: Path) -> None:
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    directory = _experiment(experiments, "current", verdict=None, skills=False)
+    directory = _experiment(experiments, "current")
     _snapshot(tmp_path, experiments, "current", mode="curated")
     operating_memory_snapshot_path(directory).write_text("{truncated", encoding="utf-8")
     payload = memory.experiment_memory(experiments, "current")
@@ -652,8 +413,8 @@ def test_the_snapshot_entry_route_serves_what_this_experiment_holds(
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     _experiment(experiments, "adopted")
-    directory = _experiment(experiments, "current", verdict=None, skills=False)
-    _params(directory, operating_memory="curated+graduated")
+    directory = _experiment(experiments, "current")
+    _params(directory, operating_memory="curated")
     _snapshot(tmp_path, experiments, "current")
     client = TestClient(create_app(tmp_path, experiments))
 
@@ -671,11 +432,6 @@ def test_the_snapshot_entry_route_serves_what_this_experiment_holds(
     } <= body.keys()
     assert body["origin"] == "curated"
     assert body["content"].startswith("# PIT 读取预算")
-
-    graduated = client.get(
-        "/api/experiments/current/memory/adopted/same-window-parent-control"
-    )
-    assert graduated.status_code == 200 and graduated.json()["origin"] == "graduated"
 
     # The library moves; the frozen copy does not.
     memory.update_curated_entry(tmp_path, "pit-read-budget", "# 改过的\n\n完全不同。\n")
@@ -716,24 +472,22 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     directory = _experiment(experiments, "adopted")
-    _params(directory, operating_memory="curated+graduated")
+    _params(directory, operating_memory="curated")
     _mounted_run(directory)
+    (experiments / ".staging").mkdir()
     client = TestClient(create_app(tmp_path, experiments))
 
     overview = client.get("/api/memory")
     assert overview.status_code == 200
     body = overview.json()
-    assert {"default_mode", "curated", "graduated"} <= body.keys()
+    assert body.keys() == {"default_mode", "curated", "experiments"}
+    assert body["default_mode"] == "curated"
     assert {"source", "library", "entries"} <= body["curated"].keys()
     assert {"name", "title", "summary", "bytes", "files"} <= body["curated"][
         "entries"
     ][0].keys()
-    assert {
-        "experiment_id",
-        "verdict",
-        "admitted",
-        "entries",
-    } <= body["graduated"]["experiments"][0].keys()
+    # The experiments the inboxes read, which the page's filters offer.
+    assert body["experiments"] == ["adopted"]
 
     entry = client.get("/api/memory/curated/pit-read-budget")
     assert entry.status_code == 200
@@ -901,86 +655,6 @@ def test_a_library_the_mount_refuses_blocks_new_entries_but_can_be_repaired(
     ] == "created"
 
 
-def test_a_candidate_body_is_readable_only_while_the_tier_admits_it(
-    tmp_path: Path,
-) -> None:
-    """The review that precedes a promotion runs through the promotion's own
-    gate, so the page can never show a candidate it could not copy."""
-
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    _experiment(experiments, "mid_forward", verdict=None)
-    entry = memory.graduated_entry(experiments, "adopted", "same-window-parent-control")
-    assert entry["experiment_id"] == "adopted"
-    assert entry["title"] == "同窗父本对照"
-    assert entry["content"].startswith("# 同窗父本对照")
-    assert entry["files"] == 1 and entry["bytes"] > 0
-    for experiment_id, skill in (
-        ("adopted", "not-a-skill"),
-        ("mid_forward", "same-window-parent-control"),
-        ("unknown", "same-window-parent-control"),
-    ):
-        with pytest.raises(KeyError):
-            memory.graduated_entry(experiments, experiment_id, skill)
-    with pytest.raises(ValueError):
-        memory.graduated_entry(experiments, "adopted", "Not_Kebab")
-
-
-def test_a_promotion_copies_the_admitted_skill_verbatim(tmp_path: Path) -> None:
-    """The whole item is what the mount would have carried, ``references/``
-    included, so that is what the curated copy starts from."""
-
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted", reference="父本对照读法\n")
-    result = memory.promote_curated_entry(
-        tmp_path,
-        experiments,
-        name="parent-control-reading",
-        experiment_id="adopted",
-        skill="same-window-parent-control",
-    )
-    assert result["action"] == "promoted"
-    item = tmp_path / OPERATING_MEMORY_LIBRARY / "parent-control-reading"
-    assert item.joinpath("SKILL.md").read_text(encoding="utf-8").startswith("# 同窗父本对照")
-    assert item.joinpath("references/notes.md").read_text(encoding="utf-8") == "父本对照读法\n"
-    # Landed writable in the repository, not as the read-only generation copy.
-    assert validate_skills_tree(tmp_path / OPERATING_MEMORY_LIBRARY, require_writable=True)
-
-
-def test_a_promotion_can_only_copy_from_a_candidate_the_page_offers(
-    tmp_path: Path,
-) -> None:
-    """One admission rule: an arm without a verdict or a discarded one is not a
-    promotion source, or this route would answer a question the page refuses."""
-
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    _experiment(experiments, "adopted")
-    _experiment(experiments, "not_adopted", verdict="discarded")
-    _experiment(experiments, "mid_forward", verdict=None)
-    for experiment_id, skill in (
-        ("adopted", "no-such-skill"),
-        ("not_adopted", "same-window-parent-control"),
-        ("mid_forward", "same-window-parent-control"),
-        ("unknown", "same-window-parent-control"),
-    ):
-        with pytest.raises(KeyError):
-            memory.promote_curated_entry(
-                tmp_path,
-                experiments,
-                name="promoted-entry",
-                experiment_id=experiment_id,
-                skill=skill,
-            )
-    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "promoted-entry").exists()
-    assert _staging_leftovers(tmp_path) == []
-
-
 # ---- write routes ---------------------------------------------------------
 
 
@@ -988,7 +662,6 @@ def test_the_curated_write_routes_carry_one_crud_cycle(tmp_path: Path) -> None:
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    _experiment(experiments, "adopted")
     client = TestClient(create_app(tmp_path, experiments))
 
     created = client.post(
@@ -1006,22 +679,6 @@ def test_the_curated_write_routes_carry_one_crud_cycle(tmp_path: Path) -> None:
     assert client.get("/api/memory/curated/cash-buffer-rule").json()["content"].endswith(
         "改过。\n"
     )
-
-    candidate = client.get(
-        "/api/memory/graduated/adopted/same-window-parent-control"
-    )
-    assert candidate.status_code == 200
-    assert {"experiment_id", "name", "title", "summary", "bytes", "files", "content"} <= (
-        candidate.json().keys()
-    )
-    assert client.get("/api/memory/graduated/adopted/absent-skill").status_code == 404
-
-    promoted = client.post(
-        "/api/memory/curated/parent-control-reading/promote",
-        json={"experiment_id": "adopted", "skill": "same-window-parent-control"},
-    )
-    assert promoted.status_code == 200
-    assert "parent-control-reading" in _entry_names(promoted.json())
 
     deleted = client.delete("/api/memory/curated/cash-buffer-rule")
     assert deleted.status_code == 200
@@ -1048,13 +705,6 @@ def test_the_write_routes_map_each_refusal_to_its_own_status(tmp_path: Path) -> 
     )
     assert client.put("/api/memory/curated/absent-entry", json={"content": "# x\n"}).status_code == 404
     assert client.delete("/api/memory/curated/absent-entry").status_code == 404
-    assert (
-        client.post(
-            "/api/memory/curated/promoted-entry/promote",
-            json={"experiment_id": "unknown", "skill": "same-window-parent-control"},
-        ).status_code
-        == 404
-    )
     # A refusal must not hand the host tree back with the reason.
     detail = client.post(
         "/api/memory/curated",
@@ -1078,7 +728,6 @@ def test_the_proxied_surface_reads_and_writes_like_any_other_client(
     _library(tmp_path)
     experiments = tmp_path / "experiments"
     experiments.mkdir()
-    _experiment(experiments, "adopted")
     client = TestClient(create_app(tmp_path, experiments))
 
     created = client.post(
@@ -1092,14 +741,6 @@ def test_the_proxied_surface_reads_and_writes_like_any_other_client(
         client.put(
             "/api/memory/curated/cash-buffer-rule",
             json={"content": "# 现金缓冲\n\n改过。\n"},
-            headers=PUBLIC_EDGE,
-        ).status_code
-        == 200
-    )
-    assert (
-        client.post(
-            "/api/memory/curated/parent-control-reading/promote",
-            json={"experiment_id": "adopted", "skill": "same-window-parent-control"},
             headers=PUBLIC_EDGE,
         ).status_code
         == 200

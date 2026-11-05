@@ -8,8 +8,8 @@ never summarizes it) and offers it under 已归档 instead, its experiment page
 still opens but the console never starts its worker again, and
 ``prune_pit_views.py`` treats it as finished for good, so its derived PIT
 caches may go. Lineage, the consistency check, the round fill queue, the
-running caps, operating memory and Paper read the arm exactly as before. The
-console need not be running.
+running caps and Paper read the arm exactly as before. The console need not
+be running.
 
 Only an arm that is over and holds nothing live is archived. Every arm named
 is checked before anything changes, and the command refuses them all when one
