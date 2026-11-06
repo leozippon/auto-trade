@@ -15,10 +15,11 @@ carries the research geometry, the account, the cost stress and the
 per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
 defaults every round relies on -- above all the model roles an arm does not
 name, so a change of the console's model defaults must stop the launcher
-rather than silently move an arm onto another model, and the sealed gate's
-level. A round states what it decides for itself in `overrides`, and anything
-it states there stops being an expected default; the rules the console has no
-value for (`sealed_years`) it must state, or every request is refused. What
+rather than silently move an arm onto another model, and the residual
+statistic's level. A round states what it decides for itself in `overrides`,
+and anything it states there stops being an expected default; the rules the
+console has no value for (`research_years`) it must state, for the round or
+per arm, or every request is refused. What
 several rounds send alike -- a geometry, a model pair's hosted roles -- lives
 in `_profiles.py`; an open round imports from there and from here, never from
 another round file.
@@ -883,8 +884,8 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         ).pipeline
         output = scratch / "output"
         shutil.copytree(starter, output, ignore=shutil.ignore_patterns("__pycache__"))
-        # Every research year the arm replays, the sealed ones too: the
-        # forward stage replays those on the same seed.
+        # Every year of the geometry the arm replays, the validation years
+        # too: its tests replay those on the same seed.
         years = pipeline.research_spans(options.rolling.geometry.research_years)
         request = research_span(years, FULL_SPAN).request(
             ArtifactRevision("smoke", output),

@@ -89,8 +89,8 @@ ARMS: dict[str, dict[str, object]] = {
 
 ROUND = Round(
     # Closed with the sealed gate (2026-11-03): its arms were created under the
-    # deflated-Sharpe gate, whose bars it still sends, and none states
-    # sealed_years.
+    # deflated-Sharpe gate, whose bars it sent through the profile until they
+    # left it (git history keeps them), and none states sealed_years.
     closed=True,
     arms=ARMS,
     pit_views_seed=FUND_TITLE_PIT_VIEWS_SEED,

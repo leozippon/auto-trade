@@ -82,9 +82,10 @@ def test_the_directive_starts_with_the_packs_direction_and_names_no_model() -> N
         assert word not in DIRECTIVE, word
 
 
-# The per-arm budgets the owner's 2026-10-27 directive tripled for this round.
+# The per-arm budgets the owner's 2026-10-27 directive tripled for this round;
+# the replay-year budget, tripled to 288 too, was retired since and has no
+# console value left to triple.
 TRIPLED = (
-    "max_replay_years",
     "max_null_controls",
     "max_api_spend_usd",
     "max_llm_calls",
@@ -110,7 +111,6 @@ def test_both_arms_send_the_selection_on_one_card_and_their_own_choices() -> Non
     ).request_params(PROBE_ID)
     tripled = {key: 3 * base[key] for key in TRIPLED}
     assert tripled == {
-        "max_replay_years": 288,
         "max_null_controls": 36,
         "max_api_spend_usd": 150.0,
         "max_llm_calls": 19_200,
@@ -137,6 +137,7 @@ def test_both_arms_send_the_selection_on_one_card_and_their_own_choices() -> Non
             "research_directive": DIRECTIVE,
             "batch_validate_max_concurrency": 4,
             **tripled,
+            "max_replay_years": 288,
             "strategy_cpus": 16,
             "strategy_memory": "64g",
         }
