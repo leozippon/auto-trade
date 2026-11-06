@@ -97,15 +97,6 @@ from .ledger import (
     research_records,
 )
 from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
-from .rolling_record import (
-    SOURCE_HOST_COMPLETION,
-    ValidationSteps,
-    frontier_after,
-    readout,
-    step_entry,
-    test_step_record,
-    test_step_records,
-)
 from .session_resume import (
     REVISIONS_DIR,
     load_recorded_steps,
@@ -118,6 +109,15 @@ from .skills import (
     SkillsSnapshot,
     latest_skills_snapshot,
     resolve_collected_skills_source,
+)
+from .validation_record import (
+    SOURCE_HOST_COMPLETION,
+    ValidationSteps,
+    horizon_after,
+    readout,
+    step_entry,
+    test_step_record,
+    test_step_records,
 )
 from .verdict import (
     ConditionReason,
@@ -141,7 +141,7 @@ _MAX_DEADLINE_OVERRIDE_MINUTES = 4800
 class EnvironmentBlockedAttempt(RuntimeError):
     """The research session's attempt ended on an environment block
     (``session_tools.EnvironmentBlocked``) while the experiment still has attempts:
-    recorded as a failed attempt, which the runner retries from the frontier
+    recorded as a failed attempt, which the runner retries from the test horizon
     and the record."""
 
 
@@ -327,7 +327,7 @@ class RollingExperimentPipeline:
     def validation_span(self) -> ReplaySpan:
         """The validation years as one span, replayed as one book from the
         decision view at their first year and labelled ``validation``: what a
-        test replays up to its frontier, and what the host completes a record
+        test replays up to its test horizon, and what the host completes a record
         over."""
 
         _research, validation = self.config.geometry.split_research(
@@ -421,7 +421,7 @@ class RollingExperimentPipeline:
             if session.outcome == ENVIRONMENT_BLOCKED:
                 if session.attempt < self.config.session_max_attempts:
                     # The attempt ends, the research does not: the next one
-                    # resumes from the frontier and the record.
+                    # resumes from the test horizon and the record.
                     raise EnvironmentBlockedAttempt(session.reason)
                 experiment_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
                 # The worker log is the operator's other place to see it.
@@ -504,7 +504,7 @@ class RollingExperimentPipeline:
                     "decision": decision.snapshot_id,
                     "research_span": years[0].snapshot.snapshot_id,
                 },
-                "frontier": frontier_after(self.ledger.read(), self.validation_steps()),
+                "test_horizon": horizon_after(self.ledger.read(), self.validation_steps()),
                 "steps_tested": len(test_step_records(self.ledger.read())),
                 "attempts": session.attempt,
                 "budget_used": session.budget_used.to_record(),
@@ -595,11 +595,11 @@ class RollingExperimentPipeline:
         fingerprint: str,
         run_id: str,
     ) -> list[dict[str, object]]:
-        """Fill the rolling record's remaining steps from one host replay of
+        """Fill the validation record's remaining steps from one host replay of
         the frozen strategy over the whole validation period.
 
         The replay is the one a test would have run at the last step: the
-        validation span as one fresh book with its matched panel, opened on
+        validation span as one fresh book with its matched random baseline, opened on
         the seed's warm start. Each step after the ``tests`` already recorded
         gets a ``test_step`` record of the same shape, read off that replay's
         window for the step and marked ``host_completion``; the records are
@@ -721,7 +721,7 @@ class RollingExperimentPipeline:
             "revision_id": nominee.revision_id,
             "research_result_ref": nominee.validation.result_ref,
             # Which series the figures below are of: ``active`` is the
-            # nominee's return minus its zero-skill panel composite.
+            # nominee's return minus its random-baseline composite.
             "series": statistics["series"],
             "mandate": gate["mandate"],
             "days": statistics["days"],
@@ -869,7 +869,7 @@ class RollingExperimentPipeline:
         integrity_failure: Callable[[Mapping[str, object]], None] | None = None,
     ) -> dict[str, object]:
         """The forward stage of a frozen artifact and its seed replicates
-        through ``broker_profile`` (its Broker and the zero-skill panel drawn
+        through ``broker_profile`` (its Broker and the random baseline drawn
         with it), as :meth:`run_forward` records it. Writes nothing to the
         ledger.
 
@@ -1041,8 +1041,8 @@ class RollingExperimentPipeline:
         raised_replicates: Sequence[Mapping[str, object]] = (),
     ) -> dict[str, object]:
         """The two reported slices of one completed forward replay through
-        ``broker_profile``, and the experiment's readout (``rolling_record.readout``):
-        the rolling record the ledger holds and the forward slice's reading.
+        ``broker_profile``, and the experiment's readout (``validation_record.readout``):
+        the validation record the ledger holds and the forward slice's reading.
 
         A slice that cannot be measured raises ``ValueError``, which fails the
         attempt: a reading is never recorded off a number that was not measured.
@@ -1148,7 +1148,7 @@ class RollingExperimentPipeline:
         Informational evidence beside the return: it says whether the excess
         came from WHICH names were picked or only from the timing, sizing and
         exposure the skeleton already fixed. This percentile is not part of any
-        verdict -- what a verdict grades against is the panel the evaluation
+        verdict -- what a verdict grades against is the random baseline the evaluation
         stored with the result -- so a backend that cannot run it (the local
         development backend) leaves the block absent and a failure is recorded
         rather than raised.
@@ -1209,7 +1209,7 @@ def research_step_record(step: StepResult) -> dict[str, object]:
     and loadings over the span (``verdict.graded_statistics``), from the
     replay's own style sidecar (``None`` when they cannot be measured).
     ``series`` inside it says whether that is the active series (the replay
-    carries a zero-skill panel) or the strategy's own. ``fingerprint`` names
+    carries a random baseline) or the strategy's own. ``fingerprint`` names
     the bytes the revision holds, which the seed replicates' check compares.
     """
 

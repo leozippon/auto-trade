@@ -130,7 +130,7 @@ class DailyMarketData:
         }
 
     def distributions_for_day(self, trade_date: str) -> Mapping[str, Distribution]:
-        """One parsed source for the Broker and the null panel's cash projection."""
+        """One parsed source for the Broker and the random baseline's cash projection."""
 
         return self._distributions.get(str(trade_date), {})
 

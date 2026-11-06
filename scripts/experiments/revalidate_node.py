@@ -22,7 +22,7 @@ replaces the experiment's slippage knob, ``--gpus 0`` sets its ``gpu_count`` kno
 (the containers attach no card, the CPU-only path of a ``gpu_count`` 0 experiment;
 for a strategy that never touches a GPU, when no card is free), and
 ``--start-day``/``--max-days`` truncate the replay to a window as a smoke does
-(no zero-skill panel then).
+(no random baseline then).
 
 Everything is written below ``.runtime/revalidate/<experiment>/<node>/<label>/``:
 ``reading.json`` (what was replayed, then the result reference or the error),

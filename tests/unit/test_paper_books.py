@@ -283,12 +283,12 @@ def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path)
         )
 
 
-def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path: Path):
+def test_a_book_pins_the_boards_its_broker_and_its_verdict_random_baseline_buy_on(tmp_path: Path):
     """The fixture experiment carries no board stamp: a graduated book pins those its
     initial cash qualifies for -- CNY 200,000 unless its creator names other
     capital, whatever the experiment's own -- an incubating one the boards its
     incubation replayed on, and that one pinned field is what its Broker
-    enforces and what its zero-skill panel draws from."""
+    enforces and what its random baseline draws from."""
 
     default = load_book(_graduated_book(tmp_path).root).profile
     assert (default.initial_cash, default.permitted_boards) == (PAPER_INITIAL_CASH, ("main", "gem"))

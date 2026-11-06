@@ -96,9 +96,9 @@ const REASON_LABELS = {
   heldout_strategy_error: "Held-out 期策略无报错",
   replicate_strategy_error: "种子副本回测无报错",
 };
-// An experiment judged on its active series -- its daily return minus the zero-skill
-// panel the host drew from its own book -- records `series: "active"`; an experiment
-// judged before panels existed records nothing, and its figures are its own.
+// An experiment judged on its active series -- its daily return minus the random
+// baseline the host drew from its own book -- records `series: "active"`; an experiment
+// judged before random baselines existed records nothing, and its figures are its own.
 const SERIES_LABELS = { active: "主动（策略 − 随机对照组合）", absolute: "策略自身" };
 const ACTIVE_TITLE = "策略日收益减去随机对照组合合成收益后的序列；对照组合由宿主按该策略自己的成交骨架随机换名回放得到";
 // The figures whose name does not already say what they are, each worded once
@@ -121,13 +121,13 @@ const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数
 // The cost-stress reading the freeze gate and F5 judge (verdict.py
 // `excess_at_cost_stress`), at the experiment's multiplier.
 const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；研究期每次验证与前推裁决读的是同一个数";
-const PANEL_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
+const BASELINE_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
 // What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
 // daily series' mean. The mean itself is the slice's `plain_excess`, or with
 // seed replicates `seed_mean.plain_excess`.
 const LOWER_BOUND_TITLE = "主动序列（登记了种子副本时为定版产物与各副本逐日平均）年化均值的移动块自助法单侧下界";
 // A replay slice as the holder reads it (verdict.py `holder_readings`): his
-// own account against the benchmark first, then against the zero-skill panel,
+// own account against the benchmark first, then against the random baseline,
 // then the active figures the gate grades.
 const HOLDER_TITLE = "定版产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
 const PLAIN_SELECTION_TITLE = "账户收益减随机对照组合收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
@@ -731,7 +731,7 @@ function chainEquity(research, forward) {
   return {
     series: (research.series || []).map((entry) => chainSeries(entry, after(entry.key))),
     benchmark: chainSeries(research.benchmark, forward.benchmark),
-    panel: chainSeries(research.panel, forward.panel),
+    baseline: chainSeries(research.baseline, forward.baseline),
     exposure:
       exposure[0] && exposure[1]
         ? {
@@ -836,19 +836,19 @@ function equityChart(payload, opts = {}) {
   const INK = themeInk();
   // A Paper book that follows real fills also draws its simulated track: the
   // same strategy, so the same ink, dotted as what did not happen. A replay's
-  // zero-skill panel (random names on the book's own trades) is a reference
+  // random baseline (random names on the book's own trades) is a reference
   // like the benchmark, in the same quiet ink, finely dotted.
   const colorOf = {
     strategy: INK.strategyColor,
     simulated: INK.strategyColor,
     benchmark: INK.muted,
-    panel: INK.muted,
+    baseline: INK.muted,
   };
-  const dashOf = { benchmark: "6 4", simulated: "2 3", panel: "1 3" };
-  const reference = new Set(["benchmark", "panel"]);
+  const dashOf = { benchmark: "6 4", simulated: "2 3", baseline: "1 3" };
+  const reference = new Set(["benchmark", "baseline"]);
   const shown = (payload.series || []).filter((s) => (s.dates || []).length);
   if (!shown.length) return el("div", { class: "hint" }, "暂无日度收益数据");
-  for (const line of [payload.benchmark, payload.panel]) {
+  for (const line of [payload.benchmark, payload.baseline]) {
     if (line && (line.dates || []).length) shown.push(line);
   }
   const seriesList = shown.map((s) => ({
@@ -2091,7 +2091,7 @@ function evidenceTiles(item) {
 }
 
 /* The ranking view: every frozen strategy with a readout, ranked by its
-   rolling record's residual IR (`registry.ranking`), with its p-value, steps,
+   validation record's residual IR (`registry.ranking`), with its p-value, steps,
    candidate changes and forward reading, and the Paper handoff beside each --
    the book it has, or a button that opens one within the cap, which the
    server enforces. Null while no experiment has a readout. */
@@ -2846,7 +2846,7 @@ function processRows(detail) {
   const record = (session || {}).record;
   const research = researchStep(detail);
   const live = research.state === "running" || research.state === "waiting";
-  // The rolling record so far, as the ledger holds it.
+  // The validation record so far, as the ledger holds it.
   const rolling = detail.record;
   const replay =
     ((detail.sessions || []).find((entry) => entry.kind === "forward") || {})
@@ -2930,13 +2930,13 @@ function processListPanel(detail, selectedKey) {
 // whose name states a threshold reads it from the same `thresholds` block the
 // criteria do, so the table and the checklist above it never disagree.
 // The holder's readings lead: account, benchmark, the raw excess between them,
-// the panel and the plain selection against it, then the active series the
+// the random baseline and the plain selection against it, then the active series the
 // gates grade and its market loading.
 const SLICE_ROWS = [
   ["strategy_return", "账户收益", fmtPct, true, HOLDER_TITLE],
   ["benchmark_return", "基准收益", fmtPct, true],
   ["raw_excess", "原始超额（账户 − 基准）", fmtPct, true],
-  ["panel_return", "随机对照组合收益", fmtPct, true, PANEL_RETURN_TITLE],
+  ["panel_return", "随机对照组合收益", fmtPct, true, BASELINE_RETURN_TITLE],
   ["plain_selection", "对随机对照（账户 − 对照组合）", fmtPct, true, PLAIN_SELECTION_TITLE],
   ["market_beta", "主动市场 β（对随机对照）", fmtSharpe, true, ACTIVE_BETA_TITLE],
   ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
@@ -3013,7 +3013,7 @@ function sliceStats(slice, fields, thresholds) {
 }
 
 /* A slice as one sentence in the holder's order: the account against the
-   benchmark, then against its zero-skill panel, then the active series the
+   benchmark, then against its random baseline, then the active series the
    gate graded. Null without readings. */
 function holderLine(label, slice) {
   const raw = (slice || {}).raw_readings;
@@ -3030,7 +3030,7 @@ function holderLine(label, slice) {
 /* The frozen book beside its seed replicates and their mean, over the named
    slices (verdict.py `seed_replicate_slice` and `seed_mean`): one row per
    seed, one figure per cell — the account against the benchmark and against
-   its zero-skill panel, each compounded. Null for a record without replicates, so
+   its random baseline, each compounded. Null for a record without replicates, so
    an experiment frozen on one seed shows nothing in its place. */
 const SLICE_NAMES = { forward: "前推", heldout: "Held-out " };
 
@@ -3144,10 +3144,10 @@ function stageHead(key, detail) {
   return panelHead(STEP_LABELS[key], el("span", { class: "badge kind" }, step.status));
 }
 
-/* Every frozen strategy's rolling record over this experiment's validation window,
+/* Every frozen strategy's validation record over this experiment's validation window,
    with its one-sided null p-value, its steps and candidate changes, and how
    many there are: what a single reading is weighed against. Nothing is
-   adjusted and no bar moves. */
+   adjusted and no threshold moves. */
 function validationWindowBlock(readouts) {
   const w = (readouts || {}).validation_window;
   if (!w || !w.count) return null;
@@ -3237,7 +3237,7 @@ function heldoutStagePanel(detail) {
 }
 
 /* 读出: how the experiment ended — its ending badge and reason — then the readout:
-   the rolling record read as one series (residual IR against its bar, the
+   the validation record read as one series (residual IR against its threshold, the
    one-sided p-value, steps and candidate changes) and the forward reading
    (the lower bound and residual IR, or the strategy error that left it
    unread); the holder's lines and seed readings; every experiment's record over the
@@ -3308,8 +3308,8 @@ function readoutStagePanel(detail) {
   );
 }
 
-/* The readout as the record states it: the rolling record's instrument with
-   its bar and years, the steps and candidate changes, and the forward
+/* The readout as the record states it: the validation record's significance
+   test with its threshold and years, the steps and candidate changes, and the forward
    reading or the strategy error in its place. */
 function readoutBlock(readout) {
   const record = readout.record || {};
@@ -3322,7 +3322,7 @@ function readoutBlock(readout) {
       "滚动记录",
       record.unmeasured
         ? `未读出：${record.unmeasured}`
-        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.bar)}，${fmtSharpe(record.years)} 年）· p = ${fmtPValue(record.p_value)}`,
+        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· p = ${fmtPValue(record.p_value)}`,
     ),
     kvRow("步数 · 换候选", `${record.steps ?? "—"} 步 · 换候选 ${record.candidate_changes ?? "—"} 次`),
     kvRow(
@@ -3404,7 +3404,7 @@ function paperHandoff(detail) {
 
 /* The frozen artifact and the research statistics it was frozen on. An
    artifact frozen with seed replicates also shows the seed-mean IR beside
-   its own IR and the bar both were held to, and one row per seed. */
+   its own IR and the threshold both were held to, and one row per seed. */
 function frozenPanel(detail) {
   const frozen = detail.frozen;
   if (!frozen) return null;
@@ -3852,7 +3852,7 @@ function sessionDetailPanel(detail, selectedKey) {
   // sessions have built, the live Trace below it is what is happening in the
   // current one, and the reader's own message box closes the column.
   panel.append(stepTreePanel(detail));
-  // The rolling record so far: every step the ledger holds, as it lands.
+  // The validation record so far: every step the ledger holds, as it lands.
   const record = recordPanel(detail);
   if (record) panel.append(record);
   if (session.record) panel.append(researchSessionPanel(detail, session));
@@ -3905,7 +3905,7 @@ function sessionDetailPanel(detail, selectedKey) {
   return panel;
 }
 
-/* Who recorded a step of the rolling record. */
+/* Who recorded a step of the validation record. */
 const SOURCE_LABELS = { test: "会话 test", host_completion: "宿主补完" };
 
 /* Drawdown of a cumulative-return series, from its running peak. */
@@ -3917,9 +3917,9 @@ function drawdownOf(cum) {
   });
 }
 
-/* The rolling record: the curve of the stitched entries -- the book and its
-   zero-skill panel compounded, a marker at every step whose candidate changed
-   -- then one row per step: its window, frontier, the candidate tested, who
+/* The validation record: the curve of the stitched entries -- the book and its
+   random baseline compounded, a marker at every step whose candidate changed
+   -- then one row per step: its window, test horizon, the candidate tested, who
    recorded it, its return, active return, drawdown, turnover and fees. Every
    figure is the ledger's own; null before the first step is recorded. */
 function recordPanel(detail) {
@@ -3940,19 +3940,19 @@ function recordPanel(detail) {
     .map((step) => ({ date: step.start, label: `第 ${step.step} 步换候选` }));
   const chart = dates.length
     ? equityChart(
-        { series: [series("strategy", "账户", curve.book || [])], panel: series("panel", "随机对照组合", curve.panel || []) },
+        { series: [series("strategy", "账户", curve.book || [])], baseline: series("baseline", "随机对照组合", curve.baseline || []) },
         { width: 980, height: 220, ddH: 0, markers },
       )
     : null;
   const headline = record.unmeasured
     ? `未读出：${record.unmeasured}`
-    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.bar)}）· p = ${fmtPValue(record.p_value)}`;
+    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}）· p = ${fmtPValue(record.p_value)}`;
   return el(
     "div",
     { class: "panel section-gap" },
     panelHead(
       "滚动记录",
-      el("span", { class: "badge kind" }, `${record.steps} 步 · 前沿 ${record.frontier}`),
+      el("span", { class: "badge kind" }, `${record.steps} 步 · 前沿 ${record.test_horizon}`),
       el("span", { class: "meta-line" }, `${headline} · 换候选 ${record.candidate_changes} 次`),
     ),
     chart,
@@ -3995,7 +3995,7 @@ function recordPanel(detail) {
    seed replicates the gate records them (`seed_replicates`): a missing or
    invalid replicate is a precondition, each invalid one's problem in the
    row's hover, and an earlier gate's seed-mean IR against the nominee's IR
-   bar is a row whenever it read one. */
+   threshold is a row whenever it read one. */
 function freezeGateChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};

@@ -232,7 +232,7 @@ RESEARCH_MANIFEST = {
         "decision_time": "2024-06-30T23:59:59+08:00",
         "input_window": "20220701..20240630",
         "research_period": "20210701..20240630",
-        "frontier": "20240630",
+        "test_horizon": "20240630",
         "validation_period": "20240701..20250630",
         "step": "quarter",
         "steps": 4,
@@ -295,7 +295,7 @@ class SessionFactsTest(unittest.TestCase):
                 "model_artifacts_empty": True,
             },
         )
-        self.assertIn("instrument", facts["artifact_contract"]["acceptance_rules"])
+        self.assertIn("significance", facts["artifact_contract"]["acceptance_rules"])
         self.assertIn("20210701..20240630", facts["research_scope"]["research"])
         self.assertIn("one research session", facts["research_scope"]["research"])
         # The periods after research end exist and are sealed: no date of them.

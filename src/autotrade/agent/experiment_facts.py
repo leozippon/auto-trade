@@ -246,7 +246,7 @@ def _research_scope(
         "complete year per label, on a data view that ends there for the whole "
         "session, then lives through the validation period "
         "(research_geometry.validation_period) one test step at a time, seeing it "
-        "only through the test results; it ends when the frontier reaches its end, "
+        "only through the test results; it ends when the test horizon reaches its end, "
         "and the candidate of the last test is the "
         "frozen strategy. No other session follows; the host then replays the frozen "
         "strategy over the periods after the geometry's last year and records the "

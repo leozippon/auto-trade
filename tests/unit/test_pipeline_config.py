@@ -234,8 +234,8 @@ class AcceptanceRulesTest(unittest.TestCase):
                 acceptance_for({"max_drawdown": 0.25, **stated})
             with self.assertRaises(TypeError):
                 AcceptanceRules(max_drawdown=0.25, **stated)  # type: ignore[arg-type]
-        # A record that states them rebuilds the rules it names, retired bars
-        # ignored, with no tracking mandate, and the forward bars it leaves out
+        # A record that states them rebuilds the rules it names, retired thresholds
+        # ignored, with no tracking mandate, and the forward thresholds it leaves out
         # resolve to today's defaults.
         old = AcceptanceRules.from_record(
             {
@@ -300,7 +300,7 @@ class AcceptanceRulesTest(unittest.TestCase):
 
     def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
         """The ``acceptance_rules`` fact is derived, never retyped: the
-        residual statistic and its bar come from ``verdict`` and this
+        residual statistic and its threshold come from ``verdict`` and this
         experiment's own rules, registration lists only what it checks, the
         validation block states the experiment's steps, and no date of any period
         appears in it."""
@@ -311,17 +311,17 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
         facts = rules.agent_facts(validation_years=5)
         self.assertEqual(
-            sorted(facts), ["forward", "graded_series", "instrument", "registration", "validation"]
+            sorted(facts), ["forward", "graded_series", "registration", "significance", "validation"]
         )
-        self.assertIn(str(verdict.PANEL_DRAWS), facts["graded_series"])
+        self.assertIn(str(verdict.BASELINE_DRAWS), facts["graded_series"])
         self.assertIn("benchmark.active_information_ratio", facts["graded_series"])
-        statistic = facts["instrument"]
+        statistic = facts["significance"]
         self.assertIn("intercept times sqrt(244) over the residual standard deviation", statistic["statistic"])
         self.assertIn("the size leg and the value leg", statistic["statistic"])
-        self.assertIn("z(1 - alpha) / sqrt(years)", statistic["bar"])
+        self.assertIn("z(1 - alpha) / sqrt(years)", statistic["threshold"])
         self.assertEqual(statistic["alpha"], 0.05)
-        self.assertEqual(statistic["bar_over_one_year"], 1.645)
-        self.assertEqual(statistic["bar_over_validation_period"], round(verdict.residual_bar(5.0, 0.05), 3))
+        self.assertEqual(statistic["threshold_over_one_year"], 1.645)
+        self.assertEqual(statistic["threshold_over_validation_period"], round(verdict.residual_threshold(5.0, 0.05), 3))
         with self.assertRaises(ValueError):
             rules.agent_facts(validation_years=0)
         validation = facts["validation"]

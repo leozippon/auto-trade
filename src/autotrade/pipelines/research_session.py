@@ -119,7 +119,6 @@ from .config import (
     positive_spend_cap,
 )
 from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage
-from .rolling_record import ValidationSteps
 from .session_tools import (
     EnvironmentBlocked,
     NullControlTool,
@@ -143,6 +142,7 @@ from .skills import (
     mounted_skill_refs,
     write_skills_index,
 )
+from .validation_record import ValidationSteps
 
 if TYPE_CHECKING:
     from autotrade.agent.runner import AgentSessionRunner
@@ -1505,7 +1505,7 @@ def research_geometry_record(
     research years, the rest the validation years, tiled into steps of
     ``test_step_months`` of which ``steps_tested`` are already tested. The
     session's data view is the decision view at the research years' end
-    (``decision_time``) for the whole session; ``frontier`` is the rolling
+    (``decision_time``) for the whole session; ``test_horizon`` is the rolling
     record's, the day the tests have reached (the research years' end before
     the first). Every decision view carries the ``window_months`` of history
     that end on its anchor day: ``input_window`` is the session's view, and
@@ -1515,7 +1515,7 @@ def research_geometry_record(
     last year exist and are hidden, and neither their dates nor their slots
     are named anywhere a session can read. The prompt's run section reads
     ``research_period``, ``validation_period``, ``step``, ``steps``,
-    ``steps_tested``, ``frontier`` and ``years`` (``agent/prompts.py``).
+    ``steps_tested``, ``test_horizon`` and ``years`` (``agent/prompts.py``).
     """
 
     def input_window(end: str) -> str:
@@ -1540,14 +1540,14 @@ def research_geometry_record(
         "step": STEP_NAMES[test_step_months],
         "steps": steps.count,
         "steps_tested": steps_tested,
-        "frontier": steps.frontier_after(steps_tested),
+        "test_horizon": steps.horizon_after(steps_tested),
         "validation_note": (
             "the session's data view (decision_time, input_window) ends on the last day of "
             "the research years and stays there for the whole session, and validate replays "
             "spans inside the research years only. The validation years reach the session "
             "only through test results: each test replays its candidate from the validation "
-            "start to the end of the next step, the new frontier, and returns the results "
-            "step by step (acceptance_rules.validation); frontier is the day the tests have "
+            "start to the end of the next step, the new test horizon, and returns the results "
+            "step by step (acceptance_rules.validation); test_horizon is the day the tests have "
             "reached, the end of the research years before the first test"
         ),
         "years": [

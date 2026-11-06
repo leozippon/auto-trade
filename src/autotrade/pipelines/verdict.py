@@ -1,28 +1,28 @@
-"""Readout statistics of one experiment: the residual-IR instrument, the forward
+"""Readout statistics of one experiment: the residual-IR significance test, the forward
 and Held-out readings, and the registration conditions.
 
 Pure functions over frozen replay data (docs/PIPELINE_DESIGN.md). Every
 statistic grades one series, the ACTIVE one: the strategy's daily return
-minus the zero-skill panel composite the host drew from the strategy's own
+minus the random-baseline composite the host drew from the strategy's own
 realized book (``environment/replay/null_control.py``). What zero skill earns
 in an account's own shape is a property of the window and the pool, so the
-panel removes what the universe construction hands any zero-skill book (lot
+random baseline removes what the universe construction hands any zero-skill book (lot
 affordability, boards, equal weighting, the book's own schedule and cash).
 
-The instrument reads the factor residual of that series: OLS on the experiment's
+The significance test reads the factor residual of that series: OLS on the experiment's
 benchmark (market), the size and the value legs of the replay's own
 cross-section (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio is read against ``z(1 − alpha) / √years`` for the
-series' length (:func:`residual_statistics`, :func:`residual_bar`), with
-its one-sided null p-value (:func:`null_p_value`). The rolling record is
-read this way (``rolling_record.record_instrument``), and so is every
+series' length (:func:`residual_statistics`, :func:`residual_threshold`), with
+its one-sided null p-value (:func:`null_p_value`). The validation record is
+read this way (``validation_record.record_significance``), and so is every
 forward and Held-out slice. Nothing is judged: the slices read the
 series as it is -- its annualised mean is its
 plain excess, its annualised standard deviation its tracking error and their
 ratio its IR (``stats.plain_statistics``) -- and its residual reading, which
 :func:`pooled_reading` pools across frozen strategies. The holder's readings
 are not regressed either: :func:`holder_readings` compounds the book, the benchmark
-and the panel as stored. The inputs are the daily series a
+and the random baseline as stored. The inputs are the daily series a
 ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
 forward and Held-out slices of one continuous replay are read from one
 sidecar.
@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import pandas as pd
 
-from autotrade.environment.replay.null_control import PANEL_DRAWS
+from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
     compounded_drawdown,
@@ -157,10 +157,10 @@ def _regression_rows(
 class ExactFit(ValueError):
     """The factor legs explain a series exactly: no residual to read. The
     series itself is degenerate -- a book that stayed in cash against an
-    empty panel -- rather than its data missing."""
+    empty random baseline -- rather than its data missing."""
 
 
-def residual_bar(years: float, alpha: float) -> float:
+def residual_threshold(years: float, alpha: float) -> float:
     """The residual IR a reading over ``years`` must reach to be significant
     at the one-sided level ``alpha`` under the null of zero residual skill:
     ``z(1 − alpha) / √years``. A null reading's residual IR is normal with
@@ -184,17 +184,17 @@ def residual_statistics(
     alpha: float,
 ) -> dict[str, float]:
     """The factor-residual reading of one daily series: the one statistic
-    the rolling record, every validation and every forward slice is read with.
+    the validation record, every validation and every forward slice is read with.
 
     ``active`` is the daily active series (the strategy's return minus its
-    zero-skill panel composite, ``series: active``) and ``market``, ``size``
+    random-baseline composite, ``series: active``) and ``market``, ``size``
     and ``value`` the three legs over the same days. OLS of the series on an
     intercept and the legs (``style.factor_ols``) gives the three betas and
     the residuals;
     the residual information ratio is the intercept annualised over the
     residual standard deviation annualised, ``intercept × √244 / σ̂`` with σ̂
-    on n − 4 degrees of freedom. ``years`` is days / 244 and ``bar`` the
-    :func:`residual_bar` at ``alpha`` for that length. ``ValueError`` on
+    on n − 4 degrees of freedom. ``years`` is days / 244 and ``threshold`` the
+    :func:`residual_threshold` at ``alpha`` for that length. ``ValueError`` on
     series of unequal length, fewer than ``MIN_REGRESSION_DAYS`` days or
     collinear legs, and :class:`ExactFit` on a series the legs explain
     exactly.
@@ -222,7 +222,7 @@ def residual_statistics(
         "residual_tracking_error": sigma * scale,
         "residual_information_ratio": float(coefficients[0]) * scale / sigma,
         **{name: float(beta) for (name, _series), beta in zip(FACTOR_SERIES, coefficients[1:], strict=True)},
-        "bar": residual_bar(years, alpha),
+        "threshold": residual_threshold(years, alpha),
     }
 
 
@@ -231,7 +231,7 @@ def residual_reading(
 ) -> dict[str, object]:
     """:func:`residual_statistics` of one sidecar's graded series over a
     slice (empty bounds take the whole sidecar), with ``series`` naming it --
-    the active series where the sidecar carries a panel -- and
+    the active series where the sidecar carries a random baseline -- and
     ``dropped_days``, the days left out for a non-finite value.
     ``ValueError`` where it cannot be read (see :func:`residual_statistics`)."""
 
@@ -255,7 +255,7 @@ def _reported_residual(
 def null_p_value(residual_information_ratio: float, years: float) -> float:
     """The one-sided p-value of a residual reading under the null of no
     residual skill, whose residual IR is normal with standard deviation
-    ``1 / √years`` (:func:`residual_bar`): ``1 − Φ(IR × √years)``."""
+    ``1 / √years`` (:func:`residual_threshold`): ``1 − Φ(IR × √years)``."""
 
     return 1.0 - NormalDist().cdf(residual_information_ratio * math.sqrt(years))
 
@@ -349,7 +349,7 @@ def graded_statistics(
     """What every gate reads of one span's graded series.
 
     The graded series is the active one when the sidecar carries a zero-skill
-    panel, else the strategy's own, and ``series`` names which.
+    random baseline, else the strategy's own, and ``series`` names which.
     ``plain_excess`` is its annualised mean, ``tracking_error`` its
     annualised standard deviation and ``information_ratio`` their ratio
     (``None`` on a flat series), as ``stats.plain_statistics`` reads them;
@@ -398,14 +398,14 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
 
     One row per replayed day (``ACTIVE_DAILY_COLUMNS``), every column read off
     the computations the gate itself runs on this sidecar: the strategy's
-    return and the zero-skill panel composite as stored, the active return
+    return and the random-baseline composite as stored, the active return
     :func:`style.active_analysis` grades -- its annualised mean over its
     annualised standard deviation is the active IR -- its
     :func:`stats.compounded_path` (``active_cumulative`` is the equity minus
     1, ``active_drawdown`` the loss below the running peak, whose largest
     value is the ``active_max_drawdown``), and the three factor legs its
-    loadings are read against. Only the composite of the panel is stored, so
-    no draw's names can be read back. Without a panel every ``active_*``
+    loadings are read against. Only the composite of the random baseline is stored, so
+    no draw's names can be read back. Without a random baseline every ``active_*``
     column is empty.
     """
 
@@ -491,10 +491,10 @@ def _compounded(series: object, start: str, end: str) -> float | None:
     return compounded_return(values) if values else None
 
 
-def panel_return(analysis: Mapping[str, object]) -> float | None:
-    """What the zero-skill panel composite itself earned over the sidecar's
+def baseline_return(analysis: Mapping[str, object]) -> float | None:
+    """What the random-baseline composite itself earned over the sidecar's
     span, after its own costs: the return of the random-name copies of the
-    book's trade skeleton. ``None`` on a sidecar without a panel."""
+    book's trade skeleton. ``None`` on a sidecar without a random baseline."""
 
     return _compounded(analysis.get("panel_daily"), "", "")
 
@@ -505,10 +505,10 @@ def holder_readings(
     """What a long-only holder of the book saw over one span, unregressed.
 
     The book's own return after every cost (``strategy_return``), the experiment's
-    benchmark price return (``benchmark_return``) and the zero-skill panel's
+    benchmark price return (``benchmark_return``) and the random baseline's
     return after its costs (``panel_return``), each compounded from the stored
     daily series over its days in ``start``..``end``; ``raw_excess`` is book
-    minus benchmark and ``plain_selection`` book minus panel, cumulative
+    minus benchmark and ``plain_selection`` book minus random baseline, cumulative
     differences like ``benchmark.excess_return``. ``plain_selection`` is the
     active series compounded: whether the names the book picked beat random
     names on its own skeleton. A series the sidecar does not carry over the
@@ -523,13 +523,13 @@ def holder_readings(
 
     strategy = _compounded(analysis.get("strategy_daily"), start, end)
     benchmark = _compounded(analysis.get("benchmark_daily"), start, end)
-    panel = _compounded(analysis.get("panel_daily"), start, end)
+    baseline = _compounded(analysis.get("panel_daily"), start, end)
     return {
         "strategy_return": strategy,
         "benchmark_return": benchmark,
-        "panel_return": panel,
+        "panel_return": baseline,
         "raw_excess": None if strategy is None or benchmark is None else strategy - benchmark,
-        "plain_selection": None if strategy is None or panel is None else strategy - panel,
+        "plain_selection": None if strategy is None or baseline is None else strategy - baseline,
     }
 
 
@@ -620,8 +620,8 @@ def forward_lower_bound(
     with replicates ``seed_mean.plain_excess``, so the record carries the
     bound alone (:func:`bootstrap_lower_bound`, seeded by ``seed_key``). It is
     not ``raw_readings.plain_selection``, which compounds the book and the
-    panel each over the span before taking their difference. A member whose
-    replay graded another series (it carries no panel) or measured other days
+    random baseline each over the span before taking their difference. A member whose
+    replay graded another series (it carries no random baseline) or measured other days
     than the book's raises ``ValueError``: a seed is never dropped from the
     mean, nor averaged on another footing.
     """
@@ -677,7 +677,7 @@ class ConditionReason(StrEnum):
 class Condition(NamedTuple):
     """One condition a stage judges on what it measured.
 
-    ``holds(measured, thresholds)`` reads the stage's own block and the bars
+    ``holds(measured, thresholds)`` reads the stage's own block and the thresholds
     its record states; a condition that does not hold records ``reason``.
     ``requires`` names the rule that turns a condition on, the tracking
     mandate's cap (empty: every experiment is held to it); an experiment without a mandate
@@ -724,7 +724,7 @@ CONDITIONS: tuple[Condition, ...] = (
     # IEEE comparison against NaN is False, so it would otherwise pass every
     # threshold; and an equity drawdown over ``max_drawdown`` across the
     # nominee's span, the account limit Paper also kills a running book at.
-    # It is the only drawdown this table judges: the rolling record's and
+    # It is the only drawdown this table judges: the validation record's and
     # the forward slices' drawdowns are recorded, never judged.
     # ``sharpe`` is read only for finiteness.
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_TOTAL_RETURN, lambda m, t: _finite(m.get("total_return"))),
@@ -844,7 +844,7 @@ def forward_slice(
     never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series is read as it is (:func:`graded_statistics`) and
-    through the residual-IR instrument (``residual_reading``, what
+    through the residual-IR significance test (``residual_reading``, what
     :func:`pooled_reading` pools across frozen strategies). F2 is
     ``lower_bound``, the ``forward_confidence`` lower bound of its plain
     excess over the book and the seed replicates the freeze registered
@@ -919,7 +919,7 @@ def forward_slice(
             "forward_confidence": rules.forward_confidence,
             "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
             "bootstrap_draws": BOOTSTRAP_DRAWS,
-            "panel_draws": PANEL_DRAWS,
+            "panel_draws": BASELINE_DRAWS,
             "cost_stress_multiplier": rules.cost_stress_multiplier,
         },
     }

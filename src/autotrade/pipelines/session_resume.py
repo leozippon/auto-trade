@@ -13,7 +13,7 @@ the raw revision id, the span, the summary and the result reference the
 Pipeline needs to freeze it, and the control flag and batch id; which bytes a
 Validation replayed is its revision's, read from the experiment's revision store
 (:func:`revision_fingerprint`). The tests an attempt ran are the ledger's
-``test_step`` records (``pipelines/rolling_record.py``).
+``test_step`` records (``pipelines/validation_record.py``).
 """
 
 from __future__ import annotations

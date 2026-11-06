@@ -382,9 +382,9 @@ def test_an_early_research_year_does_not_advertise_history_before_the_store() ->
     assert later["years"][0]["input_window"] == "20200701..20220630"
 
 
-def test_the_session_view_stays_at_the_research_end_while_the_frontier_moves() -> None:
+def test_the_session_view_stays_at_the_research_end_while_the_test_horizon_moves() -> None:
     """The geometry fact states one data view, the research year's end, at
-    every attempt; only the record's frontier follows the steps tested."""
+    every attempt; only the record's test horizon follows the steps tested."""
 
     from types import SimpleNamespace
 
@@ -409,7 +409,7 @@ def test_the_session_view_stays_at_the_research_end_while_the_frontier_moves() -
             "20210701..20230630",
         )
         assert "past the research years is refused" in geometry["spans"]
-    assert (opening["frontier"], opening["steps_tested"]) == ("20230630", 0)
-    assert (resumed["frontier"], resumed["steps_tested"], resumed["steps"]) == ("20231231", 2, 4)
+    assert (opening["test_horizon"], opening["steps_tested"]) == ("20230630", 0)
+    assert (resumed["test_horizon"], resumed["steps_tested"], resumed["steps"]) == ("20231231", 2, 4)
     with pytest.raises(ValueError, match=r"steps_tested must be 0\.\.4"):
         record(5)

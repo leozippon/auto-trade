@@ -43,7 +43,7 @@ from autotrade.environment.tools.report_issue import (
     issue_reports_path,
     read_issue_reports,
 )
-from autotrade.pipelines import rolling_record
+from autotrade.pipelines import validation_record
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import (
     GEOMETRY_PARAMETERS,
@@ -90,7 +90,7 @@ from autotrade.pipelines.session_tools import BATCH_FAILURE_ENVIRONMENT
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
     pooled_reading,
-    residual_bar,
+    residual_threshold,
     summary_excess_at_cost_stress,
 )
 
@@ -405,7 +405,7 @@ def experiment_ending(
     for itself. A worker the host or the environment broke ended the process
     rather than the research, so its state is read before the ledger. Otherwise
     the verdict decides: a graduate is named by its forward year as the holder
-    reads it — the book, the benchmark, the book against its zero-skill panel,
+    reads it — the book, the benchmark, the book against its random baseline,
     then the active IR the gate graded (``forward`` is
     :func:`_forward_view`, which carries those readings for every recorded
     slice) — a replay that refused one by the criteria it failed, a graduation
@@ -467,7 +467,7 @@ def experiment_ending(
 
 
 def _readout_line(readout: Mapping[str, object]) -> str:
-    """One line of a frozen strategy's readout: the rolling record's residual
+    """One line of a frozen strategy's readout: the validation record's residual
     IR, its p-value and candidate changes, then the forward lower bound."""
 
     record = _mapping(readout.get("record"))
@@ -546,7 +546,7 @@ def _forward_view(
         "refits_executed": record.get("refits_executed"),
         # Diagnostic: the forward slice's excess among random-name replays.
         "null_percentile": _number(_mapping(null.get("step")).get("excess_percentile")),
-        # The experiment's readout (``rolling_record.readout``); a record judged under
+        # The experiment's readout (``validation_record.readout``); a record judged under
         # the sealed-gate rules carries its verdict instead.
         "readout": dict(_mapping(record.get("readout"))) or None,
         "verdict": {**verdict, "reasons": _recorded_reasons(verdict.get("reasons"))} if verdict else None,
@@ -840,8 +840,8 @@ def experiment_listing(
 
 
 def ranking(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """The frozen strategies with a readout, ranked by their rolling record's
-    residual IR (a record the instrument could not read sorts last), each with
+    """The frozen strategies with a readout, ranked by their validation record's
+    residual IR (a record the significance test could not read sorts last), each with
     its forward reading and whether a Paper book may be opened from it.
 
     Research-period numbers never rank, and an experiment without a forward record is
@@ -915,7 +915,7 @@ class ValidationView:
     plain_excess: float | None
     information_ratio: float | None
     # ``active`` when the figures are of the node's return minus its
-    # zero-skill panel; None on a node recorded before panels existed.
+    # random baseline; None on a node recorded before random baselines existed.
     series: object
 
     @classmethod
@@ -1018,22 +1018,22 @@ def _record_alpha(params: Mapping[str, object]) -> float:
 
 
 def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, object]) -> dict[str, object] | None:
-    """The experiment's rolling record so far, read as one series: the steps the
-    ledger holds, the frontier they reached, the instrument over them
-    (``rolling_record.record_instrument``) and how often the candidate
+    """The experiment's validation record so far, read as one series: the steps the
+    ledger holds, the test horizon they reached, the significance test over them
+    (``validation_record.record_significance``) and how often the candidate
     changed. ``None`` before the first step is recorded: nothing is read off a
     replay the ledger does not name."""
 
-    tests = rolling_record.test_step_records(records)
+    tests = validation_record.test_step_records(records)
     if not tests:
         return None
-    instrument = rolling_record.record_instrument([row["entry"] for row in tests], alpha=_record_alpha(params))  # type: ignore[misc]
+    significance = validation_record.record_significance([row["entry"] for row in tests], alpha=_record_alpha(params))  # type: ignore[misc]
     return {
-        **instrument,
+        **significance,
         "start": str(tests[0]["window"]["start"]),  # type: ignore[index]
         "end": str(tests[-1]["window"]["end"]),  # type: ignore[index]
-        "frontier": str(tests[-1]["frontier"]),
-        "candidate_changes": rolling_record.candidate_changes(records),
+        "test_horizon": str(tests[-1]["test_horizon"]),
+        "candidate_changes": validation_record.candidate_changes(records),
     }
 
 
@@ -1041,21 +1041,21 @@ def _record_detail(
     identity: PublicIdentity, records: Sequence[Mapping[str, object]], params: Mapping[str, object]
 ) -> dict[str, object] | None:
     """The record for the experiment page: :func:`_record_view` with one row per
-    step (its window, frontier, candidate by public ref, source and entry
+    step (its window, test horizon, candidate by public ref, source and entry
     without the daily rows) and the daily curve the stitched entries give --
-    the book and its zero-skill panel compounded, with each step's bounds and
+    the book and its random baseline compounded, with each step's bounds and
     whether its candidate changed, for the chart's markers."""
 
     view = _record_view(records, params)
     if view is None:
         return None
-    tests = rolling_record.test_step_records(records)
+    tests = validation_record.test_step_records(records)
     rows: list[dict[str, object]] = []
     dates: list[str] = []
     book: list[float] = []
-    panel: list[float] = []
+    baseline: list[float] = []
     steps: list[dict[str, object]] = []
-    book_level = panel_level = 1.0
+    book_level = baseline_level = 1.0
     previous: str | None = None
     for record in tests:
         candidate = _mapping(record.get("candidate"))
@@ -1067,28 +1067,28 @@ def _record_detail(
             {
                 "step": record.get("step"),
                 "window": dict(_mapping(record.get("window"))),
-                "frontier": record.get("frontier"),
+                "test_horizon": record.get("test_horizon"),
                 "candidate": identity.public_text(str(candidate.get("step_id") or "")),
                 "changed": changed,
                 "source": record.get("source"),
                 **{key: value for key, value in entry.items() if key != "daily"},
             }
         )
-        for day, strategy, panel_value, *_legs in entry.get("daily") or ():  # type: ignore[misc]
+        for day, strategy, baseline_value, *_legs in entry.get("daily") or ():  # type: ignore[misc]
             book_level *= 1.0 + float(strategy)
-            panel_level *= 1.0 + float(panel_value)
+            baseline_level *= 1.0 + float(baseline_value)
             dates.append(str(day))
             book.append(book_level - 1.0)
-            panel.append(panel_level - 1.0)
+            baseline.append(baseline_level - 1.0)
         window = _mapping(record.get("window"))
         steps.append({"step": record.get("step"), "start": window.get("start"), "end": window.get("end"), "changed": changed})
-    return {**view, "rows": rows, "curve": {"dates": dates, "book": book, "panel": panel, "steps": steps}}
+    return {**view, "rows": rows, "curve": {"dates": dates, "book": book, "baseline": baseline, "steps": steps}}
 
 
 def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
     """How the experiment's record will be read, from its own stamped rules, so the
     console states it before any record exists: the residual statistic's
-    level, the research years, the step length and the bar for the whole
+    level, the research years, the step length and the threshold for the whole
     validation period. An experiment created before the rolling validation states
     none: it can no longer run a session."""
 
@@ -1102,7 +1102,7 @@ def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
         "research_years": rules.research_years,
         "validation_years": validation_years,
         "test_step_months": rules.test_step_months,
-        "bar": residual_bar(float(validation_years), rules.alpha),
+        "threshold": residual_threshold(float(validation_years), rules.alpha),
     }
 
 
@@ -1142,10 +1142,10 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
     forward months, beside its own forward ``record``; ``None`` before that
     record, or for a record judged under the sealed gate.
 
-    ``validation_window``: every frozen strategy's rolling record over the
+    ``validation_window``: every frozen strategy's validation record over the
     same validation period -- its residual IR, years, one-sided null p-value
     (``verdict.null_p_value``), steps and candidate changes -- and how many
-    there are. No reading is adjusted for the others and no bar moves with
+    there are. No reading is adjusted for the others and no threshold moves with
     their count; the count is what a p-value is weighed against.
     ``forward_pool``: every frozen strategy's residual reading over the same
     forward months, pooled (``verdict.pooled_reading``): one forward year
@@ -1214,7 +1214,7 @@ def _seed_gate_view(
 ) -> dict[str, object] | None:
     """The freeze gate's seed-replicate reading (``experiment._seed_replicate_gate``)
     -- the replicates it read, each one's seed line and IR or the problem that
-    refused it, their mean with the nominee and the bar -- or ``None`` for a
+    refused it, their mean with the nominee and the threshold -- or ``None`` for a
     gate recorded before it read seed replicates. A gate that read the
     retired regressed scale (``regressed``) shows none of its IRs."""
 
@@ -1350,7 +1350,7 @@ def _frozen_view(
         "refit_period": fit.get("refit_period"),
         "blocks": [dict(item) for item in block.get("blocks") or () if isinstance(item, Mapping)],
         # Frozen beside replicates: the gate's reading of them, for the seed
-        # mean beside the nominee's IR and their bar. Absent on one seed.
+        # mean beside the nominee's IR and their threshold. Absent on one seed.
         "seed_replicates": (
             _seed_gate_view(
                 identity, _mapping(row.get("freeze_gate")).get("seed_replicates"), regressed=regressed

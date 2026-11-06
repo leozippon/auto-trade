@@ -121,7 +121,7 @@ def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
         help=(
             "The index this experiment is measured against: the benchmark leg of the style "
             "attribution and the factor loadings, and the membership the "
-            "zero-skill panel draws replacements from."
+            "random baseline draws replacements from."
         ),
     )
 

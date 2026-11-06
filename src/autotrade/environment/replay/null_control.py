@@ -1,4 +1,4 @@
-"""Random-portfolio null control for one replay result, and its zero-skill panel.
+"""Random-portfolio null control for one replay result, and its random baseline.
 
 The question: is a window's excess return due to WHICH names the strategy
 picked, or only to its timing, sizing and exposure? The null keeps the trade
@@ -8,7 +8,7 @@ the same side of the benchmark's membership, then replays the script through
 the same Broker. If the observed excess sits inside the null distribution, the
 name selection carried no information the timing did not already carry.
 
-The draws' equal-weight mean daily return is the zero-skill panel composite:
+The draws' equal-weight mean daily return is the random-baseline composite:
 what the account earns in the candidate's own shape — its review calendar, its
 seats, its money per seat, its costs — with no skill in the names. The verdict
 grades a strategy on its daily return minus that composite
@@ -56,7 +56,7 @@ from .style import daily_returns_from_curve
 # Draws of one null control. Twenty put the composite's standard error at
 # 1.4-3.2 pp/yr against the 4-11 pp/yr active returns it is subtracted from,
 # at a twenty-fifth of what a percentile-grade 500 would cost on every replay.
-PANEL_DRAWS = 20
+BASELINE_DRAWS = 20
 # How a replacement name is drawn: uniformly among the entry day's names that
 # one board lot of this round trip's own money can buy and that sit on the
 # original's side of the benchmark's membership. Without a membership table the
@@ -65,7 +65,7 @@ PANEL_DRAWS = 20
 # (``BrokerProfile.permitted_boards``) keeps the names of every other board out.
 # Which name of that pool a draw takes is a function of the seed, the draw's
 # index and the round trip's own identity (``_trip_seed``), not of the other
-# trips or their count: a book that differs in one round trip meets a panel
+# trips or their count: a book that differs in one round trip meets a random baseline
 # that differs in that trip's replacements alone.
 MATCHED_MEMBERSHIP = "index_membership+affordability"
 MATCHED_DECILE = "circ_mv_decile+affordability"
@@ -84,11 +84,11 @@ class NullControlSetupError(RuntimeError):
     """
 
 
-class ZeroSkillPanelError(RuntimeError):
-    """Drawing the zero-skill panel failed after the candidate's own replay finished.
+class RandomBaselineError(RuntimeError):
+    """Drawing the random baseline failed after the candidate's own replay finished.
 
     Always the host's failure, never a measurement of the candidate: the
-    panel's draws replay host-scripted orders. It is raised without a cause or
+    random baseline's draws replay host-scripted orders. It is raised without a cause or
     context, because the engine types any failure inside an in-process
     strategy call as the strategy's own (``StrategyRaised``), and a chain to
     that would classify the host's failure as the candidate's.
@@ -208,12 +208,12 @@ def run_null_control(
     profile: BrokerProfile,
     schedule: StrategySchedule,
     *,
-    k: int = PANEL_DRAWS,
+    k: int = BASELINE_DRAWS,
     seed: int,
     step: tuple[str, str] | None = None,
     corporate_actions: pd.DataFrame | None = None,
     membership: Mapping[str, Collection[str]] | None = None,
-    panel: bool = False,
+    baselines: bool = False,
 ) -> dict[str, object]:
     """Replay ``k`` random-name copies of ``result``'s skeleton and rank it.
 
@@ -237,10 +237,10 @@ def run_null_control(
     dated before its entry fails the whole call before the first draw
     (``NullControlSetupError``).
 
-    ``panel`` adds the draws' daily return series to the block: ``panel_daily``
+    ``baselines`` adds the draws' daily return series to the block: ``panel_daily``
     is their equal-weight mean per trading day and ``panel_draw_sd`` the
     cross-draw standard deviation. A result that never filled a trade has an
-    idle cash account as its zero-skill copy, so its panel is zero every day.
+    idle cash account as its zero-skill copy, so its random baseline is zero every day.
     """
 
     if k < 1:
@@ -264,7 +264,7 @@ def run_null_control(
             "matched": matched,
             "excess_percentile": None,
         }
-        if panel:
+        if baselines:
             returns = daily_returns_from_curve(result.equity_curve)
             idle["panel_daily"] = [[date, 0.0] for date, _value in returns]
             idle["panel_draw_sd"] = [[date, 0.0] for date, _value in returns]
@@ -312,7 +312,7 @@ def run_null_control(
         )
         excesses.append(total_return_from_curve(run.equity_curve) - window_benchmark)
         rejects.append(sum(1 for record in run.executions if record["status"] != "filled"))
-        if panel:
+        if baselines:
             series.append(daily_returns_from_curve(run.equity_curve))
         if bounds is not None:
             step_excesses.append(
@@ -341,7 +341,7 @@ def run_null_control(
             "end": end,
             **_distribution(observed_step, step_excesses),
         }
-    if panel:
+    if baselines:
         days = [date for date, _value in series[0]]
         if any([date for date, _value in draw] != days for draw in series):
             raise ValueError("null draws cover different trading days")
@@ -376,7 +376,7 @@ class _Membership:
         position = bisect_left(self._dates, date)
         if position == 0:
             # Drawing on the float-cap decile instead would grade this span
-            # against another panel than the experiment's other spans, so nothing is
+            # against another random baseline than the experiment's other spans, so nothing is
             # drawn: the pools are built before the first draw.
             raise NullControlSetupError(
                 f"no benchmark membership is dated before {date}: the experiment mounts index_weight, "
@@ -663,7 +663,7 @@ def _orders_from_pools(
 def _trip_seed(seed: int, draw: int, trip: RoundTrip, twin: int) -> int:
     """The seed of one round trip's replacement in one draw.
 
-    A blake2b digest of the panel seed, the draw's index and the trip's own
+    A blake2b digest of the random baseline seed, the draw's index and the trip's own
     identity -- its entry instant, symbol and shares -- so it is the same in
     every process (Python's ``hash`` is salted per process) and blind to every
     trip of another identity. ``twin`` numbers the trips of one identity in
@@ -801,12 +801,12 @@ def _cn_datetime(value: object) -> datetime:
 
 
 __all__ = [
+    "BASELINE_DRAWS",
     "MATCHED_DECILE",
     "MATCHED_MEMBERSHIP",
-    "PANEL_DRAWS",
     "NullControlSetupError",
+    "RandomBaselineError",
     "RoundTrip",
-    "ZeroSkillPanelError",
     "run_null_control",
     "trade_skeleton",
 ]

@@ -38,7 +38,7 @@ from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 RESEARCH_ANCHOR_TIME = time(23, 59, 59)
 # The span label of a replay over the research years, Y1 through the last of
 # them; and of the validation years as one span, which the tests replay up to
-# their frontier.
+# their test horizon.
 FULL_SPAN = "full"
 VALIDATION_SPAN = "validation"
 
@@ -63,7 +63,7 @@ def replay_window(
     caps how many days follow: an unofficial rehearsal runs such a short
     window of a span it must not be able to pass off as a full Validation.
     ``end`` cuts the window at the last trading day on or before that date:
-    a test replays its span from the first day to the validation frontier.
+    a test replays its span from the first day to the test horizon.
     None can reach outside the span's own days, and all are applied after the
     slot identity check, never before it.
     """

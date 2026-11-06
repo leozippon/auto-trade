@@ -77,7 +77,7 @@ def generate_orders(context):
 # sealed reading replay research years in mode ``valid``, the forward stage in
 # ``heldout``. An active return of 0.0009 a day or more reads a residual IR far
 # above the one-year bar; -0.0010 reads far below zero. Forward, seed 1000
-# beats its panel well clear of its noise, seed 2000 barely and seed 3000
+# beats its random baseline well clear of its noise, seed 2000 barely and seed 3000
 # loses nearly as much as the other two win: their mean stays above zero and
 # inside its noise.
 ALPHAS = {
@@ -96,7 +96,7 @@ def _source(seed: int, *, swaps: int = 4, heads: int = 2, fit: bool = True) -> s
 
 
 class SeedEvaluator:
-    """A result whose zero-skill panel is the replay's market and size
+    """A result whose random baseline is the replay's market and size
     exposure, so the active series is the seed's daily ``alpha`` plus noise."""
 
     def __init__(
@@ -109,7 +109,7 @@ class SeedEvaluator:
     ) -> None:
         self.root = root
         self.requests: list[EvaluationRequest] = []
-        # Forward, this seed's replay raises; that one's stores no panel.
+        # Forward, this seed's replay raises; that one's stores no random baseline.
         self.fail_seed = fail_seed
         self.bare_seed = bare_seed
         # (seed, start): that seed's own code raises in the replay from start.
@@ -292,7 +292,7 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
                 sum(member["raw_readings"][key] for member in members) / 3
             )
     block = forward["slices"]["forward"]
-    # The nominee itself beat its panel, and so does the mean over the three
+    # The nominee itself beat its random baseline, and so does the mean over the three
     # seeds; the mean's lower bound does not clear zero, and is reported.
     assert block["raw_readings"]["plain_selection"] > 0
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
@@ -472,7 +472,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
         ),
         ({"bare_seed": 2000}, ValueError, "graded another series than the frozen book"),
     ],
-    ids=["the_host_fails_its_replay", "its_replay_has_no_panel"],
+    ids=["the_host_fails_its_replay", "its_replay_has_no_random_baseline"],
 )
 def test_a_replicate_missing_from_the_mean_fails_the_stage_and_leaves_no_verdict(
     tmp_path: Path, replays, error, message

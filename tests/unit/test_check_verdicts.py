@@ -33,7 +33,7 @@ LEDGER = Path("ledgers") / "experiment_ledger.jsonl"
 
 @pytest.fixture(scope="module")
 def experiment(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """An experiment created now, with a recorded freeze gate, rolling record and readout."""
+    """An experiment created now, with a recorded freeze gate, validation record and readout."""
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(worker, "ResearchPITSnapshotProvider", SyntheticPITProvider)

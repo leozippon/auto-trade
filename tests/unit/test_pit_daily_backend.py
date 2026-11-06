@@ -25,7 +25,7 @@ from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import (
     NullControlSetupError,
-    ZeroSkillPanelError,
+    RandomBaselineError,
 )
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
@@ -49,7 +49,7 @@ from autotrade.pipelines.pit_backend import (
     _asof_stash_dir,
     _AsOfReadOnlyView,
     _bind_asof_stash_contract,
-    panel_seed,
+    baseline_seed,
     prebuild_asof_stash,
 )
 
@@ -619,7 +619,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert action["cash_credit"] == pytest.approx(50.0)
     assert "corporate_actions" not in record["pit"]["asof_domains"]
 
-    # A formal replay carries the zero-skill panel the verdict grades it
+    # A formal replay carries the random baseline the verdict grades it
     # against: twenty draws of its own skeleton, the one other name standing
     # in, matched on the float-cap decile because this slot mounts no
     # index_weight. The smoke window below is not a Validation and has none.
@@ -635,7 +635,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert "panel_daily" not in json.loads(
         (Path(smoke.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    # The panel is drawn after the replay it grades and through Brokers of its
+    # The random baseline is drawn after the replay it grades and through Brokers of its
     # own, so that replay's record is the same bytes with or without it; only
     # wall-clock fields differ between two runs.
     monkeypatch.setattr(
@@ -655,18 +655,18 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
 
     assert without_clock(bare) == without_clock(record)
 
-    # The panel is seeded by the replayed span alone, never by the revision
+    # The random baseline is seeded by the replayed span alone, never by the revision
     # or the experiment: the same book resubmitted as a new revision meets the
-    # identical panel, so a resubmission cannot re-roll it, and so does the
+    # identical random baseline, so a resubmission cannot re-roll it, and so does the
     # same book replayed by another experiment's backend, so paired experiments read one
     # number for one book.
-    def panel_of(result) -> dict:
+    def baselines_of(result) -> dict:
         return json.loads(
             (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
         )
 
-    assert style["panel"]["seed"] == panel_seed("20240102", "20240103")
-    resubmitted = panel_of(
+    assert style["panel"]["seed"] == baseline_seed("20240102", "20240103")
+    resubmitted = baselines_of(
         backend.evaluate(
             dataclasses.replace(
                 request, revision=ArtifactRevision("revision_resubmitted", revision)
@@ -675,7 +675,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     )
     assert resubmitted["panel"]["seed"] == style["panel"]["seed"]
     assert resubmitted["panel_daily"] == style["panel_daily"]
-    other_experiment = panel_of(
+    other_experiment = baselines_of(
         PITDailyEvaluationBackend(
             tmp_path / "other_experiment" / "results",
             execution_mode="trusted",
@@ -690,16 +690,16 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert other_experiment["panel_daily"] == style["panel_daily"]
     assert other_experiment["panel_draw_sd"] == style["panel_draw_sd"]
 
-    # Drawing the panel is the host's work: a failure there is never a
+    # Drawing the random baseline is the host's work: a failure there is never a
     # measurement of the candidate, even when it comes through the engine
-    # wrapper the panel's scripted orders run in, which types anything raised
+    # wrapper the random baseline's scripted orders run in, which types anything raised
     # inside a strategy call as StrategyRaised. It surfaces named and
     # unchained, so every classifier reads it as an environment failure.
     monkeypatch.setattr(
         "autotrade.environment.replay.null_control._scripted_strategy",
         lambda _orders: lambda _context: [{"symbol": "000001.SZ", "action": "hold"}],
     )
-    with pytest.raises(ZeroSkillPanelError, match="candidate's own replay finished") as failure:
+    with pytest.raises(RandomBaselineError, match="candidate's own replay finished") as failure:
         backend.evaluate(request)
     assert "generate_orders failed" in str(failure.value)
     assert failure.value.__cause__ is None and failure.value.__context__ is None
@@ -733,7 +733,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
         restarted.null_control(result.result_ref, **null_control_call)
 
     # An experiment that charges the dividend tax replays on its own profile, and the
-    # panel it is graded against trades under the same one. This slot's table
+    # random baseline it is graded against trades under the same one. This slot's table
     # predates the bonus-share column, so the taxed replay is refused until the
     # slot is rebuilt rather than treating every share leg as tax-free.
     taxed = dataclasses.replace(
@@ -745,19 +745,19 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
         )
     table = pd.read_parquet(replay / "corporate_actions.parquet")
     table.assign(bonus_per_share=0.0).to_parquet(replay / "corporate_actions.parquet", index=False)
-    panel_profiles: list[BrokerProfile] = []
-    draw_panel = pit_backend.run_null_control
+    baseline_profiles: list[BrokerProfile] = []
+    draw_baselines = pit_backend.run_null_control
 
-    def recording_panel(result, frame, benchmark, profile, *args, **kwargs):
-        panel_profiles.append(profile)
-        return draw_panel(result, frame, benchmark, profile, *args, **kwargs)
+    def recording_baselines(result, frame, benchmark, profile, *args, **kwargs):
+        baseline_profiles.append(profile)
+        return draw_baselines(result, frame, benchmark, profile, *args, **kwargs)
 
-    monkeypatch.setattr("autotrade.pipelines.pit_backend.run_null_control", recording_panel)
+    monkeypatch.setattr("autotrade.pipelines.pit_backend.run_null_control", recording_baselines)
     taxed_result = PITDailyEvaluationBackend(tmp_path / "results_taxed", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
         taxed
     )
     monkeypatch.undo()
-    assert panel_profiles == [taxed.broker_profile]
+    assert baseline_profiles == [taxed.broker_profile]
     taxed_stats = json.loads(Path(taxed_result.result_ref).read_text(encoding="utf-8"))["stats"]
     # The book still holds its shares when the window ends: the dividend was
     # credited gross and nothing is owed until they are sold.
@@ -1927,20 +1927,20 @@ def generate_orders(context):
     assert late.summary["decision_calls"] == 1
     late_record = json.loads(Path(late.result_ref).read_text(encoding="utf-8"))
     assert [row["trade_date"] for row in late_record["equity_curve"]] == ["20240103"]
-    # A smoke window, cut by days or opened late, draws no panel.
+    # A smoke window, cut by days or opened late, draws no random baseline.
     for result in (short, late):
         sidecar = json.loads((Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
         assert not sidecar.get("panel_daily")
 
-    # A test's window is cut at the frontier only: it opens on the span's
-    # first day, records the days it covered and is graded against its panel
+    # A test's window is cut at the test horizon only: it opens on the span's
+    # first day, records the days it covered and is graded against its random baseline
     # like the whole span.
-    frontier = _run(None, end_day="20240102")
-    assert frontier.summary["replayed_trade_days"] == 1
-    frontier_record = json.loads(Path(frontier.result_ref).read_text(encoding="utf-8"))
-    assert [row["trade_date"] for row in frontier_record["equity_curve"]] == ["20240102"]
-    assert "asof_date_ranges" not in frontier_record["pit"]
-    sidecar = json.loads((Path(frontier.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
+    test_horizon = _run(None, end_day="20240102")
+    assert test_horizon.summary["replayed_trade_days"] == 1
+    horizon_record = json.loads(Path(test_horizon.result_ref).read_text(encoding="utf-8"))
+    assert [row["trade_date"] for row in horizon_record["equity_curve"]] == ["20240102"]
+    assert "asof_date_ranges" not in horizon_record["pit"]
+    sidecar = json.loads((Path(test_horizon.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
     assert [day for day, _value in sidecar["panel_daily"]] == ["20240102"]
 
     for days in (0, -1):
@@ -2365,10 +2365,10 @@ def test_a_span_refuses_a_slot_whose_anchor_has_no_decision_universe(tmp_path: P
         )
 
 
-def test_the_panel_a_book_meets_depends_only_on_what_is_replayed(tmp_path: Path) -> None:
+def test_the_random_baseline_a_book_meets_depends_only_on_what_is_replayed(tmp_path: Path) -> None:
     """Two experiments that validate the same bytes on the same span read one active
-    IR: the panel is seeded by the replayed span alone, so each experiment's backend
-    draws the identical panel for the identical book, while the same book on
+    IR: the random baseline is seeded by the replayed span alone, so each experiment's backend
+    draws the identical random baseline for the identical book, while the same book on
     another span draws from another seed."""
 
     snapshot, slots = _write_span_release(tmp_path)
@@ -2389,9 +2389,9 @@ def test_the_panel_a_book_meets_depends_only_on_what_is_replayed(tmp_path: Path)
     assert first_experiment["panel"] == second_experiment["panel"]
     assert first_experiment["panel_daily"] == second_experiment["panel_daily"]
     assert first_experiment["panel_draw_sd"] == second_experiment["panel_draw_sd"]
-    assert first_experiment["panel"]["seed"] == panel_seed("20240101", "20240105")
+    assert first_experiment["panel"]["seed"] == baseline_seed("20240101", "20240105")
     shorter = sidecar(tmp_path / "first_experiment" / "results_a", slots["a"])
-    assert shorter["panel"]["seed"] == panel_seed("20240101", "20240103")
+    assert shorter["panel"]["seed"] == baseline_seed("20240101", "20240103")
     assert shorter["panel"]["seed"] != first_experiment["panel"]["seed"]
 
 
@@ -2508,12 +2508,12 @@ def _mount_second_index(
 
 
 def test_an_experiment_replays_grades_and_records_its_own_benchmark_index(tmp_path: Path) -> None:
-    """``benchmark_index`` keys the benchmark series, the panel and the record.
+    """``benchmark_index`` keys the benchmark series, the random baseline and the record.
 
     The same slots, the same revision, two experiments: the CSI 500 experiment regresses on
     the 000905.SH series and draws its zero-skill replacements from 000905.SH
     membership. The default experiment is measured against CSI 300, and while the
-    mounted ``index_weight`` holds no CSI 300 cross-section its panel refuses
+    mounted ``index_weight`` holds no CSI 300 cross-section its random baseline refuses
     by name instead of falling back to the float-cap decile; once one is there
     it draws from CSI 300 membership. Both results carry the index they were
     graded against, so neither can be read without knowing its benchmark.
@@ -2540,9 +2540,9 @@ def test_an_experiment_replays_grades_and_records_its_own_benchmark_index(tmp_pa
     backend = PITDailyEvaluationBackend(
         tmp_path / "results_default", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
     )
-    # A Validation reports it as the panel's failure, the setup error in its text.
+    # A Validation reports it as the random baseline's failure, the setup error in its text.
     with pytest.raises(
-        ZeroSkillPanelError, match=r"NullControlSetupError: .*no section of the benchmark"
+        RandomBaselineError, match=r"NullControlSetupError: .*no section of the benchmark"
     ):
         backend.evaluate(request)
     chmod_tree(snapshot, file_mode=0o644, dir_mode=0o755)
@@ -2567,7 +2567,7 @@ def test_an_experiment_replays_grades_and_records_its_own_benchmark_index(tmp_pa
     assert {value for _day, value in plain["benchmark_daily"]} == {0.005}
     assert "中证500" in graded["factor_regression"]["method"]
     assert "沪深300" in plain["factor_regression"]["method"]
-    # The panel draws replacements from each experiment's own membership.
+    # The random baseline draws replacements from each experiment's own membership.
     assert graded["panel"]["matched"] == "index_membership+affordability"
     assert plain["panel"]["matched"] == "index_membership+affordability"
     # The result record itself names the benchmark beside its figures.

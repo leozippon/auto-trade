@@ -19,9 +19,9 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.null_control import (
+    BASELINE_DRAWS,
     MATCHED_DECILE,
     MATCHED_MEMBERSHIP,
-    PANEL_DRAWS,
     NullControlSetupError,
     RoundTrip,
     _candidate_pool,
@@ -296,7 +296,7 @@ def _board_draws(permitted_boards, draws: int, seed: int) -> list[list[tuple[str
     return result
 
 
-def test_the_panel_draws_only_on_the_boards_the_account_may_buy():
+def test_the_random_baseline_draws_only_on_the_boards_the_account_may_buy():
     drawn = {symbol for draw in _board_draws(("main", "gem"), 200, 1) for symbol, _action, _quantity in draw}
     assert drawn == {"000001.SZ", "000002.SZ", "600001.SH", "300001.SZ", "300002.SZ"}
     # Without the restriction the same pool reaches STAR and Beijing names.
@@ -329,7 +329,7 @@ def test_the_panel_draws_only_on_the_boards_the_account_may_buy():
 
 def test_the_draws_are_pinned_to_the_seed_the_draw_and_the_trip():
     """Pinned literals: a replacement is seeded from a blake2b digest of the
-    panel seed, the draw's index and the round trip, never from Python's
+    random baseline seed, the draw's index and the round trip, never from Python's
     per-process ``hash``, so every process -- a rerun, a paired experiment, a later
     audit -- draws exactly these names."""
 
@@ -344,13 +344,13 @@ def test_the_draws_are_pinned_to_the_seed_the_draw_and_the_trip():
 
 
 def _replacement_names(skeleton, frame: pd.DataFrame, seed: int) -> list[dict[str, str]]:
-    """Per panel draw, the name each round trip bought, by its entry instant."""
+    """Per random baseline draw, the name each round trip bought, by its entry instant."""
 
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe) for trip in skeleton]
     sellable = _sellable(universe, frame)
     names = []
-    for draw in range(PANEL_DRAWS):
+    for draw in range(BASELINE_DRAWS):
         orders, _dropped = _orders_from_pools(skeleton, pools, seed, draw, sellable, universe.carried_limit)
         names.append(
             {
@@ -367,7 +367,7 @@ def test_a_changed_round_trip_redraws_that_trip_alone():
     """The defect this replaces: every trip of every draw took the next number
     of one shared stream, so a replay with one buy more than its record (2 238
     against 2 237) redrew all twenty draws from that buy on and moved the
-    panel's cumulative return by 23 points while the book itself moved 0.37
+    random baseline's cumulative return by 23 points while the book itself moved 0.37
     pp/yr. Now an added trip and a resized one change their own replacements,
     and every other trip keeps its name in every draw."""
 
@@ -431,7 +431,7 @@ def test_a_round_trip_draws_uniformly_and_afresh_in_every_draw():
     assert set(counts) == {symbol for symbol, _quantity in pool}
     # 200 expected per name; 60 is about four and a half standard deviations.
     assert all(abs(count - 200) < 60 for count in counts.values())
-    assert len(set(picks[:PANEL_DRAWS])) > 1
+    assert len(set(picks[:BASELINE_DRAWS])) > 1
 
     halves, _unpaired = trade_skeleton(
         [
@@ -446,21 +446,21 @@ def test_a_round_trip_draws_uniformly_and_afresh_in_every_draw():
             order["symbol"]
             for order in _orders_from_pools(halves, pools, 13, draw, sellable, universe.carried_limit)[0][DAYS[0]]
         )
-        for draw in range(PANEL_DRAWS)
+        for draw in range(BASELINE_DRAWS)
     ]
     assert all(len(pair) == 2 for pair in pairs)
     assert any(first != second for first, second in pairs)
 
 
-def test_identical_trades_meet_the_identical_panel():
+def test_identical_trades_meet_the_identical_random_baseline():
     """Two replays of one script are two results with one trade list, so
-    their panels agree to the last digit."""
+    their random baselines agree to the last digit."""
 
     arguments = (_frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"))
-    first = run_null_control(_observed_result(), *arguments, seed=17, panel=True)
-    second = run_null_control(_observed_result(), *arguments, seed=17, panel=True)
+    first = run_null_control(_observed_result(), *arguments, seed=17, baselines=True)
+    second = run_null_control(_observed_result(), *arguments, seed=17, baselines=True)
 
-    assert first["k"] == PANEL_DRAWS
+    assert first["k"] == BASELINE_DRAWS
     assert first == second
 
 
@@ -579,7 +579,7 @@ def test_membership_matches_a_name_to_its_own_side_of_the_benchmark():
 def test_a_mounted_membership_that_misses_the_span_fails_before_any_draw():
     """An experiment that mounts ``index_weight`` is graded on membership in every
     span. Where its release holds no section before the span's entries -- an
-    eight-year experiment on a release whose constituents start in 2020 -- the panel
+    eight-year experiment on a release whose constituents start in 2020 -- the random baseline
     must fail by name, never quietly draw the float-cap decile for this span
     while the experiment's other spans draw membership."""
     arguments = (
@@ -677,8 +677,8 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
     )
 
 
-def test_the_panel_is_the_draws_mean_daily_return_and_leaves_the_result_alone():
-    """``panel`` keeps what the percentile throws away: every draw's daily
+def test_the_random_baseline_is_the_draws_mean_daily_return_and_leaves_the_result_alone():
+    """``baselines`` keeps what the percentile throws away: every draw's daily
     return, as their equal-weight mean and cross-draw spread per trading day.
     The draws replay through Brokers of their own, so the graded result is the
     same object before and after."""
@@ -688,7 +688,7 @@ def test_the_panel_is_the_draws_mean_daily_return_and_leaves_the_result_alone():
     arguments = (result, frame, BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"))
 
     block = run_null_control(
-        *arguments, k=4, seed=17, membership={"20251231": set(SMALL)}, panel=True
+        *arguments, k=4, seed=17, membership={"20251231": set(SMALL)}, baselines=True
     )
 
     assert (result.equity_curve, result.executions) == before
@@ -696,10 +696,10 @@ def test_the_panel_is_the_draws_mean_daily_return_and_leaves_the_result_alone():
     assert [date for date, _value in block["panel_daily"]] == list(DAYS)
     assert [date for date, _value in block["panel_draw_sd"]] == list(DAYS)
     draws = [
-        run_null_control(*arguments, k=1, seed=seed, membership={"20251231": set(SMALL)}, panel=True)
+        run_null_control(*arguments, k=1, seed=seed, membership={"20251231": set(SMALL)}, baselines=True)
         for seed in range(40)
     ]
-    # One draw's panel is that draw itself, so no two seeds need agree, and the
+    # One draw's random baseline is that draw itself, so no two seeds need agree, and the
     # composite of four is flat before the first entry and moves after it.
     assert len({tuple(value for _date, value in draw["panel_daily"]) for draw in draws}) > 1
     values = np.asarray([value for _date, value in block["panel_daily"]])
@@ -762,7 +762,7 @@ def test_a_result_with_no_filled_trade_has_no_null_and_runs_no_replay(monkeypatc
     # The zero-skill copy of a book that never traded is an idle cash account.
     idle = run_null_control(
         result, _frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"),
-        seed=3, panel=True,
+        seed=3, baselines=True,
     )
     assert idle["panel_daily"] == [[day, 0.0] for day in DAYS]
     assert idle["panel_draw_sd"] == [[day, 0.0] for day in DAYS]

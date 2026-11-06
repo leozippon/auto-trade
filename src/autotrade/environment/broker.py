@@ -254,7 +254,7 @@ class Execution:
     reason: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
     # The order's session and limit price (``StrategyOrder``), recorded only
-    # when it named them: the zero-skill panel replays them.
+    # when it named them: the random baseline replays them.
     session: str | None = None
     limit_price: float | None = None
 
@@ -816,7 +816,7 @@ def ex_date_share_multiplier(
     A cash dividend never shrinks a holding -- flooring a price-derived 0.9997
     would shave a share off most of them, and leave a one-share holding with
     none. The one rule the Broker settles a holding by and the zero-skill
-    panel sizes its exits by.
+    random baseline sizes its exits by.
     """
 
     if not _price_reset(last_close, pre_close):

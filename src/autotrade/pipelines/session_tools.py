@@ -1,7 +1,7 @@
 """The research session's Validation engine and the Agent-facing backtest tools.
 
 ``SessionValidations`` holds the session's Step list, its step tree and its
-rolling record; ``smoke_backtest``, ``validate``, ``test`` and
+validation record; ``smoke_backtest``, ``validate``, ``test`` and
 ``run_null_control`` are the replay tools a research session hands the Agent
 on top of it. Nothing
 here composes a session: ``research_session`` builds these tools and wires them
@@ -35,7 +35,10 @@ from autotrade.environment.executor import (
     strategy_resources_of,
 )
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.null_control import PANEL_DRAWS, NullControlSetupError
+from autotrade.environment.replay.null_control import (
+    BASELINE_DRAWS,
+    NullControlSetupError,
+)
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
@@ -87,16 +90,16 @@ from .experiment import (
     research_step_record,
 )
 from .ledger import ExperimentLedger, Stage
-from .rolling_record import (
+from .session_resume import record_step_sidecar
+from .skills import _assert_skills_absent_from_formal
+from .validation_record import (
     SOURCE_TEST,
     ValidationSteps,
-    record_instrument,
+    record_significance,
     step_entry,
     step_table,
     test_step_record,
 )
-from .session_resume import record_step_sidecar
-from .skills import _assert_skills_absent_from_formal
 from .verdict import (
     ConditionReason,
     active_daily,
@@ -621,14 +624,14 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
 
 # What a row's residual reading is, and is not.
 RESIDUAL_READING_NOTE = (
-    "the residual statistic over this row's own span: bar is "
+    "the residual statistic over this row's own span: threshold is "
     "z(1 - alpha) / sqrt(years) for this span's length, the same formula the "
-    "rolling record is read with; a reading, not a verdict"
+    "validation record is read with; a reading, not a verdict"
 )
 # A row whose bytes and span repeat an earlier node of the experiment.
 SAME_BYTES_NOTE = (
     "these bytes were already validated on this span as the nodes named: the "
-    "zero-skill panel is seeded by the span, so a deterministic strategy repeats "
+    "random baseline is seeded by the span, so a deterministic strategy repeats "
     "their readings exactly and a difference measures only the strategy's own "
     "non-determinism (GPU training, for one); it is the same trial, not new "
     "evidence"
@@ -637,7 +640,7 @@ SAME_BYTES_NOTE = (
 
 class SessionValidations:
     """The research session's Validation engine: one Step list, one tree, one
-    rolling record.
+    validation record.
 
     Not an Agent tool: ``validate`` commits and replays every candidate
     through it, and ``test`` records every step through it, so neither can
@@ -678,7 +681,7 @@ class SessionValidations:
         # dies keeps the nodes it validated for the attempt that resumes it.
         self.experiment_dir = experiment_dir
         # Continued from the earlier attempts' Validations and tests: the
-        # rolling record's steps so far, the frontier they imply, and how
+        # validation record's steps so far, the test horizon they imply, and how
         # many validate calls the current interval has already made.
         self.steps: list[StepResult] = list(request.steps_before)
         self.tests: list[dict[str, object]] = [dict(row) for row in request.tests_before]
@@ -693,11 +696,11 @@ class SessionValidations:
         self.candidates_started = 0
 
     @property
-    def frontier(self) -> str:
-        """The rolling record's frontier: the end of the last tested step, the
+    def test_horizon(self) -> str:
+        """The validation record's test horizon: the end of the last tested step, the
         end of the research years before the first test."""
 
-        return self.steps_plan.frontier_after(len(self.tests))
+        return self.steps_plan.horizon_after(len(self.tests))
 
     @property
     def validates_per_step(self) -> int:
@@ -716,7 +719,7 @@ class SessionValidations:
 
     def record_row(self, record: Mapping[str, object]) -> dict[str, object]:
         """One rolling-record step as a test result lists it: the step, its
-        window and frontier, the candidate by handle and its entry without
+        window and test horizon, the candidate by handle and its entry without
         the daily rows."""
 
         candidate = dict(record["candidate"])  # type: ignore[arg-type]
@@ -724,7 +727,7 @@ class SessionValidations:
         return {
             "step": record["step"],
             "window": dict(record["window"]),  # type: ignore[arg-type]
-            "frontier": record["frontier"],
+            "test_horizon": record["test_horizon"],
             "candidate": {"node_id": candidate["step_id"], **self.handle(str(candidate["step_id"]))},
             "source": record["source"],
             **entry,
@@ -821,11 +824,11 @@ class SessionValidations:
         """The residual statistic over one replay's own span.
 
         ``verdict.residual_reading`` of the replay's graded series at the
-        experiment's ``alpha``: the residual IR, the three betas and the bar for the
+        experiment's ``alpha``: the residual IR, the three betas and the threshold for the
         span's length, beside the active excess after the cost stress on the
         span's turnover (``verdict.summary_excess_at_cost_stress``, the
         reading the forward stage takes too). No pass or fail: the session
-        reads the same statistic the rolling record is read with.
+        reads the same statistic the validation record is read with.
         ``unmeasured`` names why a span the statistic cannot read has none.
         """
 
@@ -854,10 +857,10 @@ class SessionValidations:
         """What the holder's account did over the node's span, unregressed.
 
         The holder's readings of the span (``verdict.holder_readings``: the
-        book, the benchmark and the zero-skill panel as stored, the raw excess
+        book, the benchmark and the random baseline as stored, the raw excess
         and the plain selection), in the structure a forward slice carries
         them, so a row reads over research what the graduation reads forward.
-        Beside them the book's market loading relative to its panel (the
+        Beside them the book's market loading relative to its random baseline (the
         benchmark coefficient of the active series' factor regression,
         ``verdict.graded_statistics``; a diagnostic no gate reads) and, on a
         row whose span covers them, the same holder's readings of the last two
@@ -1223,7 +1226,7 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
 # screening comparison is made on; the node's result.json keeps the full table.
 # The active excess rides with the raw one because the verdict reads it -- it
 # is the series it grades: a comparison made on the raw column alone reads a
-# different number than it will. The year's benchmark and panel returns ride
+# different number than it will. The year's benchmark and random baseline returns ride
 # beside the book's own, so each year reads as the holder's account, the index
 # and zero skill on the same skeleton.
 BATCH_SUB_WINDOW_KEYS = (
@@ -1418,22 +1421,22 @@ class ValidateTool(SessionTimeBudgetAware):
         "running while the candidates replay concurrently. Returns one row per "
         "candidate: node id with its short handle (valid_002, which every tool "
         "taking a node_id accepts), headline metrics, the per-year return, "
-        "benchmark_return, panel_return (the zero-skill panel's own), excess, "
+        "benchmark_return, panel_return (the random baseline's own), excess, "
         "active excess and Sharpe of sub_windows, residual_reading (the residual "
         "statistic over the row's own span, as acceptance_rules.residual_statistic "
         "defines it: residual_information_ratio, residual_excess, "
         "residual_tracking_error, market_beta, size_beta and value_beta of the "
         "active series regressed on the market, size and value legs, days and "
-        "years, and bar, z(1 - alpha) / sqrt(years) for this span's length; beside "
+        "years, and threshold, z(1 - alpha) / sqrt(years) for this span's length; beside "
         "them active_excess_at_cost_stress, the annualised active excess after "
         "cost_stress_multiplier x the slippage on the span's turnover; a reading, "
         "never a pass or a fail), raw_readings (the holder's money, which active "
         "readings are not, under the names a forward slice carries: "
         "strategy_return, benchmark_return and panel_return, what the book after "
-        "every cost, benchmark_index and the zero-skill panel after its costs each "
+        "every cost, benchmark_index and the random baseline after its costs each "
         "compounded to over the span, with raw_excess, book minus benchmark, and "
-        "plain_selection, book minus panel, both compounded; "
-        "active_market_beta, the book's market loading relative to its panel: the "
+        "plain_selection, book minus random baseline, both compounded; "
+        "active_market_beta, the book's market loading relative to its random baseline: the "
         "market coefficient of the active series' factor regression over the "
         "span; "
         "and on a row covering them last_two_years, the same five readings from "
@@ -2161,26 +2164,26 @@ TEST_DESCRIPTION = (
     "the candidate's in exactly one integer seed assignment, e.g. SEED_BASE = 1000 -> "
     "2000), unless deterministic=true declares that the package uses no randomness, "
     "which is recorded for the operator. Registration reads no performance; a "
-    "candidate that does not register is refused with named reasons and the frontier "
-    "does not move. A registered candidate is replayed with its random panel as one "
+    "candidate that does not register is refused with named reasons and the test horizon "
+    "does not move. A registered candidate is replayed with its random baseline as one "
     "fresh continuous book from the validation start to the end of the next step; "
     "nothing carries over from earlier tests, so switching candidates costs only this "
     "replay. Its result over the newest step becomes that step's entry in the experiment's "
-    "rolling record and is never rewritten. The step always runs to completion; a "
+    "validation record and is never rewritten. The step always runs to completion; a "
     "candidate whose own code raises during the replay is refused with the error and "
-    "the frontier does not move. Then the frontier advances and the validate allowance "
+    "the test horizon does not move. Then the test horizon advances and the validate allowance "
     "starts again; the session's data view stays at the end of the research years, so "
-    "these results are how the validation years reach you. Returns: the new frontier "
+    "these results are how the validation years reach you. Returns: the new test horizon "
     "and the steps left; "
     "the candidate's whole-replay statistics (stats, raw_readings and residual_reading "
     "as a validate row carries them); step_table, one row per step from the validation "
-    "start to the frontier, each over that step's window, so the rows are quarters for "
+    "start to the test horizon, each over that step's window, so the rows are quarters for "
     "quarterly steps and months for monthly ones (return, max_drawdown, turnover, fees, "
-    "active_return against the panel, index_return); record, the record to date, one row "
+    "active_return against the random baseline, index_return); record, the record to date, one row "
     "per step with the "
-    "candidate that produced it; and instrument, the record's residual information "
+    "candidate that produced it; and significance, the record's residual information "
     "ratio of the stitched daily active series on the market, size and value legs, the "
-    "betas, the one-sided p_value and the bar for the record's current length. These "
+    "betas, the one-sided p_value and the threshold for the record's current length. These "
     "are readings, never a pass or a fail. When this call tests the last step, the "
     "session ends and this candidate is the frozen strategy. The call starts only "
     "after every background sub-agent has finished."
@@ -2190,9 +2193,9 @@ TEST_DESCRIPTION = (
 class TestTool(SessionTimeBudgetAware):
     """``test(candidate)``: one step of the validation period, lived through.
 
-    The session's only way forward and the only way it ends: the frontier
+    The session's only way forward and the only way it ends: the test horizon
     advances one step per call, the step's entry is appended to the experiment's
-    rolling record in the ledger as the call completes, and the call that
+    validation record in the ledger as the call completes, and the call that
     tests the last step finishes the session with its candidate as the frozen
     strategy. Nothing here ranks or selects: the agent chooses the candidate,
     the host replays and records.
@@ -2273,7 +2276,7 @@ class TestTool(SessionTimeBudgetAware):
             reasons = [str(item) for item in registration.get("reasons") or ()]
             raise ToolError(
                 f"test refused: {backtest.named([node_id])[0]} does not register "
-                f"({', '.join(reasons) or 'no reason recorded'}); the frontier did not move. "
+                f"({', '.join(reasons) or 'no reason recorded'}); the test horizon did not move. "
                 "Name a node that registers, or validate what registration lacks (a full-span "
                 "validation, a seed replicate). A seed replicate is what "
                 "acceptance_rules.registration.seed_replicates defines.",
@@ -2290,7 +2293,7 @@ class TestTool(SessionTimeBudgetAware):
         step = len(backtest.tests) + 1
         if step > steps.count:
             raise ToolError("test refused: the validation period is complete", error_type="validation_complete")
-        frontier = steps.frontier_after(step)
+        test_horizon = steps.horizon_after(step)
         candidate = next(item for item in backtest.steps if item.step_id == node_id)
         with backtest.time_budget.pause():
             # The warm start the replay opens on must be in the seed before
@@ -2307,7 +2310,7 @@ class TestTool(SessionTimeBudgetAware):
                 raise EnvironmentBlocked(f"test step {step}: {_public_error_text(exc)}") from exc
             started = time.perf_counter()
             try:
-                evaluation = backtest.evaluator.evaluate(request, end_day=frontier)
+                evaluation = backtest.evaluator.evaluate(request, end_day=test_horizon)
             except SessionInterrupt:
                 raise
             except Exception as exc:
@@ -2321,7 +2324,7 @@ class TestTool(SessionTimeBudgetAware):
                             f"environment; last error: {_public_error_text(exc)}"
                         ) from exc
                 raise ToolError(
-                    f"test step {step} did not complete; the frontier did not move. "
+                    f"test step {step} did not complete; the test horizon did not move. "
                     + (
                         "The candidate's own code raised on the validation data: "
                         if cause == BATCH_FAILURE_STRATEGY
@@ -2348,13 +2351,13 @@ class TestTool(SessionTimeBudgetAware):
                     "seed_replicates": list(replicates),
                     "deterministic": deterministic,
                 },
-                replay={"start": steps.start, "end": frontier, "result_ref": evaluation.result_ref},
+                replay={"start": steps.start, "end": test_horizon, "result_ref": evaluation.result_ref},
                 entry=entry,
                 registration=registration,
                 source=SOURCE_TEST,
             )
             # Durable before anything is returned: a resumed attempt
-            # continues from this frontier.
+            # continues from this test horizon.
             backtest.ledger.append(record)
             backtest.tests.append(record)
             backtest.validates_in_interval = 0
@@ -2362,28 +2365,28 @@ class TestTool(SessionTimeBudgetAware):
         if self._trace_emit is not None:
             self._trace_emit(
                 TraceEvent.TOOL_CALL_STARTED,
-                {"tool": "test", "status": "step_recorded", "step": step, "frontier": frontier},
+                {"tool": "test", "status": "step_recorded", "step": step, "test_horizon": test_horizon},
             )
         value: dict[str, object] = {
             "status": "step_recorded",
             "step": step,
             "steps": steps.count,
             "steps_left": steps.count - step,
-            "frontier": frontier,
+            "test_horizon": test_horizon,
             "candidate": {
                 "node_id": node_id,
                 **backtest.handle(node_id),
                 **({"seed_replicates": list(replicates)} if replicates else {}),
                 "deterministic": deterministic,
             },
-            "replay": {"start": steps.start, "end": frontier, "wall_seconds": round(time.perf_counter() - started, 1)},
+            "replay": {"start": steps.start, "end": test_horizon, "wall_seconds": round(time.perf_counter() - started, 1)},
             "stats": batch_candidate_stats(evaluation.summary),
             **batch_candidate_resources(evaluation.summary.get("resources")),
             "raw_readings": {name: _rounded(v) for name, v in holder_readings(analysis).items()},
             "residual_reading": backtest.residual_reading_of(analysis, evaluation.summary),
             "step_table": [_rounded_row(row) for row in step_table(replay, analysis, steps, through=step)],
             "record": [backtest.record_row(row) for row in backtest.tests],
-            "instrument": _rounded_row(record_instrument([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
+            "significance": _rounded_row(record_significance([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
             "test_replays": backtest.test_replays,
             "validates_per_step": backtest.rules.validates_per_step,
         }
@@ -2412,7 +2415,7 @@ def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
 NULL_CONTROL_NOTE = (
     "descriptive only: excess_percentile near 0.5 means the names carried no "
     "information the timing and sizing did not. The percentile gates nothing; "
-    "what the gate grades is the node's active series against the panel its own "
+    "what the gate grades is the node's active series against the random baseline its own "
     "validation drew (benchmark.active_*)"
 )
 
@@ -2464,7 +2467,7 @@ class NullControlTool(SessionTimeBudgetAware):
         self.blocks: dict[str, dict[str, object]] = {}
         self.spec = ToolSpec(
             self.spec.name,
-            f"Rank one complete Validation node of this session against K={PANEL_DRAWS} "
+            f"Rank one complete Validation node of this session against K={BASELINE_DRAWS} "
             "host replays of its own trade skeleton over the node's own span, every "
             "name replaced by a random one that one board lot of the same money could "
             "buy on the same side of the experiment's benchmark_index membership (the "
@@ -2474,7 +2477,7 @@ class NullControlTool(SessionTimeBudgetAware):
             "will carry (observed_excess, excess_percentile — near 0.5 means the names "
             "added nothing the timing and sizing did not — the null's mean and p05/p95, "
             "rejects_mean, dropped_trips_mean). Every formal validation already "
-            "reports the node against a panel of the same construction "
+            "reports the node against a random baseline of the same construction "
             "(benchmark.active_*), which is the series the verdict grades; this "
             "percentile is a second, descriptive reading of it. Costs well under a "
             "minute of host replay per research year (the session clock pauses like a "

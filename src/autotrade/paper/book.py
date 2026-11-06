@@ -23,7 +23,7 @@ pins the rules its Paper verdict is read by
 (``paper/verdict.py``), so a later change cannot move a book already trading,
 and the boards its account may buy on, in its Broker profile: the boards its
 incubation replayed on, else the experiment's stamp, else those the book's initial
-cash qualifies for. The book's Broker and its verdict's zero-skill panel both
+cash qualifies for. The book's Broker and its verdict's random baseline both
 read that one field.
 """
 

@@ -248,7 +248,7 @@ def test_a_sealed_gate_record_still_opens_its_forward_replay(tmp_path: Path, sta
         assert detail["verdict"]["reasons"] == []
         assert detail["paper_candidate"] == {"artifact_id": "strategy_research_abc"}
     else:
-        # The sealed gate alone decides: this book read below its bar.
+        # The sealed gate alone decides: this book read below its threshold.
         assert detail["verdict"]["reasons"] == ["sealed_residual_ir_below_bar"]
         assert detail["paper_candidate"] is None
 
@@ -290,7 +290,7 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
         name: name for name in ENDING_STATES
     }
     # A graduate is named by its forward year as the holder reads it -- his
-    # account, the benchmark, the account against the zero-skill panel, then
+    # account, the benchmark, the account against the random baseline, then
     # the active IR the gate graded -- a refusal by
     # the criteria it failed, and the three endings no replay decided by what
     # the record says: the Agent's first sentence, the budget, the error's
@@ -303,7 +303,7 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
         f" · 对面板 {raw['plain_selection'] * 100:+.2f}%"
         f" · 主动 IR {forward['information_ratio']:.2f}"
     )
-    # A frozen strategy is named by its readout: the record's instrument and
+    # A frozen strategy is named by its readout: the record's significance test and
     # the forward lower bound.
     readout = rows["frozen_with_record"]["forward"]["readout"]
     assert endings["frozen_with_record"]["reason"] == (
@@ -435,7 +435,7 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
 ) -> None:
     """An experiment judged on its training seeds together shows each seed and their
     mean on the experiment page -- the freeze's seed-mean IR beside the
-    nominee's and the bar, and the forward and Held-out readings per seed --
+    nominee's and the threshold, and the forward and Held-out readings per seed --
     and the series F8 judges them on together -- from the fields the console
     serves; an experiment frozen on one seed serves none of them and draws nothing
     in their place."""
@@ -447,7 +447,7 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     gate = seeded["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
     frozen = seeded["frozen"]["seed_replicates"]
     forward = seeded["forward"]["slices"]["forward"]
-    # Registration reads the replicates and judges no seed mean against a bar.
+    # Registration reads the replicates and judges no seed mean against a threshold.
     assert frozen == gate
     assert (gate["mean_information_ratio"], gate["information_ratio_bar"]) == (None, None)
     assert gate["replicates"][0]["seed_line"] == "main.py: SEED_BASE = 2000"
@@ -666,7 +666,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     assert rows["frozen"]["research_result"] == Path(str(frozen_ref)).parent.name
 
     # The forward step states how the record will be read: the level, the
-    # research and validation years, the step length and the bar over the
+    # research and validation years, the step length and the threshold over the
     # whole validation period.
     preview = experiment_detail(tmp_path, "researching")["sessions"][1]["thresholds"]
     assert preview == {
@@ -674,7 +674,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
         "research_years": REQUIRED_RULES["research_years"],
         "validation_years": 3,
         "test_step_months": 3,
-        "bar": pytest.approx(0.9497, abs=1e-4),
+        "threshold": pytest.approx(0.9497, abs=1e-4),
     }
     recorded = experiment_detail(tmp_path, "judged")["forward"]["verdict"]["thresholds"]
     assert recorded["alpha"] == preview["alpha"]
@@ -1032,8 +1032,8 @@ def _lower_bound(row: dict[str, object]) -> float:
 
 
 def test_the_ranking_lists_frozen_strategies_by_their_records_residual_ir(tmp_path: Path) -> None:
-    """Only a frozen strategy with a readout is ranked, by its rolling record's
-    residual IR; a record the instrument could not read sorts last; nothing
+    """Only a frozen strategy with a readout is ranked, by its validation record's
+    residual IR; a record the significance test could not read sorts last; nothing
     judged under the sealed gate and nothing still researching is listed."""
 
     for experiment_id, stage in (
@@ -1111,7 +1111,7 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     budget = re.sub(r"\s+", " ", body("budgetBars"))
     assert "mini ? row.spent" in budget and "mini ? `${row.label}已用 ${row.spent}`" in budget
     assert "activityNode(fresh.status)" in body("controlPanel")
-    # The card's evidence is the rolling record and the forward reading, never
+    # The card's evidence is the validation record and the forward reading, never
     # a research-period figure.
     labels = ("已测步数", "记录残差 IR", "p 值", "换候选", "前推下界")
     found = [label for label in labels if f'label: "{label}"' in body("evidenceTiles")]
@@ -1172,7 +1172,7 @@ def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
 def test_the_three_replay_stage_views_judge_nothing() -> None:
     """前推回测, Held-out and 读出 judge nothing of their own: the two slice
     views say their readings are reported, never judged, and the readout view
-    draws the record's instrument, the forward reading and every experiment's record
+    draws the record's significance test, the forward reading and every experiment's record
     over the same validation window; nothing of the sealed gate remains."""
 
     script = (
@@ -1207,12 +1207,12 @@ def test_the_listing_carries_the_freeze_and_the_record_so_far(tmp_path: Path) ->
     assert rows["fresh"]["record"] is None and rows["researching"]["record"] is None
     record = rows["recorded"]["record"]
     detail = experiment_detail(tmp_path, "recorded")["record"]
-    for field in ("steps", "residual_information_ratio", "p_value", "candidate_changes", "frontier", "start", "end"):
+    for field in ("steps", "residual_information_ratio", "p_value", "candidate_changes", "test_horizon", "start", "end"):
         assert record[field] == detail[field], field
         assert record[field] is not None, field
     # The page adds the rows and the curve the card does not draw.
     assert len(detail["rows"]) == record["steps"] == len(detail["curve"]["steps"])
-    assert len(detail["curve"]["dates"]) == len(detail["curve"]["book"]) == len(detail["curve"]["panel"]) > 0
+    assert len(detail["curve"]["dates"]) == len(detail["curve"]["book"]) == len(detail["curve"]["baseline"]) > 0
     assert "rows" not in record and "curve" not in record
 
 
@@ -1351,7 +1351,7 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
     """A forward record written before slices carried the holder's readings
     is shown as written: no reading is derived again from its replay, and
     the graduate's ending line names the figures it does hold. Its curve
-    still draws the replay's panel beside the book, on the book's own days."""
+    still draws the replay's random baseline beside the book, on the book's own days."""
 
     from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 
@@ -1375,8 +1375,8 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
     )
     client = TestClient(create_app(tmp_path, tmp_path))
     equity = client.get(f"/api/experiments/experiment/results/{detail['forward']['result']}/equity").json()
-    assert equity["panel"]["dates"] == equity["series"][0]["dates"]
-    assert equity["panel"]["final"] == pytest.approx(
+    assert equity["baseline"]["dates"] == equity["series"][0]["dates"]
+    assert equity["baseline"]["final"] == pytest.approx(
         float(np.prod([1.0 + value for _day, value in sidecar["panel_daily"]]) - 1.0), abs=1e-6
     )
 
@@ -1468,7 +1468,7 @@ def test_an_experiment_carrying_the_retired_switches_reads_as_one_without_them(t
 
 def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_count(tmp_path: Path) -> None:
     """The multiplicity readout: an experiment's readout view lists every frozen
-    strategy's rolling record over the same validation period, archived experiments
+    strategy's validation record over the same validation period, archived experiments
     included, with its one-sided null p-value and how many there are, and
     pools the forward-year readings of every frozen strategy over the same
     forward months. Nothing is adjusted: each experiment keeps its own reading."""

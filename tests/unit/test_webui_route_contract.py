@@ -591,7 +591,7 @@ def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: P
         assert read, name
         assert read <= served, (name, sorted(read - served))
     # The same threshold keys are served before the replay, from the plan.
-    assert {"alpha", "bar"} <= set(replay["thresholds"])
+    assert {"alpha", "threshold"} <= set(replay["thresholds"])
     # The stage views' statistics rows are statistics their own slice carries,
     # and every row defined is one a view selects: two rows (残差跟踪误差, IR)
     # sat in the table definition that neither stage ever drew.

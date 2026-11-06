@@ -202,18 +202,18 @@ class SubWindowBenchmarkTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["excess_return"], 0.0 - (1.05 * 0.95 - 1.0), places=6)
         self.assertAlmostEqual(rows[1]["excess_return"], -0.1 - (1.10 * 0.90 - 1.0), places=6)
 
-    def test_each_year_carries_its_panel_compounded_only_where_one_was_drawn(self) -> None:
+    def test_each_year_carries_its_random_baseline_compounded_only_where_one_was_drawn(self) -> None:
         """The holder's year reads three returns side by side: the book's, the
-        index's and zero skill's on the same skeleton. A replay without a panel
+        index's and zero skill's on the same skeleton. A replay without a random baseline
         reports none rather than zero."""
 
         benchmark = [["20220601", 0.05], ["20220630", -0.05], ["20220704", 0.10], ["20230630", -0.10]]
         strategy = [["20220601", 0.10], ["20220630", -1 / 11], ["20220704", 0.20], ["20230630", -0.25]]
-        panel = [["20220601", 0.02], ["20220630", 0.01], ["20220704", -0.03], ["20230630", 0.04]]
+        baselines = [["20220601", 0.02], ["20220630", 0.01], ["20220704", -0.03], ["20230630", 0.04]]
         summary = self.summary()
         attach_sub_window_benchmark(
             summary,
-            {"benchmark_daily": benchmark, "strategy_daily": strategy, "panel_daily": panel},
+            {"benchmark_daily": benchmark, "strategy_daily": strategy, "panel_daily": baselines},
         )
         rows = summary["sub_windows"]
         self.assertAlmostEqual(rows[0]["panel_return"], 1.02 * 1.01 - 1.0, places=6)

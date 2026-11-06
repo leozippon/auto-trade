@@ -289,16 +289,16 @@ class _Evaluator:
 def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
     """The daily series the freeze gate reads: 60 days, fifteen in each of the
     four research years the gate counts, of a return that is ``alpha`` plus
-    benchmark and size exposure plus noise, and the zero-skill panel composite
+    benchmark and size exposure plus noise, and the random-baseline composite
     every formal replay carries, which the gate subtracts."""
 
     rng = np.random.default_rng(seed)
     days = [f"{2021 + index // 15}09{index % 15 + 1:02d}" for index in range(60)]
     benchmark = rng.normal(0.0003, 0.01, len(days))
     size = rng.normal(0.0, 0.004, len(days))
-    panel = rng.normal(0.0, 0.002, len(days))
+    baselines = rng.normal(0.0, 0.002, len(days))
     strategy = (
-        alpha + 0.9 * benchmark + 0.2 * size + panel + rng.normal(0.0, 0.004, len(days))
+        alpha + 0.9 * benchmark + 0.2 * size + baselines + rng.normal(0.0, 0.004, len(days))
     )
     sidecar = {
         "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
@@ -308,7 +308,7 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
             [day, float(value)]
             for day, value in zip(days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days)))
         ],
-        "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
+        "panel_daily": [[day, float(value)] for day, value in zip(days, baselines)],
     }
     write_json_atomic(directory / "style_analysis.json", sidecar)
 
@@ -1237,9 +1237,9 @@ class BatchValidateRunTest(unittest.TestCase):
         self,
     ) -> None:
         """A row reads the sealed gate's statistic over its own visible span --
-        the residual IR, the three betas and the bar for that span's length --
+        the residual IR, the three betas and the threshold for that span's length --
         and nothing that passes or fails: no gate field, no trial count, no
-        bar from other rows."""
+        threshold from other rows."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             full = session.validate_one("full", _strategy("333"))
@@ -1258,7 +1258,7 @@ class BatchValidateRunTest(unittest.TestCase):
                     "market_beta",
                     "size_beta",
                     "value_beta",
-                    "bar",
+                    "threshold",
                     "years",
                 ):
                     self.assertAlmostEqual(reading[key], expected[key], places=6, msg=key)
@@ -1302,15 +1302,15 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(
                 list(raw), [*HOLDER_READINGS, "active_market_beta", "last_two_years"]
             )
-            book, benchmark, panel = (
+            book, benchmark, baselines = (
                 compound(key) for key in ("strategy_daily", "benchmark_daily", "panel_daily")
             )
             for name, expected in (
                 ("strategy_return", book),
                 ("benchmark_return", benchmark),
-                ("panel_return", panel),
+                ("panel_return", baselines),
                 ("raw_excess", book - benchmark),
-                ("plain_selection", book - panel),
+                ("plain_selection", book - baselines),
             ):
                 self.assertAlmostEqual(raw[name], expected, places=6, msg=name)
             statistics = graded_statistics(sidecar)
@@ -1322,7 +1322,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 places=6,
             )
             self.assertEqual(reading["cost_stress_multiplier"], 3.0)
-            # The book's market loading against its own panel is the active
+            # The book's market loading against its own random baseline is the active
             # series' regression coefficient, a diagnostic beside it.
             self.assertAlmostEqual(
                 raw["active_market_beta"], statistics["market_beta"], places=6
@@ -1332,14 +1332,14 @@ class BatchValidateRunTest(unittest.TestCase):
             late = raw["last_two_years"]
             self.assertEqual(list(late), ["span", *HOLDER_READINGS])
             self.assertEqual(late["span"], "Y3..Y4")
-            book, benchmark, panel = (
+            book, benchmark, baselines = (
                 compound(key, "20230701", "20250630")
                 for key in ("strategy_daily", "benchmark_daily", "panel_daily")
             )
             self.assertAlmostEqual(late["strategy_return"], book, places=6)
             self.assertAlmostEqual(late["benchmark_return"], benchmark, places=6)
-            self.assertAlmostEqual(late["panel_return"], panel, places=6)
-            self.assertAlmostEqual(late["plain_selection"], book - panel, places=6)
+            self.assertAlmostEqual(late["panel_return"], baselines, places=6)
+            self.assertAlmostEqual(late["plain_selection"], book - baselines, places=6)
             self.assertNotEqual(late["strategy_return"], raw["strategy_return"])
             # A probe row reads the same over its own span; it does not reach
             # the last two years, so it has no line for them.
@@ -1348,7 +1348,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 list(probe["raw_readings"]), [*HOLDER_READINGS, "active_market_beta"]
             )
             self.assertIn("active_excess_at_cost_stress", probe["residual_reading"])
-            # A row's year carries the benchmark and the panel beside its return.
+            # A row's year carries the benchmark and the random baseline beside its return.
             self.assertTrue(
                 {"return", "benchmark_return", "panel_return"}
                 <= set(row["stats"]["sub_windows"][0])
@@ -1508,17 +1508,17 @@ class DailySeriesTest(unittest.TestCase):
                         encoding="utf-8"
                     )
                 )
-                # One row per replayed day, the panel as its composite only.
+                # One row per replayed day, the random baseline as its composite only.
                 self.assertEqual(
                     list(frame["trade_date"]),
                     [day for day, _value in sidecar["strategy_daily"]],
                 )
                 strategy = np.asarray([value for _day, value in sidecar["strategy_daily"]])
-                panel = np.asarray([value for _day, value in sidecar["panel_daily"]])
+                baselines = np.asarray([value for _day, value in sidecar["panel_daily"]])
                 np.testing.assert_allclose(frame["strategy_return"], strategy, rtol=1e-9)
-                np.testing.assert_allclose(frame["panel_return"], panel, rtol=1e-9)
+                np.testing.assert_allclose(frame["panel_return"], baselines, rtol=1e-9)
                 np.testing.assert_allclose(
-                    frame["active_return"], strategy - panel, rtol=1e-8, atol=1e-12
+                    frame["active_return"], strategy - baselines, rtol=1e-8, atol=1e-12
                 )
                 # The IR every row's ledger record carries.
                 self.assertAlmostEqual(

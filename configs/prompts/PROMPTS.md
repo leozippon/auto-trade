@@ -198,7 +198,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 [存在时注入]
 ```
 
-「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `frontier`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.instrument` 的 `alpha`、`bar_over_one_year`、`bar_over_validation_period`，以及 `budgets.validates_per_step`，所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：
+「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `test_horizon`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.significance` 的 `alpha`、`threshold_over_one_year`、`threshold_over_validation_period`，以及 `budgets.validates_per_step`，所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：
 
 | 分区 | 内容 |
 | --- | --- |

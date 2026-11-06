@@ -1,4 +1,4 @@
-"""The validation lived through in steps: ``test``, the frontier, the
+"""The validation lived through in steps: ``test``, the test horizon, the
 per-interval ``validate`` allowance, the research-years bound on ``validate``
 and what reaches the agent."""
 
@@ -17,15 +17,15 @@ import pytest
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.executor import StrategyExecutionError, StrategyRaised
-from autotrade.pipelines import rolling_record, session_tools
+from autotrade.pipelines import session_tools, validation_record
 from autotrade.pipelines.config import EvaluationResult
-from autotrade.pipelines.rolling_record import (
+from autotrade.pipelines.session_tools import EnvironmentBlocked, ToolError
+from autotrade.pipelines.validation_record import (
     SOURCE_TEST,
     ValidationSteps,
     candidate_changes,
     step_entry,
 )
-from autotrade.pipelines.session_tools import EnvironmentBlocked, ToolError
 from tests.unit.test_batch_validate import _Session, _strategy
 
 DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
@@ -61,7 +61,7 @@ class _WindowEvaluator:
             rng = np.random.default_rng([seed, int(day)])
             market = rng.normal(0.0003, 0.008)
             rows.append((day, market, rng.normal(0.0, 0.003), rng.normal(0.0, 0.003), market + rng.normal(0.0, 0.002), rng.normal(0.0, 0.004)))
-        strategy = [market + 0.0015 + noise + 0.0 * panel for _d, market, _s, _v, panel, noise in rows]
+        strategy = [market + 0.0015 + noise + 0.0 * baselines for _d, market, _s, _v, baselines, noise in rows]
         equity, curve, executions = 100_000.0, [], []
         for index, ((day, *_rest), value) in enumerate(zip(rows, strategy, strict=True)):
             equity *= 1.0 + value
@@ -88,7 +88,7 @@ class _WindowEvaluator:
             directory / "style_analysis.json",
             {
                 "strategy_daily": [[day, float(value)] for (day, *_r), value in zip(rows, strategy, strict=True)],
-                "panel_daily": [[day, float(panel)] for day, _m, _s, _v, panel, _n in rows],
+                "panel_daily": [[day, float(baselines)] for day, _m, _s, _v, baselines, _n in rows],
                 "benchmark_daily": [[day, float(market)] for day, market, *_r in rows],
                 "size_factor_daily": [[day, float(size)] for day, _m, size, *_r in rows],
                 "value_factor_daily": [[day, float(value)] for day, _m, _s, value, *_r in rows],
@@ -122,43 +122,43 @@ class _Harness:
         return self.backtest.steps_plan
 
     def records(self):
-        return rolling_record.test_step_records(self.backtest.ledger.read())
+        return validation_record.test_step_records(self.backtest.ledger.read())
 
 
-def test_a_test_advances_the_frontier_one_step_and_records_it_once() -> None:
+def test_a_test_advances_the_test_horizon_one_step_and_records_it_once() -> None:
     with TemporaryDirectory() as tmp:
         harness = _Harness(Path(tmp))
         steps = harness.steps()
-        assert (steps.count, harness.backtest.frontier) == (4, "20250630")
+        assert (steps.count, harness.backtest.test_horizon) == (4, "20250630")
         node = harness.node("a", "1")
         first = harness.test.invoke({"candidate": node})
         assert first.ok and not first.finish
         value = first.value
-        assert (value["step"], value["steps"], value["steps_left"], value["frontier"]) == (1, 4, 3, "20250930")
-        assert harness.backtest.frontier == "20250930"
+        assert (value["step"], value["steps"], value["steps_left"], value["test_horizon"]) == (1, 4, 3, "20250930")
+        assert harness.backtest.test_horizon == "20250930"
         # Durable before the result returned: the ledger holds the step.
         [record] = harness.records()
-        assert (record["step"], record["frontier"], record["source"]) == (1, "20250930", SOURCE_TEST)
+        assert (record["step"], record["test_horizon"], record["source"]) == (1, "20250930", SOURCE_TEST)
         assert record["candidate"]["step_id"] == node and record["entry"]["start"] == "20250701"
-        # The replay ran from the validation start to the new frontier.
+        # The replay ran from the validation start to the new test horizon.
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20250930")
         assert value["test_replays"] == 1
         second = harness.test.invoke({"candidate": node})
-        assert second.value["frontier"] == "20251231" and [row["step"] for row in harness.records()] == [1, 2]
+        assert second.value["test_horizon"] == "20251231" and [row["step"] for row in harness.records()] == [1, 2]
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20251231")
         # The record to date lists both steps with their candidate; the
-        # instrument reads them stitched.
+        # significance test reads them stitched.
         record_rows = second.value["record"]
         assert [(row["step"], row["candidate"]["node_id"]) for row in record_rows] == [(1, node), (2, node)]
-        assert second.value["instrument"]["steps"] == 2 and "residual_information_ratio" in second.value["instrument"]
+        assert second.value["significance"]["steps"] == 2 and "residual_information_ratio" in second.value["significance"]
         # Its table has one row per quarterly step tested, read off this replay.
         assert [(row["step"], row["start"], row["end"]) for row in second.value["step_table"]] == [
             (1, "20250701", "20250930"),
             (2, "20251001", "20251231"),
         ]
         assert "months" not in second.value
-        frontiers = [row["frontier"] for row in harness.records()]
-        assert frontiers == sorted(frontiers) and len(set(frontiers)) == len(frontiers)
+        horizons = [row["test_horizon"] for row in harness.records()]
+        assert horizons == sorted(horizons) and len(set(horizons)) == len(horizons)
 
 
 def test_an_unregistrable_candidate_is_refused_without_advancing_or_counting() -> None:
@@ -170,8 +170,8 @@ def test_an_unregistrable_candidate_is_refused_without_advancing_or_counting() -
             with pytest.raises(ToolError) as refused:
                 harness.test.invoke({"candidate": node})
             assert refused.value.error_type == "test_registration_refused"
-            assert reason in str(refused.value) and "frontier did not move" in str(refused.value)
-        assert harness.records() == [] and harness.backtest.frontier == "20250630"
+            assert reason in str(refused.value) and "test horizon did not move" in str(refused.value)
+        assert harness.records() == [] and harness.backtest.test_horizon == "20250630"
         assert harness.backtest.test_replays == 0
         # Nothing was replayed for a refused candidate.
         assert all(end_day is None for _s, _e, end_day in harness.evaluator.requests)
@@ -192,7 +192,7 @@ def test_validate_is_bounded_per_interval_freed_by_a_test_and_kept_to_the_resear
         assert harness.backtest.validates_in_interval == 0
         result = harness.session.call("c")
         assert result.ok and result.value["validates_in_step"] == 1 and result.value["validates_per_step"] == 2
-        # The view does not move with the frontier: a span reaching into the
+        # The view does not move with the test horizon: a span reaching into the
         # validation year is refused by name after a test as before it, and
         # the refusal neither replays nor counts.
         harness.session.candidate("d", _strategy("4"))
@@ -222,23 +222,23 @@ def test_the_last_test_finishes_the_session_with_its_candidate() -> None:
             harness.test.invoke({"candidate": b})
 
 
-def test_nothing_returned_to_the_agent_dates_past_the_frontier() -> None:
+def test_nothing_returned_to_the_agent_dates_past_the_test_horizon() -> None:
     with TemporaryDirectory() as tmp:
         harness = _Harness(Path(tmp), test_step_months=1)
         node = harness.node("a", "1")
         result = harness.test.invoke({"candidate": node})
-        frontier = result.value["frontier"]
-        assert frontier == "20250731"
+        test_horizon = result.value["test_horizon"]
+        assert test_horizon == "20250731"
         dates = set(DATE.findall(json.dumps(result.value)))
-        assert dates and max(dates) <= frontier, sorted(dates)[-3:]
-        # The replay stopped at the frontier, and its table has one monthly row.
-        assert harness.evaluator.requests[-1][2] == frontier
+        assert dates and max(dates) <= test_horizon, sorted(dates)[-3:]
+        # The replay stopped at the test horizon, and its table has one monthly row.
+        assert harness.evaluator.requests[-1][2] == test_horizon
         assert [(row["step"], row["start"], row["end"]) for row in result.value["step_table"]] == [
             (1, "20250701", "20250731")
         ]
 
 
-def test_a_test_whose_replay_fails_leaves_the_frontier_where_it_was() -> None:
+def test_a_test_whose_replay_fails_leaves_the_test_horizon_where_it_was() -> None:
     with TemporaryDirectory() as tmp:
         harness = _Harness(
             Path(tmp),
@@ -260,11 +260,11 @@ def test_a_test_whose_replay_fails_leaves_the_frontier_where_it_was() -> None:
         with pytest.raises(ToolError) as raised:
             harness.test.invoke({"candidate": strategy})
         assert raised.value.error_type == "test_replay_failed" and raised.value.details["cause"] == "strategy"
-        assert "frontier did not move" in str(raised.value)
+        assert "test horizon did not move" in str(raised.value)
         with pytest.raises(ToolError) as failed:
             harness.test.invoke({"candidate": environment})
         assert failed.value.details["cause"] == "environment" and "resent unchanged" in str(failed.value)
-        assert harness.records() == [] and harness.backtest.frontier == "20250630"
+        assert harness.records() == [] and harness.backtest.test_horizon == "20250630"
         assert harness.backtest.test_replays == 2
         # A second host failure in a row ends the attempt, not the research.
         with pytest.raises(EnvironmentBlocked, match="2 replays failed on the environment"):

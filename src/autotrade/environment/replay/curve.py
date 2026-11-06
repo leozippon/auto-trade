@@ -17,7 +17,7 @@ from autotrade.common.records import read_json_object
 from .style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
 
 STRATEGY_LABEL = "策略"
-PANEL_LABEL = "随机对照组合"
+BASELINE_LABEL = "随机对照组合"
 
 
 def _finite(value: object) -> float | None:
@@ -128,7 +128,7 @@ def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str
 
 
 def result_curve(result_file: Path) -> dict[str, object]:
-    """The strategy's cumulative curve, its benchmark and its zero-skill panel
+    """The strategy's cumulative curve, its benchmark and its random baseline
     (the mean of the random-name copies of its own trades; ``None`` for a
     result without one) on the strategy's own days so all start at zero
     together, and the daily position weight."""
@@ -137,7 +137,7 @@ def result_curve(result_file: Path) -> dict[str, object]:
     returns = result_returns(payload)
     days = {day for day, _value in returns}
     benchmark = [(day, value) for day, value in benchmark_returns(result_file) if day in days]
-    panel = [
+    baseline = [
         (day, value) for day, value in _sidecar_returns(result_file, "panel_daily") if day in days
     ]
     exposure = result_exposures(payload)
@@ -148,7 +148,7 @@ def result_curve(result_file: Path) -> dict[str, object]:
             if benchmark
             else None
         ),
-        "panel": curve_entry("panel", PANEL_LABEL, panel) if panel else None,
+        "baseline": curve_entry("baseline", BASELINE_LABEL, baseline) if baseline else None,
         "exposure": {
             "strategy": {
                 "dates": [day for day, _value in exposure],

@@ -1,20 +1,20 @@
-"""The rolling record: the validation frontier, its test steps and their instrument.
+"""The validation record: the test horizon, its test steps and their significance test.
 
 An experiment's validation years (the research geometry's years after the first
 ``research_years``) are tiled into steps of ``test_step_months`` (``ValidationSteps``).
 Each ``test`` the session makes replays its candidate as one fresh book from
 the validation start to the end of the next step, and the candidate's result
-over that newest step is the step's entry in the experiment's rolling record: one
+over that newest step is the step's entry in the experiment's validation record: one
 ``test_step`` ledger record per step (:func:`test_step_record`), appended as
 the test completes and never rewritten, so a resumed attempt continues from
-the frontier the ledger states (:func:`frontier_after`). A step the host
+the test horizon the ledger states (:func:`horizon_after`). A step the host
 completes after the session (budget out, or the agent never tested) is a
 record of the same shape with ``source`` ``host_completion``.
 
-The record's instrument (:func:`record_instrument`) reads the entries' daily
+The record's significance test (:func:`record_significance`) reads the entries' daily
 rows stitched in step order with the residual statistic every other reading
 uses (``pipelines/verdict.py``): the residual information ratio of the active
-series on the market, size and value legs, its betas, the bar for the record's
+series on the market, size and value legs, its betas, the threshold for the record's
 length and the one-sided null p-value, beside the stitched return, drawdown
 and turnover. The per-step table a test returns (:func:`step_table`) reads
 its own replay step by step.
@@ -41,8 +41,8 @@ from .ledger import TEST_STEP_RECORD_TYPE
 from .verdict import null_p_value, residual_reading
 
 # The columns of one entry's daily rows, in order: the date, the book's return,
-# the zero-skill panel's, and the three factor legs the instrument regresses on.
-DAILY_COLUMNS = ("trade_date", "strategy_return", "panel_return", *(name for name, _series in FACTOR_SERIES))
+# the random baseline's, and the three factor legs the significance test regresses on.
+DAILY_COLUMNS = ("trade_date", "strategy_return", "baseline_return", *(name for name, _series in FACTOR_SERIES))
 _DAILY_SERIES = ("strategy_daily", "panel_daily", *(series for _name, series in FACTOR_SERIES))
 # Where a test_step record came from: the session's own test, or the host
 # filling the record after the session.
@@ -55,7 +55,7 @@ class ValidationSteps:
     """The validation years as consecutive test steps.
 
     ``start``/``end`` are the validation years' calendar bounds and
-    ``windows`` the steps' ``(first day, last day)`` in order. The frontier is
+    ``windows`` the steps' ``(first day, last day)`` in order. The test horizon is
     the last day a session may read: the day before ``start`` after no test,
     the end of step k after k tests.
     """
@@ -80,7 +80,7 @@ class ValidationSteps:
             raise ValueError(f"step must be 1..{self.count}, got {step!r}")
         return self.windows[step - 1]
 
-    def frontier_after(self, steps_tested: int) -> str:
+    def horizon_after(self, steps_tested: int) -> str:
         """The last readable day once ``steps_tested`` steps are revealed."""
 
         if not 0 <= steps_tested <= self.count:
@@ -101,25 +101,25 @@ def step_entry(
 
     ``replay`` is the result record and ``analysis`` the style sidecar beside
     it. ``return`` and ``max_drawdown`` compound the book's daily returns over
-    the window, ``panel_return`` and ``index_return`` the panel's and the
-    benchmark's, ``active_return`` is book minus panel, ``turnover`` and
+    the window, ``baseline_return`` and ``index_return`` the random baseline's and the
+    benchmark's, ``active_return`` is book minus random baseline, ``turnover`` and
     ``fees`` are the window's own fills (``stats.window_activity``,
     ``stats.window_fees``), and ``daily`` carries the window's rows
-    (:data:`DAILY_COLUMNS`) for the record's instrument. A window the replay
+    (:data:`DAILY_COLUMNS`) for the record's significance test. A window the replay
     does not cover raises ``ValueError``: an entry is never read off nothing.
     """
 
     strategy = _in_window(analysis.get("strategy_daily"), start, end)
     if not strategy:
         raise ValueError(f"the replay holds no day in {start}..{end}")
-    panel = dict(_in_window(analysis.get("panel_daily"), start, end))
-    if set(panel) != {day for day, _value in strategy}:
-        raise ValueError(f"the replay carries no zero-skill panel over every day of {start}..{end}")
+    baseline = dict(_in_window(analysis.get("panel_daily"), start, end))
+    if set(baseline) != {day for day, _value in strategy}:
+        raise ValueError(f"the replay carries no random baseline over every day of {start}..{end}")
     legs = {series: dict(_in_window(analysis.get(series), start, end)) for _name, series in FACTOR_SERIES}
     benchmark = [legs["benchmark_daily"][day] for day, _value in strategy if day in legs["benchmark_daily"]]
     activity = window_activity(replay["equity_curve"], replay["executions"], start=start, end=end)  # type: ignore[arg-type]
     book = compounded_return(value for _day, value in strategy)
-    panel_return = compounded_return(panel[day] for day, _value in strategy)
+    baseline_return = compounded_return(baseline[day] for day, _value in strategy)
     return {
         "start": start,
         "end": end,
@@ -129,11 +129,11 @@ def step_entry(
         "turnover": activity["turnover"],
         "round_trips": activity["round_trips"],
         "fees": window_fees(replay["executions"], start=start, end=end),  # type: ignore[arg-type]
-        "panel_return": panel_return,
-        "active_return": book - panel_return,
+        "baseline_return": baseline_return,
+        "active_return": book - baseline_return,
         "index_return": compounded_return(benchmark) if len(benchmark) == len(strategy) else None,
         "daily": [
-            [day, value, panel[day], *(legs[series].get(day) for _name, series in FACTOR_SERIES)]
+            [day, value, baseline[day], *(legs[series].get(day) for _name, series in FACTOR_SERIES)]
             for day, value in strategy
         ],
     }
@@ -156,12 +156,12 @@ def step_table(
     return rows
 
 
-def record_instrument(entries: Sequence[Mapping[str, object]], *, alpha: float) -> dict[str, object]:
-    """The rolling record read as one series.
+def record_significance(entries: Sequence[Mapping[str, object]], *, alpha: float) -> dict[str, object]:
+    """The validation record read as one series.
 
-    The entries' daily rows, stitched in order, give the book's, the panel's
+    The entries' daily rows, stitched in order, give the book's, the random baseline's
     and the legs' daily series; ``verdict.residual_reading`` grades the
-    active series at ``alpha`` (residual IR, betas, days, years, bar), and the
+    active series at ``alpha`` (residual IR, betas, days, years, threshold), and the
     one-sided null p-value (``verdict.null_p_value``) is stated beside it.
     ``return`` and ``max_drawdown`` compound the stitched book, ``turnover``
     sums the entries' own. A record the statistic cannot read yet (too few
@@ -232,7 +232,7 @@ def test_step_record(
         "step": step,
         "steps": steps.count,
         "window": {"start": first, "end": last},
-        "frontier": steps.frontier_after(step),
+        "test_horizon": steps.horizon_after(step),
         "candidate": dict(candidate),
         "replay": dict(replay),
         "entry": dict(entry),
@@ -242,7 +242,7 @@ def test_step_record(
 
 
 # The state a frozen strategy's readout gives its experiment: a frozen strategy
-# with its rolling record and its forward reading (``ledger.VerdictStatus``).
+# with its validation record and its forward reading (``ledger.VerdictStatus``).
 FROZEN_WITH_RECORD = "frozen_with_record"
 
 
@@ -256,8 +256,8 @@ def readout(
     """The experiment's readout, what its forward record states where a verdict once
     stood: nothing here passes or fails.
 
-    ``record`` is the rolling record read as one series
-    (:func:`record_instrument`: residual IR, one-sided p-value, bar, years)
+    ``record`` is the validation record read as one series
+    (:func:`record_significance`: residual IR, one-sided p-value, threshold, years)
     with its span and how often the candidate changed
     (:func:`candidate_changes`). ``forward`` is the frozen strategy's reading
     over the Forward year, the slice ``verdict.forward_slice`` read: its
@@ -271,9 +271,9 @@ def readout(
     block: dict[str, object] = {
         "state": FROZEN_WITH_RECORD,
         "record": {
-            **record_instrument([row["entry"] for row in tests], alpha=alpha),  # type: ignore[misc]
+            **record_significance([row["entry"] for row in tests], alpha=alpha),  # type: ignore[misc]
             "start": str(tests[0]["window"]["start"]) if tests else None,  # type: ignore[index]
-            "end": str(tests[-1]["frontier"]) if tests else None,
+            "end": str(tests[-1]["test_horizon"]) if tests else None,
             "candidate_changes": candidate_changes(records),
         },
     }
@@ -306,10 +306,10 @@ def test_step_records(records: Sequence[Mapping[str, object]]) -> list[dict[str,
     return rows
 
 
-def frontier_after(records: Sequence[Mapping[str, object]], steps: ValidationSteps) -> str:
+def horizon_after(records: Sequence[Mapping[str, object]], steps: ValidationSteps) -> str:
     """The last day the session may read, by the ledger's test steps."""
 
-    return steps.frontier_after(len(test_step_records(records)))
+    return steps.horizon_after(len(test_step_records(records)))
 
 
 def candidate_changes(records: Sequence[Mapping[str, object]]) -> int:
@@ -327,9 +327,9 @@ __all__ = [
     "SOURCE_TEST",
     "ValidationSteps",
     "candidate_changes",
-    "frontier_after",
+    "horizon_after",
     "readout",
-    "record_instrument",
+    "record_significance",
     "step_entry",
     "step_table",
     "test_step_record",

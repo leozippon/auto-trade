@@ -121,7 +121,7 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
 
 
 def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_path: Path):
-    """The zero-skill panel draws its names without regard to industry, so a
+    """The random baseline draws its names without regard to industry, so a
     single-sector book's sector move scores as selection — the one artifact
     that cleared every gate was 82.5 % banks. ``industries`` stays host-side,
     so the compact block carries the top industry's weight, and the
@@ -732,11 +732,11 @@ def test_the_factor_regression_reports_missing_factors_instead_of_zero(tmp_path:
     assert benchmark_summary_block(analysis) is None
 
 
-def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades(tmp_path: Path):
-    """A formal replay's zero-skill panel is stored beside the strategy's own
+def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verdict_grades(tmp_path: Path):
+    """A formal replay's random baseline is stored beside the strategy's own
     series, and the figures the Agent reads off it are the ones the verdict
     measures: the mean, standard deviation and drawdown of strategy minus
-    panel, with no regression."""
+    random baseline, with no regression."""
     from autotrade.environment.replay.stats import attach_sub_window_benchmark
     from autotrade.environment.replay.style import active_analysis
     from autotrade.pipelines.verdict import (
@@ -774,7 +774,7 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
         ),
         (), (), (),
     )
-    panel = {
+    baselines = {
         "k": 20,
         "seed": 5,
         "matched": "index_membership+affordability",
@@ -785,13 +785,13 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
 
     def analyse(block):
         return replay_style_analysis(
-            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", panel=block, benchmark_index=BENCHMARK_TS_CODE
+            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", baselines=block, benchmark_index=BENCHMARK_TS_CODE
         )
 
-    graded, bare = analyse(panel), analyse(None)
+    graded, bare = analyse(baselines), analyse(None)
 
-    assert graded["panel_daily"] == panel["panel_daily"]
-    assert graded["panel_draw_sd"] == panel["panel_draw_sd"]
+    assert graded["panel_daily"] == baselines["panel_daily"]
+    assert graded["panel_draw_sd"] == baselines["panel_draw_sd"]
     assert graded["panel"] == {
         "k": 20, "seed": 5, "matched": "index_membership+affordability", "dropped_trips_mean": 0.0,
     }
@@ -818,16 +818,16 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
     expected = float(np.max(1.0 - active_curve / np.maximum.accumulate(active_curve)))
     assert expected > 0.0
     assert compact["active_max_drawdown"] == pytest.approx(expected, abs=1e-12)
-    # A replay without a panel states none of it, and nothing else moved.
-    unpanelled = benchmark_summary_block(bare)
-    assert set(compact) - set(unpanelled) == {
+    # A replay without a random baseline states none of it, and nothing else moved.
+    without_baselines = benchmark_summary_block(bare)
+    assert set(compact) - set(without_baselines) == {
         "active_excess",
         "active_tracking_error",
         "active_information_ratio",
         "active_max_drawdown",
         "panel_draws",
     }
-    assert {key: compact[key] for key in unpanelled} == unpanelled
+    assert {key: compact[key] for key in without_baselines} == without_baselines
     visible = batch_candidate_stats({"total_return": 0.1, "benchmark": compact})
     assert visible["benchmark"]["active_information_ratio"] == compact["active_information_ratio"]
     assert visible["benchmark"]["tracking_error"] == compact["tracking_error"]
@@ -836,8 +836,8 @@ def test_the_sidecar_carries_the_panel_and_the_active_figures_the_verdict_grades
         summary = {"sub_windows": [{"start": days[0], "end": days[-1], "return": 0.05}]}
         return attach_sub_window_benchmark(summary, analysis)["sub_windows"]
 
-    [with_panel], [without] = year_rows(graded), year_rows(bare)
-    assert with_panel["active_excess_return"] == round(active["plain_excess"], 6)
+    [with_baselines], [without] = year_rows(graded), year_rows(bare)
+    assert with_baselines["active_excess_return"] == round(active["plain_excess"], 6)
     assert "active_excess_return" not in without
 
 
@@ -869,6 +869,6 @@ def test_membership_is_read_from_the_decision_view_and_every_slot(tmp_path: Path
         "20240628": frozenset({"000001.SZ", "000002.SZ"}),
     }
     # Unmounted and mounted-but-empty are different answers: only the first
-    # lets the panel fall back to the float-cap decile.
+    # lets the random baseline fall back to the float-cap decile.
     assert slot_membership([plain], benchmark_index=BENCHMARK_TS_CODE) is None
     assert slot_membership([plain, other], benchmark_index=BENCHMARK_TS_CODE) == {}

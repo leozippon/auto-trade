@@ -33,6 +33,6 @@
 
 主动超额是主动序列逐日差的年化均值，`plain_selection` 是两条复利收益之差；两者同号居多，但不是同一个数。
 
-`raw_readings.active_market_beta` 是主动序列对市场（`benchmark_index`）、规模、价值三条腿回归里市场腿的载荷，与 `residual_reading.market_beta` 同一个数。为负说明账户持有的名字比随机副本更低 β：指数大涨的年份主动序列落后于对照组合，大跌的年份领先。滚动记录与每个验证行的统计量（`acceptance_rules.instrument`）读的是同一回归的截距除以残差波动（`residual_reading.residual_information_ratio`），三条腿能解释的部分不算在里面。某一年的读数用 `daily_series`（`validation/active_daily.csv`）里该年的 `active_return` 对 `benchmark_return`、`size_factor_return`、`value_factor_return` 回归即得。
+`raw_readings.active_market_beta` 是主动序列对市场（`benchmark_index`）、规模、价值三条腿回归里市场腿的载荷，与 `residual_reading.market_beta` 同一个数。为负说明账户持有的名字比随机副本更低 β：指数大涨的年份主动序列落后于对照组合，大跌的年份领先。滚动记录与每个验证行的统计量（`acceptance_rules.significance`）读的是同一回归的截距除以残差波动（`residual_reading.residual_information_ratio`），三条腿能解释的部分不算在里面。某一年的读数用 `daily_series`（`validation/active_daily.csv`）里该年的 `active_return` 对 `benchmark_return`、`size_factor_return`、`value_factor_return` 回归即得。
 
 跟踪约束不读主动序列的市场载荷：设了跟踪约束的实验，登记比的是策略自身收益的 `benchmark.market_beta` 与 `benchmark.tracking_error`（`acceptance_rules.registration.tracking_mandate`）。

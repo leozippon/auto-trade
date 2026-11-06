@@ -191,7 +191,7 @@ def _required(text: str) -> Any:
     return field(kw_only=True, metadata={"help": text})
 
 
-# The step lengths a test may advance the validation frontier by, in months:
+# The step lengths a test may advance the test horizon by, in months:
 # a quarter by default, a month where a round wants finer steps.
 TEST_STEP_MONTHS = (1, 3)
 
@@ -205,7 +205,7 @@ class AcceptanceRules:
     A candidate is refused at registration on a non-finite metric or a
     drawdown over ``max_drawdown`` over its span (``evaluate``), and on a
     broken tracking mandate when one is set. Nothing else gates: the host
-    reads the rolling record and the forward reading with the residual
+    reads the validation record and the forward reading with the residual
     statistic (``pipelines/verdict.py``) at ``alpha`` and records them. Every
     field is stamped into ``params.json`` at creation so a later change to
     the defaults cannot move an experiment that already exists.
@@ -227,7 +227,7 @@ class AcceptanceRules:
         "Forward reading: multiple of the profile's slippage its reported active excess is stressed at.",
     )
     active_max_drawdown: float = _rule(
-        0.30, "Paper's drawdown limit of the active series (strategy minus zero-skill panel)."
+        0.30, "Paper's drawdown limit of the active series (strategy minus random baseline)."
     )
     # The tracking mandate: the strategy's own residual tracking error against
     # the factor legs and its market beta over the nominee's span, a
@@ -245,19 +245,19 @@ class AcceptanceRules:
         verdict.FORWARD_CONFIDENCE,
         "Forward reading: one-sided block-bootstrap confidence of its reported lower bound.",
     )
-    # The residual statistic's one-sided level (``verdict.residual_bar``):
-    # the bar every reading is stated against, never a gate.
+    # The residual statistic's one-sided level (``verdict.residual_threshold``):
+    # the threshold every reading is stated against, never a gate.
     alpha: float = _required(
-        "Residual statistic: one-sided level of the bar stated beside every reading."
+        "Residual statistic: one-sided level of the threshold stated beside every reading."
     )
     # The geometry's split: the first research_years are the research years a
     # session sees; the rest are the validation years its tests reveal.
     research_years: int = _required(
         "Research years the session sees; the rest of the geometry are the validation years."
     )
-    # How far one test advances the validation frontier, and how many
+    # How far one test advances the test horizon, and how many
     # validate calls an interval between tests may make.
-    test_step_months: int = _rule(3, "Months the validation frontier advances per test (1 or 3).")
+    test_step_months: int = _rule(3, "Months the test horizon advances per test (1 or 3).")
     validates_per_step: int = _rule(
         6, "validate calls allowed before the first test and between consecutive tests."
     )
@@ -326,7 +326,7 @@ class AcceptanceRules:
 
         Run manifests and ``hitl/params.json`` are read back long after they
         were written, so a record that carries a retired key (the former
-        ``min_return``/``min_sharpe`` targets, the deflated-Sharpe bars, the
+        ``min_return``/``min_sharpe`` targets, the deflated-Sharpe thresholds, the
         ``RETIRED_SWITCHES``, the sealed gate's ``OBSOLETE_KEYS``) must still
         rebuild the rules it does name. A record that lacks a required rule
         (``REQUIRED_ACCEPTANCE_KEYS``) is refused: it was written under rules
@@ -346,7 +346,7 @@ class AcceptanceRules:
     def agent_facts(self, *, validation_years: int) -> dict[str, object]:
         """The ``acceptance_rules`` run fact, derived from these rules so no
         prompt restates a threshold. ``validation_years`` is how many years
-        the experiment's geometry leaves after the research years, for the bar over
+        the experiment's geometry leaves after the research years, for the threshold over
         the whole validation period. Rules and that count only: the dates of
         the research and validation years are the research geometry's
         (``research_session.research_geometry_record``), and no forward or
@@ -379,8 +379,8 @@ class AcceptanceRules:
         return {
             "graded_series": (
                 "every return statistic below is measured on the ACTIVE series: the "
-                "node's daily return after every cost minus the host's zero-skill panel "
-                f"composite, the equal-weight mean of {verdict.PANEL_DRAWS} random-name "
+                "node's daily return after every cost minus the host's random baseline "
+                f"composite, the equal-weight mean of {verdict.BASELINE_DRAWS} random-name "
                 "copies of the node's own filled trades (same entry and exit instants, "
                 "same money per round trip, same Broker and costs; each name replaced by "
                 "one on the same side of the experiment's benchmark_index membership that one "
@@ -394,7 +394,7 @@ class AcceptanceRules:
                 "day as the active_return of its daily_series. The strategy exposes "
                 "nothing for this beyond its orders"
             ),
-            "instrument": {
+            "significance": {
                 "statistic": (
                     "the residual information ratio of the active series: its daily "
                     "return regressed by OLS on an intercept, the benchmark_index return "
@@ -402,16 +402,16 @@ class AcceptanceRules:
                     f"intercept times sqrt({years}) over the residual standard deviation; "
                     f"years = trading days / {years}"
                 ),
-                "bar": "z(1 - alpha) / sqrt(years): the level a zero-skill reading reaches with probability alpha; stated beside every reading, never a gate",
+                "threshold": "z(1 - alpha) / sqrt(years): the level a zero-skill reading reaches with probability alpha; stated beside every reading, never a gate",
                 "alpha": self.alpha,
-                "bar_over_one_year": round(verdict.residual_bar(1.0, self.alpha), 3),
-                "bar_over_validation_period": round(
-                    verdict.residual_bar(float(validation_years), self.alpha), 3
+                "threshold_over_one_year": round(verdict.residual_threshold(1.0, self.alpha), 3),
+                "threshold_over_validation_period": round(
+                    verdict.residual_threshold(float(validation_years), self.alpha), 3
                 ),
                 "on_spans": (
                     "every validate row reports it over its own span (residual_reading) "
-                    "with the bar for that span's length; every test reports it over the "
-                    "rolling record so far with the bar for the record's length"
+                    "with the threshold for that span's length; every test reports it over the "
+                    "validation record so far with the threshold for the record's length"
                 ),
             },
             "validation": {
@@ -419,10 +419,10 @@ class AcceptanceRules:
                 "test_step_months": self.test_step_months,
                 "validates_per_step": self.validates_per_step,
                 "test": (
-                    "test(candidate) advances the validation frontier one step: the host "
+                    "test(candidate) advances the test horizon one step: the host "
                     "replays the candidate as a fresh book from the validation start to the "
-                    "new frontier with its matched panel, records the newest step as the "
-                    "rolling record's entry for that step and returns the whole replay's "
+                    "new test horizon with its matched random baseline, records the newest step as the "
+                    "validation record's entry for that step and returns the whole replay's "
                     "statistics, a per-step table, the record to date and its residual "
                     "statistic. The session's data view stays at the end of the research "
                     "years, so the validation years reach it only through these results. "
@@ -433,7 +433,7 @@ class AcceptanceRules:
                     "test and between two tests; a further call is refused until the next test"
                 ),
                 "end": (
-                    "the session ends when the frontier reaches the end of the validation "
+                    "the session ends when the test horizon reaches the end of the validation "
                     "years; the candidate of the last test is the frozen strategy. There is "
                     "no action that ends the session earlier. If the time, call or spend "
                     "budget runs out after a test, the host completes the record with the "
@@ -467,13 +467,13 @@ class AcceptanceRules:
                     "package uses no randomness) owes none"
                 ),
                 "tracking_mandate": mandate,
-                "checked": "at every test; a candidate that fails is refused and the frontier does not move",
+                "checked": "at every test; a candidate that fails is refused and the test horizon does not move",
             },
             "forward": {
                 "reported": (
                     "one continuous replay of the frozen strategy over the twelve months "
                     "after the research geometry's last year and then Held-out, graded on its "
-                    "active series against a panel drawn from that replay: the "
+                    "active series against a random baseline drawn from that replay: the "
                     f"{self.forward_confidence:.0%} block-bootstrap lower bound of active "
                     "excess over the frozen book and its seed replicates, the active excess "
                     f"with slippage multiplied by {self.cost_stress_multiplier}, drawdowns, "
@@ -528,7 +528,7 @@ RETIRED_SWITCHES = frozenset(
 
 # The rules and the create parameter retired on 2026-11-03 with the
 # deflated-Sharpe freeze gate, its trial family and its lineage, and the
-# forward and Held-out bars, when the sealed gate became the verdict's one
+# forward and Held-out thresholds, when the sealed gate became the verdict's one
 # condition. Every params.json written before then carries them; readers
 # accept exactly these keys beside ``RETIRED_SWITCHES`` and derive nothing
 # from them, so an earlier experiment still lists in the console.
@@ -583,7 +583,7 @@ def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
     just not graded.
 
     Only the rules' own keys are read; one that is absent or ``None`` takes the
-    field default (today's verdict constants for the statistical bars), a
+    field default (today's verdict constants for the statistical thresholds), a
     required rule (``REQUIRED_ACCEPTANCE_KEYS``) has none and is refused, and
     a beta band named without a cap is refused by ``AcceptanceRules`` itself.
     """
@@ -626,13 +626,13 @@ class RollingExperimentConfig:
     window_months: int = 24
     # The index this experiment is measured against: the benchmark leg of the style
     # attribution and of the factor loadings, and the membership the
-    # zero-skill panel draws its replacements from. One of
+    # random baseline draws its replacements from. One of
     # ``contracts.BENCHMARK_INDEXES``.
     benchmark_index: str = DEFAULT_BENCHMARK_INDEX
     # The research session's budgets, spent across every attempt of the experiment's
     # one session. The host's forward replay is charged to none of them.
     # Host-side random-portfolio null controls the session may request through
-    # ``run_null_control`` (``null_control.PANEL_DRAWS`` replays each); the
+    # ``run_null_control`` (``null_control.BASELINE_DRAWS`` replays each); the
     # frozen node's block is reused at freeze. 0 leaves the tool out.
     max_null_controls: int = DEFAULT_MAX_NULL_CONTROLS
     # Replays one ``validate`` call runs at once (see
@@ -1102,11 +1102,11 @@ class ResearchSessionRequest:
     # carry required keys.
     acceptance_rules: Mapping[str, object] = field(kw_only=True)
     # The validation years as one span (``experiment.validation_span``): what
-    # a test replays from its first day to the new frontier, and the host
+    # a test replays from its first day to the new test horizon, and the host
     # completes a record over.
     validation: ReplaySpan = field(kw_only=True)
-    # The experiment's ``test_step`` ledger records so far (``rolling_record``): the
-    # record the attempt continues and the frontier it reached.
+    # The experiment's ``test_step`` ledger records so far (``validation_record``): the
+    # record the attempt continues and the test horizon it reached.
     tests_before: tuple[Mapping[str, object], ...] = ()
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints

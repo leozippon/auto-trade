@@ -2,7 +2,7 @@
 """Judge every stored reading of the current-rule experiments again and compare.
 
 The consistency check of the reading code (``pipelines/verdict.py``,
-``rolling_record.py``, ``config.py``, ``experiment.py``). An experiment keeps everything its readings were
+``validation_record.py``, ``config.py``, ``experiment.py``). An experiment keeps everything its readings were
 read from -- ``hitl/params.json``, the ledger's Steps with their style
 sidecars and revisions, the replays' results -- so each reading of an experiment
 created under the current rules is judged again by this code, CPU only, and
@@ -11,7 +11,7 @@ compared with the ledger key for key:
 - a research session's freeze registration (``experiment.freeze_registration``),
 - a forward record's slices, where its forward replay completed
   (``experiment.judged_replay``), and its readout off the ledger's rolling
-  record and that forward slice (``rolling_record.readout``).
+  record and that forward slice (``validation_record.readout``).
 
 An experiment whose rules state no ``research_years`` was judged under rules since
 retired (the sealed gate) and is never judged again: its readings are what
@@ -53,7 +53,7 @@ from autotrade.pipelines.experiment import (
 from autotrade.pipelines.experiment_params import read_param
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import recorded_path
-from autotrade.pipelines.rolling_record import readout
+from autotrade.pipelines.validation_record import readout
 
 
 class Judgement(NamedTuple):

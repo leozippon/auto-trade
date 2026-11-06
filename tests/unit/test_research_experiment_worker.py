@@ -126,14 +126,14 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     assert research_row["freeze_gate"]["passed"] is True
     assert [step["span"] for step in research_row["steps"]] == ["full", "full"]
     assert research_row["nominated_step_id"] == research_row["steps"][-1]["step_id"]
-    assert [(row["step"], row["frontier"], row["source"]) for row in tests] == [
+    assert [(row["step"], row["test_horizon"], row["source"]) for row in tests] == [
         (1, "20230930", "host_completion"),
         (2, "20231231", "host_completion"),
         (3, "20240331", "host_completion"),
         (4, "20240630", "host_completion"),
     ]
     assert {row["candidate"]["step_id"] for row in tests} == {research_row["nominated_step_id"]}
-    assert (research_row["frontier"], research_row["steps_tested"]) == ("20240630", 4)
+    assert (research_row["test_horizon"], research_row["steps_tested"]) == ("20240630", 4)
     frozen = frozen_record(records)["frozen"]
     assert Path(frozen["output_path"], "main.py").is_file()
 
@@ -430,7 +430,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
 
     It validates the working copy twice and tests the second node through
     the four steps of the validation year: each test replays the span from
-    the validation start to the new frontier and records the step, while the
+    the validation start to the new test horizon and records the step, while the
     session's ``/mnt/snapshot`` stays the decision view at the research
     year's end; the last test ends the session with its candidate frozen, and the host
     runs forward and Held-out. The two snapshot slot mounts stay empty, no
@@ -473,7 +473,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
 
     records = ExperimentLedger(options.rolling.ledger_path).read()
     *tests, research_row, replay = records
-    assert [(row["record_type"], row["step"], row["frontier"], row["source"]) for row in tests] == [
+    assert [(row["record_type"], row["step"], row["test_horizon"], row["source"]) for row in tests] == [
         ("test_step", 1, "20230930", "test"),
         ("test_step", 2, "20231231", "test"),
         ("test_step", 3, "20240331", "test"),
@@ -481,7 +481,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     ]
     assert research_row["outcome"] == "completed"
     assert research_row["finish_reason"] == "validation_period_complete"
-    assert (research_row["frontier"], research_row["steps_tested"]) == ("20240630", 4)
+    assert (research_row["test_horizon"], research_row["steps_tested"]) == ("20240630", 4)
     tested = research_row["steps"][1]["step_id"]
     assert {row["candidate"]["step_id"] for row in tests} == {tested}
     assert research_row["frozen"]["source_step_id"] == research_row["nominated_step_id"] == tested
@@ -554,7 +554,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert (view["kind"], view["decision_time"]) == ("decision_input", decision_anchor(visible_end).isoformat())
     # The facts file was written once, when the attempt opened.
     facts_after = json.loads((workspace / "inputs" / "session_context.json").read_text(encoding="utf-8"))
-    assert (facts_after["research_geometry"]["frontier"], facts_after["research_geometry"]["steps_tested"]) == (
+    assert (facts_after["research_geometry"]["test_horizon"], facts_after["research_geometry"]["steps_tested"]) == (
         visible_end,
         0,
     )
@@ -574,12 +574,12 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         marked = max(str(row["trade_date"]) for row in replayed["equity_curve"])
         assert decided < first_validation_day and marked < first_validation_day, (decided, marked)
     # Each test replayed the validation span as one fresh book from its first
-    # day to the step's frontier, and no further.
+    # day to the step's test horizon, and no further.
     for row in tests:
-        assert (row["replay"]["start"], row["replay"]["end"]) == (first_validation_day, row["frontier"])
+        assert (row["replay"]["start"], row["replay"]["end"]) == (first_validation_day, row["test_horizon"])
         replayed = json.loads(Path(row["replay"]["result_ref"]).read_text(encoding="utf-8"))
         assert first_validation_day <= replayed["equity_curve"][0]["trade_date"] <= "20230703"
-        assert replayed["equity_curve"][-1]["trade_date"] <= row["frontier"]
+        assert replayed["equity_curve"][-1]["trade_date"] <= row["test_horizon"]
     # The readout reads the four tested steps as one record; the forward
     # stage replayed nothing of the validation year again.
     readout = replay["readout"]
@@ -595,7 +595,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         assert later not in read
     forward_reading = replay["slices"]["forward"]["residual_reading"]["residual_information_ratio"]
     assert f"{forward_reading:.4f}" not in read
-    # What each test returned dates no later than the frontier it reached.
+    # What each test returned dates no later than the test horizon it reached.
     returned = [
         message.content
         for message in llm.calls[-1]["messages"]
@@ -603,7 +603,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     ]
     assert len(returned) == 3
     for row, content in zip(tests[:3], returned, strict=True):
-        assert max(DATE.findall(content)) == row["frontier"], row["step"]
+        assert max(DATE.findall(content)) == row["test_horizon"], row["step"]
 
 
 def _resume_script_summary() -> str:
@@ -725,12 +725,12 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     ]
 
 
-def test_an_interrupted_session_resumes_from_its_frontier_and_record(
+def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     """The first attempt validates the working copy, tests it and then loses
     its model: the step it recorded stays in the ledger. The second worker
-    start resumes the session at the frontier that step reached -- on the
+    start resumes the session at the test horizon that step reached -- on the
     same view at the research year's end, with facts that state the steps
     tested -- and when its one remaining call is spent the host completes the
     record from the tested candidate, not from the Validation the resumed
@@ -762,7 +762,7 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
         )
     ledger = ExperimentLedger(options.rolling.ledger_path)
     tested, failed = ledger.read()
-    assert (tested["record_type"], tested["step"], tested["frontier"], tested["source"]) == (
+    assert (tested["record_type"], tested["step"], tested["test_horizon"], tested["source"]) == (
         "test_step", 1, "20230930", "test"
     )
     assert failed["record_type"] == "attempt_failed"
@@ -788,16 +788,16 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
     assert [row["step_id"] for row in record["steps"]] != [tested_node]
     assert record["frozen"]["source_step_id"] == tested_node != record["steps"][-1]["step_id"]
     completion = records[2:5]
-    assert [(row["step"], row["frontier"], row["source"]) for row in completion] == [
+    assert [(row["step"], row["test_horizon"], row["source"]) for row in completion] == [
         (2, "20231231", "host_completion"),
         (3, "20240331", "host_completion"),
         (4, "20240630", "host_completion"),
     ]
     assert {row["candidate"]["step_id"] for row in completion} == {tested_node}
-    assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
+    assert (record["test_horizon"], record["steps_tested"]) == ("20240630", 4)
     assert result["verdict"]["status"] == "frozen_with_record"
     # Both attempts opened on the research year's view; the resumed one read
-    # the frontier in its facts.
+    # the test horizon in its facts.
     research_requests = synthetic_provider.requests[
         : next(index for index, item in enumerate(synthetic_provider.requests) if item[0] == "heldout")
     ]
@@ -807,7 +807,7 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
     opening = second_llm.calls[0]["messages"]
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     geometry = facts["research_geometry"]
-    assert (geometry["frontier"], geometry["steps_tested"], geometry["steps"]) == ("20230930", 1, 4)
+    assert (geometry["test_horizon"], geometry["steps_tested"], geometry["steps"]) == ("20230930", 1, 4)
     assert facts["experiment"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
     assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 1
     assert "第 2 次尝试" in opening[1].content
@@ -820,7 +820,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     anything. The resumed attempt has no summary to start from: it opens with
     the note alone (which says so) and continues the call budget, which its
     one validate exhausts; the host then freezes that registrable Validation
-    and completes the rolling record from one replay of it."""
+    and completes the validation record from one replay of it."""
 
     from autotrade.environment.llm import ProviderResponse
     from tests.unit.test_interactive_worker_local import (
@@ -1095,8 +1095,8 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
 
     The session validates its working copy as a control; a test of that node
     is refused at registration with its named reason, which carries no
-    reading of any kind and moves no frontier. It validates the working copy
-    again and tests it: the first step is recorded, the frontier advances a
+    reading of any kind and moves no test horizon. It validates the working copy
+    again and tests it: the first step is recorded, the test horizon advances a
     quarter while the session's view stays at the research year's end, and
     the model reads the step. The call budget then ends the session, and the host
     completes the record's remaining steps from one replay of the tested
@@ -1145,7 +1145,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert len(llm.calls) == 5
     records = ExperimentLedger(options.rolling.ledger_path).read()
     *tests, record, replay = records
-    assert [(row["record_type"], row["step"], row["frontier"], row["source"]) for row in tests] == [
+    assert [(row["record_type"], row["step"], row["test_horizon"], row["source"]) for row in tests] == [
         ("test_step", 1, "20230930", "test"),
         ("test_step", 2, "20231231", "host_completion"),
         ("test_step", 3, "20240331", "host_completion"),
@@ -1156,7 +1156,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert {row["candidate"]["step_id"] for row in tests} == {tested}
     assert (record["outcome"], record["finish_reason"]) == ("deadline", "llm_call_budget_exhausted")
     assert record["frozen"]["source_step_id"] == tested and record["experiment_end"] is None
-    assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
+    assert (record["test_horizon"], record["steps_tested"]) == ("20240630", 4)
     assert record["budget_used"]["test_replays"] == 1
     assert replay["record_type"] == "forward" and result["verdict"]["status"] == "frozen_with_record"
     # The session's view: the research year's end, the only decision view
@@ -1176,9 +1176,9 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
         for message in call["messages"]
         if "does not register" in (message.content or "")
     )
-    assert "freeze_nominee_is_control" in refusal and "the frontier did not move" in refusal
+    assert "freeze_nominee_is_control" in refusal and "the test horizon did not move" in refusal
     assert "information_ratio" not in refusal and "continue" not in refusal
-    # What the test returned dates no later than the frontier it reached.
+    # What the test returned dates no later than the test horizon it reached.
     [returned] = [
         message.content
         for message in llm.calls[-1]["messages"]
@@ -1208,11 +1208,11 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert facts["research_geometry"]["research_period"] == "20220701..20230630"
     assert facts["research_geometry"]["validation_period"] == "20230701..20240630"
     assert facts["research_geometry"]["input_window"] == "20210701..20230630"
-    assert (facts["research_geometry"]["frontier"], facts["research_geometry"]["steps_tested"]) == ("20230630", 0)
+    assert (facts["research_geometry"]["test_horizon"], facts["research_geometry"]["steps_tested"]) == ("20230630", 0)
     assert facts["experiment"] == {"validations_to_date": 0, "full_span_validations_to_date": 0}
-    instrument = facts["artifact_contract"]["acceptance_rules"]["instrument"]
-    assert (instrument["alpha"], instrument["bar_over_validation_period"]) == (0.05, 1.645)
-    # The facts state the frontier, so the prompt carries the run section
+    significance = facts["artifact_contract"]["acceptance_rules"]["significance"]
+    assert (significance["alpha"], significance["threshold_over_validation_period"]) == (0.05, 1.645)
+    # The facts state the test horizon, so the prompt carries the run section
     # (prompts.build_run_section) and no sealed-gate paragraph.
     assert "## 本次运行" in system and "## 封存检验" not in system
 

@@ -13,7 +13,7 @@ once. It carries only what the harness enforces or the Agent cannot find out
 itself; what a tool's parameter, limit or returned field means is the tool's
 description and schema, the strategy contract is ``output/README.md``, and how
 to research is the Agent's own call. The dynamic part is the environment
-block: the run's dates, steps, bar and validate allowance generated from the
+block: the run's dates, steps, threshold and validate allowance generated from the
 run facts (:func:`build_run_section`), the facts themselves behind an index of
 their keys, then the experiment's direction and the researcher's directive.
 Rendered copies for human audit are exported by ``scripts/dev/export_prompts.py``
@@ -190,22 +190,22 @@ def build_resume_instruction(
 
 
 def build_run_section(experiment_facts: Mapping[str, object]) -> str:
-    """This run's data view, years, steps, bar and validate allowance in words.
+    """This run's data view, years, steps, threshold and validate allowance in words.
 
     Read off the facts the prompt also carries, so the list and the JSON
     cannot disagree: ``research_geometry`` (``research_period``, ``years``,
     ``validation_period``, ``step``, ``steps``, ``steps_tested``,
-    ``frontier``), ``artifact_contract.acceptance_rules.instrument``
-    (``alpha``, ``bar_over_one_year``, ``bar_over_validation_period``) and
+    ``test_horizon``), ``artifact_contract.acceptance_rules.significance``
+    (``alpha``, ``threshold_over_one_year``, ``threshold_over_validation_period``) and
     ``budgets.validates_per_step``. Empty for facts whose geometry states no
-    frontier; a geometry that does state one must carry every other key.
+    test horizon; a geometry that does state one must carry every other key.
     """
 
     geometry = experiment_facts.get("research_geometry")
-    if not isinstance(geometry, Mapping) or "frontier" not in geometry:
+    if not isinstance(geometry, Mapping) or "test_horizon" not in geometry:
         return ""
     rules = experiment_facts["artifact_contract"]["acceptance_rules"]  # type: ignore[index]
-    instrument = rules["instrument"]
+    significance = rules["significance"]
     allowance = experiment_facts["budgets"]["validates_per_step"]  # type: ignore[index]
     step = STEP_LENGTH_WORDS[str(geometry["step"])]
     research_end = str(geometry["research_period"]).split("..")[1]
@@ -217,8 +217,8 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
         f"- 数据：会话挂载的数据止于研究年末 {research_end}，整个会话都不变；验证期只通过 `test` 的结果揭开。",
         f"- 研究年：{years} 个，{geometry['research_period']}；`validate` 只在研究年内回测。",
         f"- 验证期：{geometry['validation_period']}，共 {geometry['steps']} 步，每步{step}；本次尝试开始时已测试 {tested} 步"
-        + (f"，测到 {geometry['frontier']}。" if tested else "。"),
-        f"- 门槛：α = {instrument['alpha']}；一年区间约 {instrument['bar_over_one_year']}，整个验证期约 {instrument['bar_over_validation_period']}。",
+        + (f"，测到 {geometry['test_horizon']}。" if tested else "。"),
+        f"- 门槛：α = {significance['alpha']}；一年区间约 {significance['threshold_over_one_year']}，整个验证期约 {significance['threshold_over_validation_period']}。",
         f"- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 {allowance} 次。",
     )
     return "\n".join(lines)

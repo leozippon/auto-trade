@@ -133,7 +133,7 @@ class LocalDailyEvaluationBackend:
 
         Same contract as the PIT backend: an unofficial smoke run gets the real
         replay path over a short window, never a short window dressed up as a
-        full Validation, and a test replays its span up to the frontier.
+        full Validation, and a test replays its span up to the test horizon.
         """
         if max_days is not None and max_days <= 0:
             raise ValueError("max_days must be a positive integer")

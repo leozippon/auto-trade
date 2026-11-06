@@ -5,10 +5,10 @@ One JSONL file per experiment. The pipeline writes three record types:
 - ``research_session``: the experiment's one research session, its outcome and the
   Steps of every attempt; it carries the experiment's ``frozen`` block when the
   nominee registered for the freeze, otherwise ``experiment_end``;
-- ``test_step``: one step of the experiment's rolling record, appended by a
-  session's ``test`` or by the host's completion (``rolling_record``);
+- ``test_step``: one step of the experiment's validation record, appended by a
+  session's ``test`` or by the host's completion (``validation_record``);
 - ``forward``: the frozen artifact's continuous forward and Held-out
-  replay, the two slices and the experiment's readout (``rolling_record.readout``);
+  replay, the two slices and the experiment's readout (``validation_record.readout``);
 - ``attempt_failed``: a session or replay that raised before its business
   record. It carries the error evidence and is ignored by every reader of the
   business types, so the attempt is re-runnable but auditable. A run killed
@@ -77,7 +77,7 @@ class SessionKind(StrEnum):
     FORWARD = "forward"
 
 
-# One step of the experiment's rolling record (``pipelines/rolling_record.py``):
+# One step of the experiment's validation record (``pipelines/validation_record.py``):
 # appended by the session's ``test`` as the step completes, or by the host
 # completing the record after the session; a step is recorded exactly once.
 TEST_STEP_RECORD_TYPE = "test_step"

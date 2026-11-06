@@ -4,7 +4,7 @@ docs/AGENT_DESIGN.md plus docs/ENVIRONMENT_DESIGN.md §2.2 define the Agent
 session and tool-entrypoint contract: one conversation per session attempt,
 Steps share the session, only documented tools are callable, and the session
 budget is the master constraint. The session finishes when the ``test`` that
-brings the frontier to the end of the validation years returns; no other
+brings the test horizon to the end of the validation years returns; no other
 action ends it. The budget the pipeline hands over includes a trailing
 wrap-up grace window (``deadline_grace_seconds``): reaching the main deadline
 never interrupts the model — a single wrap-up prompt is injected and the
@@ -12,8 +12,8 @@ session keeps its full tool surface through the grace window; when the grace
 window, the model-call budget or the API spend cap is exhausted the session
 closes gracefully (``session_end`` with status ``deadline_exceeded``,
 ``call_budget_exhausted`` or ``api_spend_exhausted``) and the Pipeline
-records a ``deadline`` outcome and completes the rolling record from the
-frontier instead of failing the run. Main conversation calls and compactions
+records a ``deadline`` outcome and completes the validation record from the
+test horizon instead of failing the run. Main conversation calls and compactions
 are logged in the Agent trace (docs/ENVIRONMENT_DESIGN.md §2.4 and §4.2).
 """
 
@@ -131,7 +131,7 @@ class AgentSessionBudgetExhausted(SessionInterrupt):
         self.llm_calls = llm_calls
 
 
-# ``test`` advances the validation frontier and, on the last step, ends the
+# ``test`` advances the test horizon and, on the last step, ends the
 # session: it waits for every sub-agent (the last step's close would discard
 # their reports) and a finishing call ends the turn.
 _TERMINAL_TOOLS = frozenset({"test"})

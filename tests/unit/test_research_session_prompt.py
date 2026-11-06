@@ -237,7 +237,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "`fit` 与 `REFIT_PERIOD`",
     ):
         assert clause in process, clause
-    # The host reads the record; the statistic and its bar; no pass or fail.
+    # The host reads the record; the statistic and its threshold; no pass or fail.
     for clause in (
         "宿主读的是滚动记录",
         "随机选股对照组合",
@@ -419,11 +419,11 @@ def _run_facts(**geometry: object) -> dict[str, object]:
     five-year validation geometry with quarterly steps; ``years`` lists every
     year of the geometry, as the record does."""
 
-    from autotrade.pipelines.verdict import residual_bar
+    from autotrade.pipelines.verdict import residual_threshold
 
     return {
         "research_geometry": {
-            "frontier": "20200731",
+            "test_horizon": "20200731",
             "research_period": "20150801..20200731",
             "years": [{"label": f"Y{index}", "end": f"{2015 + index}0731"} for index in range(1, 11)],
             "validation_period": "20200801..20250731",
@@ -434,10 +434,10 @@ def _run_facts(**geometry: object) -> dict[str, object]:
         },
         "artifact_contract": {
             "acceptance_rules": {
-                "instrument": {
+                "significance": {
                     "alpha": 0.05,
-                    "bar_over_one_year": round(residual_bar(1.0, 0.05), 3),
-                    "bar_over_validation_period": round(residual_bar(5.0, 0.05), 3),
+                    "threshold_over_one_year": round(residual_threshold(1.0, 0.05), 3),
+                    "threshold_over_validation_period": round(residual_threshold(5.0, 0.05), 3),
                 }
             }
         },
@@ -445,10 +445,10 @@ def _run_facts(**geometry: object) -> dict[str, object]:
     }
 
 
-def test_the_run_section_states_this_runs_view_steps_and_bar() -> None:
+def test_the_run_section_states_this_runs_view_steps_and_threshold() -> None:
     """The environment tells the session, concretely, that its data ends at
     the research years' end for the whole session, the research years, the
-    number and length of the steps, the bar and the validate allowance, read
+    number and length of the steps, the threshold and the validate allowance, read
     off the facts the prompt also carries."""
 
     facts = _run_facts()
@@ -466,11 +466,11 @@ def test_the_run_section_states_this_runs_view_steps_and_bar() -> None:
     # A resumed attempt reads where its predecessor stopped on the same data
     # view; monthly steps read as months.
     later = prompts.build_run_section(
-        _run_facts(frontier="20211031", step="month", steps=60, steps_tested=15)
+        _run_facts(test_horizon="20211031", step="month", steps=60, steps_tested=15)
     )
     assert "止于研究年末 20200731，" in later
     assert "共 60 步，每步一个月；本次尝试开始时已测试 15 步，测到 20211031。" in later
-    # A geometry that states a frontier must state the rest: a missing key or
+    # A geometry that states a test horizon must state the rest: a missing key or
     # an unknown step length fails the prompt instead of dropping the line.
     broken = _run_facts()
     del broken["budgets"]["validates_per_step"]  # type: ignore[attr-defined]
@@ -478,5 +478,5 @@ def test_the_run_section_states_this_runs_view_steps_and_bar() -> None:
         prompts.build_run_section(broken)
     with pytest.raises(KeyError):
         prompts.build_run_section(_run_facts(step="week"))
-    # Facts without a frontier add no section.
+    # Facts without a test horizon add no section.
     assert "## 本次运行" not in _full_prompt()

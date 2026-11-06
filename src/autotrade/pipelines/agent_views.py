@@ -12,7 +12,7 @@ from collections.abc import Mapping, Sequence
 # null (a result with no filled trade) must not read as a missing one, and the
 # null's own centre and spread over its ``k`` draws because a percentile alone
 # does not say how far the observed excess sits from them. Informational: the
-# pipeline gates on the active series against the panel each validation draws,
+# pipeline gates on the active series against the random baseline each validation draws,
 # never on this percentile.
 NULL_CONTROL_KEYS = (
     "status",

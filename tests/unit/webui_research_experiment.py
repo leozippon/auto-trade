@@ -5,8 +5,8 @@ plane, the ledger and the result artifacts it names. ``build_experiment`` writes
 for one experiment at a chosen stage — researching, frozen with the forward replay
 running, or with its readout — from synthetic daily series, and computes
 every recorded statistic with the pipeline's own functions
-(``freeze_registration``, ``rolling_record.step_entry``, ``forward_slice``,
-``heldout_slice``, ``rolling_record.readout``), so a projection test reads
+(``freeze_registration``, ``validation_record.step_entry``, ``forward_slice``,
+``heldout_slice``, ``validation_record.readout``), so a projection test reads
 the same numbers a real experiment would carry. The ``graduated`` and ``discarded``
 stages write the records of an experiment judged under the retired sealed gate, in
 the shape that code left, for the console's reading of such ledgers.
@@ -26,7 +26,7 @@ from autotrade.common.records import write_json_atomic
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
-from autotrade.pipelines import rolling_record
+from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
 from autotrade.pipelines.experiment import freeze_registration
@@ -248,8 +248,8 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
     }
 
 
-def _with_panel(result_ref: str, scale: float, *, series: str = "strategy_daily") -> None:
-    """Give a replay's sidecar the zero-skill panel series every replay
+def _with_baselines(result_ref: str, scale: float, *, series: str = "strategy_daily") -> None:
+    """Give a replay's sidecar the random baseline series every replay
     carries: ``scale`` times its ``series``."""
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
@@ -440,19 +440,19 @@ def build_experiment(
         # no ledger record names it.
         write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=0.002, seed=9)
     if stage == "frozen_with_record":
-        # The rolling record: every step of the validation period, read off
+        # The validation record: every step of the validation period, read off
         # one replay of the frozen strategy, as the host's completion writes it.
         validation = GEOMETRY.split_research(RULES.research_years)[1]
-        plan = rolling_record.ValidationSteps.of(validation, RULES.test_step_months)
+        plan = validation_record.ValidationSteps.of(validation, RULES.test_step_months)
         record_ref = write_result(
             directory, "valid", start=SEALED[0], days=_business_day_count(SEALED[0], SEALED[1]), edge=0.002, seed=21
         )
-        _with_panel(record_ref, 0.9, series="benchmark_daily")
+        _with_baselines(record_ref, 0.9, series="benchmark_daily")
         record_replay = json.loads(Path(record_ref).read_text(encoding="utf-8"))
         record_analysis = _analysis(record_ref)
         for step in range(1, plan.count + 1):
             first, last = plan.window(step)
-            step_record = rolling_record.test_step_record(
+            step_record = validation_record.test_step_record(
                     head={
                         "experiment_id": experiment_id,
                         "epoch_id": "research",
@@ -470,9 +470,9 @@ def build_experiment(
                         "deterministic": False,
                     },
                     replay={"start": plan.start, "end": plan.end, "result_ref": record_ref},
-                    entry=rolling_record.step_entry(record_replay, record_analysis, start=first, end=last),
+                    entry=validation_record.step_entry(record_replay, record_analysis, start=first, end=last),
                     registration=gate,
-                    source=rolling_record.SOURCE_HOST_COMPLETION,
+                    source=validation_record.SOURCE_HOST_COMPLETION,
                 )
             # The session record is already in the ledger: the steps follow it.
             records.append(step_record)
@@ -482,17 +482,17 @@ def build_experiment(
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)
         replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
-        # Every forward replay carries its zero-skill panel: random names on
+        # Every forward replay carries its random baseline: random names on
         # the book's own skeleton, which ride the market as the book does.
         if seeded:
-            _with_panel(ref, 0.6)
+            _with_baselines(ref, 0.6)
         else:
-            _with_panel(ref, 0.9, series="benchmark_daily")
+            _with_baselines(ref, 0.9, series="benchmark_daily")
         if seeded:
             replicate_ref = write_result(
                 directory, "heldout", start=REPLAY["start"], days=300, edge=edge / 4, seed=8
             )
-            _with_panel(replicate_ref, 0.9)
+            _with_baselines(replicate_ref, 0.9)
             identity = {"artifact_id": "strategy_research_seed", "source_step_id": replicate["step_id"]}
             replicates.append((identity, _analysis(replicate_ref)))
             replicate_rows.append(
@@ -525,17 +525,17 @@ def build_experiment(
             seed_replicates=replicates,
         )
         if stage == "frozen_with_record":
-            judged = {"readout": rolling_record.readout(records, alpha=RULES.alpha, forward=forward)}
+            judged = {"readout": validation_record.readout(records, alpha=RULES.alpha, forward=forward)}
         else:
             # The retired sealed gate's reading and verdict, as that code wrote
-            # them: the frozen book over the sealed years against its bar.
+            # them: the frozen book over the sealed years against its threshold.
             sealed_ref = write_result(directory, "valid", start=SEALED[0], days=250, edge=2 * edge, seed=11)
-            _with_panel(sealed_ref, 0.9, series="benchmark_daily")
+            _with_baselines(sealed_ref, 0.9, series="benchmark_daily")
             sealed_analysis = _analysis(sealed_ref)
             sealed_end = sealed_analysis["strategy_daily"][-1][0]
             reading = residual_reading(sealed_analysis, start=SEALED[0], end=sealed_end, alpha=RULES.alpha)
-            reasons = [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
-            thresholds = {"alpha": RULES.alpha, "bar": reading["bar"]}
+            reasons = [] if reading["residual_information_ratio"] >= reading["threshold"] else ["sealed_residual_ir_below_bar"]
+            thresholds = {"alpha": RULES.alpha, "bar": reading["threshold"]}
             sealed = {
                 "start": SEALED[0],
                 "end": sealed_end,
