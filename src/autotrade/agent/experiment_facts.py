@@ -326,7 +326,7 @@ def _execution_policy(data_summary: Mapping[str, object]) -> dict[str, object]:
         "events_available": "events.parquet" in populated_files,
         "text_available": "text_index.parquet" in populated_files,
         "strategy_clock": "configured_schedule_only",
-        "execution_time": "order_execute_at_exact",
+        "execution_time": "order_session_open_close_or_intraday_else_execute_at_exact",
         "missing_exact_price": "reject",
         "historical_minutes_drive_strategy": False,
     }
@@ -526,7 +526,8 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "suspension_enforced": True,
             "schedule": schedule,
             "decision_frequency": "day_month_quarter_or_year",
-            "execution_time": "order_execute_at_exact",
+            "execution_time": "order_session_open_close_or_intraday_else_execute_at_exact",
+            "session_fills": "daily_bar_open_close_or_vwap_plus_slippage_intraday_limit_price_fills_once_day_low_or_high_reaches_it_locked_or_unreached_unfilled_same_day",
             "missing_exact_price": "reject",
         }
     )
