@@ -19,7 +19,11 @@ from autotrade.common.records import (
 )
 from autotrade.data_sources.tushare.cron_update import resolve_job_start_date
 from autotrade.environment.artifacts import artifact_fingerprint
-from autotrade.environment.broker import BrokerProfile, DailyBroker
+from autotrade.environment.broker import (
+    BrokerProfile,
+    DailyBroker,
+    default_permitted_boards,
+)
 from autotrade.environment.broker_core import board_of
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.sandbox import GpuMode, SandboxConfig
@@ -319,6 +323,23 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_random_baseline_buy_o
             paper_root(tmp_path) / "other", experiment_dir=experiment, artifact_id="strategy_research_abc",
             repo_root=tmp_path, track="graduated", permitted_boards=("main",),
         )
+
+
+def test_a_paper_account_keeps_only_the_boards_its_own_capital_qualifies_for(tmp_path: Path):
+    """An experiment stamped with every board at CNY 1,000,000 opens a CNY 200,000
+    Paper account that may not buy on the STAR Market or the Beijing exchange: both ask
+    CNY 500,000 of assets, whatever the experiment could buy."""
+
+    experiment = build_experiment(tmp_path / "experiments", "exp", "graduated")
+    params = read_json_object(experiment / "hitl" / "params.json")
+    stamp = {"initial_cash": 1_000_000.0, "permitted_boards": ["main", "gem", "star", "bj"]}
+    write_json_atomic(experiment / "hitl" / "params.json", {**params, **stamp})
+    book = create_book(
+        paper_root(tmp_path) / "exp", experiment_dir=experiment, artifact_id="strategy_research_abc",
+        repo_root=tmp_path, track="graduated",
+    )
+    assert read_json_object(book.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem"]
+    assert load_book(book.root).profile.permitted_boards == default_permitted_boards(PAPER_INITIAL_CASH)
 
 
 def test_the_book_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp_path: Path):
