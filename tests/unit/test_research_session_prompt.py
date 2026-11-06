@@ -162,6 +162,23 @@ def test_no_tool_description_carries_fold_or_meta_vocabulary() -> None:
         assert retired_vocabulary(text) == [], name
 
 
+def test_the_tools_state_the_validate_allowance_the_prompt_states() -> None:
+    """The replay-year budget is retired: no tool text charges one, and the
+    budget validate and smoke_backtest name is the one the run section
+    states, validates_per_step calls before the first test and between tests."""
+
+    descriptions = _tool_descriptions()
+    for name, text in descriptions.items():
+        assert not re.search(r"replay[-_ ]years?", text, re.IGNORECASE), name
+    for name in ("validate", "smoke_backtest"):
+        assert "acceptance_rules.validation.validates_per_step" in descriptions[name], name
+    assert "before the first test and between two tests" in descriptions["validate"]
+    run = prompts.build_run_section(_run_facts())
+    assert "- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 6 次。" in run
+    # A control is a comparison leg test never takes.
+    assert "test never takes it" in descriptions["validate"]
+
+
 def test_retired_tools_are_absent_from_every_role() -> None:
     surfaces = {
         "session": _SESSION_TOOLS,

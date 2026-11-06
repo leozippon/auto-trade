@@ -239,8 +239,9 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         "day unless start names a later one, which is how you measure a fit "
         "where a real batch will run it: a fit whose training window grows with "
         "the span is far slower late in the research period than on day one, so "
-        "probe a data-dense late window BEFORE spending replay-years on a "
-        "full-span batch. Returns seconds_per_day.strategy (the only figure "
+        "probe a data-dense late window BEFORE spending a validate call (each "
+        "interval between tests allows acceptance_rules.validation."
+        "validates_per_step of them) on a full-span batch. Returns seconds_per_day.strategy (the only figure "
         "that scales with the days replayed), window_build_seconds (the host "
         "side as-of view: on a late start it is almost all the one-off opening "
         "of that window, minutes of host wall clock paid once and reused by a "
@@ -254,7 +255,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         "(peak memory against the container limit, per-fit seconds against the "
         "fit timeout in force, and GPU memory for a GPU strategy), and the exact "
         "exception text on failure. It commits no revision, creates no Step, "
-        "cannot be frozen, and consumes no replay-years. Use it before "
+        "cannot be tested, and does not count against validates_per_step. Use it before "
         "validate instead of hand-writing a shell smoke test against "
         "/mnt/snapshot.",
         {
@@ -1325,8 +1326,8 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     candidate measured at ~2.0 s/day over 243 serial decision days died at
     ``strategy inference exceeded 180s`` on one rebalance day inside a 2-way
     batch. Both caps bound ONE call, so both are equally distorted by the
-    fan-out, and the whole-replay runaway is bounded elsewhere (the replay-year
-    budget and the session's own deadline).
+    fan-out, and the whole-replay runaway is bounded elsewhere (the session's
+    own deadline).
 
     The batch owns the evaluator for the pool's lifetime — a session runs
     one tool at a time — so mutating and restoring the shared config here is
@@ -1362,8 +1363,9 @@ class ValidateTool(SessionTimeBudgetAware):
     """The one Validation tool: pre-registered candidates as sibling Steps.
 
     Every candidate gets its own ``modification_check``, its own immutable
-    revision, one replay over the batch's span and one Step node, and costs one
-    replay-year per research year of that span. The candidates of a call share
+    revision, one replay over the batch's span and one Step node; the call
+    counts once against the interval's ``validates_per_step`` allowance,
+    whatever its width. The candidates of a call share
     one parent node and one span, so a round's numbers are comparable and each
     hypothesis is registered before any result exists, at every width from one
     to six.
@@ -1516,11 +1518,11 @@ class ValidateTool(SessionTimeBudgetAware):
                                 "description": (
                                     "true registers a comparison leg (a "
                                     "baseline, the mechanism-removed carrier, a "
-                                    "placebo): it replays and costs "
-                                    "replay-years like any candidate but can "
-                                    "never be nominated or frozen, so a real "
-                                    "candidate registered as a control forfeits "
-                                    "its nomination; false for a candidate."
+                                    "placebo): it replays in the same call like "
+                                    "any candidate, but test never takes it, so "
+                                    "a real candidate registered as a control "
+                                    "can never be tested or frozen; false for a "
+                                    "candidate."
                                 ),
                             },
                         },
@@ -1589,10 +1591,11 @@ class ValidateTool(SessionTimeBudgetAware):
             return self._invoke_exempt(arguments)
 
     def _invoke_exempt(self, arguments: Mapping[str, object]) -> ToolResult:
-        # Everything that can refuse the batch runs before a single
-        # replay-year is spent, so a rejected batch costs nothing and the Agent
-        # can fix the offending input and call again. Because it costs nothing,
-        # the same rejection can also repeat forever: ``_rejected`` counts it.
+        # Everything that can refuse the batch runs before any replay starts
+        # or the call counts against validates_per_step, so a rejected batch
+        # costs nothing and the Agent can fix the offending input and call
+        # again. Because it costs nothing, the same rejection can also repeat
+        # forever: ``_rejected`` counts it.
         if self.backtest.validates_in_interval >= self.backtest.validates_per_step:
             raise ToolError(
                 f"validate refused: acceptance_rules.validation.validates_per_step allows "
