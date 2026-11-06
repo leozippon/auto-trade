@@ -13,7 +13,8 @@ window, the model-call budget or the API spend cap is exhausted the session
 closes gracefully (``session_end`` with status ``deadline_exceeded``,
 ``call_budget_exhausted`` or ``api_spend_exhausted``) and the Pipeline
 records a ``deadline`` outcome and completes the validation record from the
-test horizon instead of failing the run. Main conversation calls and compactions
+test horizon instead of failing the run; the readout follows from the host's
+forward replay. Main conversation calls and compactions
 are logged in the Agent trace (docs/ENVIRONMENT_DESIGN.md §2.4 and §4.2).
 """
 
@@ -363,8 +364,8 @@ class AgentSessionRunner:
         self.time_budget = validate_time_budget_bindings(
             time_budget, tuple(bindings), owner="Agent runner"
         )
-        # The tail of the session clock the parent keeps for its own
-        # finalization; children and the parent's waits for them stop there.
+        # The tail of the session clock the parent keeps for its wrap-up;
+        # children and the parent's waits for them stop there.
         self._child_reserve_seconds = self._child_reserve_for_budget()
         if self.subagent is not None:
             self.subagent.parent_reserve_seconds = self._child_reserve_seconds
@@ -409,8 +410,7 @@ class AgentSessionRunner:
         ``preamble`` is inserted between the system prompt and the instruction:
         a resumed attempt puts the interrupted one's compaction summary there.
         ``complete_validations`` are the Validations earlier attempts recorded,
-        seeded as finalization candidates so the resumed session can nominate
-        them.
+        seeded so the resumed session can test them.
         ``budget_total_seconds`` is the whole session budget the time-budget
         notices are measured against; a resumed attempt hands over the experiment
         total while its time budget only holds what is left of it.
@@ -1030,9 +1030,9 @@ class AgentSessionRunner:
         three reports.
 
         Two exemptions, because a refusal that cannot be satisfied loses more
-        than the reports it protects. The session's own tail (hard finalization,
-        or the wrap-up grace, which hard finalization never enters) is where
-        finishing is the only remaining move. And whatever the phase, a child
+        than the reports it protects. The session's own tail, the wrap-up grace,
+        is where finishing is the only remaining move (the host completes the
+        record once the budget is spent). And whatever the phase, a child
         that outlives the teardown barrier's own window is one the session no
         longer has time to wait for.
         """
@@ -1401,7 +1401,7 @@ class AgentSessionRunner:
         """The tail to withhold from the children of THIS session.
 
         A child shares the session clock, so it must stop before the parent's
-        finalization window opens: the child cancelled at the parent's deadline
+        wrap-up window opens: the child cancelled at the parent's deadline
         had spent shared LLM calls on a report nobody could receive. The tail
         is withheld only while there is a session outside it — a budget no
         larger than the tail belongs to a session that starts inside its own
@@ -1419,11 +1419,10 @@ class AgentSessionRunner:
     def _subagent_wait_floor(self) -> float | None:
         """Remaining seconds at which the parent stops waiting for a child.
 
-        ``None`` means it must not wait at all: once the wrap-up prompt is out
-        or hard finalization is active, what is left is finishing time. A session
-        with three complete Validations spent 55 minutes inside one such wait,
-        crossed the finalize window, the main deadline and the whole grace
-        without ever reaching the loop top, and ended selecting none of them.
+        ``None`` means it must not wait at all: once the wrap-up prompt is out,
+        what is left is finishing time. A session once spent 55 minutes inside
+        one such wait and crossed the main deadline and the whole grace without
+        ever reaching the loop top.
         """
 
         if self._wrap_up_sent:
@@ -1434,8 +1433,9 @@ class AgentSessionRunner:
         """Skip no_tool_call when a sub-agent is still running; wait for progress.
 
         Returns False once the wait floor is reached, so the turn falls through
-        to the ordinary nudge and the loop reaches its next top — where hard
-        finalization starts — instead of yielding the rest of the session.
+        to the ordinary nudge and the loop reaches its next top — where the
+        wrap-up notice and the deadline are checked — instead of yielding the
+        rest of the session.
         """
         uncollected = self._uncollected_subagent_jobs()
         if not uncollected:

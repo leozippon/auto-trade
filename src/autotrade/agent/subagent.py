@@ -659,7 +659,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         self.compactor = compactor
         # Seconds of the shared session budget reserved for the parent alone:
         # a child's deadline is the session's remaining time minus this tail,
-        # so every child returns before the parent's finalization window opens.
+        # so every child returns before the parent's wrap-up window opens.
         # The runner sets it from its own session config; zero means the plain
         # session deadline is the only bound.
         self.parent_reserve_seconds = 0.0
@@ -758,7 +758,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             started["resumed_from"] = resumed_from
         if self.parent_reserve_seconds > 0:
             # Why a child can end while the session clock still shows time:
-            # the tail is the parent's finalization window.
+            # the tail is the parent's wrap-up window.
             started["parent_reserve_seconds"] = self.parent_reserve_seconds
         self._emit(TraceEvent.SUBAGENT_TASK, started)
         brief = task.strip()
@@ -1416,8 +1416,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
 
         The session budget is shared, so the child's share ends
         ``parent_reserve_seconds`` before the session's does: the tail belongs
-        to the parent's finalization. A child that ran to the very end of the
-        budget once took the parent's whole selection window with it.
+        to the parent's wrap-up. A child that ran to the very end of the
+        budget once took the parent's whole wrap-up window with it.
         """
 
         return time.monotonic() >= local_deadline or (
