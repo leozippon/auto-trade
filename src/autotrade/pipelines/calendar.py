@@ -99,13 +99,6 @@ def anchor_before(start: str) -> datetime:
     return datetime.combine(day, RESEARCH_ANCHOR_TIME, tzinfo=CN_TZ)
 
 
-def anchor_on(day: str) -> datetime:
-    """23:59:59 +08:00 of ``day`` itself: the decision view that has read
-    every row stamped on it, which is the view a frontier on ``day`` mounts."""
-
-    return datetime.combine(date.fromisoformat(day), RESEARCH_ANCHOR_TIME, tzinfo=CN_TZ)
-
-
 def months_before(end: str, months: int) -> str:
     """The first day of the ``months``-long window that ends on ``end``."""
 
@@ -340,7 +333,6 @@ __all__ = [
     "ResearchGeometry",
     "Slot",
     "anchor_before",
-    "anchor_on",
     "load_sse_trading_days",
     "replay_window",
     "step_windows",

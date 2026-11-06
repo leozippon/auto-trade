@@ -158,7 +158,7 @@ def render() -> str:
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
-            "## 本次运行\n{由运行事实生成：前沿日期；研究年的个数与日期；验证期的日期、步数、每步长度与本次尝试开始时已测试的步数；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限}\n\n"
+            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与前沿；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限}\n\n"
             f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
             f"{build_exploration_section('[存在时注入]')}\n\n"
@@ -182,7 +182,7 @@ def render() -> str:
         "| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略，以及各读文件根在 `shell` 里的挂载路径 |",
         "| `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |",
         "",
-        "动态事实只作为常用索引。Agent 不能把其中的日期、period、会话标识或资源元数据用作交易信号，也不能据此推断前沿之后的行情。",
+        "动态事实只作为常用索引。Agent 不能把其中的日期、period、会话标识或资源元数据用作交易信号，也不能据此推断研究年末之后的行情。",
         "",
     ]
     return "\n".join(parts)

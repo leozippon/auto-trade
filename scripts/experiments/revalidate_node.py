@@ -7,10 +7,13 @@ is replayed by the evaluator a session's ``validate`` calls, assembled
 from the arm's own ``hitl/params.json`` exactly as the round smoke assembles a
 scratch experiment (``_round._smoke_replays``): the arm's PIT view seed
 hardlinked in, the arm's own sandbox image and pretrained-store pin, cards
-taken by ``hitl_state.select_gpus``. A span is a span of the visible research
-years (``full``, ``Yk`` or ``Yi..Yj``), resolved as the session resolved it,
-so nothing past them is ever replayed here; the only path to the sealed years,
-forward and Held-out is the arm's own forward stage. What may be changed is
+taken by ``hitl_state.select_gpus``. A span is a span of the arm's research
+years (``full``, ``Yk`` or ``Yi..Yj``, the first ``research_years`` of its
+geometry as its params name them), resolved as the session resolved it, so
+nothing past them is ever replayed here: the validation years are the tests'
+and the host's completion, forward and Held-out the arm's own forward stage.
+An arm whose params name no ``research_years`` (created before the rolling
+validation) is refused before anything is written. What may be changed is
 recorded: ``--variant`` replays a modified copy of the node's ``output/``
 instead (an ablation; the reading keeps the diff against the recorded bytes),
 ``--seed`` gives the strategy's one seed line another integer (the one change
@@ -63,7 +66,7 @@ from autotrade.environment.sandbox_images import (
     prepare_experiment_sandbox_image,
 )
 from autotrade.environment.step_tree import node_handle
-from autotrade.pipelines.config import research_span
+from autotrade.pipelines.config import acceptance_for, research_span
 from autotrade.pipelines.experiment import _SEED_LINE, _SEED_NAME
 from autotrade.pipelines.hitl_state import select_gpus
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -203,6 +206,9 @@ def main(argv: list[str] | None = None) -> int:
         params = read_json_object(arm / "hitl" / "params.json", missing_ok=True)
         if not params:
             raise ValueError(f"missing experiment params: {arm / 'hitl' / 'params.json'}")
+        # The arm's own split, read as its worker reads it: a record without
+        # research_years is refused rather than read under every year.
+        research_years = acceptance_for(params).research_years
         row = session_step(ExperimentLedger(arm / "ledgers" / "experiment_ledger.jsonl").read(), args.node)
         out = label_dir(args.experiment, node_handle(row["step_id"]), args.label)
     except (OSError, ValueError) as exc:
@@ -262,9 +268,9 @@ def main(argv: list[str] | None = None) -> int:
             store=FilesystemArtifactStore(experiment_dir / "artifacts" / "strategy"),
             ref_store=AgentRefStore(experiment_dir),
         ).pipeline
-        # The spans the session resolved a node's span over: its visible years.
+        # The spans the session resolved a node's span over: its research years.
         _, years = pipeline.research_inputs()
-        request = research_span(years, args.span).request(
+        request = research_span(years[:research_years], args.span).request(
             revision, schedule=options.rolling.schedule, broker_profile=options.rolling.broker_profile
         )
         result = pipeline.evaluator.evaluate(request, max_days=args.max_days, start_day=args.start_day)

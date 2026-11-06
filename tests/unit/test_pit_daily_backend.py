@@ -16,7 +16,6 @@ import pyarrow.parquet as pq
 import pytest
 
 from autotrade.common.records import HOST_PATH_RE
-from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
@@ -2884,11 +2883,10 @@ def test_a_span_prebuild_encodes_the_parts_its_replay_publishes(tmp_path: Path) 
     assert prebuild("second")["reused"] is True
 
 
-def test_a_test_replay_needs_the_seeds_warm_start_and_the_frontiers_view(tmp_path: Path) -> None:
+def test_a_test_replay_needs_the_seeds_warm_start(tmp_path: Path) -> None:
     """A test opens its span on the as-of state the seed prebuilt for the
-    span's first slot and mounts the decision view at the new frontier next;
-    a seed that carries neither is refused by name, before any replay, and a
-    prebuilt one passes."""
+    span's first slot; a seed that lacks it is refused by name, before any
+    replay, and a prebuilt one passes."""
 
     snapshot, slots = _write_span_release(tmp_path)
     request = _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
@@ -2909,11 +2907,3 @@ def test_a_test_replay_needs_the_seeds_warm_start_and_the_frontiers_view(tmp_pat
         host_dir=tmp_path / "stash_build",
     )
     backend.require_warm_start(request)
-
-    provider, _fake = _provider_with_fake_builder(tmp_path / "provider")
-    decision = datetime(2024, 1, 31, 23, 59, 59, tzinfo=CN_TZ)
-    with pytest.raises(FileNotFoundError, match="no decision view at 2024-01-31T23:59:59\\+08:00") as missing:
-        provider.require_decision_view(decision_time=decision)
-    assert "step boundaries" in str(missing.value)
-    built = provider.prepare_decision(decision_time=decision)
-    assert provider.require_decision_view(decision_time=decision) == built

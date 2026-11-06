@@ -162,6 +162,23 @@ def test_no_tool_description_carries_fold_or_meta_vocabulary() -> None:
         assert retired_vocabulary(text) == [], name
 
 
+def test_the_tools_state_the_validate_allowance_the_prompt_states() -> None:
+    """The replay-year budget is retired: no tool text charges one, and the
+    budget validate and smoke_backtest name is the one the run section
+    states, validates_per_step calls before the first test and between tests."""
+
+    descriptions = _tool_descriptions()
+    for name, text in descriptions.items():
+        assert not re.search(r"replay[-_ ]years?", text, re.IGNORECASE), name
+    for name in ("validate", "smoke_backtest"):
+        assert "acceptance_rules.validation.validates_per_step" in descriptions[name], name
+    assert "before the first test and between two tests" in descriptions["validate"]
+    run = prompts.build_run_section(_run_facts())
+    assert "- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 6 次。" in run
+    # A control is a comparison leg test never takes.
+    assert "test never takes it" in descriptions["validate"]
+
+
 def test_retired_tools_are_absent_from_every_role() -> None:
     surfaces = {
         "session": _SESSION_TOOLS,
@@ -201,14 +218,16 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     process = stable[stable.index("# 研究与回测流程") : stable.index("# 读数")]
     readings = stable[stable.index("# 读数") : stable.index("# 策略")]
     assert "AI 首席量化研究官（AI Chief Quantitative Research Officer）" in stable
-    # Research on the visible years, each test extends the backtest one step,
-    # then the host-run Forward and Held-out stages, then Paper.
+    # Research on the visible years, whose data view never moves; each test
+    # extends the backtest one step and reveals it through its results; then
+    # the host-run Forward and Held-out stages, then Paper.
     for clause in (
-        "研究期分两段：研究年一开始就可见，验证期由 `test` 逐步揭开",
-        "你能读到的数据止于当前的前沿日期",
-        "用 `validate` 回测",
-        "`test` 把一个候选从验证期起点回测到下一步的终点，这一步的结果记入本实验的滚动记录",
-        "随后前沿推进一步",
+        "研究期分两段：研究年与验证期",
+        "你能读到的数据止于研究年末，整个会话都不变",
+        "验证期的数据不会挂载，只通过 `test` 的结果一步一步揭开",
+        "用 `validate` 在研究年内回测",
+        "`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的滚动记录",
+        "前沿推进一步",
         "已记入滚动记录的条目不会改写",
         "验证期最后一步测试完，会话结束，最后测试的候选被冻结",
         "会话不能主动结束",
@@ -229,7 +248,8 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     ):
         assert clause in readings, clause
     assert "参考包、研究方向与研究者指令都不能放宽它们" in stable
-    assert "读取前沿之后的数据" in stable and "模型自身的知识" in stable
+    assert "读取研究年末之后的数据" in stable and "模型自身的知识" in stable
+    assert "验证期只通过 `test` 的结果了解" in stable
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
     # The retired action set and its wording are gone from every surface the
     # session reads under this contract: no freeze or finishing action, no
@@ -396,7 +416,8 @@ def test_the_contract_quotes_no_forward_figure_and_names_only_real_row_fields() 
 
 def _run_facts(**geometry: object) -> dict[str, object]:
     """Facts carrying what the run section reads, at a five-year research and
-    five-year validation geometry with quarterly steps."""
+    five-year validation geometry with quarterly steps; ``years`` lists every
+    year of the geometry, as the record does."""
 
     from autotrade.pipelines.verdict import residual_bar
 
@@ -404,7 +425,7 @@ def _run_facts(**geometry: object) -> dict[str, object]:
         "research_geometry": {
             "frontier": "20200731",
             "research_period": "20150801..20200731",
-            "years": [{"label": f"Y{index}"} for index in range(1, 6)],
+            "years": [{"label": f"Y{index}", "end": f"{2015 + index}0731"} for index in range(1, 11)],
             "validation_period": "20200801..20250731",
             "step": "quarter",
             "steps": 20,
@@ -424,30 +445,31 @@ def _run_facts(**geometry: object) -> dict[str, object]:
     }
 
 
-def test_the_run_section_states_this_runs_frontier_steps_and_bar() -> None:
-    """The environment tells the session, concretely, the frontier date, the
-    research years, the number and length of the steps, the bar and the
-    validate allowance, read off the facts the prompt also carries."""
+def test_the_run_section_states_this_runs_view_steps_and_bar() -> None:
+    """The environment tells the session, concretely, that its data ends at
+    the research years' end for the whole session, the research years, the
+    number and length of the steps, the bar and the validate allowance, read
+    off the facts the prompt also carries."""
 
     facts = _run_facts()
     prompt = prompts.build_system_prompt(experiment_facts=facts)
     section = prompt[prompt.index("## 本次运行") : prompt.index("## 运行事实")]
     assert prompt.index("# 环境") < prompt.index("## 本次运行")
     for clause in (
-        "- 前沿：20200731；会话里的数据止于这一天。",
-        "- 研究年：5 个，20150801..20200731。",
+        "- 数据：会话挂载的数据止于研究年末 20200731，整个会话都不变；验证期只通过 `test` 的结果揭开。",
+        "- 研究年：5 个，20150801..20200731；`validate` 只在研究年内回测。",
         "- 验证期：20200801..20250731，共 20 步，每步一个季度；本次尝试开始时已测试 0 步。",
         "- 门槛：α = 0.05；一年区间约 1.645，整个验证期约 0.736。",
         "- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 6 次。",
     ):
         assert clause in section, clause
-    # A resumed attempt reads where its predecessor stopped; monthly steps
-    # read as months.
+    # A resumed attempt reads where its predecessor stopped on the same data
+    # view; monthly steps read as months.
     later = prompts.build_run_section(
         _run_facts(frontier="20211031", step="month", steps=60, steps_tested=15)
     )
-    assert "- 前沿：20211031；" in later
-    assert "共 60 步，每步一个月；本次尝试开始时已测试 15 步" in later
+    assert "止于研究年末 20200731，" in later
+    assert "共 60 步，每步一个月；本次尝试开始时已测试 15 步，测到 20211031。" in later
     # A geometry that states a frontier must state the rest: a missing key or
     # an unknown step length fails the prompt instead of dropping the line.
     broken = _run_facts()

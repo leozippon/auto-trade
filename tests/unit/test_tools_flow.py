@@ -2017,7 +2017,6 @@ def _fold_backtest_tool(
         decision_time=datetime(2021, 12, 31, 23, 59, 59, tzinfo=UTC),
         years=(ReplaySpan("Y1", "valid", "20210701", "20220630", snapshot),),
         validation=ReplaySpan("validation", "valid", "20220701", "20230630", snapshot),
-        decision_view_at=lambda _anchor: snapshot,
         window_months=24,
         max_llm_calls=3,
         deadline_seconds=600.0,

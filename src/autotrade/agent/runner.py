@@ -132,8 +132,8 @@ class AgentSessionBudgetExhausted(SessionInterrupt):
 
 
 # ``test`` advances the validation frontier and, on the last step, ends the
-# session: it waits for every sub-agent (the container restarts behind it) and
-# a finishing call ends the turn.
+# session: it waits for every sub-agent (the last step's close would discard
+# their reports) and a finishing call ends the turn.
 _TERMINAL_TOOLS = frozenset({"test"})
 # The Agent's own compaction: the tool validates the summary, the runner
 # rebuilds the conversation once the turn's tool results are in.

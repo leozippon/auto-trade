@@ -15,7 +15,6 @@ import shutil
 import threading
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -105,9 +104,7 @@ from .calendar import (
     MACRO_HISTORY_START,
     Slot,
     anchor_before,
-    anchor_on,
     months_before,
-    step_windows,
     yyyymmdd,
 )
 from .config import (
@@ -118,11 +115,11 @@ from .config import (
     ResearchSessionRequest,
     ResearchSessionResult,
     SessionResume,
-    SnapshotBundle,
     StepResult,
     positive_spend_cap,
 )
 from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage
+from .rolling_record import ValidationSteps
 from .session_tools import (
     EnvironmentBlocked,
     NullControlTool,
@@ -429,78 +426,6 @@ def _strategy_sandbox(evaluator: object) -> SandboxConfig:
     sandbox = getattr(evaluator, "sandbox", None)
     return sandbox if isinstance(sandbox, SandboxConfig) else SandboxConfig()
 
-class _SessionView:
-    """What the session sees of the data: the mounted decision view, the facts
-    file and the container that reads them.
-
-    A test advances the frontier by one step; :meth:`advance` then stops the
-    session container, mounts the decision view at the new frontier over the
-    same workspace, rewrites the run facts with the new frontier and the steps
-    tested, and starts the container again, so the session goes on where it
-    was with one more step of data in view.
-    """
-
-    def __init__(
-        self,
-        developer: LLMResearchDeveloper,
-        local: LocalSandbox,
-        request: ResearchSessionRequest,
-        manifest: RunManifest,
-        *,
-        inputs_dir: Path,
-        models_dir: Path,
-    ) -> None:
-        self.developer = developer
-        self.local = local
-        self.request = request
-        self.manifest = manifest
-        self.inputs_dir = inputs_dir
-        self.models_dir = models_dir
-        self.sandbox: DockerSandbox | None = None
-        self.paths = local.paths
-        self.steps_tested = len(request.tests_before)
-
-    def write_facts(self, paths) -> dict[str, object]:
-        """Write the read-only facts file from the manifest as it stands."""
-
-        self.paths = paths
-        if self.inputs_dir.exists():
-            chmod_tree(self.inputs_dir, file_mode=0o644, dir_mode=0o755)
-        facts = self.developer._session_facts(
-            self.request, manifest=self.manifest, paths=paths, models_dir=self.models_dir
-        )
-        write_json_atomic(self.inputs_dir / SESSION_CONTEXT_NAME, facts)
-        chmod_tree(self.inputs_dir, file_mode=0o444, dir_mode=0o555)
-        return facts
-
-    def advance(self, snapshot: SnapshotBundle, frontier: str) -> None:
-        """Mount ``snapshot``, the decision view at ``frontier``, and restart
-        the session container on it."""
-
-        request = self.request
-        if self.sandbox is not None:
-            self.sandbox.stop()
-        self.steps_tested += 1
-        self.developer._install_snapshot_view(
-            self.local, snapshot, frontier=frontier, window_months=request.window_months,
-            session_key=request.session_key,
-        )
-        self.manifest.update(
-            research=research_geometry_record(
-                request.years,
-                research_years=request.research_years,
-                test_step_months=int(request.acceptance_rules["test_step_months"]),  # type: ignore[call-overload]
-                steps_tested=self.steps_tested,
-                window_months=request.window_months,
-                decision_time=anchor_on(frontier).isoformat(),
-            ),
-            snapshots={"decision_input": {"snapshot_id": snapshot.snapshot_id}},
-        )
-        self.write_facts(self.paths)
-        if self.sandbox is not None:
-            self.sandbox.start()
-
-
 class LLMResearchDeveloper:
     """Adapter from the native Agent loop to ``ResearchDeveloper``."""
 
@@ -636,7 +561,6 @@ class LLMResearchDeveloper:
         tree = self._install_step_tree(paths)
         sandbox: DockerSandbox | None = None
         emit_event = trace.emit
-        view = _SessionView(self, local, request, manifest, inputs_dir=inputs_dir, models_dir=models_dir)
         try:
             if self.command_runner_factory is not None:
                 command_runner = self.command_runner_factory(workspace_root)
@@ -665,9 +589,10 @@ class LLMResearchDeveloper:
                     ),
                 )
                 sandbox.start()
-                view.sandbox = sandbox
                 command_runner = PersistentCommandRunner(sandbox)
-            facts = view.write_facts(paths)
+            facts = self._write_session_facts(
+                request, manifest=manifest, paths=paths, inputs_dir=inputs_dir, models_dir=models_dir
+            )
 
             modification = ModificationCheckTool(
                 output_dir,
@@ -711,7 +636,6 @@ class LLMResearchDeveloper:
                 session_ref=session_ref,
                 trace=trace,
                 time_budget=time_budget,
-                view=view,
             )
 
             def budget_used_now() -> dict[str, object]:
@@ -907,7 +831,6 @@ class LLMResearchDeveloper:
                     test_step_months=int(request.acceptance_rules["test_step_months"]),  # type: ignore[call-overload]
                     steps_tested=len(request.tests_before),
                     window_months=request.window_months,
-                    decision_time=request.decision_time.isoformat(),
                 ),
                 # The index this arm is graded against; the Agent-visible facts
                 # publish it so a session designs against the same benchmark
@@ -1051,10 +974,7 @@ class LLMResearchDeveloper:
             repo_root=self.repo_root,
         )
         _environment_phase(request.progress_hook, "pit_view", request.run_id)
-        self._install_snapshot_view(
-            local, request.snapshot, frontier=request.frontier, window_months=request.window_months,
-            session_key=request.session_key,
-        )
+        self._install_snapshot_view(local, request)
         return mounted_memory
 
     def _session_tools(
@@ -1078,12 +998,10 @@ class LLMResearchDeveloper:
         session_ref: str,
         trace: AgentTraceWriter,
         time_budget: InferenceTimeBudget,
-        view: _SessionView,
     ) -> tuple[SessionValidations, SmokeBacktestTool, list[Tool], NullControlTool | None]:
         """The parent session's tools over the session's Validations; returns
         the Validations, the smoke tool, the tool list and the null-control
-        tool (None when the arm allows no null controls). ``view`` is what a
-        test advances after it records its step."""
+        tool (None when the arm allows no null controls)."""
 
         backtest = SessionValidations(
             request=request,
@@ -1177,8 +1095,8 @@ class LLMResearchDeveloper:
             StepRollbackTool(tree, output_dir, models_dir, session_ref=session_ref)
         )
         # The one way forward and the one way the session ends: a test records
-        # its step in the ledger, then the view advances to the new frontier.
-        tools.append(TestTool(backtest, advance_view=view.advance, trace_emit=trace.emit))
+        # its step in the ledger and returns its results; the view stays.
+        tools.append(TestTool(backtest, trace_emit=trace.emit))
         return backtest, smoke, tools, null_control_tool
 
     def _session_runner(
@@ -1463,23 +1381,16 @@ class LLMResearchDeveloper:
             link_copytree(experiment_tree, paths.steps)
         return StepTree(paths.steps)
 
-    def _install_snapshot_view(
-        self,
-        local: LocalSandbox,
-        snapshot: SnapshotBundle,
-        *,
-        frontier: str,
-        window_months: int,
-        session_key: str,
-    ) -> None:
-        """Mount the decision view ``snapshot`` as the session's ``/mnt/snapshot``:
-        the view at ``frontier``, re-mounted over whatever the attempt or the
-        test before left there (a resumed attempt mounts the frontier's view,
-        a test the next one)."""
+    def _install_snapshot_view(self, local: LocalSandbox, request: ResearchSessionRequest) -> None:
+        """Mount the session's decision view (``request.snapshot``, the view at
+        the end of the research years) as its ``/mnt/snapshot`` for the whole
+        session, over whatever an earlier attempt left there."""
 
+        snapshot = request.snapshot
         source = Path(snapshot.decision_ref).resolve(strict=True)
         target = local.paths.current_snapshot
-        start, end = months_before(frontier, window_months), frontier
+        end = yyyymmdd(request.decision_time)
+        start = months_before(end, request.window_months)
         _remove_mounted_tree(target)
         if source.is_dir():
             local.bind_snapshot_view(source)
@@ -1511,9 +1422,28 @@ class LLMResearchDeveloper:
         install_agent_data_contract(
             local.paths,
             kind=Stage.RESEARCH,
-            session_ref=self.ref_store.get_or_create("session", session_key),
+            session_ref=self.ref_store.get_or_create("session", request.session_key),
             views={"snapshot": (target, "/mnt/snapshot")},
         )
+
+    def _write_session_facts(
+        self,
+        request: ResearchSessionRequest,
+        *,
+        manifest: RunManifest,
+        paths,
+        inputs_dir: Path,
+        models_dir: Path,
+    ) -> dict[str, object]:
+        """Write the read-only facts file of this attempt from the manifest;
+        returns the facts. Written once: nothing in the session moves them."""
+
+        if inputs_dir.exists():
+            chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
+        facts = self._session_facts(request, manifest=manifest, paths=paths, models_dir=models_dir)
+        write_json_atomic(inputs_dir / SESSION_CONTEXT_NAME, facts)
+        chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
+        return facts
 
     def _session_facts(
         self,
@@ -1566,7 +1496,6 @@ def research_geometry_record(
     test_step_months: int,
     steps_tested: int,
     window_months: int,
-    decision_time: str,
 ) -> dict[str, object]:
     """The research geometry as a session may know it: its own dates only.
 
@@ -1574,18 +1503,19 @@ def research_geometry_record(
     console's prompt preview) or the one-year spans a session replays them as
     (``ResearchSessionRequest.years``); the first ``research_years`` are the
     research years, the rest the validation years, tiled into steps of
-    ``test_step_months`` of which ``steps_tested`` are already revealed.
-    ``frontier`` is the last day the session can read when the attempt opens
-    (the day of ``decision_time``). Every decision view carries the
-    ``window_months`` of history that end on its anchor day: ``input_window``
-    is the session's view at ``decision_time``, and each year's
-    ``input_window`` is that of the view its replay starts from, anchored the
-    day before the year starts. The validation years' dates are stated so the
-    session knows what its tests reveal; the periods after the last year exist
-    and are hidden, and neither their dates nor their slots are named anywhere
-    a session can read. The prompt's run section reads ``frontier``,
+    ``test_step_months`` of which ``steps_tested`` are already tested. The
+    session's data view is the decision view at the research years' end
+    (``decision_time``) for the whole session; ``frontier`` is the rolling
+    record's, the day the tests have reached (the research years' end before
+    the first). Every decision view carries the ``window_months`` of history
+    that end on its anchor day: ``input_window`` is the session's view, and
+    each year's ``input_window`` is that of the view its replay starts from,
+    anchored the day before the year starts. The validation years' dates are
+    stated so the session knows what its tests reveal; the periods after the
+    last year exist and are hidden, and neither their dates nor their slots
+    are named anywhere a session can read. The prompt's run section reads
     ``research_period``, ``validation_period``, ``step``, ``steps``,
-    ``steps_tested`` and ``years`` (``agent/prompts.py``).
+    ``steps_tested``, ``frontier`` and ``years`` (``agent/prompts.py``).
     """
 
     def input_window(end: str) -> str:
@@ -1597,27 +1527,28 @@ def research_geometry_record(
     research, validation = years[:research_years], years[research_years:]
     if not research or not validation:
         raise ValueError("the geometry needs at least one research year and one validation year")
-    steps = step_windows(validation[0].start, validation[-1].end, test_step_months)
-    if not 0 <= steps_tested <= len(steps):
-        raise ValueError(f"steps_tested must be 0..{len(steps)}, got {steps_tested!r}")
-    frontier = yyyymmdd(datetime.fromisoformat(decision_time))
+    steps = ValidationSteps.of(validation, test_step_months)
     return {
-        "decision_time": decision_time,
-        "frontier": frontier,
-        "input_window": input_window(frontier),
+        "decision_time": anchor_before(validation[0].start).isoformat(),
+        "input_window": input_window(research[-1].end),
         "history_floors": {
             "daily": DAILY_HISTORY_START,
             "macro": dict.fromkeys(BACKFILLED_MACRO_DATASETS, MACRO_HISTORY_START),
         },
         "research_period": f"{research[0].start}..{research[-1].end}",
-        "validation_period": f"{validation[0].start}..{validation[-1].end}",
+        "validation_period": f"{steps.start}..{steps.end}",
         "step": STEP_NAMES[test_step_months],
-        "steps": len(steps),
+        "steps": steps.count,
         "steps_tested": steps_tested,
+        "frontier": steps.frontier_after(steps_tested),
         "validation_note": (
-            "the validation years are lived through one test at a time: each test "
-            "reveals the next step up to the new frontier (acceptance_rules.validation); "
-            "no view, span, tool or reading of this session reaches past the frontier"
+            "the session's data view (decision_time, input_window) ends on the last day of "
+            "the research years and stays there for the whole session, and validate replays "
+            "spans inside the research years only. The validation years reach the session "
+            "only through test results: each test replays its candidate from the validation "
+            "start to the end of the next step, the new frontier, and returns the results "
+            "step by step (acceptance_rules.validation); frontier is the day the tests have "
+            "reached, the end of the research years before the first test"
         ),
         "years": [
             {
@@ -1631,9 +1562,9 @@ def research_geometry_record(
             for year in years
         ],
         "spans": (
-            f"{FULL_SPAN} (the research years Y1..Y{research_years}), one year such as Y1, "
-            f"or contiguous years such as Y1..Y{len(years)}; a span may reach past "
-            "the research years only as far as the frontier"
+            f"{FULL_SPAN} (the research years Y1..Y{research_years}), one research year "
+            f"such as Y1, or contiguous research years such as Y1..Y{research_years}; a "
+            "span reaching past the research years is refused"
         ),
     }
 
@@ -1667,7 +1598,7 @@ STEP_NAMES = {1: "month", 3: "quarter"}
 
 # The ``forbidden`` fact of a research session.
 SESSION_FORBIDDEN = [
-    "data_after_the_frontier",
+    "data_after_the_research_years",
     "forward_period",
     "heldout",
     "external_network",

@@ -33,9 +33,9 @@ SESSION_PREAMBLE = """\
 
 SESSION_PROCESS_SECTION = """\
 # 研究与回测流程
-研究期分两段：研究年一开始就可见，验证期由 `test` 逐步揭开；你能读到的数据止于当前的前沿日期。
-1. 研究：写候选，用 `validate` 回测。研究方向来自参考包（`refs/`）与「环境」里注入的方向。
-2. 测试：`test` 把一个候选从验证期起点回测到下一步的终点，这一步的结果记入本实验的滚动记录；随后前沿推进一步，挂载的数据随之更新，工作区保留。两步之间可以继续研究、换候选；已记入滚动记录的条目不会改写。
+研究期分两段：研究年与验证期。你能读到的数据止于研究年末，整个会话都不变；验证期的数据不会挂载，只通过 `test` 的结果一步一步揭开。
+1. 研究：写候选，用 `validate` 在研究年内回测。研究方向来自参考包（`refs/`）与「环境」里注入的方向。
+2. 测试：`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的滚动记录，前沿推进一步。两步之间可以继续研究、换候选；已记入滚动记录的条目不会改写。
 3. 结束：验证期最后一步测试完，会话结束，最后测试的候选被冻结。会话不能主动结束；预算耗尽时，宿主用最后测试的候选跑完剩下的步。
 4. 之后：宿主在会话从未见过的数据上运行 Forward 与 Held-out 两个阶段，读数不回到会话；是否进入 Paper（每日出单、人工交易）由运营者决定。冻结后再没有 Agent 改它，需要随时间调整的部分要写进策略自己的 `fit` 与 `REFIT_PERIOD`。\
 """
@@ -54,8 +54,8 @@ SESSION_STRATEGY_SECTION = """\
 
 SESSION_PROHIBITIONS = """\
 # 禁止事项
-这些规则保护前沿之后数据的隔离与回测的真实，越过任何一条，本实验的证据就不再成立；参考包、研究方向与研究者指令都不能放宽它们。
-- 读取前沿之后的数据，或从日期、路径、元数据和模型自身的知识推断之后的行情。
+这些规则保护研究年末之后数据的隔离与回测的真实，越过任何一条，本实验的证据就不再成立；参考包、研究方向与研究者指令都不能放宽它们。
+- 读取研究年末之后的数据，或从日期、路径、元数据和模型自身的知识推断之后的行情；验证期只通过 `test` 的结果了解。
 - 使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录，或越过快照范围。
 - 用研究期收益硬编码具体股票、日期、题材或事件。
 - 伪造工具结果、回测状态或人工回复。\
@@ -100,7 +100,7 @@ SESSION_STATIC_SECTIONS = (
 PROTOCOL_INSTRUCTION = "\n\n".join(SESSION_STATIC_SECTIONS)
 
 SESSION_DEFAULT_INSTRUCTION = """\
-开始研究。参考包在 `refs/`（若挂载），策略合同在只读的 `output/README.md`，前沿、步数与预算在「环境」里。准备好候选后用 `test` 推进验证期。\
+开始研究。参考包在 `refs/`（若挂载），策略合同在只读的 `output/README.md`，日期、步数与预算在「环境」里。准备好候选后用 `test` 推进验证期。\
 """
 
 SESSION_DYNAMIC_CONTEXT_HEADER = """\
@@ -190,13 +190,13 @@ def build_resume_instruction(
 
 
 def build_run_section(experiment_facts: Mapping[str, object]) -> str:
-    """This run's frontier, years, steps, bar and validate allowance in words.
+    """This run's data view, years, steps, bar and validate allowance in words.
 
     Read off the facts the prompt also carries, so the list and the JSON
-    cannot disagree: ``research_geometry`` (``frontier``, ``research_period``,
-    ``years``, ``validation_period``, ``step``, ``steps``, ``steps_tested``),
-    ``artifact_contract.acceptance_rules.instrument`` (``alpha``,
-    ``bar_over_one_year``, ``bar_over_validation_period``) and
+    cannot disagree: ``research_geometry`` (``research_period``, ``years``,
+    ``validation_period``, ``step``, ``steps``, ``steps_tested``,
+    ``frontier``), ``artifact_contract.acceptance_rules.instrument``
+    (``alpha``, ``bar_over_one_year``, ``bar_over_validation_period``) and
     ``budgets.validates_per_step``. Empty for facts whose geometry states no
     frontier; a geometry that does state one must carry every other key.
     """
@@ -208,12 +208,16 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
     instrument = rules["instrument"]
     allowance = experiment_facts["budgets"]["validates_per_step"]  # type: ignore[index]
     step = STEP_LENGTH_WORDS[str(geometry["step"])]
-    years = len(geometry["years"])  # type: ignore[arg-type]
+    research_end = str(geometry["research_period"]).split("..")[1]
+    # ``years`` lists the validation years too: count the research years alone.
+    years = sum(1 for year in geometry["years"] if str(year["end"]) <= research_end)  # type: ignore[attr-defined]
+    tested = int(geometry["steps_tested"])  # type: ignore[call-overload]
     lines = (
         "## 本次运行",
-        f"- 前沿：{geometry['frontier']}；会话里的数据止于这一天。",
-        f"- 研究年：{years} 个，{geometry['research_period']}。",
-        f"- 验证期：{geometry['validation_period']}，共 {geometry['steps']} 步，每步{step}；本次尝试开始时已测试 {geometry['steps_tested']} 步。",
+        f"- 数据：会话挂载的数据止于研究年末 {research_end}，整个会话都不变；验证期只通过 `test` 的结果揭开。",
+        f"- 研究年：{years} 个，{geometry['research_period']}；`validate` 只在研究年内回测。",
+        f"- 验证期：{geometry['validation_period']}，共 {geometry['steps']} 步，每步{step}；本次尝试开始时已测试 {tested} 步"
+        + (f"，测到 {geometry['frontier']}。" if tested else "。"),
         f"- 门槛：α = {instrument['alpha']}；一年区间约 {instrument['bar_over_one_year']}，整个验证期约 {instrument['bar_over_validation_period']}。",
         f"- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 {allowance} 次。",
     )

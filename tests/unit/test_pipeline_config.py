@@ -1439,7 +1439,6 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
         decision_time=datetime(2025, 6, 30, tzinfo=UTC),
         years=(),
         validation=ReplaySpan("validation", "valid", "20250701", "20260630", SnapshotBundle("v", "d", "r")),
-        decision_view_at=lambda _anchor: SnapshotBundle("snap", "decision", ""),
     )
 
     assert (

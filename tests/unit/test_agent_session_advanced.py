@@ -1353,7 +1353,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         assert rule in reference, rule
     prohibitions = prompt[prompt.index("# 禁止事项") :]
     for rule in (
-        "读取前沿之后的数据",
+        "读取研究年末之后的数据",
         "使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录",
         "伪造工具结果",
     ):
@@ -1364,7 +1364,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
     assert facts["visibility_policy"]["visible_research_period"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_the_frontier"]
+    assert "不进入任何会话" in facts["visibility_policy"]["after_the_research_years"]
 
 
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():

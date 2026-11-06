@@ -430,9 +430,9 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
 
     It validates the working copy twice and tests the second node through
     the four steps of the validation year: each test replays the span from
-    the validation start to the new frontier, records the step and remounts
-    the session's ``/mnt/snapshot`` as the decision view at that frontier;
-    the last test ends the session with its candidate frozen, and the host
+    the validation start to the new frontier and records the step, while the
+    session's ``/mnt/snapshot`` stays the decision view at the research
+    year's end; the last test ends the session with its candidate frozen, and the host
     runs forward and Held-out. The two snapshot slot mounts stay empty, no
     replay slot appears anywhere in the session's runtime tree, and the
     Validations the session replayed never saw a bar past the research year.
@@ -539,25 +539,24 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert research_row["agent_trace_ref"].endswith(f"{research_row['run_id']}.jsonl")
 
     # The research year is Y1; Y2 is the validation year, revealed one step
-    # at a time. The session opened on the decision view at the research
-    # year's end; each test had the view at its new frontier prepared before
-    # it replayed and the session remounted there, except the last, which
-    # ends the session on the view the forward stage opens on.
+    # at a time through the test results alone. The session opened on the
+    # decision view at the research year's end and read it until it ended:
+    # no test prepared or mounted another view.
     first_validation_day, visible_end = "20230701", "20230630"
     anchors = [
         decision.strftime("%Y%m%d")
         for phase, _start, _end, decision in synthetic_provider.requests
         if phase == "decision"
     ]
-    assert anchors == ["20230630", "20230930", "20231231", "20240331", "20240630"]
+    assert anchors == [visible_end]
     root = options.work_root / options.experiment_id / "research"
     view = json.loads((root / "runtime" / "current_snapshot" / "manifest.json").read_text(encoding="utf-8"))
-    assert (view["kind"], view["decision_time"]) == ("decision_input", decision_anchor("20240331").isoformat())
-    # The facts file the remounted session reads moved with it.
+    assert (view["kind"], view["decision_time"]) == ("decision_input", decision_anchor(visible_end).isoformat())
+    # The facts file was written once, when the attempt opened.
     facts_after = json.loads((workspace / "inputs" / "session_context.json").read_text(encoding="utf-8"))
     assert (facts_after["research_geometry"]["frontier"], facts_after["research_geometry"]["steps_tested"]) == (
-        "20240331",
-        3,
+        visible_end,
+        0,
     )
     assert not (root / "snapshots").exists()
     manifests = [
@@ -731,10 +730,11 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
 ):
     """The first attempt validates the working copy, tests it and then loses
     its model: the step it recorded stays in the ledger. The second worker
-    start resumes the session at the frontier that step reached -- the view
-    it mounts and the facts it reads are the frontier's -- and when its one
-    remaining call is spent the host completes the record from the tested
-    candidate, not from the Validation the resumed attempt added."""
+    start resumes the session at the frontier that step reached -- on the
+    same view at the research year's end, with facts that state the steps
+    tested -- and when its one remaining call is spent the host completes the
+    record from the tested candidate, not from the Validation the resumed
+    attempt added."""
 
     from autotrade.environment.llm import ProviderResponse
     from tests.unit.test_interactive_worker_local import (
@@ -796,13 +796,14 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
     assert {row["candidate"]["step_id"] for row in completion} == {tested_node}
     assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
     assert result["verdict"]["status"] == "frozen_with_record"
-    # The resumed attempt opened on the frontier's view and read it in its facts.
+    # Both attempts opened on the research year's view; the resumed one read
+    # the frontier in its facts.
     research_requests = synthetic_provider.requests[
         : next(index for index, item in enumerate(synthetic_provider.requests) if item[0] == "heldout")
     ]
     assert [
         decision.strftime("%Y%m%d") for phase, _start, _end, decision in research_requests if phase == "decision"
-    ] == ["20230630", "20230930", "20230930"]
+    ] == ["20230630", "20230630"]
     opening = second_llm.calls[0]["messages"]
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     geometry = facts["research_geometry"]
@@ -1096,8 +1097,8 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     is refused at registration with its named reason, which carries no
     reading of any kind and moves no frontier. It validates the working copy
     again and tests it: the first step is recorded, the frontier advances a
-    quarter, the session's view and facts are remounted there and the model
-    reads the step. The call budget then ends the session, and the host
+    quarter while the session's view stays at the research year's end, and
+    the model reads the step. The call budget then ends the session, and the host
     completes the record's remaining steps from one replay of the tested
     candidate before the forward stage runs.
     """
@@ -1158,15 +1159,15 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
     assert record["budget_used"]["test_replays"] == 1
     assert replay["record_type"] == "forward" and result["verdict"]["status"] == "frozen_with_record"
-    # The session's views: opened at the research year's end, remounted once
-    # at the frontier its test reached, and never prepared for a later day.
+    # The session's view: the research year's end, the only decision view
+    # the research stage prepared, whatever the tests reached.
     research_requests = synthetic_provider.requests[
         : next(index for index, item in enumerate(synthetic_provider.requests) if item[0] == "heldout")
     ]
     assert [
         decision.strftime("%Y%m%d") for phase, _start, _end, decision in research_requests if phase == "decision"
-    ] == ["20230630", "20230930"]
-    assert all(decision.strftime("%Y%m%d") <= "20230930" for _phase, _start, _end, decision in research_requests)
+    ] == ["20230630"]
+    assert all(decision.strftime("%Y%m%d") <= "20230630" for _phase, _start, _end, decision in research_requests)
 
     # The refusal the model read names the registration's reason and nothing measured.
     refusal = next(

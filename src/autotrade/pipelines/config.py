@@ -422,10 +422,11 @@ class AcceptanceRules:
                     "test(candidate) advances the validation frontier one step: the host "
                     "replays the candidate as a fresh book from the validation start to the "
                     "new frontier with its matched panel, records the newest step as the "
-                    "rolling record's entry for that step, returns the whole replay's "
-                    "statistics, a per-month table, the record to date and its residual "
-                    "statistic, then mounts the decision view at the new frontier; the "
-                    "candidate must register (registration below) and may change at any step"
+                    "rolling record's entry for that step and returns the whole replay's "
+                    "statistics, a per-step table, the record to date and its residual "
+                    "statistic. The session's data view stays at the end of the research "
+                    "years, so the validation years reach it only through these results. "
+                    "The candidate must register (registration below) and may change at any step"
                 ),
                 "validates_per_step_rule": (
                     f"at most {self.validates_per_step} validate calls before the first "
@@ -908,8 +909,8 @@ def research_span(
     The span opens on its first year's slot and decision view and continues
     through the rest; a span covering exactly the ``full`` years is labelled
     ``full`` however it was named. Any other label, or a year ``years`` does
-    not have, is refused. Whether a year may be replayed yet (the validation
-    frontier) is the caller's rule, not the parser's.
+    not have, is refused. Whether a year may be replayed (a Validation stays
+    inside the research years) is the caller's rule, not the parser's.
     """
 
     count = len(years)
@@ -1069,15 +1070,15 @@ SESSION_OUTCOMES = ("completed", "deadline", ENVIRONMENT_BLOCKED)
 class ResearchSessionRequest:
     experiment_id: str
     run_id: str
-    # The Agent's data view when the attempt opens: the decision view at the
-    # validation frontier, anchored at ``decision_time``.
+    # The Agent's data view for the whole session: the decision view at the
+    # end of the research years, anchored at ``decision_time``; no test moves it.
     snapshot: SnapshotBundle
     decision_time: datetime
     # Every year of the research geometry in order, one single-slot span each
     # (labels Y1..Yn): the first ``acceptance_rules.research_years`` are the
     # research years and ``full`` (``research_span``) is their span; the rest
-    # are the validation years, which a Validation may reach only up to the
-    # frontier and which the tests replay.
+    # are the validation years, which only the tests replay (a Validation
+    # stays inside the research years).
     years: tuple[ReplaySpan, ...]
     # Months of history every decision view carries up to its anchor
     # (``RollingExperimentConfig.window_months``): the view the session reads
@@ -1104,13 +1105,8 @@ class ResearchSessionRequest:
     # a test replays from its first day to the new frontier, and the host
     # completes a record over.
     validation: ReplaySpan = field(kw_only=True)
-    # The decision view at a step boundary, for the session to mount after a
-    # test: the pipeline's provider, which refuses a view the seed lacks.
-    decision_view_at: Callable[[datetime], SnapshotBundle] = field(
-        kw_only=True, repr=False, compare=False
-    )
     # The arm's ``test_step`` ledger records so far (``rolling_record``): the
-    # frontier the attempt opens at and the record it continues.
+    # record the attempt continues and the frontier it reached.
     tests_before: tuple[Mapping[str, object], ...] = ()
     modification_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
@@ -1183,13 +1179,6 @@ class ResearchSessionRequest:
         """How many of ``years`` are the research years (the rules' value)."""
 
         return int(self.acceptance_rules["research_years"])  # type: ignore[call-overload]
-
-    @property
-    def frontier(self) -> str:
-        """The last day the session may read when the attempt opens: the day
-        of ``decision_time``."""
-
-        return self.decision_time.strftime("%Y%m%d")
 
     @property
     def full_span(self) -> ReplaySpan:

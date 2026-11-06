@@ -221,9 +221,10 @@ class ResearchPITSnapshotProvider:
     def prepare_decision(self, *, decision_time: datetime) -> SnapshotBundle:
         """The decision view at ``decision_time`` alone, with no replay slot.
 
-        A research session reads the view at its frontier and nothing else:
-        the slot that starts there is the next step's, so preparing it beside
-        the view would build data a research session may not see yet.
+        A research session reads the view at the end of its research years
+        and nothing else: the slot that starts there is the validation years',
+        so preparing it beside the view would build data the session never
+        reads.
         """
 
         decision = _cn_datetime(decision_time)
@@ -235,27 +236,6 @@ class ResearchPITSnapshotProvider:
             replay_ref="",
             generation_id=self.release.generation_id,
         )
-
-    def require_decision_view(self, *, decision_time: datetime) -> SnapshotBundle:
-        """The decision view at ``decision_time`` as :meth:`prepare_decision`
-        returns it, but only if the cache already holds it.
-
-        A test advances the session's frontier by one step, and the view it
-        mounts next is a step-boundary view the PIT view seed carries
-        (``pit_views_seed.plan_seed``); building one in the middle of a
-        session takes hours, so a seed that lacks it is refused by name
-        (``FileNotFoundError``) instead.
-        """
-
-        decision = _cn_datetime(decision_time)
-        decision_dir = self.cache_root / "decision" / _decision_key(decision)
-        if not (decision_dir / "manifest.json").is_file():
-            raise FileNotFoundError(
-                f"the PIT view seed carries no decision view at {decision.isoformat()} "
-                f"({decision_dir.name}); rebuild the seed with the validation years' step "
-                "boundaries (scripts/data/prebuild_pit_views_seed.py)"
-            )
-        return self.prepare_decision(decision_time=decision)
 
     def _bind_cache_contract(self) -> dict[str, object]:
         path = self.cache_root / "provider.json"
