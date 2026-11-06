@@ -128,8 +128,16 @@ for top in sorted(tops):
             continue
         path.unlink()
         removed.append(path.as_posix())
-print(f"tracked: {len(tracked)} listed; {len(removed)} stale removed under {', '.join(sorted(tops))}"
-      + (": " + ", ".join(removed) if removed else ""))
+# A directory left empty is stale too: the skill library refuses an item
+# directory without its SKILL.md, so a removed item must not leave a shell.
+pruned = 0
+for top in sorted(tops):
+    for path in sorted(Path(top).rglob("*"), reverse=True):
+        if path.is_dir() and not path.is_symlink() and not any(path.iterdir()):
+            path.rmdir()
+            pruned += 1
+print(f"tracked: {len(tracked)} listed; {len(removed)} stale removed, {pruned} empty directories pruned "
+      f"under {', '.join(sorted(tops))}" + (": " + ", ".join(removed) if removed else ""))
 PY
 }
 
