@@ -422,7 +422,7 @@ def test_the_one_off_window_build_is_never_reported_per_day(tmp_path: Path) -> N
 def test_a_rehearsal_reports_what_it_cost_its_container(tmp_path: Path) -> None:
     """The rehearsal is where a batch is sized, so it carries the telemetry.
 
-    An arm that profiled its fit under ``shell`` concluded the replay was
+    An experiment that profiled its fit under ``shell`` concluded the replay was
     swapping against a ceiling it had guessed at. Here the numbers come from
     the container that actually ran the replay.
     """

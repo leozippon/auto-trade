@@ -182,7 +182,7 @@ class SyntheticPITProvider:
                 },
             )
             if phase == "valid":
-                # The warm start the seed prebuilds for a research slot
+                # The prebuilt as-of state the seed prebuilds for a research slot
                 # (scripts/data/prebuild_pit_views_seed.py): a test's replay
                 # opens on it, and the backend refuses a slot without one.
                 prebuild_asof_stash(
@@ -239,8 +239,8 @@ def _manifest(directory: Path, record: dict[str, object]) -> None:
     chmod_tree(directory, file_mode=0o444, dir_mode=0o555)
 
 
-def make_arm(tmp_path: Path, **params: object) -> tuple[Path, Path]:
-    """A repository with a raw calendar, the strategy and one arm's params."""
+def make_experiment(tmp_path: Path, **params: object) -> tuple[Path, Path]:
+    """A repository with a raw calendar, the strategy and one experiment's params."""
 
     repo = tmp_path / "repo"
     raw = repo / "data" / "raw"
@@ -258,12 +258,12 @@ def make_arm(tmp_path: Path, **params: object) -> tuple[Path, Path]:
     strategy = repo / "strategies" / "main.py"
     strategy.parent.mkdir(parents=True)
     strategy.write_text(STRATEGY, encoding="utf-8")
-    experiment = repo / "experiments" / "arm"
+    experiment = repo / "experiments" / "experiment"
     (experiment / "hitl").mkdir(parents=True)
     (experiment / "hitl" / "params.json").write_text(
         json.dumps(
             {
-                "experiment_id": "arm",
+                "experiment_id": "experiment",
                 "strategy_path": "strategies/main.py",
                 "data_backend": "pit",
                 "execution_mode": "trusted",

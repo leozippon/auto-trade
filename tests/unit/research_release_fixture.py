@@ -66,7 +66,7 @@ def publish_release(
     ``datasets`` get one parquet partition each and ``trading_days`` are both
     the SSE calendar's open days and the daily partitions. ``index_daily`` and
     ``index_weight`` always get their per-index partitions, because every real
-    release carries them and an arm's ``benchmark_index`` is checked against
+    release carries them and an experiment's ``benchmark_index`` is checked against
     them at create time; ``benchmark_indexes`` narrows that set to model a
     release published before an index existed. Each partition's first row is
     dated ``history_start`` -- by default the first trading day of the 2020

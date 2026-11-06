@@ -5,7 +5,7 @@ copy, put, bootstrap and report primitives verify their own results) record
 their arguments and the instance they were pointed at, and answer from the
 environment; both are tested for real in ~/zgca-compute. The mock `zenith`
 only records, since the workflow reaches the API through those two. The
-remote script's `tracked`, `arm-state` and `status` steps run for real
+remote script's `tracked`, `experiment-state` and `status` steps run for real
 against a temporary root, `status` with a stub `docker` so no daemon is asked.
 """
 
@@ -186,13 +186,13 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self._seed()
         self._pretrained()
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
-        self._arm("arm_here")
-        for argv in (("deploy", "data/pit_views_seed_test"), ("push", "arm_here"), ("sync", "arm_there")):
+        self._experiment("experiment_here")
+        for argv in (("deploy", "data/pit_views_seed_test"), ("push", "experiment_here"), ("sync", "experiment_there")):
             code, err = self.run_main("--instance", instance, *argv, ZGCA_REMOTE_ROOT=other)
             self.assertEqual(code, 0, err)
         dev = self.calls("dev")
         self.assertEqual({self.step(call) for call in dev},
-                         {"bootstrap", "dirs", "copy", "put", "tracked", "prepare", "local-disk", "report", "arm-state"})
+                         {"bootstrap", "dirs", "copy", "put", "tracked", "prepare", "local-disk", "report", "experiment-state"})
         # Its directory on the instance's own disk is its own too.
         local = "/ebs/auto-trade-validate"
         for call in dev:
@@ -228,9 +228,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self._seed()
         self._pretrained()
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
-        self._arm("arm_here")
+        self._experiment("experiment_here")
         for argv in (("deploy", "data/pit_views_seed_test"), ("run", "scripts/experiments/create_round_test.py"),
-                     ("sync", "arm_new"), ("push", "arm_here")):
+                     ("sync", "experiment_new"), ("push", "experiment_here")):
             for env, reason in (({"MOCK_STATE": "STOPPING"}, "is STOPPING, not RUNNING"), ({"MOCK_INSTANCE_EXIT_STATE": "1"}, "instance state")):
                 with self.subTest(command=argv[0], reason=reason):
                     code, err = self.run_main(*argv, **env)
@@ -270,8 +270,8 @@ class ZgcaWorkflowTest(unittest.TestCase):
             release_dir.mkdir(parents=True, exist_ok=True)
             (release_dir / "manifest.json").write_text("{}", encoding="utf-8")
 
-    def _arm(self, arm: str, *, created_under: str | None = None, **status: object) -> None:
-        hitl = self.repo / "experiments" / arm / "hitl"
+    def _experiment(self, experiment: str, *, created_under: str | None = None, **status: object) -> None:
+        hitl = self.repo / "experiments" / experiment / "hitl"
         hitl.mkdir(parents=True)
         root = created_under or str(self.repo / "experiments")
         (hitl / "params.json").write_text(json.dumps({"experiments_root": root}), encoding="utf-8")
@@ -392,7 +392,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         )
         everything = zgca.release_exclusions(self._provider(text=()))
         self.assertIn("stk_mins_1min_by_date", everything)
-        # Datasets every arm reads outside its configuration never stay behind.
+        # Datasets every experiment reads outside its configuration never stay behind.
         for name in ("trade_cal", "stock_basic", "namechange", "index_member_all", "index_classify", "daily"):
             self.assertNotIn(name, everything)
 
@@ -479,8 +479,8 @@ class ZgcaWorkflowTest(unittest.TestCase):
             "src/pkg.egg-info/PKG-INFO": False,
             "data/README.md": True,  # a tracked file does not open a runtime directory
             "data/release/manifest.json": False,
-            "experiments/arm/hitl/status.json": False,
-            "logs/workers/arm.log": False,
+            "experiments/experiment/hitl/status.json": False,
+            "logs/workers/experiment.log": False,
         }
         for name in files:
             (root / name).parent.mkdir(parents=True, exist_ok=True)
@@ -585,82 +585,82 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("not a tracked file", err)
         self.assertFalse(self.calls("dev"))
-        code, err = self.run_main("run", "scripts/experiments/create_round_test.py", "--dry-run", "arm_one")
+        code, err = self.run_main("run", "scripts/experiments/create_round_test.py", "--dry-run", "experiment_one")
         self.assertEqual(code, 0, err)
         steps = [self.remote(call) for call in self.calls("dev")]
-        self.assertEqual(steps, [["console-up"], ["round", "scripts/experiments/create_round_test.py", "--dry-run", "arm_one"]])
+        self.assertEqual(steps, [["console-up"], ["round", "scripts/experiments/create_round_test.py", "--dry-run", "experiment_one"]])
         code, err = self.run_main("run", "scripts/experiments/create_round_test.py", MOCK_STEP_EXIT_CONSOLE_UP="1")
         self.assertEqual(code, 1)
         self.assertIn("console-up failed", err)
         self.assertEqual(self.step(self.calls()[-1]), "console-up")
 
-    def test_sync_pulls_an_instance_arm_and_refuses_to_overwrite_a_local_one(self) -> None:
-        local = self.repo / "experiments" / "arm_local"
+    def test_sync_pulls_an_instance_experiment_and_refuses_to_overwrite_a_local_one(self) -> None:
+        local = self.repo / "experiments" / "experiment_local"
         (local / "hitl").mkdir(parents=True)
         (local / "hitl" / "params.json").write_text(json.dumps({"experiments_root": str(self.repo / "experiments")}), encoding="utf-8")
-        code, err = self.run_main("sync", "arm_local")
+        code, err = self.run_main("sync", "experiment_local")
         self.assertEqual(code, 1)
-        self.assertIn("arm of this host", err)
+        self.assertIn("experiment of this host", err)
         (local / "hitl" / "params.json").unlink()
-        code, err = self.run_main("sync", "arm_local")
+        code, err = self.run_main("sync", "experiment_local")
         self.assertEqual(code, 1)
         self.assertIn("refusing to overwrite", err)
         code, err = self.run_main("sync", "../escape")
         self.assertEqual(code, 1)
         self.assertFalse(self.calls("dev"))
-        copied = self.repo / "experiments" / "arm_zgca"
+        copied = self.repo / "experiments" / "experiment_zgca"
         (copied / "hitl").mkdir(parents=True)
         (copied / "hitl" / "params.json").write_text(json.dumps({"experiments_root": f"{zgca.REMOTE_ROOT}/experiments"}), encoding="utf-8")
-        for arm in ("arm_new", "arm_zgca"):
-            with self.subTest(arm=arm):
-                code, err = self.run_main("sync", arm)
+        for experiment in ("experiment_new", "experiment_zgca"):
+            with self.subTest(experiment=experiment):
+                code, err = self.run_main("sync", experiment)
                 self.assertEqual(code, 0, err)
                 dev = self.calls("dev")
-                self.assertEqual([self.step(call) for call in dev], ["arm-state", "copy", "copy"])
-                self.assertEqual(self.remote(dev[0]), ["arm-state", arm])
+                self.assertEqual([self.step(call) for call in dev], ["experiment-state", "copy", "copy"])
+                self.assertEqual(self.remote(dev[0]), ["experiment-state", experiment])
                 pull = dev[1]["args"]
-                self.assertEqual(pull[-2:], [f"dev:{zgca.REMOTE_ROOT}/experiments/{arm}/", f"{self.repo / 'experiments' / arm}/"])
+                self.assertEqual(pull[-2:], [f"dev:{zgca.REMOTE_ROOT}/experiments/{experiment}/", f"{self.repo / 'experiments' / experiment}/"])
                 self.assertEqual(pull[pull.index("--exclude") + 1], "/pit_views/")
                 self.assertNotIn("--delete", pull)
-                self.assertEqual(dev[2]["args"][-2:], [f"dev:{zgca.REMOTE_ROOT}/logs/workers/{arm}.log", f"{self.repo / 'logs' / 'workers' / arm}.log"])
+                self.assertEqual(dev[2]["args"][-2:], [f"dev:{zgca.REMOTE_ROOT}/logs/workers/{experiment}.log", f"{self.repo / 'logs' / 'workers' / experiment}.log"])
                 self.log.unlink()
 
-    def test_push_ships_ended_arms_of_this_host_and_refuses_the_rest_before_any_call(self) -> None:
-        """The way lineage arms reach the instance: the reverse of sync, under the same rules."""
+    def test_push_ships_ended_experiments_of_this_host_and_refuses_the_rest_before_any_call(self) -> None:
+        """The way lineage experiments reach the instance: the reverse of sync, under the same rules."""
         from autotrade.pipelines.hitl_state import proc_start_ticks
 
-        self._arm("arm_one")
-        self._arm("arm_two", state="stopped", pid=None)
-        self._arm("arm_copy", created_under=f"{zgca.REMOTE_ROOT}/experiments")
-        self._arm("arm_live", state="running_session", pid=os.getpid(), pid_start_ticks=proc_start_ticks(os.getpid()))
-        (self.repo / "experiments" / "arm_bare").mkdir()
-        for arms, reason in ((("arm_one", "../escape"), "not an experiment id"),
-                             (("arm_bare",), "not a readable arm of this host"),
-                             (("arm_one", "arm_copy"), "copy of an arm of the instance"),
-                             (("arm_live", "arm_one"), "arm_live still running here")):
+        self._experiment("experiment_one")
+        self._experiment("experiment_two", state="stopped", pid=None)
+        self._experiment("experiment_copy", created_under=f"{zgca.REMOTE_ROOT}/experiments")
+        self._experiment("experiment_live", state="running_session", pid=os.getpid(), pid_start_ticks=proc_start_ticks(os.getpid()))
+        (self.repo / "experiments" / "experiment_bare").mkdir()
+        for experiments, reason in ((("experiment_one", "../escape"), "not an experiment id"),
+                             (("experiment_bare",), "not a readable experiment of this host"),
+                             (("experiment_one", "experiment_copy"), "copy of an experiment of the instance"),
+                             (("experiment_live", "experiment_one"), "experiment_live still running here")):
             with self.subTest(reason=reason):
-                code, err = self.run_main("push", *arms)
+                code, err = self.run_main("push", *experiments)
                 self.assertEqual(code, 1)
                 self.assertIn(reason, err)
         self.assertFalse(self.calls())
-        code, err = self.run_main("push", "arm_one", "arm_two")
+        code, err = self.run_main("push", "experiment_one", "experiment_two")
         self.assertEqual(code, 0, err)
         self.assertEqual([(call["tool"], self.step(call)) for call in self.calls()],
                          [("instance", "state"), ("dev", "copy"), ("dev", "copy")])
-        for arm, call in zip(("arm_one", "arm_two"), self.calls("dev"), strict=True):
+        for experiment, call in zip(("experiment_one", "experiment_two"), self.calls("dev"), strict=True):
             args = call["args"]
-            self.assertEqual(args[-2:], [f"{self.repo / 'experiments' / arm}/", f"dev:{zgca.REMOTE_ROOT}/experiments/{arm}/"])
+            self.assertEqual(args[-2:], [f"{self.repo / 'experiments' / experiment}/", f"dev:{zgca.REMOTE_ROOT}/experiments/{experiment}/"])
             self.assertEqual(args[args.index("--exclude") + 1], "/pit_views/")
             self.assertNotIn("--delete", args)
 
-    def test_sync_stops_before_any_transfer_when_the_arm_state_step_refuses(self) -> None:
-        code, err = self.run_main("sync", "arm_running", MOCK_STEP_EXIT_ARM_STATE="1")
+    def test_sync_stops_before_any_transfer_when_the_experiment_state_step_refuses(self) -> None:
+        code, err = self.run_main("sync", "experiment_running", MOCK_STEP_EXIT_EXPERIMENT_STATE="1")
         self.assertEqual(code, 1)
-        self.assertIn("remote step arm-state failed", err)
-        self.assertEqual([self.step(call) for call in self.calls("dev")], ["arm-state"])
+        self.assertIn("remote step experiment-state failed", err)
+        self.assertEqual([self.step(call) for call in self.calls("dev")], ["experiment-state"])
 
-    def test_the_arm_state_step_refuses_an_arm_whose_worker_runs(self) -> None:
-        """The console's own notion of a running arm decides, run for real against a temporary root."""
+    def test_the_experiment_state_step_refuses_an_experiment_whose_worker_runs(self) -> None:
+        """The console's own notion of a running experiment decides, run for real against a temporary root."""
         from autotrade.pipelines.hitl_state import proc_start_ticks
 
         # Another root than the default keeps its venv inside it.
@@ -670,38 +670,38 @@ class ZgcaWorkflowTest(unittest.TestCase):
         (venv / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
         (venv / "bin" / "python").chmod(0o700)
         live = {"state": "running_session", "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid())}
-        arms = {
-            "arm_live": live,
+        experiments = {
+            "experiment_live": live,
             # A worker that is gone no longer writes, whatever its last state said.
-            "arm_gone": {**live, "pid_start_ticks": live["pid_start_ticks"] + 1},
-            "arm_done": {"state": "completed", "verdict": "pass", "pid": None},
+            "experiment_gone": {**live, "pid_start_ticks": live["pid_start_ticks"] + 1},
+            "experiment_done": {"state": "completed", "verdict": "pass", "pid": None},
         }
-        for arm, record in arms.items():
-            (root / "experiments" / arm / "hitl").mkdir(parents=True)
-            (root / "experiments" / arm / "hitl" / "status.json").write_text(json.dumps(record), encoding="utf-8")
+        for experiment, record in experiments.items():
+            (root / "experiments" / experiment / "hitl").mkdir(parents=True)
+            (root / "experiments" / experiment / "hitl" / "status.json").write_text(json.dumps(record), encoding="utf-8")
         env = {**os.environ, "ZGCA_REMOTE_ROOT": str(root)}
 
-        def step(arm: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "arm-state", arm], env=env, capture_output=True, text=True, check=False)
+        def step(experiment: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "experiment-state", experiment], env=env, capture_output=True, text=True, check=False)
 
-        refused = step("arm_live")
+        refused = step("experiment_live")
         self.assertEqual(refused.returncode, 1)
-        self.assertIn("arm_live: state running_session", refused.stdout)
-        self.assertIn("arm_live is still running", refused.stderr)
-        for arm in ("arm_gone", "arm_done"):
-            with self.subTest(arm=arm):
-                shown = step(arm)
+        self.assertIn("experiment_live: state running_session", refused.stdout)
+        self.assertIn("experiment_live is still running", refused.stderr)
+        for experiment in ("experiment_gone", "experiment_done"):
+            with self.subTest(experiment=experiment):
+                shown = step(experiment)
                 self.assertEqual(shown.returncode, 0, shown.stderr)
-                self.assertIn(f"{arm}: state {arms[arm]['state']}", shown.stdout)
-        missing = step("arm_absent")
+                self.assertIn(f"{experiment}: state {experiments[experiment]['state']}", shown.stdout)
+        missing = step("experiment_absent")
         self.assertEqual(missing.returncode, 1)
-        self.assertIn("no arm arm_absent", missing.stderr)
+        self.assertIn("no experiment experiment_absent", missing.stderr)
 
     def test_the_status_step_shows_the_newest_round_log_not_an_image_build_log(self) -> None:
         root = Path(self.temp.name) / "instance"
         logs = root / "logs" / "zgca"
         logs.mkdir(parents=True)
-        (logs / "create_round_test_20261019T190000Z.log").write_text("smoke\narms created\nround-exit 0\n", encoding="utf-8")
+        (logs / "create_round_test_20261019T190000Z.log").write_text("smoke\nexperiments created\nround-exit 0\n", encoding="utf-8")
         build = logs / "image_build_20261019T200000Z.log"
         build.write_text("Successfully built\n", encoding="utf-8")
         os.utime(logs / "create_round_test_20261019T190000Z.log", (1, 1))
@@ -714,7 +714,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env=env, capture_output=True, text=True, check=False)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("image: docker unavailable\n", shown.stdout)
-        self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log\n  smoke\n  arms created\n  round-exit 0", shown.stdout)
+        self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log\n  smoke\n  experiments created\n  round-exit 0", shown.stdout)
         self.assertNotIn(build.name, shown.stdout)
         self.assertIn("fill: no session\n", shown.stdout)
         # A fill log is newer but is not the round log; its last pass and its end are shown.
@@ -754,7 +754,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root),
                "PLAN": str(temp / "plan"), "PASSES": str(temp / "passes"), "SLEPT": str(temp / "slept")}
         for plan, ending in (([f"0|{held}", f"0|{held}", f"0|{done}"], "round-exit 0"),
-                             ([f"0|{held}", "1|arm_one: refused, HTTP 400"], "round-exit 1")):
+                             ([f"0|{held}", "1|experiment_one: refused, HTTP 400"], "round-exit 1")):
             with self.subTest(ending=ending):
                 for leftover in (temp / "passes", temp / "slept", *(root / "logs" / "zgca").glob("*.log")):
                     leftover.unlink(missing_ok=True)
@@ -768,17 +768,17 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual((temp / "slept").read_text(encoding="utf-8").split(), ["600"] * (len(plan) - 1))
 
     def test_console_up_restarts_an_idle_console_onto_the_checkout_and_keeps_a_busy_one(self) -> None:
-        """A console serves the code it was started with: with no arm running an
+        """A console serves the code it was started with: with no experiment running an
         existing one is killed, its port let go and a new one started before any
-        arm is created; with arms running it is kept. Run for real against a
+        experiment is created; with experiments running it is kept. Run for real against a
         temporary root with tmux, sleep and the venv's python stubbed."""
         temp = Path(self.temp.name)
         root, stubs = temp / "instance", temp / "stubs"
         for directory in (root / ".venv" / "bin", stubs):
             directory.mkdir(parents=True)
         scripts = {
-            # running_arms lists $ARMS; the health probe answers while $UP exists.
-            root / ".venv" / "bin" / "python": '#!/bin/sh\ncase "$2" in *running_arms*) cat "$ARMS" ;;\n'
+            # running_experiments lists $EXPERIMENTS; the health probe answers while $UP exists.
+            root / ".venv" / "bin" / "python": '#!/bin/sh\ncase "$2" in *running_experiments*) cat "$EXPERIMENTS" ;;\n'
             '*) [ -f "$UP" ] || exit 1; echo "{}" ;; esac\n',
             # has-session answers $HAS; killing a session takes the console down, a new one brings it up.
             stubs / "tmux": '#!/bin/sh\necho "$1" >>"$CALLS"\ncase "$1" in has-session) exit "$HAS" ;;\n'
@@ -791,17 +791,17 @@ class ZgcaWorkflowTest(unittest.TestCase):
         cases = (
             ("1", "", "console started in tmux session autotrade-console", ["has-session", "new-session"]),
             ("0", "", "console restarted on the current checkout", ["has-session", "kill-session", "new-session"]),
-            ("0", "arm_a\narm_b\n", "console kept: arms are running (arm_a arm_b)", ["has-session"]),
+            ("0", "experiment_a\nexperiment_b\n", "console kept: experiments are running (experiment_a experiment_b)", ["has-session"]),
         )
-        for has, arms, said, calls in cases:
+        for has, experiments, said, calls in cases:
             with self.subTest(said=said):
-                (temp / "arms").write_text(arms, encoding="utf-8")
+                (temp / "experiments").write_text(experiments, encoding="utf-8")
                 (temp / "calls").unlink(missing_ok=True)
                 (temp / "up").unlink(missing_ok=True)
                 if has == "0":  # an existing console answers
                     (temp / "up").touch()
                 env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root), "HAS": has,
-                       "ARMS": str(temp / "arms"), "UP": str(temp / "up"), "CALLS": str(temp / "calls")}
+                       "EXPERIMENTS": str(temp / "experiments"), "UP": str(temp / "up"), "CALLS": str(temp / "calls")}
                 shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "console-up"], env=env, capture_output=True, text=True, check=False)
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertIn(said, shown.stdout)

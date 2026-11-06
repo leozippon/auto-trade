@@ -1,7 +1,7 @@
 """One replay result as a daily curve: cumulative return, benchmark, exposure.
 
 The research console draws an experiment's result through these functions, and
-a Paper book copies its source experiment's curve through the same ones when it
+a Paper account copies its source experiment's curve through the same ones when it
 is created, so the book's own copy and the console's read the same numbers.
 Nothing here is chained or recomputed across results: one result file in, one
 curve out.
@@ -12,12 +12,12 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import read_current_record
 
 from .style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
 
 STRATEGY_LABEL = "策略"
-PANEL_LABEL = "随机对照组合"
+BASELINE_LABEL = "随机对照组合"
 
 
 def _finite(value: object) -> float | None:
@@ -31,7 +31,7 @@ def read_result(path: Path) -> dict[str, object]:
     """One ``result.json``; an unreadable or non-object file reads as empty."""
 
     try:
-        payload = read_json_object(Path(path))
+        payload = read_current_record(Path(path))
     except (OSError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -96,8 +96,8 @@ def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
 def benchmark_label(result_file: Path) -> str:
     """Which benchmark this result was graded against, from its own sidecar.
 
-    The sidecar records the arm's ``benchmark_index``; a result written before
-    the parameter existed carries the default, which is what those arms ran on.
+    The sidecar records the experiment's ``benchmark_index``; a result written before
+    the parameter existed carries the default, which is what those experiments ran on.
     """
 
     sidecar = read_result(Path(result_file).parent / STYLE_ARTIFACT_NAME)
@@ -128,7 +128,7 @@ def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str
 
 
 def result_curve(result_file: Path) -> dict[str, object]:
-    """The strategy's cumulative curve, its benchmark and its zero-skill panel
+    """The strategy's cumulative curve, its benchmark and its random baseline
     (the mean of the random-name copies of its own trades; ``None`` for a
     result without one) on the strategy's own days so all start at zero
     together, and the daily position weight."""
@@ -137,8 +137,8 @@ def result_curve(result_file: Path) -> dict[str, object]:
     returns = result_returns(payload)
     days = {day for day, _value in returns}
     benchmark = [(day, value) for day, value in benchmark_returns(result_file) if day in days]
-    panel = [
-        (day, value) for day, value in _sidecar_returns(result_file, "panel_daily") if day in days
+    baseline = [
+        (day, value) for day, value in _sidecar_returns(result_file, "baseline_daily") if day in days
     ]
     exposure = result_exposures(payload)
     return {
@@ -148,7 +148,7 @@ def result_curve(result_file: Path) -> dict[str, object]:
             if benchmark
             else None
         ),
-        "panel": curve_entry("panel", PANEL_LABEL, panel) if panel else None,
+        "baseline": curve_entry("baseline", BASELINE_LABEL, baseline) if baseline else None,
         "exposure": {
             "strategy": {
                 "dates": [day for day, _value in exposure],

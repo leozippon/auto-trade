@@ -1,36 +1,36 @@
 #!/usr/bin/env python3
-"""Replay one recorded Validation node of a finished arm again, outside its session.
+"""Replay one recorded Validation node of a finished experiment again, outside its session.
 
 An independent reading of a node: its recorded revision, checked file by file
-against the revision manifest and the fingerprint the arm's ledger recorded,
+against the revision manifest and the fingerprint the experiment's ledger recorded,
 is replayed by the evaluator a session's ``validate`` calls, assembled
-from the arm's own ``hitl/params.json`` exactly as the round smoke assembles a
-scratch experiment (``_round._smoke_replays``): the arm's PIT view seed
-hardlinked in, the arm's own sandbox image and pretrained-store pin, cards
-taken by ``hitl_state.select_gpus``. A span is a span of the arm's research
+from the experiment's own ``hitl/params.json`` exactly as the round smoke assembles a
+scratch experiment (``_round._smoke_replays``): the experiment's prebuilt view cache
+hardlinked in, the experiment's own sandbox image and pretrained-store pin, cards
+taken by ``hitl_state.select_gpus``. A span is a span of the experiment's research
 years (``full``, ``Yk`` or ``Yi..Yj``, the first ``research_years`` of its
 geometry as its params name them), resolved as the session resolved it, so
 nothing past them is ever replayed here: the validation years are the tests'
-and the host's completion, forward and Held-out the arm's own forward stage.
-An arm whose params name no ``research_years`` (created before the rolling
+and the host's completion, forward and Held-out the experiment's own forward stage.
+An experiment whose params name no ``research_years`` (created before the rolling
 validation) is refused before anything is written. What may be changed is
 recorded: ``--variant`` replays a modified copy of the node's ``output/``
 instead (an ablation; the reading keeps the diff against the recorded bytes),
 ``--seed`` gives the strategy's one seed line another integer (the one change
 a seed replicate may make, ``experiment.seed_change``), ``--slippage-bps``
-replaces the arm's slippage knob, ``--gpus 0`` sets its ``gpu_count`` knob to 0
-(the containers attach no card, the CPU-only path of a ``gpu_count`` 0 arm;
+replaces the experiment's slippage knob, ``--gpus 0`` sets its ``gpu_count`` knob to 0
+(the containers attach no card, the CPU-only path of a ``gpu_count`` 0 experiment;
 for a strategy that never touches a GPU, when no card is free), and
 ``--start-day``/``--max-days`` truncate the replay to a window as a smoke does
-(no zero-skill panel then).
+(no random baseline then).
 
-Everything is written below ``.runtime/revalidate/<arm>/<node>/<label>/``:
+Everything is written below ``.runtime/revalidate/<experiment>/<node>/<label>/``:
 ``reading.json`` (what was replayed, then the result reference or the error),
 the strategy copy that ran, a scratch experiment holding the pin, the PIT
 views and the result, and ``active_daily.csv`` beside the result of a whole
-span. The arm's directory is only read. A label is used once.
+span. The experiment's directory is only read. A label is used once.
 
-usage: revalidate_node.py --experiment <arm> --node valid_012 --label exact
+usage: revalidate_node.py --experiment <experiment> --node valid_012 --label exact
        [--span full] [--variant DIR] [--seed N] [--slippage-bps X] [--gpus 0]
        [--start-day YYYYMMDD] [--max-days N]
 """
@@ -69,7 +69,7 @@ from autotrade.environment.step_tree import node_handle
 from autotrade.pipelines.config import acceptance_for, research_span
 from autotrade.pipelines.experiment import _SEED_LINE, _SEED_NAME
 from autotrade.pipelines.hitl_state import select_gpus
-from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.ledger import ExperimentLedger, research_records
 from autotrade.pipelines.session_resume import REVISIONS_DIR
 from autotrade.pipelines.session_tools import write_active_daily
 from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker_options
@@ -81,19 +81,15 @@ DAY = re.compile(r"\d{8}")
 
 
 def session_step(records: list[dict], node: str) -> dict:
-    """The row of ``node`` (its step id or short handle) in the arm's one
+    """The row of ``node`` (its step id or short handle) in the experiment's one
     research session that ended research."""
 
-    ended = [
-        record
-        for record in records
-        if record.get("record_type") == "research_session" and (record.get("frozen") or record.get("arm_end"))
-    ]
+    ended = [record for record in research_records(records) if record.get("frozen") or record.get("experiment_end")]
     if len(ended) != 1:
-        raise ValueError("the arm has no research session that ended its research")
+        raise ValueError("the experiment has no research session that ended its research")
     rows = [row for row in ended[0]["steps"] if node in (row["step_id"], node_handle(row["step_id"]))]
     if len(rows) != 1:
-        raise ValueError(f"{node!r} names {len(rows)} Steps of the arm's research session, not one")
+        raise ValueError(f"{node!r} names {len(rows)} Steps of the experiment's research session, not one")
     return rows[0]
 
 
@@ -182,13 +178,13 @@ def set_seed(output: Path, seed: int) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--experiment", required=True, help="Experiment id of a finished arm.")
+    parser.add_argument("--experiment", required=True, help="Experiment id of a finished experiment.")
     parser.add_argument("--node", required=True, help="Step id or short handle (valid_012).")
     parser.add_argument("--label", required=True, help="Name of this reading, used once.")
     parser.add_argument("--span", default="full", help="Research span: full, Yk or Yi..Yj.")
     parser.add_argument("--variant", type=Path, help="Modified copy of the node's output/ to replay.")
     parser.add_argument("--seed", type=int, help="New value of the strategy's one seed line.")
-    parser.add_argument("--slippage-bps", type=float, help="Replaces the arm's slippage_bps.")
+    parser.add_argument("--slippage-bps", type=float, help="Replaces the experiment's slippage_bps.")
     parser.add_argument("--gpus", type=int, choices=[0], help="0: attach no card (gpu_count 0).")
     parser.add_argument("--start-day", help="First trading day of a truncated window (YYYYMMDD).")
     parser.add_argument("--max-days", type=int, help="Trading days of a truncated window.")
@@ -201,15 +197,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--slippage-bps must be in [0, 10000)")
     if args.variant is not None and not (args.variant / "main.py").is_file():
         parser.error("--variant must be a directory holding main.py")
-    arm = EXPERIMENTS_ROOT / args.experiment
+    finished = EXPERIMENTS_ROOT / args.experiment
     try:
-        params = read_json_object(arm / "hitl" / "params.json", missing_ok=True)
+        params = read_json_object(finished / "hitl" / "params.json", missing_ok=True)
         if not params:
-            raise ValueError(f"missing experiment params: {arm / 'hitl' / 'params.json'}")
-        # The arm's own split, read as its worker reads it: a record without
+            raise ValueError(f"missing experiment params: {finished / 'hitl' / 'params.json'}")
+        # The experiment's own split, read as its worker reads it: a record without
         # research_years is refused rather than read under every year.
         research_years = acceptance_for(params).research_years
-        row = session_step(ExperimentLedger(arm / "ledgers" / "experiment_ledger.jsonl").read(), args.node)
+        row = session_step(ExperimentLedger(finished / "ledgers" / "experiment_ledger.jsonl").read(), args.node)
         out = label_dir(args.experiment, node_handle(row["step_id"]), args.label)
     except (OSError, ValueError) as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -238,7 +234,7 @@ def main(argv: list[str] | None = None) -> int:
     write_json_atomic(out / "reading.json", reading)
     started = time.monotonic()
     try:
-        revision = copy_revision(arm, row, out / "strategy")
+        revision = copy_revision(finished, row, out / "strategy")
         if args.variant is not None:
             reading["variant"] = use_variant(revision.output_path, args.variant.resolve())
         if args.seed is not None:
@@ -255,8 +251,8 @@ def main(argv: list[str] | None = None) -> int:
             if spec.gpu == GpuMode.AUTO:
                 devices = select_gpus(EXPERIMENTS_ROOT, spec.gpu_count, require_name=spec.gpu_name_filter)
                 spec = replace(spec, gpu=tuple(devices))
-            # The arm's own image tag, as its worker resolves it.
-            shutil.copyfile(arm / "hitl" / SANDBOX_IMAGE_STATE_NAME, experiment_dir / "hitl" / SANDBOX_IMAGE_STATE_NAME)
+            # The experiment's own image tag, as its worker resolves it.
+            shutil.copyfile(finished / "hitl" / SANDBOX_IMAGE_STATE_NAME, experiment_dir / "hitl" / SANDBOX_IMAGE_STATE_NAME)
             spec = prepare_experiment_sandbox_image(spec, experiment_id=args.experiment, experiment_dir=experiment_dir)
             options = replace(options, agent_sandbox=spec)
             reading["gpu_devices"] = list(spec.gpu) if isinstance(spec.gpu, tuple) else spec.gpu

@@ -1,9 +1,9 @@
 """The Paper verdict: does a book's active return hold up on days nobody saw?
 
 The evidence is the book's daily active return on Paper: the account's daily
-return minus the mean of the zero-skill panel drawn on the book's own Paper
+return minus the mean of the random baseline drawn on the book's own Paper
 fills -- for a real-fill book the fills its owner recorded, corrections
-included (``replay/null_control.run_null_control``, the panel research grades
+included (``replay/null_control.run_null_control``, the random baseline research grades
 against), over the bars, ex-dates, index and membership of the book's newest
 replay slot, through the book's pinned Broker profile, so its names come only
 from the boards the book may buy on. The days begin at the book's first Paper
@@ -20,7 +20,7 @@ sessions, each on the days through it and each once: kill when the
 ``kill_confidence`` upper bound of the mean is below zero, confirm when its
 ``confirm_confidence`` lower bound is above it (the moving-block bootstrap,
 ``pipelines/verdict.bootstrap_lower_bound``, seeded by the artifact id). A
-drawdown past the arm's pinned ``max_drawdown`` (account) or
+drawdown past the experiment's pinned ``max_drawdown`` (account) or
 ``active_max_drawdown`` (active series) kills on any day. ``verdict.json``
 holds the latest reading. The rules are the ones the book pinned at creation.
 """
@@ -34,7 +34,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    read_current_record,
+    read_json_object,
+    write_json_atomic,
+)
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.snapshot import load_snapshot_manifest
 from autotrade.environment.replay.null_control import run_null_control
@@ -71,7 +75,7 @@ def paper_reading(book: Book) -> dict[str, object]:
     """
 
     equity, executions = _journals(book.root)
-    previous = read_json_object(book.root / VERDICT_NAME, missing_ok=True)
+    previous = read_current_record(book.root / VERDICT_NAME, missing_ok=True)
     if not equity:
         return evidence_reading(book, equity, executions, None, {}, previous=previous)
     slot = newest_replay_slot(book.root)
@@ -108,7 +112,7 @@ def evidence_reading(
     fills against ``frame``'s bars of exactly those days.
 
     ``previous`` is the last reading: a checkpoint it already checked is never
-    checked again, though the panel drawn on a longer window differs.
+    checked again, though the random baseline drawn on a longer window differs.
     """
 
     rules = book.verdict_rules
@@ -133,31 +137,31 @@ def evidence_reading(
         return {
             **reading, "status": stored, "transition": transition, "checked_through": checked,
             "next_checkpoint": checkpoint, "plain": None, "account_return": None,
-            "index_return": None, "account_max_drawdown": None, "active_max_drawdown": None, "panel": None,
+            "index_return": None, "account_max_drawdown": None, "active_max_drawdown": None, "baseline": None,
         }
     if len(set(dates)) != len(dates) or dates != sorted(dates):
         raise ValueError(f"{book.root.name}'s equity journal does not hold each settled day once, in order")
     # A replay's first row carries the capital it opened with; the account's
-    # first return is measured from it as the panel's is.
+    # first return is measured from it as the random baseline's is.
     curve = [
         {"trade_date": day, "equity": float(row["equity"]), **({"initial_equity": book.profile.initial_cash} if index == 0 else {})}
         for index, (day, row) in enumerate(zip(dates, equity, strict=True))
     ]
-    panel = run_null_control(
+    baselines = run_null_control(
         ReplayResult(equity_curve=tuple(curve), executions=tuple(executions), inference_dates=(), pending_orders=()),
         frame,
         benchmark,
         book.profile,
         book.schedule,
-        seed=int(rules["panel_seed"]),
+        seed=int(rules["baseline_seed"]),
         corporate_actions=corporate_actions,
         membership=membership,
-        panel=True,
+        baselines=True,
     )
     account = daily_returns_from_curve(curve)
-    zero_skill = {str(day): float(value) for day, value in panel["panel_daily"]}
+    zero_skill = {str(day): float(value) for day, value in baselines["baseline_daily"]}
     if [day for day, _value in account] != dates or list(zero_skill) != dates:
-        raise ValueError(f"{book.root.name}'s account and zero-skill panel measured different days")
+        raise ValueError(f"{book.root.name}'s account and random baseline measured different days")
     missing = [day for day in dates if day not in benchmark]
     if missing:
         raise ValueError(f"the benchmark {book.benchmark_index} has no return on {missing[0]}")
@@ -178,8 +182,8 @@ def evidence_reading(
         "index_return": float(compounded_return(benchmark[day] for day in dates)),
         "account_max_drawdown": float(max(drawdown for _equity, drawdown in compounded_path(account_returns))),
         "active_max_drawdown": float(max(drawdown for _equity, drawdown in compounded_path(active))),
-        "panel": {
-            key: panel.get(key) for key in ("k", "seed", "matched", "round_trips", "dropped_trips_mean", "reason")
+        "baseline": {
+            key: baselines.get(key) for key in ("k", "seed", "matched", "round_trips", "dropped_trips_mean", "reason")
         },
     }
 

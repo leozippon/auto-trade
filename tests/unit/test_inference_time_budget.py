@@ -184,8 +184,8 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             clock.advance(10.0)
             if self.calls == 1:
                 raise RuntimeError("repairable validation failure")
-            # Under the arm, where the worker roots results: the freeze gate
-            # reads a row's result under its arm (``ledger.recorded_path``).
+            # Under the experiment, where the worker roots results: the registration check
+            # reads a row's result under its experiment (``ledger.recorded_path``).
             result = experiment / "artifacts" / "results" / f"valid_{self.calls:03d}" / "result.json"
             result.parent.mkdir(parents=True)
             result.write_text("{}\n", encoding="utf-8")
@@ -278,7 +278,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     )
     assert str(tmp_path) not in repair_context
     assert time_budget.remaining() == pytest.approx(0.5)
-    # The host keeps the real EvaluationResult path for ledger/freeze work, but
+    # The host keeps the real EvaluationResult path for ledger/register work, but
     # neither the Agent observation nor its audit Trace may expose that path.
     host_result_ref = backtest.steps[-1].validation.result_ref
     assert Path(host_result_ref).is_absolute()

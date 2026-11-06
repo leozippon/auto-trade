@@ -567,7 +567,7 @@ class SnapshotConfig:
 
     def to_record(self) -> dict[str, object]:
         """The configuration's one record: what a PIT view cache binds, what
-        a run manifest and the Agent's facts show, and what a Paper book
+        a run manifest and the Agent's facts show, and what a Paper account
         stores. It names each domain's resolved window rather than the shared
         base, so ``from_record`` rebuilds a configuration that builds the same
         snapshots and has this same record."""

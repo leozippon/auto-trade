@@ -2,7 +2,7 @@
 
 One row per ``(ts_code, trade_date)``, computed from that trade date's own
 minute bars and nothing else, so a strategy can use signed order flow without
-mounting the minute domain (a minute-carrying view seed costs ~235 GB).
+mounting the minute domain (a minute-carrying view cache costs ~235 GB).
 
 The signed-imbalance construction is the minute-close tick rule:
 

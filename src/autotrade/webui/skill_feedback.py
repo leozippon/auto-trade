@@ -1,6 +1,6 @@
 """Console projection of Agent-filed skill feedback and its resolutions.
 
-Sessions contradict a mounted operating-memory entry with the ``skill_feedback``
+Sessions contradict a mounted skill-library entry with the ``skill_feedback``
 tool; each report is one redacted JSON line in the owning experiment's
 ``ledgers/skill_feedback.jsonl``. This module is the only place they are read
 back together — for the researcher, never for a session. Like every other

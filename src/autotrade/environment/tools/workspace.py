@@ -25,9 +25,9 @@ ROOT_RELATIVE_PATH_RULE = (
 )
 
 # The workspace bind mount has no quota and shares one host filesystem with the
-# data lake, the experiment directories and the logs: one arm wrote 6.4 GB of
+# data lake, the experiment directories and the logs: one experiment wrote 6.4 GB of
 # intermediates, and a naive full-market minute concatenation would need about
-# 490 GB. A full disk would fail the nightly data update, other arms' ledger
+# 490 GB. A full disk would fail the nightly data update, other experiments' ledger
 # appends and the host's result writes at once, so the two calls that write in
 # bulk -- ``shell`` and ``validate`` -- are refused below this floor.
 WORKSPACE_MIN_FREE_BYTES = 50 * 1024**3

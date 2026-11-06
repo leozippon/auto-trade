@@ -387,7 +387,7 @@
       "skip_if_already_ok": true
     },
     "cn_weekly_release_prune": {
-      "description": "Saturday research-release retention, the last step the weekly fundamental sweep chains (--then): scripts/data/tushare_lake.py prune-releases --apply removes, oldest first, every research release that no consumer records any more -- not the raw generation record, a seed under data/, an experiment that has not ended (completed, or archived with no live worker), or a Paper book that is not killed. It runs under the updater lock the runner passes to it and under the release registry lock, changes no partition and commits no generation, and logs each removal with the bytes it freed.",
+      "description": "Saturday research-release retention, the last step the weekly fundamental sweep chains (--then): scripts/data/tushare_lake.py prune-releases --apply removes, oldest first, every research release that no consumer records any more -- not the raw generation record, a seed under data/, an experiment that has not ended (completed, or archived with no live worker), or a Paper account that is not killed. It runs under the updater lock the runner passes to it and under the release registry lock, changes no partition and commits no generation, and logs each removal with the bytes it freed.",
       "operation": "prune_releases",
       "skip_if_already_ok": true
     },
@@ -414,7 +414,7 @@
       "skip_if_already_ok": false
     },
     "manual_history_backfill_macro": {
-      "description": "Manual (not scheduled): lower the research-history floor to 20140701 for the benchmark and Shenwan series eight-year rule-score arms read (index_daily, index_dailybasic, sw_daily) and land their missing history. Run with --start-date 20140701 --end-date <the last trade date before the lake's current floor>; covered partitions skip. Follow with cn_nightly_full_audit --force-run.",
+      "description": "Manual (not scheduled): lower the research-history floor to 20140701 for the benchmark and Shenwan series eight-year rule-score experiments read (index_daily, index_dailybasic, sw_daily) and land their missing history. Run with --start-date 20140701 --end-date <the last trade date before the lake's current floor>; covered partitions skip. Follow with cn_nightly_full_audit --force-run.",
       "operation": "download_tier",
       "tier": "macro",
       "end_date_offset_days": 0,

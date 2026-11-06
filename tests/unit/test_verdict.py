@@ -1,4 +1,4 @@
-"""Verdict statistics: freeze gate, forward verdict, Held-out rule
+"""Verdict statistics: registration check, forward verdict, Held-out rule
 (docs/PIPELINE_DESIGN.md)."""
 
 from __future__ import annotations
@@ -101,12 +101,12 @@ def _heldout(analysis, **overrides):
 
 def _forward(analysis, **overrides):
     """The forward slice of ``analysis``. A forward replay always carries its
-    zero-skill panel: a sidecar built without one gets a panel of zeros, which
+    random baseline: a sidecar built without one gets a random baseline of zeros, which
     leaves every graded figure the book's own
-    (:func:`test_a_zero_panel_reproduces_the_ungraded_figures_exactly`)."""
+    (:func:`test_a_zero_random_baseline_reproduces_the_ungraded_figures_exactly`)."""
 
-    if "panel_daily" not in analysis:
-        analysis = _with_panel(analysis, np.zeros(len(analysis["strategy_daily"])))
+    if "baseline_daily" not in analysis:
+        analysis = _with_baselines(analysis, np.zeros(len(analysis["strategy_daily"])))
     arguments = {
         "start": FORWARD_START,
         "end": FORWARD_END,
@@ -169,7 +169,7 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
 def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     """The one statistic the sealed gate grades: OLS of a daily series on the
     three legs, its intercept annualised over its residual standard deviation
-    annualised, with the bar z(1 - alpha) / sqrt(years) beside it."""
+    annualised, with the threshold z(1 - alpha) / sqrt(years) beside it."""
 
     rng = np.random.default_rng(5)
     days = 5 * TRADING_DAYS_PER_YEAR
@@ -192,12 +192,12 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     assert reading["residual_excess"] == pytest.approx(0.06, abs=1e-12)
     assert reading["residual_tracking_error"] == pytest.approx(sigma * SCALE, rel=1e-12)
     assert reading["residual_information_ratio"] == pytest.approx(0.06 / (sigma * SCALE), rel=1e-9)
-    assert reading["bar"] == pytest.approx(NormalDist().inv_cdf(0.95) / math.sqrt(5.0))
-    assert reading["bar"] == pytest.approx(0.7356, abs=1e-4)
+    assert reading["threshold"] == pytest.approx(NormalDist().inv_cdf(0.95) / math.sqrt(5.0))
+    assert reading["threshold"] == pytest.approx(0.7356, abs=1e-4)
 
-    # The bar follows the pinned alpha and the span's length, and nothing else.
-    assert verdict.residual_bar(1.0, 0.05) == pytest.approx(1.6449, abs=1e-4)
-    assert verdict.residual_bar(5.0, 0.025) == pytest.approx(NormalDist().inv_cdf(0.975) / math.sqrt(5.0))
+    # The threshold follows the pinned alpha and the span's length, and nothing else.
+    assert verdict.residual_threshold(1.0, 0.05) == pytest.approx(1.6449, abs=1e-4)
+    assert verdict.residual_threshold(5.0, 0.025) == pytest.approx(NormalDist().inv_cdf(0.975) / math.sqrt(5.0))
     one_year = verdict.residual_statistics(
         active[:TRADING_DAYS_PER_YEAR],
         market[:TRADING_DAYS_PER_YEAR],
@@ -205,7 +205,7 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
         value[:TRADING_DAYS_PER_YEAR],
         alpha=0.05,
     )
-    assert one_year["years"] == 1.0 and one_year["bar"] == pytest.approx(1.6449, abs=1e-4)
+    assert one_year["years"] == 1.0 and one_year["threshold"] == pytest.approx(1.6449, abs=1e-4)
 
     # A sidecar's graded series over a slice reads the same statistic.
     analysis = {
@@ -227,7 +227,7 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     with pytest.raises(ValueError, match="fewer than"):
         verdict.residual_statistics(active[:5], market[:5], size[:5], value[:5], alpha=0.05)
     with pytest.raises(ValueError, match="alpha"):
-        verdict.residual_bar(5.0, 0.0)
+        verdict.residual_threshold(5.0, 0.0)
 
 
 def test_bootstrap_bound_is_fixed_by_the_artifact_id(monkeypatch):
@@ -258,7 +258,7 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
         "forward_confidence": 0.8,
         "bootstrap_block_days": verdict.BOOTSTRAP_BLOCK_DAYS,
         "bootstrap_draws": verdict.BOOTSTRAP_DRAWS,
-        "panel_draws": verdict.PANEL_DRAWS,
+        "baseline_draws": verdict.BASELINE_DRAWS,
         "cost_stress_multiplier": 2.0,
     }
 
@@ -276,24 +276,24 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
     ] == pytest.approx(base["plain_excess"])
     # The sealed gate's statistic over the forward months, for the pool.
     assert base["residual_reading"] == verdict.residual_reading(
-        _with_panel(analysis, np.zeros(len(FORWARD_DAYS))), start=FORWARD_START, end=FORWARD_END, alpha=0.05
+        _with_baselines(analysis, np.zeros(len(FORWARD_DAYS))), start=FORWARD_START, end=FORWARD_END, alpha=0.05
     )
-def _with_panel(analysis, panel):
+def _with_baselines(analysis, baselines):
     return {
         **analysis,
-        "panel_daily": [
+        "baseline_daily": [
             [day, float(value)]
-            for (day, _own), value in zip(analysis["strategy_daily"], panel, strict=True)
+            for (day, _own), value in zip(analysis["strategy_daily"], baselines, strict=True)
         ],
     }
 
 
-def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
-    """Grading subtracts the panel and changes nothing else: against a panel of
+def test_a_zero_random_baseline_reproduces_the_ungraded_figures_exactly():
+    """Grading subtracts the random baseline and changes nothing else: against a random baseline of
     zeros every statistic, bound and reason is the float it was without one,
-    and only ``series`` and the panel's own reading tell the two records
-    apart: a book without a panel has no plain selection, one against a zero
-    panel selects exactly its own return. A forward slice reads the same with
+    and only ``series`` and the random baseline's own reading tell the two records
+    apart: a book without a random baseline has no plain selection, one against a zero
+    random baseline selects exactly its own return. A forward slice reads the same with
     or without it."""
     rng = np.random.default_rng(101)
     research = _weekdays("20210701", "20250630")
@@ -302,7 +302,7 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
         _segment(FORWARD_DAYS, 0.10, rng), _segment(HELDOUT_DAYS, 0.02, rng, te=0.05)
     )
 
-    panel_readings = ("panel_return", "plain_selection")
+    panel_readings = ("baseline_return", "plain_selection")
 
     def without_series(block):
         kept = {key: value for key, value in block.items() if key != "series"}
@@ -337,32 +337,32 @@ def test_a_zero_panel_reproduces_the_ungraded_figures_exactly():
 
     for read in (heldout, forward_slice, verdict.graded_statistics):
         sidecar = forward
-        zeros = _with_panel(sidecar, np.zeros(len(sidecar["strategy_daily"])))
+        zeros = _with_baselines(sidecar, np.zeros(len(sidecar["strategy_daily"])))
         own, graded = read(sidecar), read(zeros)
         assert (own["series"], graded["series"]) == ("absolute", "active")
         assert without_series(own) == without_series(graded)
         if "raw_readings" in own:
             assert {key: own["raw_readings"][key] for key in panel_readings} == {
-                "panel_return": None,
+                "baseline_return": None,
                 "plain_selection": None,
             }
-            assert graded["raw_readings"]["panel_return"] == 0.0
+            assert graded["raw_readings"]["baseline_return"] == 0.0
             assert graded["raw_readings"]["plain_selection"] == own["raw_readings"]["strategy_return"]
 
 
-def test_the_graded_series_is_the_strategy_minus_its_panel():
+def test_the_graded_series_is_the_strategy_minus_its_random_baseline():
     """The return statistics are those of the active series, measured by the
     code that measures any series; the mandate's tracking error and beta stay
-    the strategy's own, which the panel must not move."""
+    the strategy's own, which the random baseline must not move."""
     rng = np.random.default_rng(102)
     research = _weekdays("20210701", "20250630")
     days, active, benchmark, size, _value = _segment(research, 0.06, rng, te=0.05, beta=0.05)
-    _days, panel, _b, _s, _v = _segment(
+    _days, baselines, _b, _s, _v = _segment(
         research, 0.04, np.random.default_rng(103), beta=0.9, size_beta=0.3
     )
-    # The panel rides the same factors as the book it was drawn from.
-    panel = panel - _b * 0.9 - _s * 0.3 + benchmark * 0.9 + size * 0.3
-    book = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
+    # The random baseline rides the same factors as the book it was drawn from.
+    baselines = baselines - _b * 0.9 - _s * 0.3 + benchmark * 0.9 + size * 0.3
+    book = _with_baselines(_analysis((days, active + baselines, benchmark, size)), baselines)
     alone = _analysis((days, active, benchmark, size))
 
     graded = verdict.graded_statistics(book)
@@ -372,7 +372,7 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
         assert graded[key] == pytest.approx(verdict.graded_statistics(alone)[key], rel=1e-9)
 
     registered = verdict.registered_mandate(book, rules=AcceptanceRules(**REQUIRED_RULES))
-    own = verdict.graded_statistics({**book, "panel_daily": []})
+    own = verdict.graded_statistics({**book, "baseline_daily": []})
     assert registered["mandate"]["market_beta"] == pytest.approx(own["market_beta"], rel=1e-12)
     assert registered["mandate"]["market_beta"] == pytest.approx(0.95, abs=0.03)
     # The mandate's tracking error is the residual one, below the series' own.
@@ -385,17 +385,17 @@ def test_the_graded_series_is_the_strategy_minus_its_panel():
         "freeze_beta_outside_band",
     ]
 
-    # A day the panel does not cover would be graded against nothing.
-    short = {**book, "panel_daily": book["panel_daily"][:-1]}
-    with pytest.raises(ValueError, match="zero-skill panel has no return"):
+    # A day the random baseline does not cover would be graded against nothing.
+    short = {**book, "baseline_daily": book["baseline_daily"][:-1]}
+    with pytest.raises(ValueError, match="random baseline has no return"):
         verdict.graded_statistics(short)
 
 
 def test_the_forward_mandate_and_active_drawdown_are_reported_whatever_the_rules():
     rng = np.random.default_rng(121)
     days, active, benchmark, size, _value = _segment(FORWARD_DAYS, 0.30, rng, te=0.05, beta=0.0)
-    panel = 1.0 * benchmark
-    book = _with_panel(_analysis((days, active + panel, benchmark, size)), panel)
+    baselines = 1.0 * benchmark
+    book = _with_baselines(_analysis((days, active + baselines, benchmark, size)), baselines)
     base = _forward(book)
 
     assert base["series"] == "active"
@@ -431,20 +431,20 @@ def test_an_unmeasurable_slice_raises_instead_of_judging():
 
 
 def _summary(*, slippage_bps=5.0, turnover=40.0):
-    """The two summary fields the freeze gate's cost stress reads."""
+    """The two summary fields the registration check's cost stress reads."""
 
     return {"turnover": turnover, "cost_sensitivity": {"slippage_bps": slippage_bps}}
 
 
 def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slice():
-    """The forward slice's F5 reading, the freeze gate's and a research row's
+    """The forward slice's F5 reading, the registration check's and a research row's
     report are the same function of the graded series, the turnover and the
     slippage."""
 
     rng = np.random.default_rng(117)
     analysis = _analysis(_segment(FORWARD_DAYS, 0.10, rng, exact=True))
     block = _forward(analysis, turnover=30.0, slippage_bps=5.0, cost_stress_multiplier=2.0)
-    statistics = verdict.graded_statistics(_with_panel(analysis, np.zeros(len(FORWARD_DAYS))))
+    statistics = verdict.graded_statistics(_with_baselines(analysis, np.zeros(len(FORWARD_DAYS))))
     assert block["excess_at_cost_stress"] == verdict.excess_at_cost_stress(
         statistics["plain_excess"],
         statistics["days"],
@@ -460,12 +460,12 @@ def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slic
     )
 
 
-def test_the_panel_return_is_what_the_panel_composite_compounded_to():
+def test_the_random_baseline_return_is_what_the_random_baseline_composite_compounded_to():
     days = _weekdays("20210701", "20210730")
-    panel = [-0.001] * len(days)
-    sidecar = {"panel_daily": [[day, value] for day, value in zip(days, panel)]}
-    assert verdict.panel_return(sidecar) == pytest.approx((1 - 0.001) ** len(days) - 1)
-    assert verdict.panel_return({}) is None
+    baselines = [-0.001] * len(days)
+    sidecar = {"baseline_daily": [[day, value] for day, value in zip(days, baselines)]}
+    assert verdict.baseline_return(sidecar) == pytest.approx((1 - 0.001) ** len(days) - 1)
+    assert verdict.baseline_return({}) is None
 
 
 def _rally_book(rng, *, alpha, active_beta, days=FORWARD_DAYS):
@@ -478,22 +478,22 @@ def _rally_book(rng, *, alpha, active_beta, days=FORWARD_DAYS):
     n = len(days)
     benchmark = rng.normal(0.0015, 0.01, n)
     size = rng.normal(0.0, 0.004, n)
-    panel = 0.9 * benchmark + rng.normal(0.0, 0.003, n)
+    baselines = 0.9 * benchmark + rng.normal(0.0, 0.003, n)
     active = alpha / TRADING_DAYS_PER_YEAR + active_beta * benchmark + rng.normal(0.0, 0.003, n)
-    return _with_panel(_analysis((list(days), panel + active, benchmark, size)), panel)
+    return _with_baselines(_analysis((list(days), baselines + active, benchmark, size)), baselines)
 
 
 def _selection_book(rng, mean, *, days=FORWARD_DAYS):
-    """A book whose daily return minus its panel's averages exactly ``mean`` a
+    """A book whose daily return minus its random baseline's averages exactly ``mean`` a
     year over ``days``, around noise of about 4.8 % a year."""
 
     n = len(days)
     benchmark = rng.normal(0.0, 0.01, n)
     size = rng.normal(0.0, 0.004, n)
-    panel = 0.9 * benchmark + rng.normal(0.0, 0.003, n)
+    baselines = 0.9 * benchmark + rng.normal(0.0, 0.003, n)
     noise = rng.normal(0.0, 0.003, n)
     active = noise - noise.mean() + mean / TRADING_DAYS_PER_YEAR
-    return _with_panel(_analysis((list(days), panel + active, benchmark, size)), panel)
+    return _with_baselines(_analysis((list(days), baselines + active, benchmark, size)), baselines)
 
 
 def _intercept(analysis, start="", end=""):
@@ -506,7 +506,7 @@ def _intercept(analysis, start="", end=""):
 
 
 def test_f2_grades_a_negative_market_loading_on_what_it_earned():
-    """A book that lost to its own panel in a rally because it held
+    """A book that lost to its own random baseline in a rally because it held
     lower-beta names: a regressed reading would pass it, F2 reads the series
     the holder earned and refuses it, and the holder's readings say why."""
 
@@ -521,7 +521,7 @@ def test_f2_grades_a_negative_market_loading_on_what_it_earned():
 
 
 def test_heldout_reads_a_negative_market_loading_on_what_it_earned():
-    """Held-out reads the plain series too: a book that lagged its panel
+    """Held-out reads the plain series too: a book that lagged its random baseline
     through a Held-out rally on its lower-beta names reads below zero where
     its regression intercept would not."""
 
@@ -557,7 +557,7 @@ def test_f2_is_the_lower_bound_of_the_plain_mean():
     series = np.array(
         [
             own - drawn
-            for (_day, own), (_same, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)
+            for (_day, own), (_same, drawn) in zip(book["strategy_daily"], book["baseline_daily"], strict=True)
         ]
     )
     bound = _forward(book, forward_confidence=0.9)
@@ -593,25 +593,25 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     raw = forward["raw_readings"]
     strategy = compound("strategy_daily", FORWARD_START, FORWARD_END)
     benchmark = compound("benchmark_daily", FORWARD_START, FORWARD_END)
-    panel = compound("panel_daily", FORWARD_START, FORWARD_END)
+    baselines = compound("baseline_daily", FORWARD_START, FORWARD_END)
     assert raw == pytest.approx(
         {
             "strategy_return": strategy,
             "benchmark_return": benchmark,
-            "panel_return": panel,
+            "baseline_return": baselines,
             "raw_excess": strategy - benchmark,
-            "plain_selection": strategy - panel,
+            "plain_selection": strategy - baselines,
         },
         rel=1e-12,
     )
     active = [
         own - drawn
-        for (day, own), (_day, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)
+        for (day, own), (_day, drawn) in zip(book["strategy_daily"], book["baseline_daily"], strict=True)
         if FORWARD_START <= day <= FORWARD_END
     ]
     assert forward["plain_excess"] == pytest.approx(np.mean(active) * TRADING_DAYS_PER_YEAR, rel=1e-12)
-    # The whole-span reading of a sidecar is the panel_return of before.
-    assert verdict.holder_readings(book)["panel_return"] == pytest.approx(verdict.panel_return(book))
+    # The whole-span reading of a sidecar is the baseline_return of before.
+    assert verdict.holder_readings(book)["baseline_return"] == pytest.approx(verdict.baseline_return(book))
     # A span with no stored day reads nothing rather than zero.
     assert verdict.holder_readings(book, start="20300101", end="20301231") == dict.fromkeys(raw)
 
@@ -652,7 +652,7 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
     members = [book, *(sidecar for _identity, sidecar in others)]
     daily = np.mean(
         [
-            [own - drawn for (_day, own), (_same, drawn) in zip(m["strategy_daily"], m["panel_daily"], strict=True)]
+            [own - drawn for (_day, own), (_same, drawn) in zip(m["strategy_daily"], m["baseline_daily"], strict=True)]
             for m in members
         ],
         axis=0,
@@ -671,11 +671,11 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
     )
     assert agreed["lower_bound"] > 0
 
-    # A replicate without a panel, or one that measured other days.
+    # A replicate without a random baseline, or one that measured other days.
     with pytest.raises(ValueError, match="another series"):
-        _forward(book, seed_replicates=[replicate({**others[0][1], "panel_daily": []})])
+        _forward(book, seed_replicates=[replicate({**others[0][1], "baseline_daily": []})])
     short = _selection_book(rng, 0.10, days=FORWARD_DAYS[:-1])
-    with pytest.raises(ValueError, match="measured other days than the frozen book"):
+    with pytest.raises(ValueError, match="measured other days than the registered book"):
         _forward(book, seed_replicates=[replicate(short)])
 
     span = FORWARD_DAYS + HELDOUT_DAYS
@@ -708,10 +708,10 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
 def test_a_reading_is_weighed_by_its_null_p_value_and_readings_pool_by_their_years():
     """Under the null a residual IR over ``years`` is normal with standard
     deviation 1/sqrt(years): its one-sided p-value is 1 - Phi(IR sqrt(years)),
-    at the bar exactly alpha. Readings of independent strategies pool by
+    at the threshold exactly alpha. Readings of independent strategies pool by
     their years; one that states no IR is counted, not pooled."""
 
-    assert verdict.null_p_value(verdict.residual_bar(5.0, 0.05), 5.0) == pytest.approx(0.05)
+    assert verdict.null_p_value(verdict.residual_threshold(5.0, 0.05), 5.0) == pytest.approx(0.05)
     assert verdict.null_p_value(0.0, 3.0) == pytest.approx(0.5)
     readings = [
         {"residual_information_ratio": 1.0, "years": 1.0},

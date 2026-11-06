@@ -1,4 +1,4 @@
-"""Workspace reference pack: the read-only ``refs/`` tree and the seeded ``output/``."""
+"""Workspace reference workspace: the read-only ``refs/`` tree and the seeded ``output/``."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ STARTER_PICK = """def first(context):
 
 
 def _pack(root: Path, *, starter: bool) -> Path:
-    """A reference pack as the repository checks one in."""
+    """A reference workspace as the repository checks one in."""
 
     pack = root / "pack"
     pack.mkdir(parents=True)
@@ -155,7 +155,7 @@ class InstallWorkspaceReferenceTest(unittest.TestCase):
 
 
 class SeedOutputFromStarterTest(unittest.TestCase):
-    """``output/`` starts as the pack's starter, so no arm has to port it."""
+    """``output/`` starts as the pack's starter, so no experiment has to port it."""
 
     def test_a_pack_with_a_starter_seeds_output_and_keeps_the_contract_readme(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -190,7 +190,7 @@ class SeedOutputFromStarterTest(unittest.TestCase):
             self.assertEqual(seed_output_from_starter(output, None), ())
 
     def test_nothing_under_the_workspace_is_mode_protected(self) -> None:
-        """Every arm that fanned candidates out of a copy hit "is not writable"
+        """Every experiment that fanned candidates out of a copy hit "is not writable"
         and recovered with the same ``chmod -R a+w``: ``cp`` reproduces the
         source's mode, so one 0o444 file anywhere under the workspace locks the
         typed writers out of every copy made from it. Nothing there carries a
@@ -215,7 +215,7 @@ class SeedOutputFromStarterTest(unittest.TestCase):
                 (workspace / "refs" / "starter" / "main.py").read_text(encoding="utf-8"),
                 STARTER_MAIN,
             )
-            # The fan-out the arms actually run: copy2 reproduces the source
+            # The fan-out the experiments actually run: copy2 reproduces the source
             # mode exactly as `cp` does under the sandbox's zero umask.
             candidate = workspace / "candidates" / "c_v15"
             (candidate / "lib").mkdir(parents=True)

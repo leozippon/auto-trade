@@ -34,7 +34,7 @@ from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.gpu import list_gpus
 from autotrade.environment.llm.model_profiles import model_profile
 from autotrade.paper import fills
-from autotrade.paper.books import delete_book, open_frozen_book
+from autotrade.paper.books import delete_book, open_registered_book
 from autotrade.paper.engine import PAPER_STATE_NAME, PaperWriterBusy
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_status
 
@@ -91,7 +91,7 @@ def _raw_generation_status(repo_root: Path) -> dict[str, object]:
 
 
 # Raw-lake states that leave health ok. ``updating`` is a write in progress,
-# not a fault: no console path reads the live lake -- an arm pins an
+# not a fault: no console path reads the live lake -- an experiment pins an
 # already-published release (its seed's, or the last complete one while the
 # updater holds the lake) and Paper reads the newest committed one -- so it is
 # reported in ``raw_generation`` without degrading. ``unreadable`` and any
@@ -281,7 +281,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             "status": "ok" if healthy else "degraded",
             **manager.running_slots(),
             # The GPU side of a start, which the research fill reads beside
-            # the two running-arm limits.
+            # the two running-experiment limits.
             **manager.gpu_slots(),
             "unreadable_experiments": unreadable,
             "raw_generation": raw_generation,
@@ -506,14 +506,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return _zip_response(members(), filename)
 
     @app.get("/api/experiments/{experiment_id}/frozen/strategy.zip")
-    def get_frozen_strategy(experiment_id: str) -> FileResponse:
+    def get_registered_strategy(experiment_id: str) -> FileResponse:
         _experiment_dir(experiment_id)
         try:
-            strategy_dir = registry.frozen_strategy_dir(experiment_root, experiment_id)
+            strategy_dir = registry.registered_strategy_dir(experiment_root, experiment_id)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
         except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="the experiment has no frozen artifact") from exc
+            raise HTTPException(status_code=404, detail="the experiment has no registered artifact") from exc
         return _strategy_zip_response(strategy_dir, f"{experiment_id}__frozen.zip")
 
     # ---- step tree ---------------------------------------------------------------
@@ -598,7 +598,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    # ---- operating memory ---------------------------------------------------------
+    # ---- skill library ---------------------------------------------------------
     # The curated library is a tracked repository directory, so editing it is
     # a repository write. Who may issue one is decided where every other
     # mutating console route decides it — the loopback/Unix-socket bind and,
@@ -784,7 +784,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         _trading_env(env)
         directory = _experiment_dir(str(payload.get("experiment_id") or ""))
         try:
-            book_id = open_frozen_book(root, directory)
+            book_id = open_registered_book(root, directory)
         except FileNotFoundError as exc:
             raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
         except (ValueError, OSError, RuntimeError) as exc:
@@ -802,7 +802,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PaperWriterBusy as exc:
             raise HTTPException(
-                status_code=409, detail=f"Paper book {book} is running; delete it after the run"
+                status_code=409, detail=f"Paper account {book} is running; delete it after the run"
             ) from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=omit_private_paths(str(exc))) from exc

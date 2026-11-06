@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The 2026-10-28 round: test-time training under distribution shift, gpt-6.1-sol and gemini-4-argon on the A100 instance with the relay's alternate key.
 
-Two arms mount the new pack `ttt_100k_8y_20261028`: its direction introduces
+Two experiments mount the new pack `ttt_100k_8y_20261028`: its direction introduces
 test-time training -- updating part of a model at inference time from what is
 visible then -- and names the question the round is read on afterwards,
 whether test-time training lets a model learn and adapt to out-of-distribution
@@ -12,29 +12,29 @@ continual-learning line closed (`refs/families.md`). Everything else is round
 20261027's: the eight-year fundamentals-plus-titles geometry on a 100k account
 graded against CSI 1000 (`FUND_TITLE_EIGHT_YEAR_100K`), main board and ChiNext,
 the 10-24 seed, DeepSeek-V4.1-Flash sub-agents and compaction with the
-threshold pinned at 221,184, xhigh, no lineage and one A100 per arm -- except
+threshold pinned at 221,184, xhigh, no lineage and one A100 per experiment -- except
 the relay's alternate key (`llm_key` alternate, `LIGHTING_API_KEY_ALT`; every
 role is a relay model, which that key requires), four replays per batch
-(`batch_validate_max_concurrency` 4) on the arm's one card, and, by the
+(`batch_validate_max_concurrency` 4) on the experiment's one card, and, by the
 owner's 2026-10-27 directive to give the Agent room for complex strategies,
-every per-arm budget at three times round 20261027's: 288 replay-years, 36
+every per-experiment budget at three times round 20261027's: 288 replay-years, 36
 null controls, USD 150 of API spend, 19,200 model calls, 7,200 minutes of
 pausable inference before `deadline`, 10,800 s for one `fit` call and 1,080 s
 for one `generate_orders` call -- and a strategy container of 16 CPUs and
 64 GiB, twice the default, which the session container shares. These are
 ceilings, not reservations: a fit-bearing leg's two containers never compute
-at once, so one arm's four legs compute on at most 64 of the instance's 128
-CPUs, while the memory ceilings of both arms' containers together exceed its
-463 GiB and rely, as every arm already does, on containers not filling at once.
+at once, so one experiment's four legs compute on at most 64 of the instance's 128
+CPUs, while the memory ceilings of both experiments' containers together exceed its
+463 GiB and rely, as every experiment already does, on containers not filling at once.
 
-| Arm | Main session | Sub-agents / compaction |
+| Experiment | Main session | Sub-agents / compaction |
 | --- | --- | --- |
 | `ttt_100k_8y_sol_zgca_20261028` | gpt-6.1-sol | DeepSeek-V4.1-Flash |
 | `ttt_100k_8y_argon_zgca_20261028` | gemini-4-argon | DeepSeek-V4.1-Flash |
 
-The console refuses to create a GPU arm while too few cards are free
+The console refuses to create a GPU experiment while too few cards are free
 (`ExperimentManager._claimable_gpus`), so queue the round with `--fill`, which
-creates each arm in file order once a card is free:
+creates each experiment in file order once a card is free:
 
     ~/miniconda3/envs/quant/bin/python ops/zgca/zgca.py run scripts/experiments/create_round_20261028.py --fill
 
@@ -87,7 +87,7 @@ DIRECTIVE = (
     "重做其中一个，需要一个真正新的机制。"
 )
 
-ARMS: dict[str, dict[str, object]] = {
+EXPERIMENTS: dict[str, dict[str, object]] = {
     f"ttt_100k_8y_{name}_zgca_20261028": {
         "model": model,
         "subagent_model": FLASH,
@@ -103,11 +103,11 @@ ARMS: dict[str, dict[str, object]] = {
 }
 
 ROUND = Round(
-    # Closed with the sealed gate (2026-11-03): its arms were created under the
+    # Closed with the sealed gate (2026-11-03): its experiments were created under the
     # deflated-Sharpe gate, whose bars it sent through the profile until they
     # left it (git history keeps them), and none states sealed_years.
     closed=True,
-    arms=ARMS,
+    experiments=EXPERIMENTS,
     pit_views_seed=FUND_TITLE_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_EIGHT_YEAR_100K,

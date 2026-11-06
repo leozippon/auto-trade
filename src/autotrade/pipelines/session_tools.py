@@ -1,7 +1,7 @@
 """The research session's Validation engine and the Agent-facing backtest tools.
 
 ``SessionValidations`` holds the session's Step list, its step tree and its
-rolling record; ``smoke_backtest``, ``validate``, ``test`` and
+validation record; ``smoke_backtest``, ``validate``, ``test`` and
 ``run_null_control`` are the replay tools a research session hands the Agent
 on top of it. Nothing
 here composes a session: ``research_session`` builds these tools and wires them
@@ -21,7 +21,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from autotrade.agent.compact import safe_error_summary
-from autotrade.common.records import read_json_object, redact_host_paths
+from autotrade.common.records import (
+    read_current_record,
+    read_json_object,
+    redact_host_paths,
+)
 from autotrade.environment.artifacts import (
     READONLY_FILES,
     ArtifactRevision,
@@ -35,7 +39,10 @@ from autotrade.environment.executor import (
     strategy_resources_of,
 )
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.null_control import PANEL_DRAWS, NullControlSetupError
+from autotrade.environment.replay.null_control import (
+    BASELINE_DRAWS,
+    NullControlSetupError,
+)
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
@@ -81,22 +88,22 @@ from .config import (
     research_span,
 )
 from .experiment import (
-    freeze_registration,
+    check_registration,
     null_control_seed,
     replay_and_analysis,
     research_step_record,
 )
 from .ledger import ExperimentLedger, Stage
-from .rolling_record import (
+from .session_resume import record_step_sidecar
+from .skills import _assert_skills_absent_from_formal
+from .validation_record import (
     SOURCE_TEST,
     ValidationSteps,
-    record_instrument,
+    record_significance,
     step_entry,
     step_table,
     test_step_record,
 )
-from .session_resume import record_step_sidecar
-from .skills import _assert_skills_absent_from_formal
 from .verdict import (
     ConditionReason,
     active_daily,
@@ -115,7 +122,7 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
     """The style sidecar beside one recorded Validation's result."""
 
     result_dir = Path(step.validation.result_ref).parent
-    return read_json_object(result_dir / STYLE_ARTIFACT_NAME)
+    return read_current_record(result_dir / STYLE_ARTIFACT_NAME)
 
 
 def _public_error_text(exc: Exception) -> str:
@@ -210,7 +217,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     object, same modification gate — only the window is short.
 
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
-    node is written and nothing here can be tested or frozen.
+    node is written and nothing here can be tested or registered.
 
     Like every other replay tool it pauses the session's thinking clock. A
     5-day rehearsal is dominated by the same full ``fit`` a Validation runs,
@@ -350,7 +357,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             # means the gate will not be what fails the official one.
             raise ToolError(f"smoke_backtest blocked by modification_check: {check.error}")
         # The rehearsal replays an immutable snapshot outside the Agent's mounts,
-        # not the live tree: it can neither be frozen nor leave anything behind
+        # not the live tree: it can neither be registered nor leave anything behind
         # in the directory (a trusted-mode run imports main.py and would drop
         # __pycache__ into it, which the next modification_check would
         # reject), and the Agent's own writes during the run cannot reach the
@@ -583,7 +590,7 @@ def write_active_daily(result_ref: str) -> Path:
     """
 
     result_dir = Path(result_ref).parent
-    analysis = read_json_object(result_dir / STYLE_ARTIFACT_NAME)
+    analysis = read_current_record(result_dir / STYLE_ARTIFACT_NAME)
     target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
     staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
@@ -621,14 +628,14 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
 
 # What a row's residual reading is, and is not.
 RESIDUAL_READING_NOTE = (
-    "the residual statistic over this row's own span: bar is "
+    "the residual statistic over this row's own span: threshold is "
     "z(1 - alpha) / sqrt(years) for this span's length, the same formula the "
-    "rolling record is read with; a reading, not a verdict"
+    "validation record is read with; a reading, not a verdict"
 )
-# A row whose bytes and span repeat an earlier node of the arm.
+# A row whose bytes and span repeat an earlier node of the experiment.
 SAME_BYTES_NOTE = (
     "these bytes were already validated on this span as the nodes named: the "
-    "zero-skill panel is seeded by the span, so a deterministic strategy repeats "
+    "random baseline is seeded by the span, so a deterministic strategy repeats "
     "their readings exactly and a difference measures only the strategy's own "
     "non-determinism (GPU training, for one); it is the same trial, not new "
     "evidence"
@@ -637,7 +644,7 @@ SAME_BYTES_NOTE = (
 
 class SessionValidations:
     """The research session's Validation engine: one Step list, one tree, one
-    rolling record.
+    validation record.
 
     Not an Agent tool: ``validate`` commits and replays every candidate
     through it, and ``test`` records every step through it, so neither can
@@ -678,7 +685,7 @@ class SessionValidations:
         # dies keeps the nodes it validated for the attempt that resumes it.
         self.experiment_dir = experiment_dir
         # Continued from the earlier attempts' Validations and tests: the
-        # rolling record's steps so far, the frontier they imply, and how
+        # validation record's steps so far, the test horizon they imply, and how
         # many validate calls the current interval has already made.
         self.steps: list[StepResult] = list(request.steps_before)
         self.tests: list[dict[str, object]] = [dict(row) for row in request.tests_before]
@@ -693,11 +700,11 @@ class SessionValidations:
         self.candidates_started = 0
 
     @property
-    def frontier(self) -> str:
-        """The rolling record's frontier: the end of the last tested step, the
+    def test_horizon(self) -> str:
+        """The validation record's test horizon: the end of the last tested step, the
         end of the research years before the first test."""
 
-        return self.steps_plan.frontier_after(len(self.tests))
+        return self.steps_plan.horizon_after(len(self.tests))
 
     @property
     def validates_per_step(self) -> int:
@@ -715,8 +722,8 @@ class SessionValidations:
         }
 
     def record_row(self, record: Mapping[str, object]) -> dict[str, object]:
-        """One rolling-record step as a test result lists it: the step, its
-        window and frontier, the candidate by handle and its entry without
+        """One validation-record step as a test result lists it: the step, its
+        window and test horizon, the candidate by handle and its entry without
         the daily rows."""
 
         candidate = dict(record["candidate"])  # type: ignore[arg-type]
@@ -724,7 +731,7 @@ class SessionValidations:
         return {
             "step": record["step"],
             "window": dict(record["window"]),  # type: ignore[arg-type]
-            "frontier": record["frontier"],
+            "test_horizon": record["test_horizon"],
             "candidate": {"node_id": candidate["step_id"], **self.handle(str(candidate["step_id"]))},
             "source": record["source"],
             **entry,
@@ -782,7 +789,7 @@ class SessionValidations:
         deterministic: bool = False,
     ) -> dict[str, object]:
         """Whether one Step of this session registers, as the Pipeline reads
-        it (``experiment.freeze_registration``), with ``seed_replicates`` the
+        it (``experiment.check_registration``), with ``seed_replicates`` the
         Steps it would register as its seed replicates and ``deterministic``
         its declaration that the package uses no randomness. Registration
         only, never a score. A node that is not a Step of this session does
@@ -795,7 +802,7 @@ class SessionValidations:
         named = (node_id, *seed_replicates)
         if any(step_id not in rows for step_id in named):
             return {"passed": False, "reasons": [ConditionReason.NOT_A_SESSION_STEP]}
-        return freeze_registration(
+        return check_registration(
             rows[node_id],
             experiment_dir=self.experiment_dir,
             acceptance=self.rules,
@@ -821,11 +828,11 @@ class SessionValidations:
         """The residual statistic over one replay's own span.
 
         ``verdict.residual_reading`` of the replay's graded series at the
-        arm's ``alpha``: the residual IR, the three betas and the bar for the
+        experiment's ``alpha``: the residual IR, the three betas and the threshold for the
         span's length, beside the active excess after the cost stress on the
         span's turnover (``verdict.summary_excess_at_cost_stress``, the
         reading the forward stage takes too). No pass or fail: the session
-        reads the same statistic the rolling record is read with.
+        reads the same statistic the validation record is read with.
         ``unmeasured`` names why a span the statistic cannot read has none.
         """
 
@@ -854,10 +861,10 @@ class SessionValidations:
         """What the holder's account did over the node's span, unregressed.
 
         The holder's readings of the span (``verdict.holder_readings``: the
-        book, the benchmark and the zero-skill panel as stored, the raw excess
+        book, the benchmark and the random baseline as stored, the raw excess
         and the plain selection), in the structure a forward slice carries
         them, so a row reads over research what the graduation reads forward.
-        Beside them the book's market loading relative to its panel (the
+        Beside them the book's market loading relative to its random baseline (the
         benchmark coefficient of the active series' factor regression,
         ``verdict.graded_statistics``; a diagnostic no gate reads) and, on a
         row whose span covers them, the same holder's readings of the last two
@@ -900,13 +907,13 @@ class SessionValidations:
     def commit_revision(
         self, source_output: Path, fingerprint: str, *, label: str
     ) -> ArtifactRevision:
-        """Freeze one approved working tree into an immutable revision.
+        """Register one approved working tree into an immutable revision.
 
         The revision is verified to be the bytes ``modification_check`` just
         approved, so an approval can never be transferred to a tree that was
         still being written; a mismatch discards the revision and raises.
 
-        It also records the artifact it descends from, so the revisions the arm
+        It also records the artifact it descends from, so the revisions the experiment
         keeps form the same lineage the Step tree draws.
         """
         revision, snapshot = self.artifact_store.create_revision(
@@ -928,10 +935,10 @@ class SessionValidations:
 
         A tree position the Agent set with ``step_rollback`` is the deliberate
         branch point and wins; otherwise the working copy descends from the last
-        Validation the arm recorded, across attempts. ``validate`` commits
+        Validation the experiment recorded, across attempts. ``validate`` commits
         a whole round before it records any of it, so a round's revisions all
-        resolve to the same parent and stay siblings. ``None`` before the arm's
-        first Validation, and at a position the arm's own Validations do not
+        resolve to the same parent and stay siblings. ``None`` before the experiment's
+        first Validation, and at a position the experiment's own Validations do not
         account for (an inherited seed node), which starts a new lineage root
         rather than inventing a parent.
         """
@@ -1064,7 +1071,7 @@ def recorded_step(
     )
 
 
-# ``validate``'s candidate range and replay width live with the arm's
+# ``validate``'s candidate range and replay width live with the experiment's
 # other budgets (``config.BATCH_VALIDATE_MAX_CANDIDATES``,
 # ``RollingExperimentConfig.batch_validate_max_concurrency``).
 BATCH_NAME_MAX_CHARS = 40
@@ -1096,7 +1103,7 @@ BATCH_FAILURE_ENVIRONMENT = "environment"
 # to resend, which is right for a transient fault (a clock lost to load, a card
 # another process took) and leaves nothing to stop the loop when the host
 # fails the span every time: in round 20261015 every replay crossing
-# 2022-07-01 failed in the host's as-of merge, and two arms resent 6 and 4 such
+# 2022-07-01 failed in the host's as-of merge, and two experiments resent 6 and 4 such
 # batches (2.1 h and 1.5 h of wall time), although nothing past that date had
 # been tested. A batch in which every candidate failed on the environment
 # measured nothing; the second such batch on the same span in one attempt ends
@@ -1130,7 +1137,7 @@ def _failure_cause(error: BaseException | None) -> str:
 class _Replayed:
     """One candidate's replay: its evaluation or the error it raised, the
     ``time.perf_counter`` window it ran in, and the card it was pinned to
-    (None: every card of the arm)."""
+    (None: every card of the experiment)."""
 
     evaluation: EvaluationResult | None
     error: Exception | None
@@ -1156,7 +1163,7 @@ class _Replayed:
 def leg_cards(devices: Sequence[int], width: int) -> list[int]:
     """The card of each of a batch's ``width`` concurrent replay slots.
 
-    The arm's cards in turn, so with at least as many cards as slots no two
+    The experiment's cards in turn, so with at least as many cards as slots no two
     legs running at once share one, and with fewer they share evenly. A batch
     running one replay at a time pins nothing: that replay attaches every card,
     which is what lets one strategy run a model across them (tensor parallel).
@@ -1173,7 +1180,7 @@ def _shared_gpu_note(siblings: Sequence[str]) -> str:
     The siblings that replayed on its card while it ran held memory on the
     same device. The CUDA report cannot say whose memory filled the card -- a
     sibling's, the candidate's own other strategy container's, or a process
-    outside the arm -- so the note names the siblings as sharers, not as the
+    outside the experiment -- so the note names the siblings as sharers, not as the
     cause, and the failure stays the environment's and is refunded like any
     other contention.
     """
@@ -1223,14 +1230,14 @@ BATCH_CANDIDATE_SUMMARY_KEYS = (
 # screening comparison is made on; the node's result.json keeps the full table.
 # The active excess rides with the raw one because the verdict reads it -- it
 # is the series it grades: a comparison made on the raw column alone reads a
-# different number than it will. The year's benchmark and panel returns ride
+# different number than it will. The year's benchmark and random baseline returns ride
 # beside the book's own, so each year reads as the holder's account, the index
 # and zero skill on the same skeleton.
 BATCH_SUB_WINDOW_KEYS = (
     "label",
     "return",
     "benchmark_return",
-    "panel_return",
+    "baseline_return",
     "excess_return",
     "active_excess_return",
     "sharpe",
@@ -1261,7 +1268,7 @@ def batch_candidate_resources(
 
     What the replay cost its container against the limits it ran under: the
     peak memory and the fit seconds beside the ceilings this batch's own
-    concurrency put them under. Two arms sized a batch from the session
+    concurrency put them under. Two experiments sized a batch from the session
     container's limits instead and lost 20 replay-years to timeouts. A failed
     candidate has no metrics but carries the same block from its exception, so
     every row keeps it in the one place — its own top level. Absent when the
@@ -1269,7 +1276,7 @@ def batch_candidate_resources(
 
     The fit seconds ride as their summary, not as the per-fit list: a strategy
     that refits daily reads 1,941 fits over an eight-year span, and because a
-    batch result is re-sent with every later model call, two arms' lists came
+    batch result is re-sent with every later model call, two experiments' lists came
     to about a fifth of their main input. A completed row's ``result_ref``
     keeps the list under ``stats.resources``; ``smoke_backtest`` replays a few
     days and returns it whole.
@@ -1315,14 +1322,14 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     ``generate_orders(context)`` take longer without the strategy doing
     anything different, so a fixed cap makes the verdict depend on how many
     siblings a candidate happened to be batched with — the failure mode that
-    cost one arm four Validations to fits solo reruns finished in
+    cost one experiment four Validations to fits solo reruns finished in
     1,550-2,027 s. Scaling both caps by ``workers`` keeps the guards (a
     runaway fit or decision still dies) while removing that dependence.
 
     The inference cap was deliberately left fixed when the fit cap was
     scaled, on the argument that a Validation makes hundreds of decision
     calls and widening the per-call cap would stretch a slow batch instead of
-    failing it. Three arms then filed the counter-example on one day: a
+    failing it. Three experiments then filed the counter-example on one day: a
     candidate measured at ~2.0 s/day over 243 serial decision days died at
     ``strategy inference exceeded 180s`` on one rebalance day inside a 2-way
     batch. Both caps bound ONE call, so both are equally distorted by the
@@ -1395,7 +1402,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "you; models/ is shared with the working copy), or output itself to "
         "validate the working copy as it stands; build such a directory by copying "
         "output/, the code you have been editing, not refs/, which only holds the "
-        "pack this arm started from. A candidate whose replay completes becomes its own immutable "
+        "reference workspace this experiment started from. A candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
         "with its span. A candidate whose replay fails has no result_ref and, while "
         "record_failed_attempts is on, is recorded as a dead-end node, so later "
@@ -1418,22 +1425,22 @@ class ValidateTool(SessionTimeBudgetAware):
         "running while the candidates replay concurrently. Returns one row per "
         "candidate: node id with its short handle (valid_002, which every tool "
         "taking a node_id accepts), headline metrics, the per-year return, "
-        "benchmark_return, panel_return (the zero-skill panel's own), excess, "
+        "benchmark_return, baseline_return (the random baseline's own), excess, "
         "active excess and Sharpe of sub_windows, residual_reading (the residual "
         "statistic over the row's own span, as acceptance_rules.residual_statistic "
         "defines it: residual_information_ratio, residual_excess, "
         "residual_tracking_error, market_beta, size_beta and value_beta of the "
         "active series regressed on the market, size and value legs, days and "
-        "years, and bar, z(1 - alpha) / sqrt(years) for this span's length; beside "
+        "years, and threshold, z(1 - alpha) / sqrt(years) for this span's length; beside "
         "them active_excess_at_cost_stress, the annualised active excess after "
         "cost_stress_multiplier x the slippage on the span's turnover; a reading, "
         "never a pass or a fail), raw_readings (the holder's money, which active "
         "readings are not, under the names a forward slice carries: "
-        "strategy_return, benchmark_return and panel_return, what the book after "
-        "every cost, benchmark_index and the zero-skill panel after its costs each "
+        "strategy_return, benchmark_return and baseline_return, what the book after "
+        "every cost, benchmark_index and the random baseline after its costs each "
         "compounded to over the span, with raw_excess, book minus benchmark, and "
-        "plain_selection, book minus panel, both compounded; "
-        "active_market_beta, the book's market loading relative to its panel: the "
+        "plain_selection, book minus random baseline, both compounded; "
+        "active_market_beta, the book's market loading relative to its random baseline: the "
         "market coefficient of the active series' factor regression over the "
         "span; "
         "and on a row covering them last_two_years, the same five readings from "
@@ -1458,7 +1465,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "replay record, and its daily_series (validation/active_daily.csv in the "
         "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "
         "graded series, one row per trading day of the span: strategy_return, "
-        "panel_return (the zero-skill composite), active_return (their "
+        "baseline_return (the zero-skill composite), active_return (their "
         "difference), active_cumulative and active_drawdown (its compounded path "
         "and the loss below its running peak, whose maximum is "
         "active_max_drawdown), benchmark_return, size_factor_return and "
@@ -1521,7 +1528,7 @@ class ValidateTool(SessionTimeBudgetAware):
                                     "placebo): it replays in the same call like "
                                     "any candidate, but test never takes it, so "
                                     "a real candidate registered as a control "
-                                    "can never be tested or frozen; false for a "
+                                    "can never be tested or registered; false for a "
                                     "candidate."
                                 ),
                             },
@@ -1567,7 +1574,7 @@ class ValidateTool(SessionTimeBudgetAware):
         self.workspace = workspace
         self.modification_check_factory = modification_check_factory
         self._trace_emit = trace_emit
-        # The arm's replay width (``batch_validate_max_concurrency``), already
+        # The experiment's replay width (``batch_validate_max_concurrency``), already
         # validated with its other budgets.
         self.max_concurrency = max_concurrency
         # Per-session rejection counter, keyed by signature. Not persisted:
@@ -2161,28 +2168,28 @@ TEST_DESCRIPTION = (
     "the candidate's in exactly one integer seed assignment, e.g. SEED_BASE = 1000 -> "
     "2000), unless deterministic=true declares that the package uses no randomness, "
     "which is recorded for the operator. Registration reads no performance; a "
-    "candidate that does not register is refused with named reasons and the frontier "
-    "does not move. A registered candidate is replayed with its random panel as one "
+    "candidate that does not register is refused with named reasons and the test horizon "
+    "does not move. A registered candidate is replayed with its random baseline as one "
     "fresh continuous book from the validation start to the end of the next step; "
     "nothing carries over from earlier tests, so switching candidates costs only this "
-    "replay. Its result over the newest step becomes that step's entry in the arm's "
-    "rolling record and is never rewritten. The step always runs to completion; a "
+    "replay. Its result over the newest step becomes that step's entry in the experiment's "
+    "validation record and is never rewritten. The step always runs to completion; a "
     "candidate whose own code raises during the replay is refused with the error and "
-    "the frontier does not move. Then the frontier advances and the validate allowance "
+    "the test horizon does not move. Then the test horizon advances and the validate allowance "
     "starts again; the session's data view stays at the end of the research years, so "
-    "these results are how the validation years reach you. Returns: the new frontier "
+    "these results are how the validation years reach you. Returns: the new test horizon "
     "and the steps left; "
     "the candidate's whole-replay statistics (stats, raw_readings and residual_reading "
     "as a validate row carries them); step_table, one row per step from the validation "
-    "start to the frontier, each over that step's window, so the rows are quarters for "
+    "start to the test horizon, each over that step's window, so the rows are quarters for "
     "quarterly steps and months for monthly ones (return, max_drawdown, turnover, fees, "
-    "active_return against the panel, index_return); record, the record to date, one row "
+    "active_return against the random baseline, index_return); record, the record to date, one row "
     "per step with the "
-    "candidate that produced it; and instrument, the record's residual information "
+    "candidate that produced it; and significance, the record's residual information "
     "ratio of the stitched daily active series on the market, size and value legs, the "
-    "betas, the one-sided p_value and the bar for the record's current length. These "
+    "betas, the one-sided p_value and the threshold for the record's current length. These "
     "are readings, never a pass or a fail. When this call tests the last step, the "
-    "session ends and this candidate is the frozen strategy. The call starts only "
+    "session ends and this candidate is the registered strategy. The call starts only "
     "after every background sub-agent has finished."
 )
 
@@ -2190,10 +2197,10 @@ TEST_DESCRIPTION = (
 class TestTool(SessionTimeBudgetAware):
     """``test(candidate)``: one step of the validation period, lived through.
 
-    The session's only way forward and the only way it ends: the frontier
-    advances one step per call, the step's entry is appended to the arm's
-    rolling record in the ledger as the call completes, and the call that
-    tests the last step finishes the session with its candidate as the frozen
+    The session's only way forward and the only way it ends: the test horizon
+    advances one step per call, the step's entry is appended to the experiment's
+    validation record in the ledger as the call completes, and the call that
+    tests the last step finishes the session with its candidate as the registered
     strategy. Nothing here ranks or selects: the agent chooses the candidate,
     the host replays and records.
     """
@@ -2273,7 +2280,7 @@ class TestTool(SessionTimeBudgetAware):
             reasons = [str(item) for item in registration.get("reasons") or ()]
             raise ToolError(
                 f"test refused: {backtest.named([node_id])[0]} does not register "
-                f"({', '.join(reasons) or 'no reason recorded'}); the frontier did not move. "
+                f"({', '.join(reasons) or 'no reason recorded'}); the test horizon did not move. "
                 "Name a node that registers, or validate what registration lacks (a full-span "
                 "validation, a seed replicate). A seed replicate is what "
                 "acceptance_rules.registration.seed_replicates defines.",
@@ -2290,24 +2297,24 @@ class TestTool(SessionTimeBudgetAware):
         step = len(backtest.tests) + 1
         if step > steps.count:
             raise ToolError("test refused: the validation period is complete", error_type="validation_complete")
-        frontier = steps.frontier_after(step)
+        test_horizon = steps.horizon_after(step)
         candidate = next(item for item in backtest.steps if item.step_id == node_id)
         with backtest.time_budget.pause():
-            # The warm start the replay opens on must be in the seed before
+            # The prebuilt as-of state the replay opens on must be in the seed before
             # the replay runs: a seed that lacks it ends the attempt by name.
             try:
-                require_warm = getattr(backtest.evaluator, "require_warm_start", None)
+                require_prebuilt = getattr(backtest.evaluator, "require_prebuilt_asof_state", None)
                 request = backtest.validation_request(
                     backtest.artifact_store.revision(candidate.revision_id),
                     backtest.request.validation,
                 )
-                if callable(require_warm):
-                    require_warm(request)
+                if callable(require_prebuilt):
+                    require_prebuilt(request)
             except (FileNotFoundError, RuntimeError) as exc:
                 raise EnvironmentBlocked(f"test step {step}: {_public_error_text(exc)}") from exc
             started = time.perf_counter()
             try:
-                evaluation = backtest.evaluator.evaluate(request, end_day=frontier)
+                evaluation = backtest.evaluator.evaluate(request, end_day=test_horizon)
             except SessionInterrupt:
                 raise
             except Exception as exc:
@@ -2321,7 +2328,7 @@ class TestTool(SessionTimeBudgetAware):
                             f"environment; last error: {_public_error_text(exc)}"
                         ) from exc
                 raise ToolError(
-                    f"test step {step} did not complete; the frontier did not move. "
+                    f"test step {step} did not complete; the test horizon did not move. "
                     + (
                         "The candidate's own code raised on the validation data: "
                         if cause == BATCH_FAILURE_STRATEGY
@@ -2348,13 +2355,13 @@ class TestTool(SessionTimeBudgetAware):
                     "seed_replicates": list(replicates),
                     "deterministic": deterministic,
                 },
-                replay={"start": steps.start, "end": frontier, "result_ref": evaluation.result_ref},
+                replay={"start": steps.start, "end": test_horizon, "result_ref": evaluation.result_ref},
                 entry=entry,
                 registration=registration,
                 source=SOURCE_TEST,
             )
             # Durable before anything is returned: a resumed attempt
-            # continues from this frontier.
+            # continues from this test horizon.
             backtest.ledger.append(record)
             backtest.tests.append(record)
             backtest.validates_in_interval = 0
@@ -2362,28 +2369,28 @@ class TestTool(SessionTimeBudgetAware):
         if self._trace_emit is not None:
             self._trace_emit(
                 TraceEvent.TOOL_CALL_STARTED,
-                {"tool": "test", "status": "step_recorded", "step": step, "frontier": frontier},
+                {"tool": "test", "status": "step_recorded", "step": step, "test_horizon": test_horizon},
             )
         value: dict[str, object] = {
             "status": "step_recorded",
             "step": step,
             "steps": steps.count,
             "steps_left": steps.count - step,
-            "frontier": frontier,
+            "test_horizon": test_horizon,
             "candidate": {
                 "node_id": node_id,
                 **backtest.handle(node_id),
                 **({"seed_replicates": list(replicates)} if replicates else {}),
                 "deterministic": deterministic,
             },
-            "replay": {"start": steps.start, "end": frontier, "wall_seconds": round(time.perf_counter() - started, 1)},
+            "replay": {"start": steps.start, "end": test_horizon, "wall_seconds": round(time.perf_counter() - started, 1)},
             "stats": batch_candidate_stats(evaluation.summary),
             **batch_candidate_resources(evaluation.summary.get("resources")),
             "raw_readings": {name: _rounded(v) for name, v in holder_readings(analysis).items()},
             "residual_reading": backtest.residual_reading_of(analysis, evaluation.summary),
             "step_table": [_rounded_row(row) for row in step_table(replay, analysis, steps, through=step)],
             "record": [backtest.record_row(row) for row in backtest.tests],
-            "instrument": _rounded_row(record_instrument([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
+            "significance": _rounded_row(record_significance([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
             "test_replays": backtest.test_replays,
             "validates_per_step": backtest.rules.validates_per_step,
         }
@@ -2391,7 +2398,7 @@ class TestTool(SessionTimeBudgetAware):
             value.update(
                 outcome="completed",
                 pipeline_outcome=(
-                    f"The validation period is complete: {backtest.named([node_id])[0]} is the frozen "
+                    f"The validation period is complete: {backtest.named([node_id])[0]} is the registered "
                     "strategy; the host replays it over the Forward year and the Held-out months and "
                     "records the readings. The session ends here."
                 ),
@@ -2412,7 +2419,7 @@ def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
 NULL_CONTROL_NOTE = (
     "descriptive only: excess_percentile near 0.5 means the names carried no "
     "information the timing and sizing did not. The percentile gates nothing; "
-    "what the gate grades is the node's active series against the panel its own "
+    "what the gate grades is the node's active series against the random baseline its own "
     "validation drew (benchmark.active_*)"
 )
 
@@ -2420,11 +2427,11 @@ NULL_CONTROL_NOTE = (
 class NullControlTool(SessionTimeBudgetAware):
     """Rank one complete Validation against random-name replays of its trades.
 
-    The same null control the Pipeline runs for the frozen node at freeze
+    The same null control the Pipeline runs for the registered node at registration
     (``experiment._null_control``), drawn with the same seed through the same
     backend over the node's own span, so the figure the Agent reads before
     selecting is the figure the ledger records: the block is cached per node
-    and handed to the Pipeline, which reuses it for the frozen node instead of
+    and handed to the Pipeline, which reuses it for the registered node instead of
     drawing again. Each call is host replay the session does not pay for, hence
     the per-session cap.
     """
@@ -2464,24 +2471,24 @@ class NullControlTool(SessionTimeBudgetAware):
         self.blocks: dict[str, dict[str, object]] = {}
         self.spec = ToolSpec(
             self.spec.name,
-            f"Rank one complete Validation node of this session against K={PANEL_DRAWS} "
+            f"Rank one complete Validation node of this session against K={BASELINE_DRAWS} "
             "host replays of its own trade skeleton over the node's own span, every "
             "name replaced by a random one that one board lot of the same money could "
-            "buy on the same side of the arm's benchmark_index membership (the "
+            "buy on the same side of the experiment's benchmark_index membership (the "
             "float-cap decile when "
             "index_weight is not mounted): the same null control the Pipeline runs "
-            "for the frozen node at freeze. Returns the null_control block the ledger "
+            "for the registered node at registration. Returns the null_control block the ledger "
             "will carry (observed_excess, excess_percentile — near 0.5 means the names "
             "added nothing the timing and sizing did not — the null's mean and p05/p95, "
             "rejects_mean, dropped_trips_mean). Every formal validation already "
-            "reports the node against a panel of the same construction "
+            "reports the node against a random baseline of the same construction "
             "(benchmark.active_*), which is the series the verdict grades; this "
             "percentile is a second, descriptive reading of it. Costs well under a "
             "minute of host replay per research year (the session clock pauses like a "
             f"formal backtest) and is capped at {max_calls} per "
             "session (max_null_controls in the budgets fact; every result reports "
-            "null_controls_remaining); a node's block is cached, and the frozen node's "
-            "block is reused at freeze instead of being drawn again. Use it on "
+            "null_controls_remaining); a node's block is cached, and the registered node's "
+            "block is reused at registration instead of being drawn again. Use it on "
             "full-span finalists before a test, not on every candidate. "
             "Refused for a node that is not a complete Validation of this session, "
             "once the cap is spent, and while a background sub-agent that can write "
@@ -2520,8 +2527,8 @@ class NullControlTool(SessionTimeBudgetAware):
         if self.used >= self.max_calls:
             raise ToolError(
                 f"run_null_control budget exhausted: {self.max_calls} per session "
-                "(max_null_controls). The frozen node's null control still runs at "
-                "freeze.",
+                "(max_null_controls). The registered node's null control still runs at "
+                "registration.",
                 error_type="null_control_budget_exhausted",
             )
         runner = getattr(self.backtest.evaluator, "null_control", None)

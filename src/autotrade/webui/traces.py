@@ -326,9 +326,9 @@ def read_subagent_trace(path: Path, task_id: str) -> dict[str, object]:
 
 
 def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
-    """One child's rounds in order, in the block model the parent view renders.
+    """One child's turns in order, in the block model the parent view renders.
 
-    ``agent_output`` per model round and ``tool_group`` per batch of tool calls
+    ``agent_output`` per model turn and ``tool_group`` per batch of tool calls
     reuse the parent renderers; ``marker`` and ``summary`` carry the wrap-up,
     truncation and final report.
     """
@@ -373,7 +373,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "收尾提示",
-                    f"第 {_as_int(event.get('round'))} 轮，上限 "
+                    f"第 {_as_int(event.get('round'))} 回合，上限 "
                     f"{_as_int(event.get('rounds_limit'))}：已要求子代理立即收尾。",
                 )
             )
@@ -384,9 +384,9 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "父代理指令",
-                    f"第 {_as_int(event.get('round'))} 轮前送达（{chars} 字符）。"
+                    f"第 {_as_int(event.get('round'))} 回合前送达（{chars} 字符）。"
                     if event.get("delivery") == "delivered"
-                    else f"已排队（{chars} 字符），子代理下一轮前读取。",
+                    else f"已排队（{chars} 字符），子代理下一回合前读取。",
                 )
             )
         elif kind == TraceEvent.SUBAGENT_CONTEXT_COMPACTION:
@@ -396,7 +396,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "上下文压缩",
-                    f"第 {_as_int(event.get('round'))} 轮："
+                    f"第 {_as_int(event.get('round'))} 回合："
                     f"{compaction.get('status') or 'unknown'}，消息 "
                     f"{_as_int(compaction.get('messages_before'))}→"
                     f"{_as_int(compaction.get('messages_after'))}，估算 "
@@ -554,7 +554,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             for task, row in _as_mapping(cached.get("subagent_usage")).items()
         }
         # The session's cumulative spend rides on every budgeted event; the
-        # last block seen is the arm's usage so far, earlier attempts included.
+        # last block seen is the experiment's usage so far, earlier attempts included.
         budget_used = cached.get("budget_used")
         for raw in blob[:tail].splitlines():
             event = _decode_event(raw)
@@ -566,7 +566,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             if task_id is not None:
                 task_ids.add(task_id)
                 # A finished task reports authoritative totals; a live one is
-                # summed from the per-round records seen so far.
+                # summed from the per-turn records seen so far.
                 if _subagent_phase(event) == "ended":
                     ended_ids.add(task_id)
                     totals = _as_mapping(event.get("usage_totals"))
@@ -992,7 +992,7 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
 
 
 def _absorb_subagent_totals(state: _SubagentState, event: dict[str, object]) -> None:
-    """The terminal event's own totals win: they also cover rounds whose
+    """The terminal event's own totals win: they also cover turns whose
     events fell outside the read window."""
 
     for field in ("rounds", "llm_calls", "tool_calls"):

@@ -9,7 +9,7 @@ immutable revision, same replay-year budget, same selection path through
 These tests cover the refusals that must happen before anything runs, the
 spans a batch may replay on a multi-year research period, the per-candidate
 isolation of a failure, the lineage the tree ends up with, and that a batch
-node can actually be frozen through the gate.
+node can actually be registered through the gate.
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ def _strategy(marker: str) -> str:
     return f"def generate_orders(context):\n    _ = {marker}\n    return []\n"
 
 
-# What a replay's summary says of its costs: the slippage the freeze gate's
+# What a replay's summary says of its costs: the slippage the registration check's
 # cost stress charges again on the replay's turnover.
 COSTED = {"cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}}
 
@@ -287,18 +287,18 @@ class _Evaluator:
 
 
 def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
-    """The daily series the freeze gate reads: 60 days, fifteen in each of the
+    """The daily series the registration check reads: 60 days, fifteen in each of the
     four research years the gate counts, of a return that is ``alpha`` plus
-    benchmark and size exposure plus noise, and the zero-skill panel composite
+    benchmark and size exposure plus noise, and the random-baseline composite
     every formal replay carries, which the gate subtracts."""
 
     rng = np.random.default_rng(seed)
     days = [f"{2021 + index // 15}09{index % 15 + 1:02d}" for index in range(60)]
     benchmark = rng.normal(0.0003, 0.01, len(days))
     size = rng.normal(0.0, 0.004, len(days))
-    panel = rng.normal(0.0, 0.002, len(days))
+    baselines = rng.normal(0.0, 0.002, len(days))
     strategy = (
-        alpha + 0.9 * benchmark + 0.2 * size + panel + rng.normal(0.0, 0.004, len(days))
+        alpha + 0.9 * benchmark + 0.2 * size + baselines + rng.normal(0.0, 0.004, len(days))
     )
     sidecar = {
         "strategy_daily": [[day, float(value)] for day, value in zip(days, strategy)],
@@ -308,7 +308,7 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
             [day, float(value)]
             for day, value in zip(days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days)))
         ],
-        "panel_daily": [[day, float(value)] for day, value in zip(days, panel)],
+        "baseline_daily": [[day, float(value)] for day, value in zip(days, baselines)],
     }
     write_json_atomic(directory / "style_analysis.json", sidecar)
 
@@ -339,7 +339,7 @@ class _Session:
         max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     ) -> None:
         # Where the worker roots a session, as every session has one: the
-        # freeze gate reads a nominee's strategy from its revision store.
+        # registration check reads a nominee's strategy from its revision store.
         experiment_dir = experiment_dir or root / "experiment"
         self.root = root
         self.trace_events = trace
@@ -397,7 +397,7 @@ class _Session:
         self.tree = StepTree(root / "steps")
         self.evaluator = _Evaluator(
             # Where the worker roots them: a recorded result is read under
-            # the arm it belongs to (``ledger.recorded_path``).
+            # the experiment it belongs to (``ledger.recorded_path``).
             experiment_dir / "artifacts" / "results",
             fail_markers=fail_markers,
             contention_markers=contention_markers,
@@ -531,7 +531,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
 
     def test_a_candidate_with_the_start_logic_is_a_legal_candidate(self) -> None:
         """A session may re-validate its start: on another span, or on the full
-        period to count it toward the freeze gate. Nothing refuses it."""
+        period to count it toward the registration check. Nothing refuses it."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("start", "# the start as it stands\n" + PARENT_SOURCE)
@@ -817,10 +817,10 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(session.tree.current_node_id, branch_point)
             self.assertEqual(len(session.backtest.steps), 4)
 
-    def test_candidates_replay_concurrently_up_to_the_arms_width(self) -> None:
+    def test_candidates_replay_concurrently_up_to_the_experiments_width(self) -> None:
         """The bound is host capacity, not correctness: each replay owns its
         result directory, as-of view and container, and the bookkeeping around
-        them stays on the calling thread. The width is the arm's own
+        them stays on the calling thread. The width is the experiment's own
         ``batch_validate_max_concurrency``, and both strategy deadlines scale
         with exactly the width it produced."""
         fit_base = SandboxConfig().fit_timeout_seconds
@@ -871,7 +871,7 @@ class BatchValidateRunTest(unittest.TestCase):
         candidate's verdict depended on how many siblings happened to share the
         host: two explore_github folds lost both batch candidates to `strategy
         fit exceeded 3600s` while solo reruns of the same code did the same four
-        refits in 1,550-2,027 s, and three arms lost slots to `strategy
+        refits in 1,550-2,027 s, and three experiments lost slots to `strategy
         inference exceeded 180s` inside a batch -- one with a byte-identical
         serial control that replayed 243 decision days at ~2.0 s/day. Both caps
         therefore move with the batch's own width, and only for the pool's
@@ -958,7 +958,7 @@ class BatchValidateRunTest(unittest.TestCase):
         the same place: the row's own top level, beside ``stats`` rather than
         inside it, because a failed row has no ``stats`` at all.
 
-        Two arms sized a batch from a 3-day smoke and lost 20 replay-years to
+        Two experiments sized a batch from a 3-day smoke and lost 20 replay-years to
         fits that ran past the concurrency-scaled cap, reasoning about a
         ceiling neither of them had measured.
 
@@ -1038,7 +1038,7 @@ class BatchValidateRunTest(unittest.TestCase):
 
     def test_a_leg_the_shared_card_failed_names_the_siblings_beside_it(self) -> None:
         """Legs of a batch that are not pinned to a card of their own (here the
-        arm pins none) attach the same cards, so siblings that replayed while a
+        experiment pins none) attach the same cards, so siblings that replayed while a
         leg ran out of GPU memory held memory on the same device. The leg's
         error names them, wherever it is read, so the Agent
         can tell its own batch may have overcommitted the card. The CUDA
@@ -1081,8 +1081,8 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertIn("other processes on the card held the rest", gpu["error"])
             self.assertNotIn(note, gpu["error"])
 
-    def test_concurrent_legs_each_take_one_card_of_the_arm(self) -> None:
-        """Legs replaying side by side are pinned to the arm's cards in turn, so
+    def test_concurrent_legs_each_take_one_card_of_the_experiment(self) -> None:
+        """Legs replaying side by side are pinned to the experiment's cards in turn, so
         with as many cards as legs no two share one (to-do 32's pile-on onto the
         first card); a replay running alone attaches every card, so one strategy
         can still spread a model across them. A leg the shared card failed names
@@ -1135,7 +1135,7 @@ class BatchValidateRunTest(unittest.TestCase):
             else:
                 self.assertNotIn(note, rows[0]["error"])
 
-    def test_leg_cards_turn_through_the_arms_cards(self) -> None:
+    def test_leg_cards_turn_through_the_experiments_cards(self) -> None:
         self.assertEqual(leg_cards((1, 4), 1), [])
         self.assertEqual(leg_cards((1, 4), 2), [1, 4])
         self.assertEqual(leg_cards((1, 4), 3), [1, 4, 1])
@@ -1237,9 +1237,9 @@ class BatchValidateRunTest(unittest.TestCase):
         self,
     ) -> None:
         """A row reads the sealed gate's statistic over its own visible span --
-        the residual IR, the three betas and the bar for that span's length --
+        the residual IR, the three betas and the threshold for that span's length --
         and nothing that passes or fails: no gate field, no trial count, no
-        bar from other rows."""
+        threshold from other rows."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             full = session.validate_one("full", _strategy("333"))
@@ -1258,7 +1258,7 @@ class BatchValidateRunTest(unittest.TestCase):
                     "market_beta",
                     "size_beta",
                     "value_beta",
-                    "bar",
+                    "threshold",
                     "years",
                 ):
                     self.assertAlmostEqual(reading[key], expected[key], places=6, msg=key)
@@ -1274,7 +1274,7 @@ class BatchValidateRunTest(unittest.TestCase):
         """Two sessions quoted 0.148 and 1.608 as one node's "cost stress": the
         graduation's active reading and the raw cumulative excess. Every row
         carries the one both gates judge, computed by the host: the active
-        excess at the arm's multiplier. The holder's readings beside it are
+        excess at the experiment's multiplier. The holder's readings beside it are
         the structure a forward slice carries, plain selection included, so
         the row reads over research what the graduation reads forward."""
         with TemporaryDirectory() as tmp:
@@ -1302,15 +1302,15 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(
                 list(raw), [*HOLDER_READINGS, "active_market_beta", "last_two_years"]
             )
-            book, benchmark, panel = (
-                compound(key) for key in ("strategy_daily", "benchmark_daily", "panel_daily")
+            book, benchmark, baselines = (
+                compound(key) for key in ("strategy_daily", "benchmark_daily", "baseline_daily")
             )
             for name, expected in (
                 ("strategy_return", book),
                 ("benchmark_return", benchmark),
-                ("panel_return", panel),
+                ("baseline_return", baselines),
                 ("raw_excess", book - benchmark),
-                ("plain_selection", book - panel),
+                ("plain_selection", book - baselines),
             ):
                 self.assertAlmostEqual(raw[name], expected, places=6, msg=name)
             statistics = graded_statistics(sidecar)
@@ -1322,7 +1322,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 places=6,
             )
             self.assertEqual(reading["cost_stress_multiplier"], 3.0)
-            # The book's market loading against its own panel is the active
+            # The book's market loading against its own random baseline is the active
             # series' regression coefficient, a diagnostic beside it.
             self.assertAlmostEqual(
                 raw["active_market_beta"], statistics["market_beta"], places=6
@@ -1332,14 +1332,14 @@ class BatchValidateRunTest(unittest.TestCase):
             late = raw["last_two_years"]
             self.assertEqual(list(late), ["span", *HOLDER_READINGS])
             self.assertEqual(late["span"], "Y3..Y4")
-            book, benchmark, panel = (
+            book, benchmark, baselines = (
                 compound(key, "20230701", "20250630")
-                for key in ("strategy_daily", "benchmark_daily", "panel_daily")
+                for key in ("strategy_daily", "benchmark_daily", "baseline_daily")
             )
             self.assertAlmostEqual(late["strategy_return"], book, places=6)
             self.assertAlmostEqual(late["benchmark_return"], benchmark, places=6)
-            self.assertAlmostEqual(late["panel_return"], panel, places=6)
-            self.assertAlmostEqual(late["plain_selection"], book - panel, places=6)
+            self.assertAlmostEqual(late["baseline_return"], baselines, places=6)
+            self.assertAlmostEqual(late["plain_selection"], book - baselines, places=6)
             self.assertNotEqual(late["strategy_return"], raw["strategy_return"])
             # A probe row reads the same over its own span; it does not reach
             # the last two years, so it has no line for them.
@@ -1348,13 +1348,13 @@ class BatchValidateRunTest(unittest.TestCase):
                 list(probe["raw_readings"]), [*HOLDER_READINGS, "active_market_beta"]
             )
             self.assertIn("active_excess_at_cost_stress", probe["residual_reading"])
-            # A row's year carries the benchmark and the panel beside its return.
+            # A row's year carries the benchmark and the random baseline beside its return.
             self.assertTrue(
-                {"return", "benchmark_return", "panel_return"}
+                {"return", "benchmark_return", "baseline_return"}
                 <= set(row["stats"]["sub_windows"][0])
             )
 
-    def test_the_cost_stress_is_read_on_every_row_and_never_refuses_a_freeze(self) -> None:
+    def test_the_cost_stress_is_read_on_every_row_and_never_refuses_a_registration(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), acceptance_rules={"max_drawdown": 0.25})
             # The same edge, traded a hundred thousand times as much: the
@@ -1365,7 +1365,7 @@ class BatchValidateRunTest(unittest.TestCase):
             above = session.validate_one("above", _strategy("2"))
             self.assertLess(below["residual_reading"]["active_excess_at_cost_stress"], 0)
             self.assertGreater(above["residual_reading"]["active_excess_at_cost_stress"], 0)
-            # A reading, not a condition: the node registers and freezes.
+            # A reading, not a condition: the node registers and is registered.
             finished = session.finish.invoke({"outcome": "freeze", "node_id": below["node_id"]})
             self.assertTrue(finished.finish)
 
@@ -1426,7 +1426,7 @@ class EnvironmentBlockedTest(unittest.TestCase):
     """A span the host fails in every candidate, twice, ends the session.
 
     The refund makes resending a batch the environment failed free, which is
-    right once and wrong forever: in round 20261015 two arms resent batches
+    right once and wrong forever: in round 20261015 two experiments resent batches
     on spans the host could never replay until their sessions ran out.
     """
 
@@ -1508,17 +1508,17 @@ class DailySeriesTest(unittest.TestCase):
                         encoding="utf-8"
                     )
                 )
-                # One row per replayed day, the panel as its composite only.
+                # One row per replayed day, the random baseline as its composite only.
                 self.assertEqual(
                     list(frame["trade_date"]),
                     [day for day, _value in sidecar["strategy_daily"]],
                 )
                 strategy = np.asarray([value for _day, value in sidecar["strategy_daily"]])
-                panel = np.asarray([value for _day, value in sidecar["panel_daily"]])
+                baselines = np.asarray([value for _day, value in sidecar["baseline_daily"]])
                 np.testing.assert_allclose(frame["strategy_return"], strategy, rtol=1e-9)
-                np.testing.assert_allclose(frame["panel_return"], panel, rtol=1e-9)
+                np.testing.assert_allclose(frame["baseline_return"], baselines, rtol=1e-9)
                 np.testing.assert_allclose(
-                    frame["active_return"], strategy - panel, rtol=1e-8, atol=1e-12
+                    frame["active_return"], strategy - baselines, rtol=1e-8, atol=1e-12
                 )
                 # The IR every row's ledger record carries.
                 self.assertAlmostEqual(
@@ -1824,7 +1824,7 @@ def _canned_null(calls: list[dict[str, object]]):
 
 
 class NullControlToolTest(unittest.TestCase):
-    """The session's null control is the freeze's null control: the same
+    """The session's null control is the registration's null control: the same
     backend call with the same seed, cached per node and capped per session."""
 
     def test_a_validated_node_is_ranked_once_and_the_block_is_reused(self) -> None:
@@ -1840,7 +1840,7 @@ class NullControlToolTest(unittest.TestCase):
             # The Agent-visible block is the same whitelist the run facts use.
             self.assertNotIn("seed", first["null_control"])
             self.assertEqual((first["null_controls_used"], first["null_controls_remaining"]), (1, 1))
-            # Drawn exactly as the freeze would draw it: whole period, frozen role.
+            # Drawn exactly as the registration would draw it: whole period, frozen role.
             self.assertIsNone(calls[0]["step"])
             self.assertEqual(calls[0]["seed"], null_control_seed("research", "frozen"))
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20210701", "20250630"))
@@ -1889,7 +1889,7 @@ class NullControlToolTest(unittest.TestCase):
                 tool.invoke({"node_id": node})
             self.assertEqual(failed.exception.error_type, "null_control_failed")
             self.assertEqual(failed.exception.details["null_controls_remaining"], 0)
-            # A failure is not a result the freeze may reuse.
+            # A failure is not a result the registration may reuse.
             self.assertNotIn(node, tool.blocks)
 
     def test_a_null_control_that_drew_nothing_costs_no_call(self) -> None:
@@ -1951,7 +1951,7 @@ class NullControlToolTest(unittest.TestCase):
 class RecordedValidationDurabilityTest(unittest.TestCase):
     """Every recorded Validation is made durable at once: the experiment's
     tree carries the node, a host-only sidecar carries what the Pipeline needs
-    to freeze it, so an attempt that dies keeps them for its resumed attempt."""
+    to register it, so an attempt that dies keeps them for its resumed attempt."""
 
     def test_a_recorded_validation_is_published_with_its_host_sidecar(self) -> None:
 

@@ -5,7 +5,7 @@ committed generation into a shared hardlink checkpoint, then stores a durable
 experiment-local manifest.  Resume always reuses that manifest; a new
 experiment started while the updater holds the lake (or a crashed run left it
 ``updating``) uses the last complete release.
-An experiment that names the release it must read (the one its PIT view seed
+An experiment that names the release it must read (the one its prebuilt view cache
 was built from) pins exactly that already-published release instead.
 
 Retention (``retire_research_releases``) removes the releases no consumer
@@ -141,14 +141,14 @@ def require_benchmark_index(
     of its constituent table, and both are read only at replay end, where a
     missing one degrades to an unmeasured benchmark and an unmeasurable
     verdict. A release that predates an index therefore has to be refused where
-    the arm names it -- and so does one whose history of the index starts
+    the experiment names it -- and so does one whose history of the index starts
     inside the research period: without a bar before ``research_start`` the
     first research year has no benchmark return to read against, and
-    without a constituent section dated before it the zero-skill panel has no
-    membership to match the first entries on. Only the datasets the arm
+    without a constituent section dated before it the random baseline has no
+    membership to match the first entries on. Only the datasets the experiment
     actually consumes are checked (``datasets`` is its
-    ``required_release_raw_datasets``): an arm that mounts no ``index_weight``
-    draws its zero-skill panel on the float-cap decile, and one that mounts no
+    ``required_release_raw_datasets``): an experiment that mounts no ``index_weight``
+    draws its random baseline on the float-cap decile, and one that mounts no
     macro domain has no benchmark series by its own configuration -- neither is
     this parameter's doing.
     """

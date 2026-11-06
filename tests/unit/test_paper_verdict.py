@@ -34,16 +34,16 @@ from tests.unit.test_paper_reconcile import SESSIONS, A, B, _fill, _session
 from tests.unit.test_paper_reconcile import _bars as _two_name_bars
 from tests.unit.test_paper_reconcile import _book as _reconcile_book
 from tests.unit.test_paper_trading import SYMBOL, _bars
-from tests.unit.webui_research_arm import build_arm
+from tests.unit.webui_research_experiment import build_experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
-    arm = build_arm(tmp_path / "experiments", book_id, "graduated")
+    experiment = build_experiment(tmp_path / "experiments", book_id, "graduated")
     return create_book(
         paper_root(tmp_path) / book_id,
-        experiment_dir=arm,
+        experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
         track="graduated",
@@ -68,7 +68,7 @@ def _noisy(mean: float, count: int, seed: int = 7, sd: float = 0.004) -> np.ndar
 
 def _read(book: Book, returns, *, index=None, previous=None) -> dict[str, object]:
     """The reading of an account that earned ``returns`` and never traded:
-    its zero-skill panel is the idle account, so its active return is its own.
+    its random baseline is the idle account, so its active return is its own.
 
     ``index`` is the pinned index's daily return (independent noise unless
     given)."""
@@ -121,7 +121,7 @@ def test_statistical_checks_run_only_at_checkpoints_and_each_once(tmp_path: Path
 
 def test_a_negative_market_loading_is_judged_on_what_it_earned(tmp_path: Path):
     """A book whose active return carries minus half the index's and earns
-    10 %/yr on top of that: through a rally it lags its panel, and the
+    10 %/yr on top of that: through a rally it lags its random baseline, and the
     verdict reads the lag the holder bore -- killed -- where a regression on
     the index would have credited it back. The same book in a falling market
     earned its lead, and is confirmed."""
@@ -195,7 +195,7 @@ def _write_slot(root: Path, benchmark: str, index_pct: dict[str, float]) -> None
 
 def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_slot(tmp_path: Path, monkeypatch):
     """End to end through the real engine and a real-fill correction: only the
-    book's settled days are read, the panel is handed the corrected fill (not
+    book's settled days are read, the random baseline is handed the corrected fill (not
     the one the session's journal still holds), and the slot's bars, index and
     membership -- with the decision view's earlier section -- reach it."""
 
@@ -233,9 +233,9 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     ] == [(B, "buy", 200, 15.2, "2026-01-05T15:00:00+08:00")]
     assert sorted(handed["frame"]["trade_date"].unique()) == settled
     assert handed["membership"] == {"20251231": frozenset({A, B}), "20260106": frozenset({A})}
-    # The panel is drawn through the book's pinned profile, so on its boards only.
+    # The random baseline is drawn through the book's pinned profile, so on its boards only.
     assert handed["profile"] is book.profile
-    assert reading["panel"]["matched"] == MATCHED_MEMBERSHIP and reading["panel"]["round_trips"] == 1
+    assert reading["baseline"]["matched"] == MATCHED_MEMBERSHIP and reading["baseline"]["round_trips"] == 1
     assert reading["index_return"] == pytest.approx(np.prod([1 + index_pct[day] / 100 for day in settled]) - 1)
     # Under one bootstrap block: measured, not yet bounded.
     assert reading["status"] == "observing" and reading["plain"]["confirm_lower_bound"] is None

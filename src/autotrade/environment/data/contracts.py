@@ -108,10 +108,10 @@ DOMAIN_REPORT_TYPES: dict[str, str] = {
 }
 # The A-share benchmark indexes the lake carries, code to display label. The
 # ingest adapter downloads exactly these for `index_daily` (partitioned by
-# `ts_code`) and `index_weight` (by `index_code`), and an arm's
+# `ts_code`) and `index_weight` (by `index_code`), and an experiment's
 # `benchmark_index` picks one of them: it decides the benchmark series the
 # style attribution and the factor loadings regress on, and the
-# membership the zero-skill panel draws replacements from. One table, so the
+# membership the random baseline draws replacements from. One table, so the
 # download scope and the choices a create request may name cannot drift.
 BENCHMARK_INDEXES: dict[str, str] = {
     "000001.SH": "上证指数",

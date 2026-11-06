@@ -5,7 +5,7 @@ plan order with durable pause/stop, session-boundary restart, per-session
 directives and ledger-based resume. This is the only orchestration entry point;
 there is no unattended batch driver. The append-only ledger is the source of
 truth: a session with a durable record is complete, the research session is
-due until research is over, and the forward replay runs only after a freeze.
+due until research is over, and the forward replay runs only after a registration.
 Integrity-flagged rows are not successes: resume refuses them.
 
 All control state lives under ``experiments/<id>/hitl/`` as single-writer JSON
@@ -41,7 +41,7 @@ from autotrade.environment.trace import (
 )
 
 from .hitl_state import (
-    ArmState,
+    ExperimentState,
     PlannedSession,
     StatusReporter,
     consume_restart_request,
@@ -50,10 +50,10 @@ from .hitl_state import (
 )
 from .ledger import (
     ExperimentLedger,
-    FrozenArtifactMutated,
-    assert_no_frozen_artifact_mutation,
-    frozen_record,
+    RegisteredArtifactMutated,
+    assert_no_registered_artifact_mutation,
     is_durable_success_record,
+    registered_record,
     research_over,
 )
 
@@ -107,7 +107,7 @@ class InteractiveExperimentRunner:
             total_sessions=len(self.sessions),
         )
         try:
-            assert_no_frozen_artifact_mutation(self.ledger.read())
+            assert_no_registered_artifact_mutation(self.ledger.read())
             for session in self.sessions:
                 if session.session_key in completed or not self._due(session):
                     continue
@@ -133,7 +133,7 @@ class InteractiveExperimentRunner:
                 control = read_control(self.control_path)
                 if control.request in ("pause", "stop"):
                     self.status.set(
-                        state=ArmState.PAUSED if control.request == "pause" else ArmState.STOPPED
+                        state=ExperimentState.PAUSED if control.request == "pause" else ExperimentState.STOPPED
                     )
                     return {"status": control.request, "sessions_run": ran}
                 if control.restart_pending and consume_restart_request(
@@ -147,20 +147,20 @@ class InteractiveExperimentRunner:
             # run failed for it; only real errors take the failed state below.
             raise
         except Exception as exc:
-            self.status.set(state=ArmState.FAILED, error=f"{type(exc).__name__}: {exc}")
+            self.status.set(state=ExperimentState.FAILED, error=f"{type(exc).__name__}: {exc}")
             raise
         finally:
             self.status.stop()
 
     def _due(self, session: PlannedSession) -> bool:
         """The research session runs until research is over; the forward replay
-        runs once an artifact froze."""
+        runs once an artifact registered."""
 
         records = self.ledger.read()
         if session.kind == "research":
             return not research_over(records)
         if session.kind == "forward":
-            return frozen_record(records) is not None
+            return registered_record(records) is not None
         raise ValueError(f"unknown session kind: {session.kind}")
 
     def _execute_with_retries(
@@ -171,7 +171,7 @@ class InteractiveExperimentRunner:
             self._begin_session(session)
             try:
                 self.execute_session(session, context)
-            except (ExperimentStopped, AgentSessionBudgetExhausted, FrozenArtifactMutated):
+            except (ExperimentStopped, AgentSessionBudgetExhausted, RegisteredArtifactMutated):
                 raise
             except Exception as exc:  # noqa: BLE001 - session failure is kept and retried or re-raised after the last attempt
                 last_error = exc
@@ -200,7 +200,7 @@ class InteractiveExperimentRunner:
         is coming up, and the pid survives the entrypoint's ``execv``, so the
         experiment keeps showing exactly one live worker across the swap."""
 
-        self.status.set(state=ArmState.LAUNCHING)
+        self.status.set(state=ExperimentState.LAUNCHING)
         return {"status": "restart", "sessions_run": ran}
 
     def _gate(self) -> bool:
@@ -218,7 +218,7 @@ class InteractiveExperimentRunner:
         self._session_started_monotonic = time.monotonic()
         self._session_started_at = datetime.now(UTC).isoformat()
         self.status.set(
-            state=ArmState.RUNNING_SESSION,
+            state=ExperimentState.RUNNING_SESSION,
             session_key=session.session_key,
             session_kind=session.kind,
             session_started_at=self._session_started_at,

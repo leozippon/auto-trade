@@ -275,7 +275,7 @@ The default executor uses network-disabled, read-only Docker containers with bou
 
 ## Opening file
 
-When a reference pack supplies a starter, that starter replaces `output/main.py` and `refs/README.md` describes it. Otherwise `output/main.py` does not trade: `generate_orders` returns no orders. It is not a baseline to extend. The session writes the strategy.
+When a reference workspace supplies a starter, that starter replaces `output/main.py` and `refs/README.md` describes it. Otherwise `output/main.py` does not trade: `generate_orders` returns no orders. It is not a baseline to extend. The session writes the strategy.
 
 ## A fitted-model package example
 

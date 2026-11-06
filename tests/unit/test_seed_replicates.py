@@ -1,7 +1,7 @@
-"""Seed replicates: a strategy that trains a model is frozen with its seeds.
+"""Seed replicates: a strategy that trains a model is registered with its seeds.
 
-The arm's own pipeline runs end to end -- the real artifact store, ledger,
-freeze registration, sealed reading and verdict -- over scripted Validations
+The experiment's own pipeline runs end to end -- the real artifact store, ledger,
+final registration, sealed reading and verdict -- over scripted Validations
 whose daily active return is set per training seed (``SEED_BASE`` in the
 candidate's ``main.py``) and per stage, so the readings each seed gets are
 known before the pipeline reads them.
@@ -32,7 +32,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import (
     RollingExperimentPipeline,
-    freeze_registration,
+    check_registration,
 )
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
@@ -40,7 +40,7 @@ from autotrade.pipelines.ledger import (
     forward_record,
     paper_candidate,
 )
-from scripts.dev.check_verdicts import check_arm
+from scripts.dev.check_verdicts import check_experiment
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 from tests.unit.test_rolling_pipeline import (
     CONFIG_PROFILE,
@@ -77,7 +77,7 @@ def generate_orders(context):
 # sealed reading replay research years in mode ``valid``, the forward stage in
 # ``heldout``. An active return of 0.0009 a day or more reads a residual IR far
 # above the one-year bar; -0.0010 reads far below zero. Forward, seed 1000
-# beats its panel well clear of its noise, seed 2000 barely and seed 3000
+# beats its random baseline well clear of its noise, seed 2000 barely and seed 3000
 # loses nearly as much as the other two win: their mean stays above zero and
 # inside its noise.
 ALPHAS = {
@@ -96,7 +96,7 @@ def _source(seed: int, *, swaps: int = 4, heads: int = 2, fit: bool = True) -> s
 
 
 class SeedEvaluator:
-    """A result whose zero-skill panel is the replay's market and size
+    """A result whose random baseline is the replay's market and size
     exposure, so the active series is the seed's daily ``alpha`` plus noise."""
 
     def __init__(
@@ -109,7 +109,7 @@ class SeedEvaluator:
     ) -> None:
         self.root = root
         self.requests: list[EvaluationRequest] = []
-        # Forward, this seed's replay raises; that one's stores no panel.
+        # Forward, this seed's replay raises; that one's stores no random baseline.
         self.fail_seed = fail_seed
         self.bare_seed = bare_seed
         # (seed, start): that seed's own code raises in the replay from start.
@@ -133,9 +133,9 @@ class SeedEvaluator:
         sidecar = Path(result.result_ref).parent / STYLE_ARTIFACT_NAME
         analysis = json.loads(sidecar.read_text(encoding="utf-8"))
         if seed == self.bare_seed and request.mode == "heldout":
-            del analysis["panel_daily"]
+            del analysis["baseline_daily"]
         else:
-            analysis["panel_daily"] = [
+            analysis["baseline_daily"] = [
                 [day, 0.9 * market + 0.2 * size]
                 for (day, market), (_day, size) in zip(
                     analysis["benchmark_daily"], analysis["size_factor_daily"], strict=True
@@ -198,7 +198,7 @@ class SeedDeveloper:
         )
 
 
-def _arm(
+def _experiment(
     tmp_path: Path,
     candidates,
     *,
@@ -209,7 +209,7 @@ def _arm(
     **replays,
 ):
     config = RollingExperimentConfig(
-        experiment_id="arm",
+        experiment_id="experiment",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
         acceptance=acceptance_for(REQUIRED_RULES),
@@ -236,13 +236,13 @@ def _arm(
     return pipeline, evaluator
 
 
-def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
+def test_a_model_nominee_registers_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
     """The registered replicates are checked, frozen beside the nominee, and
     replayed exactly like it forward; the forward record carries their
     readings beside the nominee's, and a seed mean whose bound is below zero
     decides nothing: the readout reads, it does not judge."""
 
-    pipeline, evaluator = _arm(
+    pipeline, evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(2000), "full"), (_source(3000), "full")],
         replicates=(1, 2),
@@ -287,22 +287,22 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
         block = forward["slices"][name]
         members = [block, *block["seed_replicates"]]
         assert block["seed_mean"]["members"] == 3
-        for key in ("plain_selection", "strategy_return", "panel_return"):
+        for key in ("plain_selection", "strategy_return", "baseline_return"):
             assert block["seed_mean"]["raw_readings"][key] == pytest.approx(
                 sum(member["raw_readings"][key] for member in members) / 3
             )
     block = forward["slices"]["forward"]
-    # The nominee itself beat its panel, and so does the mean over the three
+    # The nominee itself beat its random baseline, and so does the mean over the three
     # seeds; the mean's lower bound does not clear zero, and is reported.
     assert block["raw_readings"]["plain_selection"] > 0
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
     assert block["lower_bound"] < 0 < block["seed_mean"]["plain_excess"]
     assert forward["readout"]["forward"]["lower_bound"] == block["lower_bound"]
-    assert experiment_verdict(pipeline.ledger.read()) == {"status": "frozen_with_record", "reasons": []}
+    assert experiment_verdict(pipeline.ledger.read()) == {"status": "registered_with_record", "reasons": []}
 
 
 def test_seeds_that_agree_forward_are_read_together(tmp_path: Path):
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path, [(_source(1000), "full"), (_source(2000), "full")], replicates=(1,)
     )
     pipeline.run_research_session()
@@ -316,16 +316,16 @@ def _refused(
     tmp_path: Path, candidates, *, nominee: int = 0, replicates=(), deterministic: bool = False
 ) -> dict[str, object]:
     """The registration ``test`` reads for ``nominee`` with ``replicates``,
-    off the arm's recorded Validations. The session ends on its budget
+    off the experiment's recorded Validations. The session ends on its budget
     before any test, and a nominee that trains a model owes a replicate no
-    host can name, so the arm itself freezes nothing."""
+    host can name, so the experiment itself registers nothing."""
 
-    pipeline, _evaluator = _arm(tmp_path, candidates, outcome="deadline")
+    pipeline, _evaluator = _experiment(tmp_path, candidates, outcome="deadline")
     record = pipeline.run_research_session()
     assert record["frozen"] is None
-    assert record["arm_end"]["status"] == "no_deliverable"
+    assert record["experiment_end"]["status"] == "no_deliverable"
     rows = record["steps"]
-    return freeze_registration(
+    return check_registration(
         rows[nominee],
         experiment_dir=pipeline.config.experiment_dir,
         acceptance=pipeline.config.acceptance,
@@ -367,7 +367,7 @@ def test_a_replicate_that_loses_does_not_hold_back_the_registration(tmp_path: Pa
     """Registration reads no score: a valid replicate whose seed loses what
     the nominee's wins registers beside it."""
 
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path, [(_source(1000), "full"), (_source(4000), "full")], replicates=(1,)
     )
     record = pipeline.run_research_session()
@@ -380,10 +380,10 @@ def test_a_replicate_that_loses_does_not_hold_back_the_registration(tmp_path: Pa
 @pytest.mark.parametrize("replicates", [(), (1,)], ids=["alone", "with_a_worse_seed"])
 def test_a_deterministic_model_nominee_owes_no_replicate(tmp_path: Path, replicates):
     """A nominee that trains a model but declares its package deterministic
-    freezes without a replicate. The gate and the frozen block record the
+    registers without a replicate. The gate and the registered block record the
     declaration for the operator's review."""
 
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(4000), "full")],
         replicates=replicates,
@@ -409,11 +409,11 @@ def test_a_deterministic_nominee_is_held_to_its_replicates_validity(tmp_path: Pa
 
 
 def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):
-    """A nominee that trains no model needs no replicate: it freezes alone,
+    """A nominee that trains no model needs no replicate: it registers alone,
     its gate reads that it had nothing to replicate, and forward its own
     series is read, with its bound."""
 
-    pipeline, evaluator = _arm(
+    pipeline, evaluator = _experiment(
         tmp_path, [(_source(1000, fit=False), "full"), (_source(2000, fit=False), "full")]
     )
     record = pipeline.run_research_session()
@@ -439,7 +439,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
 
     start = "20240701"
 
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(2000), "full")],
         replicates=(1,),
@@ -451,15 +451,15 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
     assert raised["source_step_id"] == "research_step_1" and raised["result_ref"] is None
     assert raised["strategy_error"] is True and "generate_orders raised" in raised["error"]
     assert "seed_mean" not in forward["slices"]["forward"]
-    assert forward["readout"]["state"] == "frozen_with_record"
+    assert forward["readout"]["state"] == "registered_with_record"
     assert forward["readout"]["forward"]["lower_bound"] == forward["slices"]["forward"]["lower_bound"]
     assert paper_candidate(pipeline.ledger.read())["artifact_id"] == forward["artifact_id"]
     # The consistency check reads the same readings off the stored replays.
-    arm = pipeline.config.experiment_dir
-    (arm / "hitl" / "params.json").write_text(
+    experiment = pipeline.config.experiment_dir
+    (experiment / "hitl" / "params.json").write_text(
         json.dumps({**REQUIRED_RULES, "_created_at": utc_now_iso()}), encoding="utf-8"
     )
-    assert [item.differences for item in check_arm(arm)] == [[], [], []]
+    assert [item.differences for item in check_experiment(experiment)] == [[], [], []]
 
 
 @pytest.mark.parametrize(
@@ -470,14 +470,14 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
             RuntimeError,
             r"seed replicate research_step_1 \(.*\) did not complete",
         ),
-        ({"bare_seed": 2000}, ValueError, "graded another series than the frozen book"),
+        ({"bare_seed": 2000}, ValueError, "graded another series than the registered book"),
     ],
-    ids=["the_host_fails_its_replay", "its_replay_has_no_panel"],
+    ids=["the_host_fails_its_replay", "its_replay_has_no_random_baseline"],
 )
 def test_a_replicate_missing_from_the_mean_fails_the_stage_and_leaves_no_verdict(
     tmp_path: Path, replays, error, message
 ):
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(2000), "full")],
         replicates=(1,),

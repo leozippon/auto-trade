@@ -1,4 +1,4 @@
-"""Read-only projection of the local daily Paper books, one function per page panel.
+"""Read-only projection of the local daily Paper accounts, one function per page panel.
 
 Books sit side by side under the Paper state root, one directory each
 (``paper.books``). ``books_payload`` is the overview, one row per book. A book's
@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import read_current_record
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
@@ -102,7 +102,7 @@ def book_dir(repo_root: Path, book: str, env: str = "paper") -> Path:
     """One book's directory; anything that is not a book under the root is unknown."""
     root = env_dir(repo_root, env)
     if not BOOK_ID_PATTERN.fullmatch(book) or ".." in book or not (root / book / BOOK_NAME).is_file():
-        raise KeyError(f"unknown Paper book: {book}")
+        raise KeyError(f"unknown Paper account: {book}")
     return root / book
 
 
@@ -160,7 +160,7 @@ def _read_json(path: Path) -> tuple[dict[str, object] | None, str | None]:
     """(payload, error): (None, None) = missing, (None, msg) = unreadable. The
     reader names the file by its host path, which a console page omits."""
     try:
-        return read_json_object(path), None
+        return read_current_record(path), None
     except FileNotFoundError:
         return None, None
     except (OSError, ValueError) as exc:
@@ -612,9 +612,9 @@ def _day_before(yyyymmdd: str) -> str:
 def _book_benchmark_index(root: Path) -> str:
     """The index this book is measured against, from its own record.
 
-    Frozen at creation from the source arm's ``benchmark_index``; a book
+    Frozen at creation from the source experiment's ``benchmark_index``; a book
     created before the parameter existed carries none and reads as the
-    default, which is the index those arms ran on.
+    default, which is the index those experiments ran on.
     """
     record, _error = _read_json(root / BOOK_NAME)
     code = _mapping(record).get("benchmark_index")

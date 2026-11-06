@@ -17,7 +17,7 @@ scheduled job, so releases and Paper pins never see a half-applied command.
   generation record names it, a seed (or a seed build's workspace pin) one or
   two levels under ``data/`` was built from it, an experiment under
   ``experiments/`` that has not ended pinned it or names a seed built from it,
-  or a Paper book that is not killed has it pinned. The consumers are read
+  or a Paper account that is not killed has it pinned. The consumers are read
   under the release registry lock and the updater lock, so a release a
   consumer records is never removed (``research_release``); a removal prints
   the bytes it freed, those of the files whose last link it removed. Nothing
@@ -51,8 +51,8 @@ from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     PARAMS_NAME,
     STATUS_NAME,
-    ArmState,
-    arm_is_archived,
+    ExperimentState,
+    experiment_is_archived,
     read_status,
     status_pid_alive,
 )
@@ -203,14 +203,14 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
             continue
         try:
             status = read_status(hitl / STATUS_NAME)
-            state = str(status.get("state") or ArmState.CREATED)
+            state = str(status.get("state") or ExperimentState.CREATED)
         except (OSError, TypeError, ValueError):
-            status, state = {}, ArmState.UNREADABLE
-        # An arm has ended once completed (the console neither runs nor
+            status, state = {}, ExperimentState.UNREADABLE
+        # An experiment has ended once completed (the console neither runs nor
         # resumes it) or archived while no worker still runs it; any other
-        # arm, one whose state is unknown or unreadable included, keeps its
+        # experiment, one whose state is unknown or unreadable included, keeps its
         # release.
-        if state == ArmState.COMPLETED or (arm_is_archived(directory) and not status_pid_alive(status)):
+        if state == ExperimentState.COMPLETED or (experiment_is_archived(directory) and not status_pid_alive(status)):
             continue
         reason = f"experiment {directory.name} ({state})"
         keep(pinned_generation(directory), reason)
@@ -225,7 +225,7 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
             killed = False
         if not killed:
             for cache in sorted((paper / book_id / PIT_CACHE_NAME).glob("*")):
-                keep(pinned_generation(cache), f"Paper book {book_id}")
+                keep(pinned_generation(cache), f"Paper account {book_id}")
     return kept
 
 

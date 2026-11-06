@@ -231,7 +231,7 @@ def test_a_taxed_replay_refuses_an_ex_date_table_without_the_bonus_split():
     orders = {"20240102": [("buy", 1000, "15:00")]}
     with pytest.raises(ValueError, match="bonus_per_share"):
         _replay(TAXED, frame, old_table, orders)
-    # The same slot still replays an arm that does not charge the tax.
+    # The same slot still replays an experiment that does not charge the tax.
     assert _replay(UNTAXED, frame, old_table, orders)["corporate_actions"][0]["cash_credit"] == pytest.approx(500.0)
     with pytest.raises(ValueError, match="bonus_per_share"):
         DailyMarketData(frame, _actions([(SYMBOL, "20240103", 0.5, 1.0, -0.1)]))
@@ -239,9 +239,9 @@ def test_a_taxed_replay_refuses_an_ex_date_table_without_the_bonus_split():
         BrokerProfile(dividend_tax="yes")  # type: ignore[arg-type]
 
 
-def test_the_zero_skill_panel_charges_its_draws_the_arms_own_tax():
+def test_the_random_baseline_charges_its_draws_the_experiments_own_tax():
     """The only replacement name pays its own dividend on the exit day, so a
-    taxed panel's draws lose a fifth of it and an untaxed panel's do not."""
+    taxed random baseline's draws lose a fifth of it and an untaxed random baseline's do not."""
 
     frame = _frame(
         {
@@ -255,13 +255,13 @@ def test_the_zero_skill_panel_charges_its_draws_the_arms_own_tax():
         daily=frame, strategy=_script(orders), schedule=SCHEDULE, profile=TAXED, corporate_actions=actions
     )
 
-    def panel(profile: BrokerProfile) -> dict:
+    def baselines(profile: BrokerProfile) -> dict:
         return run_null_control(
             result, frame, {"20240102": 0.0, "20240103": 0.0}, profile, SCHEDULE,
-            k=2, seed=1, corporate_actions=actions, panel=True,
+            k=2, seed=1, corporate_actions=actions, baselines=True,
         )
 
-    taxed, untaxed = panel(TAXED), panel(UNTAXED)
+    taxed, untaxed = baselines(TAXED), baselines(UNTAXED)
     assert taxed["rejects_mean"] == untaxed["rejects_mean"] == 0.0
     # 1000 shares of the replacement paid 300 of dividend: the taxed draw
     # keeps 240 of it.

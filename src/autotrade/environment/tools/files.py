@@ -103,7 +103,7 @@ class _WorkspaceWriteTool:
             target.write_text(content, encoding="utf-8")
         except PermissionError as exc:
             # Not a host bug: the Agent copied this path out of a locked Step
-            # snapshot or frozen artifact, so it carries 0o444/0o555. Say so
+            # snapshot or registered artifact, so it carries 0o444/0o555. Say so
             # instead of handing back a bare "[Errno 13]".
             raise ToolError(
                 f"{relative} is not writable",

@@ -445,7 +445,7 @@ def _agent_visible_manifest(
             "benchmark_index",
             "snapshot_config",
             "start",
-            "arm",
+            "experiment",
             "modification_constraints",
             "acceptance_rules",
             "broker_profile",

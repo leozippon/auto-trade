@@ -119,7 +119,6 @@ from .config import (
     positive_spend_cap,
 )
 from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage
-from .rolling_record import ValidationSteps
 from .session_tools import (
     EnvironmentBlocked,
     NullControlTool,
@@ -143,6 +142,7 @@ from .skills import (
     mounted_skill_refs,
     write_skills_index,
 )
+from .validation_record import ValidationSteps
 
 if TYPE_CHECKING:
     from autotrade.agent.runner import AgentSessionRunner
@@ -607,7 +607,7 @@ class LLMResearchDeveloper:
                 # blocked on bytes only the host may produce.
                 readonly_seed=source,
             )
-            # The arm's budgets minus what earlier attempts spent: the clock
+            # The experiment's budgets minus what earlier attempts spent: the clock
             # holds only the remainder, the counters start from the spend.
             attempt_seconds = max(request.deadline_seconds - used.inference_seconds, 0.001)
             time_budget = InferenceTimeBudget(duration_seconds=attempt_seconds)
@@ -771,8 +771,8 @@ class LLMResearchDeveloper:
         """The session container's spec under this session's GPU allocation."""
 
         # Per-session HITL override: the session attaches that many of the
-        # devices its arm holds (a tuple, worker.load_worker_options) and
-        # never another arm's.
+        # devices its experiment holds (a tuple, worker.load_worker_options) and
+        # never another experiment's.
         if request.sandbox_gpu_count is None:
             return self.sandbox_spec
         count = int(request.sandbox_gpu_count)
@@ -782,7 +782,7 @@ class LLMResearchDeveloper:
         if isinstance(claim, tuple):
             if count > len(claim):
                 raise GpuUnavailableError(
-                    f"this session asks for {count} GPU(s) but the arm holds "
+                    f"this session asks for {count} GPU(s) but the experiment holds "
                     f"{len(claim)}: devices {list(claim)}"
                 )
             return replace(self.sandbox_spec, gpu=claim[:count], gpu_count=count)
@@ -832,7 +832,7 @@ class LLMResearchDeveloper:
                     steps_tested=len(request.tests_before),
                     window_months=request.window_months,
                 ),
-                # The index this arm is graded against; the Agent-visible facts
+                # The index this experiment is graded against; the Agent-visible facts
                 # publish it so a session designs against the same benchmark
                 # the host measures it on.
                 "benchmark_index": request.benchmark_index,
@@ -841,7 +841,7 @@ class LLMResearchDeveloper:
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
                 "start": start_record(),
-                "arm": arm_record(request.steps_before),
+                "experiment": experiment_record(request.steps_before),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
@@ -872,7 +872,7 @@ class LLMResearchDeveloper:
                     # How many replays one validate call runs at once,
                     # and so the factor both wall clocks above are scaled by.
                     "batch_validate_max_concurrency": request.batch_validate_max_concurrency,
-                    # The totals above are the arm's; what earlier attempts
+                    # The totals above are the experiment's; what earlier attempts
                     # already spent of them.
                     "used_before_this_attempt": used.to_record(),
                 },
@@ -901,7 +901,7 @@ class LLMResearchDeveloper:
         if resume is None:
             copy_artifact(source, output_dir)
             copy_model_artifacts(source_models, models_dir)
-            # A reference pack that ships a runnable starter is what the arm
+            # A reference workspace that ships a runnable starter is what the experiment
             # starts from; the template supplies the contract files it keeps.
             seed_output_from_starter(
                 output_dir, self.workspace_reference, repo_root=self.repo_root
@@ -926,7 +926,7 @@ class LLMResearchDeveloper:
         inputs_dir: Path,
     ) -> list[MemorySource]:
         """Mount what the session reads beside its working copy: operating
-        memory, skills and their index, the reference pack and the PIT view.
+        memory, skills and their index, the reference workspace and the PIT view.
         Returns the memory sources mounted."""
 
         if inputs_dir.exists():
@@ -1001,7 +1001,7 @@ class LLMResearchDeveloper:
     ) -> tuple[SessionValidations, SmokeBacktestTool, list[Tool], NullControlTool | None]:
         """The parent session's tools over the session's Validations; returns
         the Validations, the smoke tool, the tool list and the null-control
-        tool (None when the arm allows no null controls)."""
+        tool (None when the experiment allows no null controls)."""
 
         backtest = SessionValidations(
             request=request,
@@ -1210,7 +1210,7 @@ class LLMResearchDeveloper:
     ) -> tuple[str, str, str | None, tuple[str, ...], bool, str, str]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the frozen candidate (the last test's), its seed replicates, whether
+        the registered candidate (the last test's), its seed replicates, whether
         it was declared deterministic, the reason and the finish reason."""
 
         from autotrade.agent.compact import compaction_summary_message
@@ -1273,14 +1273,14 @@ class LLMResearchDeveloper:
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace,
             # its model calls or its API spend); the Validations it completed
-            # are still the arm's trials.
+            # are still the experiment's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
             deterministic = False
             finish_reason = exc.finish_reason
         except EnvironmentBlocked as exc:
             # The host ended the session: its replays on one span kept failing
-            # on the environment, so the arm ends on that, not on research.
+            # on the environment, so the experiment ends on that, not on research.
             conversation_id = runner.conversation_id
             outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
             deterministic = False
@@ -1356,7 +1356,7 @@ class LLMResearchDeveloper:
             deterministic=deterministic,
             reason=reason,
             finish_reason=finish_reason,
-            # The nulls the session already drew, for the freeze to reuse.
+            # The nulls the session already drew, for the registration to reuse.
             null_controls=(
                 dict(null_control_tool.blocks)
                 if null_control_tool is not None
@@ -1505,7 +1505,7 @@ def research_geometry_record(
     research years, the rest the validation years, tiled into steps of
     ``test_step_months`` of which ``steps_tested`` are already tested. The
     session's data view is the decision view at the research years' end
-    (``decision_time``) for the whole session; ``frontier`` is the rolling
+    (``decision_time``) for the whole session; ``test_horizon`` is the rolling
     record's, the day the tests have reached (the research years' end before
     the first). Every decision view carries the ``window_months`` of history
     that end on its anchor day: ``input_window`` is the session's view, and
@@ -1515,7 +1515,7 @@ def research_geometry_record(
     last year exist and are hidden, and neither their dates nor their slots
     are named anywhere a session can read. The prompt's run section reads
     ``research_period``, ``validation_period``, ``step``, ``steps``,
-    ``steps_tested``, ``frontier`` and ``years`` (``agent/prompts.py``).
+    ``steps_tested``, ``test_horizon`` and ``years`` (``agent/prompts.py``).
     """
 
     def input_window(end: str) -> str:
@@ -1540,14 +1540,14 @@ def research_geometry_record(
         "step": STEP_NAMES[test_step_months],
         "steps": steps.count,
         "steps_tested": steps_tested,
-        "frontier": steps.frontier_after(steps_tested),
+        "test_horizon": steps.horizon_after(steps_tested),
         "validation_note": (
             "the session's data view (decision_time, input_window) ends on the last day of "
             "the research years and stays there for the whole session, and validate replays "
             "spans inside the research years only. The validation years reach the session "
             "only through test results: each test replays its candidate from the validation "
-            "start to the end of the next step, the new frontier, and returns the results "
-            "step by step (acceptance_rules.validation); frontier is the day the tests have "
+            "start to the end of the next step, the new test horizon, and returns the results "
+            "step by step (acceptance_rules.validation); test_horizon is the day the tests have "
             "reached, the end of the research years before the first test"
         ),
         "years": [
@@ -1572,7 +1572,7 @@ def research_geometry_record(
 def start_record() -> dict[str, object]:
     """Which template seeded the session's working copy and its contract files.
 
-    A reference pack that ships ``starter/`` is then overlaid onto ``output/``
+    A reference workspace that ships ``starter/`` is then overlaid onto ``output/``
     (:func:`seed_output_from_starter`), so this names the template the contract
     files and ``output/README.md`` come from, not necessarily the strategy code
     the session starts reading.
@@ -1581,7 +1581,7 @@ def start_record() -> dict[str, object]:
     return {"kind": "template", "template_ref": "agent_output_template"}
 
 
-def arm_record(steps: Sequence[StepResult]) -> dict[str, object]:
+def experiment_record(steps: Sequence[StepResult]) -> dict[str, object]:
     """The Validations the session's earlier attempts recorded, as the attempt
     starts; the steps tested so far are the research geometry's fact."""
 
@@ -1679,9 +1679,9 @@ def _resolve_workspace_reference(
     workspace_reference: str | Path | None,
     repo_root: str | Path | None = None,
 ) -> Path | None:
-    """The reference pack directory, or ``None`` when the parameter is unset.
+    """The reference workspace directory, or ``None`` when the parameter is unset.
 
-    One resolution for both things a pack supplies: the read-only ``refs/``
+    One resolution for both things a reference workspace supplies: the read-only ``refs/``
     tree and the starter that seeds ``output/``. An empty value is a no-op; a
     set path must exist, be a directory and stay inside the repository,
     otherwise this fails immediately.
@@ -1715,16 +1715,16 @@ def install_workspace_reference(
     *,
     repo_root: str | Path | None = None,
 ) -> None:
-    """Copy the optional reference pack into ``workspace/refs/`` before sandbox start.
+    """Copy the optional reference workspace into ``workspace/refs/`` before sandbox start.
 
-    The pack lands writable like everything else under the Agent's workspace
+    The reference workspace lands writable like everything else under the Agent's workspace
     mount. It was installed 0o444/0o555 once, to keep the reference copy from
-    drifting; what that actually bought was a papercut in every arm, because
+    drifting; what that actually bought was a papercut in every experiment, because
     ``cp`` reproduces the source's mode and the copies it seeds -- a candidate
     directory, a working file under ``output/`` -- came out unwritable for the
     typed writers, which run as the host user and cannot chmod a file the
     sandbox user owns. Drift costs nothing instead: every session start removes
-    this tree and re-copies it from the checked-in pack.
+    this tree and re-copies it from the checked-in reference workspace.
 
     The copy writes only ``refs/``, never ``models/`` or ``inputs/``;
     ``output/`` is seeded separately by :func:`seed_output_from_starter`.
@@ -1746,16 +1746,16 @@ def seed_output_from_starter(
     *,
     repo_root: str | Path | None = None,
 ) -> tuple[str, ...]:
-    """Seed a session's ``output/`` from the reference pack's starter package.
+    """Seed a session's ``output/`` from the reference workspace's starter package.
 
-    A pack that ships ``starter/main.py`` ships a runnable strategy, so the
+    A reference workspace that ships ``starter/main.py`` ships a runnable strategy, so the
     working copy starts as that package rather than as the bare template: every
-    arm otherwise spent its first substantive turn hand-porting the same files,
+    experiment otherwise spent its first substantive turn hand-porting the same files,
     and the copies it made from the read-only ``refs/`` tree came out
     unwritable. The template's read-only contract files are not overwritten —
-    ``output/README.md`` remains the strategy contract, whatever the pack
-    carries. Returns the relative paths seeded, empty when there is no pack or
-    the pack ships no starter.
+    ``output/README.md`` remains the strategy contract, whatever the reference workspace
+    carries. Returns the relative paths seeded, empty when there is no reference workspace or
+    the reference workspace ships no starter.
     """
     seed = _resolve_workspace_reference(workspace_reference, repo_root)
     if seed is None:

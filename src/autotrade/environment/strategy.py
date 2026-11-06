@@ -683,7 +683,7 @@ class StrategyContext:
     asof_version: str = "0"
     # Per-replay fitted state written by ``fit`` and read-only afterwards, the
     # frozen Agent-authored ``models/`` assets, and the read-only pretrained
-    # model store the arm pinned; each empty when absent.
+    # model store the experiment pinned; each empty when absent.
     state_dir: str = ""
     models_dir: str = ""
     pretrained_dir: str = ""

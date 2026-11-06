@@ -1,24 +1,24 @@
 #!/usr/bin/env python3
-"""Judge every stored reading of the current-rule arms again and compare.
+"""Judge every stored reading of the current-rule experiments again and compare.
 
 The consistency check of the reading code (``pipelines/verdict.py``,
-``rolling_record.py``, ``config.py``, ``experiment.py``). An arm keeps everything its readings were
+``validation_record.py``, ``config.py``, ``experiment.py``). An experiment keeps everything its readings were
 read from -- ``hitl/params.json``, the ledger's Steps with their style
-sidecars and revisions, the replays' results -- so each reading of an arm
+sidecars and revisions, the replays' results -- so each reading of an experiment
 created under the current rules is judged again by this code, CPU only, and
 compared with the ledger key for key:
 
-- a research session's freeze registration (``experiment.freeze_registration``),
+- a research session's final registration (``experiment.check_registration``),
 - a forward record's slices, where its forward replay completed
   (``experiment.judged_replay``), and its readout off the ledger's rolling
-  record and that forward slice (``rolling_record.readout``).
+  record and that forward slice (``validation_record.readout``).
 
-An arm whose rules state no ``research_years`` was judged under rules since
+An experiment whose rules state no ``research_years`` was judged under rules since
 retired (the sealed gate) and is never judged again: its readings are what
 its ledger says.
 
 Run it by hand before landing a change to the reading code, from a checkout
-whose ``experiments/`` holds the arms, or with ``--experiments``:
+whose ``experiments/`` holds the experiments, or with ``--experiments``:
 
     python scripts/dev/check_verdicts.py
 
@@ -44,41 +44,41 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object
-from autotrade.pipelines.arm_params import read_param
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
-    freeze_registration,
+    check_registration,
     judged_replay,
     replay_and_analysis,
 )
+from autotrade.pipelines.experiment_params import read_param
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
-from autotrade.pipelines.ledger import recorded_path
-from autotrade.pipelines.rolling_record import readout
+from autotrade.pipelines.ledger import ExperimentLedger, recorded_path
+from autotrade.pipelines.validation_record import readout
 
 
 class Judgement(NamedTuple):
     """One stored reading judged again: where it is, and the paths at which
     the stored reading and today's differ (none when it reproduces)."""
 
-    arm: str
+    experiment: str
     reading: str
     differences: list[str]
 
 
-def current_arms(experiments: Path) -> list[Path]:
-    """The arms under ``experiments`` judged under the current rules: those
+def current_experiments(root: Path) -> list[Path]:
+    """The experiments under ``experiments`` judged under the current rules: those
     whose rules state ``research_years`` (the rolling validation's, which the
     session sees the research years under, every test registers against and
-    the readout reads). An arm created before then was judged under rules
+    the readout reads). An experiment created before then was judged under rules
     since retired, so its stored readings differ by the rule, not by a
     defect."""
 
-    arms = []
-    for path in sorted(Path(experiments).iterdir()):
+    experiments = []
+    for path in sorted(Path(root).iterdir()):
         params = path / HITL_DIR_NAME / PARAMS_NAME
         if params.is_file() and read_json_object(params).get("research_years") is not None:
-            arms.append(path)
-    return arms
+            experiments.append(path)
+    return experiments
 
 
 def _stored(value: object) -> Any:
@@ -115,11 +115,11 @@ def differences(stored: object, now: object, path: str = "") -> list[str]:
 
 
 def _replayed(
-    arm: Path, record: Mapping[str, Any], rules: AcceptanceRules, slippage_bps: float
+    experiment: Path, record: Mapping[str, Any], rules: AcceptanceRules, slippage_bps: float
 ) -> dict[str, object]:
-    """The slices of one stored forward replay of ``arm``, read again."""
+    """The slices of one stored forward replay of ``experiment``, read again."""
 
-    replay, analysis = replay_and_analysis(str(recorded_path(arm, str(record["result_ref"]))))
+    replay, analysis = replay_and_analysis(str(recorded_path(experiment, str(record["result_ref"]))))
     spans = record["replay"]
     return judged_replay(
         replay,
@@ -132,7 +132,7 @@ def _replayed(
         seed_replicates=[
             (
                 {key: row[key] for key in ("artifact_id", "source_step_id")},
-                replay_and_analysis(str(recorded_path(arm, str(row["result_ref"]))))[1],
+                replay_and_analysis(str(recorded_path(experiment, str(row["result_ref"]))))[1],
             )
             for row in record.get("seed_replicates") or ()
             if row.get("result_ref")
@@ -140,19 +140,17 @@ def _replayed(
     )["slices"]
 
 
-def check_arm(arm: Path) -> list[Judgement]:
-    """Every stored reading of one arm against today's reading of it."""
+def check_experiment(experiment: Path) -> list[Judgement]:
+    """Every stored reading of one experiment against today's reading of it."""
 
-    params = read_json_object(arm / HITL_DIR_NAME / PARAMS_NAME)
-    ledger = arm / "ledgers" / "experiment_ledger.jsonl"
-    lines = ledger.read_text(encoding="utf-8").splitlines() if ledger.is_file() else []
-    records = [json.loads(line) for line in lines if line]
+    params = read_json_object(experiment / HITL_DIR_NAME / PARAMS_NAME)
+    records = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
     rules = acceptance_for(params)
     slippage = float(read_param(params, "slippage_bps"))  # type: ignore[arg-type]
     found: list[Judgement] = []
 
     def judge(reading: str, stored: object, now: object) -> None:
-        found.append(Judgement(arm.name, reading, differences(stored, _stored(now))))
+        found.append(Judgement(experiment.name, reading, differences(stored, _stored(now))))
 
     for record in records:
         kind = record.get("record_type")
@@ -161,11 +159,11 @@ def check_arm(arm: Path) -> list[Judgement]:
             nominee = steps[str(record["nominated_step_id"])]
             seeds = record["freeze_gate"].get("seed_replicates") or {}
             judge(
-                "freeze_registration",
+                "check_registration",
                 record["freeze_gate"],
-                freeze_registration(
+                check_registration(
                     nominee,
-                    experiment_dir=arm,
+                    experiment_dir=experiment,
                     acceptance=rules,
                     seed_replicates=[steps[str(entry["step_id"])] for entry in seeds.get("replicates") or ()],
                     deterministic=bool(seeds.get("deterministic")),
@@ -176,7 +174,7 @@ def check_arm(arm: Path) -> list[Judgement]:
             # written: the test steps before it, and the record's own slice.
             before = records[: records.index(record)]
             if record.get("status") == "ok":
-                slices = _replayed(arm, record, rules, slippage)
+                slices = _replayed(experiment, record, rules, slippage)
                 judge("forward", record["slices"], slices)
                 now = readout(before, alpha=rules.alpha, forward=slices["forward"])
             else:
@@ -189,20 +187,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n\n")[0])
     parser.add_argument("--experiments", type=Path, default=REPO_ROOT / "experiments")
     args = parser.parse_args(argv)
-    arms = current_arms(args.experiments)
+    experiments = current_experiments(args.experiments)
     failed = 0
     count = 0
-    for arm in arms:
-        judgements = check_arm(arm)
+    for experiment in experiments:
+        judgements = check_experiment(experiment)
         if not judgements:
-            print(f"{'-':<10} {arm.name}: no stored reading")
+            print(f"{'-':<10} {experiment.name}: no stored reading")
         for item in judgements:
             count += 1
             failed += bool(item.differences)
             detail = f": differs at {item.differences[:20]}" if item.differences else ""
-            print(f"{'different' if item.differences else 'identical':<10} {item.reading:<27} {item.arm}{detail}")
+            print(f"{'different' if item.differences else 'identical':<10} {item.reading:<27} {item.experiment}{detail}")
     print(
-        f"{len(arms)} arms under the rolling validation: "
+        f"{len(experiments)} experiments under the rolling validation: "
         f"{count} stored readings, {count - failed} identical, {failed} different"
     )
     return 1 if failed else 0

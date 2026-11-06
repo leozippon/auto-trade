@@ -102,9 +102,9 @@ def test_the_audit_entrypoint_assembles_through_the_shared_builder() -> None:
 
 
 def test_the_audit_parser_exposes_every_create_time_gate() -> None:
-    """The acceptance rules are stamped into ``params.json`` when the arm is
+    """The acceptance rules are stamped into ``params.json`` when the experiment is
     created and nothing can move them afterwards, so a field the parser does
-    not expose pins every audited arm at its default. The flags are read off
+    not expose pins every audited experiment at its default. The flags are read off
     the rules' own fields: unset is ``None`` (the worker's default), a count
     parses as an integer and a limit as a float. A rule without a default
     takes the console's creation value, and is a required flag where the
@@ -138,10 +138,10 @@ def test_the_audit_parser_exposes_every_create_time_gate() -> None:
             parser.parse_args(["--research-years=1", wrong])
 
 
-def test_an_arm_created_from_the_command_line_holds_the_consoles_creation_rules(
+def test_an_experiment_created_from_the_command_line_holds_the_consoles_creation_rules(
     tmp_path: Path,
 ) -> None:
-    """An audited arm is judged as a console arm created the same day would
+    """An audited experiment is judged as a console experiment created the same day would
     be: the rules' own defaults, a limit the operator names, and none of the
     retired switches."""
 
@@ -264,7 +264,7 @@ def test_the_pipeline_uses_the_experiments_own_pit_view_seed(
 ) -> None:
     """The seed is the experiment's resolved one, not a hardcoded default.
 
-    An arm whose dataset selection needs its own prebuilt tree must read that
+    An experiment whose dataset selection needs its own prebuilt tree must read that
     tree here too, and on the same terms: an explicitly chosen seed has to
     apply rather than fall back to a cold build.
     """

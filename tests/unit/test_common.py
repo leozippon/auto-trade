@@ -81,11 +81,11 @@ def test_a_dataclass_record_round_trips_and_refuses_another_key_set() -> None:
         dataclass_from_record(_Pinned, {**record, "extra": 1})
 
 
-@pytest.mark.parametrize("value", ["a", "arm_1-x", "9" * 100])
+@pytest.mark.parametrize("value", ["a", "experiment_1-x", "9" * 100])
 def test_an_experiment_id_is_a_safe_directory_name(value: str) -> None:
     assert is_experiment_id(value)
 
 
-@pytest.mark.parametrize("value", ["", "-arm", "_arm", "a/b", "a b", "a.b", "9" * 101, None, 1])
+@pytest.mark.parametrize("value", ["", "-experiment", "_experiment", "a/b", "a b", "a.b", "9" * 101, None, 1])
 def test_anything_else_is_not_an_experiment_id(value: object) -> None:
     assert not is_experiment_id(value)

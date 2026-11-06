@@ -388,7 +388,7 @@ def sub_window_stats(
     """Per year of the replay window, the same metrics as the whole.
 
     ``year_windows`` is the ``(start, end)`` calendar bounds (``YYYYMMDD``) of
-    the years the replay was requested over, in order: the arm's research years
+    the years the replay was requested over, in order: the experiment's research years
     (``ResearchGeometry.research_years``), carried on the evaluation request so
     the rows divide the replay by the years it really has instead of assuming
     they begin in July. A row is labelled by its months
@@ -416,8 +416,8 @@ def sub_window_stats(
     ``benchmark_return`` / ``excess_return`` stay ``None`` until the
     evaluation backend joins the benchmark series in
     (``attach_sub_window_benchmark``): the replay itself never reads an index.
-    ``panel_return`` and ``active_excess_return`` are added there too, on a
-    replay that carries a panel.
+    ``baseline_return`` and ``active_excess_return`` are added there too, on a
+    replay that carries a random baseline.
     """
 
     rows = sorted(
@@ -482,12 +482,12 @@ def attach_sub_window_benchmark(
     each reader — re-deriving the join. A slot without a usable benchmark
     leaves the fields ``None`` rather than reporting a fabricated zero.
 
-    A replay that carries a zero-skill panel also gets the year's active excess
+    A replay that carries a random baseline also gets the year's active excess
     (``style.window_plain_excess`` of its active series: the annualised mean
-    of the book's daily return minus the panel's, no regression), the figure
-    the freeze gate counts positive years on, and the panel composite's own
+    of the book's daily return minus the random baseline's, no regression), the figure
+    the registration check counts positive years on, and the random-baseline composite's own
     return over the year, compounded like the benchmark's: the year's return,
-    its benchmark and its panel side by side are the holder's account, the
+    its benchmark and its random baseline side by side are the holder's account, the
     index and zero skill on the same skeleton.
     """
 
@@ -534,10 +534,10 @@ def attach_sub_window_benchmark(
         if active is not None:
             excess = window_plain_excess(active, start=start, end=end)
             row["active_excess_return"] = None if excess is None else _round(excess)
-            row["panel_return"] = _round(
+            row["baseline_return"] = _round(
                 compounded_return(
                     value
-                    for day, value in _series_pairs(style_analysis.get("panel_daily"))
+                    for day, value in _series_pairs(style_analysis.get("baseline_daily"))
                     if start <= day <= end
                 )
             )
@@ -713,7 +713,7 @@ def _max_drawdown(opening: float, equities: Sequence[float]) -> float:
 def compounded_return(returns: Iterable[float]) -> float:
     """What a daily return series compounds to: the equity it reaches from 1,
     less 1. The one compounding of a stored series over a window, for a year's
-    benchmark and panel and for the holder's readings of a slice alike."""
+    benchmark and random baseline and for the holder's readings of a slice alike."""
 
     equity = 1.0
     for value in returns:
@@ -742,7 +742,7 @@ def compounded_path(returns: Iterable[float]) -> list[tuple[float, float]]:
 def compounded_drawdown(returns: Iterable[float]) -> float:
     """Peak-to-trough loss of the equity a daily return series compounds to from 1.
 
-    The one drawdown of a return series: the freeze gate and the verdicts grade
+    The one drawdown of a return series: the registration check and the verdicts grade
     the active series by it, and a formal result reports the same figure as
     ``benchmark.active_max_drawdown``.
     """
@@ -757,7 +757,7 @@ def plain_statistics(returns: Iterable[float]) -> dict[str, float | int | None]:
     standard deviation (n − 1 degrees of freedom) and ``information_ratio``
     their ratio, ``None`` on a flat series; each annualised over
     ``TRADING_DAYS_PER_YEAR``. Of the active series -- a book's daily return
-    minus its zero-skill panel's -- these are the figures every replay reports
+    minus its random baseline's -- these are the figures every replay reports
     and every gate grades (``pipelines/verdict.py``). Fewer than two days
     measure none of them.
     """

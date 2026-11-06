@@ -1,30 +1,30 @@
 #!/usr/bin/env python3
-"""Report, and with --apply delete, the derived PIT caches of finished arms.
+"""Report, and with --apply delete, the derived PIT caches of finished experiments.
 
-An arm's ``pit_views/`` (decision views, replay slots, as-of stash) is a cache
+An experiment's ``pit_views/`` (decision views, replay slots, as-of stash) is a cache
 of its pinned release and snapshot configuration. Its only reader is the PIT
-snapshot provider inside that arm's worker, and a worker whose ledger already
+snapshot provider inside that experiment's worker, and a worker whose ledger already
 carries a verdict republishes the completion status and exits before any
 snapshot is prepared; a missing tree is rebuilt on demand (re-linked from the
-seed, the rest cold-built). So once an arm is finished for good its views can
+seed, the rest cold-built). So once an experiment is finished for good its views can
 go, together with the sandbox work root a worker left behind before it learned
-to release it. A worker that writes an arm's terminal status releases both
-itself, through the same ``release_pit_views``; this tool is for the arms that
-ended before it did, for arms stopped after their verdict, and for archived
-arms.
+to release it. A worker that writes an experiment's terminal status releases both
+itself, through the same ``release_pit_views``; this tool is for the experiments that
+ended before it did, for experiments stopped after their verdict, and for archived
+experiments.
 
 Finished for good means no live worker and either the archive marker
-(``hitl/archived.json``, written by ``archive_arm.py``) or hitl status
+(``hitl/archived.json``, written by ``archive_experiment.py``) or hitl status
 ``completed`` or ``stopped`` with a ledger verdict (``graduated``,
 ``discarded`` or ``no_deliverable``), which rules out a pending forward replay.
-Archiving is the operator's final word: the console never starts the arm's
-worker again, and one whose research was interrupted never gets a verdict. Anything else is kept, an arm
+Archiving is the operator's final word: the console never starts the experiment's
+worker again, and one whose research was interrupted never gets a verdict. Anything else is kept, an experiment
 whose status or ledger cannot be read is refused, and nothing outside
 ``pit_views/`` and ``.runtime/sandboxes/<id>`` is touched.
 
-The default only reports, per arm and in total, the bytes deletion would free:
+The default only reports, per experiment and in total, the bytes deletion would free:
 an inode counts only when every hard link to it lies inside the deleted tree,
-so the views an arm shares with its seed count nothing.
+so the views an experiment shares with its seed count nothing.
 
 usage: prune_pit_views.py [--apply]
 """
@@ -49,8 +49,8 @@ from autotrade.environment.sandbox import remove_sandbox_tree
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     STATUS_NAME,
-    ArmState,
-    arm_is_archived,
+    ExperimentState,
+    experiment_is_archived,
     read_status,
     status_pid_alive,
 )
@@ -58,12 +58,12 @@ from autotrade.pipelines.ledger import ExperimentLedger, experiment_verdict
 from autotrade.pipelines.worker import pit_views_tree, release_pit_views
 from autotrade.webui.manager import ManagerDeleteError, _derived_sandbox_tree
 
-TERMINAL_STATES = (ArmState.COMPLETED, ArmState.STOPPED)
+TERMINAL_STATES = (ExperimentState.COMPLETED, ExperimentState.STOPPED)
 GIB = 1024**3
 
 
 def kept_reason(directory: Path) -> str:
-    """Why this arm's caches stay, or "" when it is finished for good.
+    """Why this experiment's caches stay, or "" when it is finished for good.
 
     Raises OSError or ValueError when its status or ledger cannot be read.
     """
@@ -71,9 +71,9 @@ def kept_reason(directory: Path) -> str:
     status = read_status(directory / HITL_DIR_NAME / STATUS_NAME)
     if status_pid_alive(status):
         return f"live worker (pid {status.get('pid')})"
-    if arm_is_archived(directory):
+    if experiment_is_archived(directory):
         return ""
-    state = str(status.get("state") or ArmState.CREATED)
+    state = str(status.get("state") or ExperimentState.CREATED)
     if state not in TERMINAL_STATES:
         return f"state {state!r} is not terminal"
     records = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").read()
@@ -83,7 +83,7 @@ def kept_reason(directory: Path) -> str:
 
 
 def derived_trees(repo_root: Path, directory: Path) -> dict[str, Path]:
-    """The arm's derived trees that exist: its PIT views and its sandbox root."""
+    """The experiment's derived trees that exist: its PIT views and its sandbox root."""
 
     trees: dict[str, Path] = {}
     views = pit_views_tree(directory)
@@ -120,7 +120,7 @@ def freed_bytes(root: Path) -> int:
 
 def _delete(label: str, path: Path) -> None:
     if label == "pit_views":
-        # The worker's own release of a finished arm's views.
+        # The worker's own release of a finished experiment's views.
         release_pit_views(path.parent)
     elif not remove_sandbox_tree(path):
         raise OSError(f"sandbox tree still exists after removal: {path}")
@@ -165,7 +165,7 @@ def prune(repo_root: Path, *, apply: bool) -> int:
         pruned.append(name)
     total = sum(totals.values())
     print(
-        f"total: {len(pruned)} finished arms, {'freed' if apply else 'would free'} "
+        f"total: {len(pruned)} finished experiments, {'freed' if apply else 'would free'} "
         f"{total / GIB:.1f} GiB (pit_views {totals['pit_views'] / GIB:.1f} GiB, "
         f"sandboxes {totals['sandbox'] / GIB:.1f} GiB); {len(kept)} kept, "
         f"{len(refused)} refused; filesystem free {free_before / GIB:.1f} GiB"

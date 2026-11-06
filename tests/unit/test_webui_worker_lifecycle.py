@@ -154,7 +154,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         )
         # The research session is not settled: no durable record yet.
         self.client = TestClient(create_app(self.repo_root, self.experiments_root))
-        # The arm asks for the default GPU, so starting it claims a card; this
+        # The experiment asks for the default GPU, so starting it claims a card; this
         # class is about the worker, not the host's devices.
         probe = stubbed_gpu_probe()
         probe.start()
@@ -448,8 +448,8 @@ class WorkerLifecycleTest(unittest.TestCase):
             control.directives, {"research": "keep the turnover down"}
         )
 
-    def test_an_archived_arm_is_never_started_again(self) -> None:
-        """Archived is finished for good, and the prunes act on it: an arm
+    def test_an_archived_experiment_is_never_started_again(self) -> None:
+        """Archived is finished for good, and the prunes act on it: an experiment
         interrupted mid-research (its status still says running, its worker
         is gone), which the console otherwise reads as resumable, is refused
         on every start path before anything is claimed or spawned."""
@@ -733,7 +733,7 @@ class CreatePreflightTest(unittest.TestCase):
         asserts the persisted file survives the stricter pass -- every
         parameter check, only the deployment-state steps skipped.
         """
-        from autotrade.pipelines.arm_params import PARAMETERS
+        from autotrade.pipelines.experiment_params import PARAMETERS
         from autotrade.pipelines.worker import resolve_worker_options
 
         response = self._create()
@@ -794,12 +794,12 @@ class CreatePreflightTest(unittest.TestCase):
                     manager.create_experiment({**payload, "experiment_id": "shared_body_2"})
         self.assertFalse((self.experiments_root / "shared_body_2").exists())
 
-    def test_a_gpu_arm_gets_a_card_it_can_use_and_holds_it_while_its_worker_lives(self) -> None:
+    def test_a_gpu_experiment_gets_a_card_it_can_use_and_holds_it_while_its_worker_lives(self) -> None:
         """A card somebody else uses is passed over while it keeps less than the
         console's admission margin free, one that keeps more is taken, a card a
-        running arm holds is never handed out again even while it shows nothing
-        in use, and a GPU arm with no such card left is refused before anything
-        is written while a CPU arm is still created. The margin is a start-up
+        running experiment holds is never handed out again even while it shows nothing
+        in use, and a GPU experiment with no such card left is refused before anything
+        is written while a CPU experiment is still created. The margin is a start-up
         setting of the console, so the health view and the claim a start writes
         are the same selection. The worker is a real detached child, so the hold
         ends exactly when it dies."""
@@ -840,7 +840,7 @@ class CreatePreflightTest(unittest.TestCase):
             self.assertIn(
                 f"a card is free only when it keeps {MIN_FREE_GPU_MEMORY_MIB} MiB free", detail
             )
-            self.assertIn("claimed by running arms: gpu_shared [1]; preflight_demo [2]", detail)
+            self.assertIn("claimed by running experiments: gpu_shared [1]; preflight_demo [2]", detail)
             self.assertFalse((self.experiments_root / "gpu_behind").exists())
 
             # The margin is what the console was started with: raising it in
@@ -877,7 +877,7 @@ class CreatePreflightTest(unittest.TestCase):
 
 
 class RestartSlotRaceTest(unittest.TestCase):
-    """At a running-arm limit, a restart owns the slot it is about to free.
+    """At a running-experiment limit, a restart owns the slot it is about to free.
 
     `restart` terminates the worker and then spawns a new one, and for as long
     as the SIGTERM grace lasts this experiment holds no running slot. While the
@@ -979,5 +979,5 @@ class RestartSlotRaceTest(unittest.TestCase):
         # was refused rather than served out of exp_a's slot.
         self.assertEqual(self.client.get("/api/experiments").json()["running"], ["exp_a"])
         self.assertEqual(second.get("status"), 400, second.get("detail"))
-        self.assertIn("running-arm limit reached", str(second.get("detail")))
+        self.assertIn("running-experiment limit reached", str(second.get("detail")))
         self.assertFalse((self.experiments_root / "exp_b").exists())

@@ -226,10 +226,10 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "你能读到的数据止于研究年末，整个会话都不变",
         "验证期的数据不会挂载，只通过 `test` 的结果一步一步揭开",
         "用 `validate` 在研究年内回测",
-        "`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的滚动记录",
-        "前沿推进一步",
-        "已记入滚动记录的条目不会改写",
-        "验证期最后一步测试完，会话结束，最后测试的候选被冻结",
+        "`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的验证记录",
+        "测试终点推进一步",
+        "已记入验证记录的条目不会改写",
+        "验证期最后一步测试完，会话结束，最后测试的候选定版",
         "会话不能主动结束",
         "宿主用最后测试的候选跑完剩下的步",
         "运行 Forward 与 Held-out 两个阶段，读数不回到会话",
@@ -237,9 +237,9 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "`fit` 与 `REFIT_PERIOD`",
     ):
         assert clause in process, clause
-    # The host reads the record; the statistic and its bar; no pass or fail.
+    # The host reads the record; the statistic and its threshold; no pass or fail.
     for clause in (
-        "宿主读的是滚动记录",
+        "宿主读的是验证记录",
         "随机选股对照组合",
         "残差信息比率",
         "z(1−α)/√年数",
@@ -247,12 +247,12 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "是读数，不是判决",
     ):
         assert clause in readings, clause
-    assert "参考包、研究方向与研究者指令都不能放宽它们" in stable
+    assert "参考工作区、研究方向与研究者指令都不能放宽它们" in stable
     assert "读取研究年末之后的数据" in stable and "模型自身的知识" in stable
     assert "验证期只通过 `test` 的结果了解" in stable
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
     # The retired action set and its wording are gone from every surface the
-    # session reads under this contract: no freeze or finishing action, no
+    # session reads under this contract: no registration or finishing action, no
     # "no excess" outcome, no pass/fail verdict, no replay-year budget.
     surfaces = {
         "system_prompt": prompt,
@@ -264,7 +264,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         for retired in (
             "freeze",
             "finish_session",
-            "定版",
+            "冻结",
             "no_edge",
             "未发现超额",
             "没有超额",
@@ -292,7 +292,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     ):
         for surface in (prompt, prompts.WRAP_UP_PROMPT):
             assert retired not in surface, retired
-    # How to research is the Agent's own call, which a reference pack may
+    # How to research is the Agent's own call, which a reference workspace may
     # suggest: the stable prompt carries no research protocol, evidence
     # recipe, process quota, delegation style or compute advice.
     for retired in (
@@ -359,7 +359,7 @@ def test_the_session_surfaces_word_the_experiment_the_current_way() -> None:
     # The wording the surfaces do use, stated once where each is defined.
     assert "AI 首席量化研究官" in surfaces["system_prompt"]
     assert "随机选股对照组合" in surfaces["system_prompt"]
-    assert "冻结" in surfaces["system_prompt"]
+    assert "定版" in surfaces["system_prompt"]
 
 
 # Forward and Held-out results never enter a session (agent-design §1.2): the
@@ -419,11 +419,11 @@ def _run_facts(**geometry: object) -> dict[str, object]:
     five-year validation geometry with quarterly steps; ``years`` lists every
     year of the geometry, as the record does."""
 
-    from autotrade.pipelines.verdict import residual_bar
+    from autotrade.pipelines.verdict import residual_threshold
 
     return {
         "research_geometry": {
-            "frontier": "20200731",
+            "test_horizon": "20200731",
             "research_period": "20150801..20200731",
             "years": [{"label": f"Y{index}", "end": f"{2015 + index}0731"} for index in range(1, 11)],
             "validation_period": "20200801..20250731",
@@ -434,10 +434,10 @@ def _run_facts(**geometry: object) -> dict[str, object]:
         },
         "artifact_contract": {
             "acceptance_rules": {
-                "instrument": {
+                "significance": {
                     "alpha": 0.05,
-                    "bar_over_one_year": round(residual_bar(1.0, 0.05), 3),
-                    "bar_over_validation_period": round(residual_bar(5.0, 0.05), 3),
+                    "threshold_over_one_year": round(residual_threshold(1.0, 0.05), 3),
+                    "threshold_over_validation_period": round(residual_threshold(5.0, 0.05), 3),
                 }
             }
         },
@@ -445,10 +445,10 @@ def _run_facts(**geometry: object) -> dict[str, object]:
     }
 
 
-def test_the_run_section_states_this_runs_view_steps_and_bar() -> None:
+def test_the_run_section_states_this_runs_view_steps_and_threshold() -> None:
     """The environment tells the session, concretely, that its data ends at
     the research years' end for the whole session, the research years, the
-    number and length of the steps, the bar and the validate allowance, read
+    number and length of the steps, the threshold and the validate allowance, read
     off the facts the prompt also carries."""
 
     facts = _run_facts()
@@ -466,11 +466,11 @@ def test_the_run_section_states_this_runs_view_steps_and_bar() -> None:
     # A resumed attempt reads where its predecessor stopped on the same data
     # view; monthly steps read as months.
     later = prompts.build_run_section(
-        _run_facts(frontier="20211031", step="month", steps=60, steps_tested=15)
+        _run_facts(test_horizon="20211031", step="month", steps=60, steps_tested=15)
     )
     assert "止于研究年末 20200731，" in later
     assert "共 60 步，每步一个月；本次尝试开始时已测试 15 步，测到 20211031。" in later
-    # A geometry that states a frontier must state the rest: a missing key or
+    # A geometry that states a test horizon must state the rest: a missing key or
     # an unknown step length fails the prompt instead of dropping the line.
     broken = _run_facts()
     del broken["budgets"]["validates_per_step"]  # type: ignore[attr-defined]
@@ -478,5 +478,5 @@ def test_the_run_section_states_this_runs_view_steps_and_bar() -> None:
         prompts.build_run_section(broken)
     with pytest.raises(KeyError):
         prompts.build_run_section(_run_facts(step="week"))
-    # Facts without a frontier add no section.
+    # Facts without a test horizon add no section.
     assert "## 本次运行" not in _full_prompt()

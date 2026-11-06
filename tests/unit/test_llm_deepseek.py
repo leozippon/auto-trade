@@ -461,7 +461,7 @@ def test_shared_effort_scale_keeps_its_order_on_deepseek_tiers(level: str, wire:
 )
 def test_catalog_refuses_names_deepseek_serves_as_flash(model: str):
     # DeepSeek routes every one of these to deepseek-flash server-side, so an
-    # arm created on one would run on Flash under another model's label.
+    # experiment created on one would run on Flash under another model's label.
     assert MODEL_CHOICES.count("deepseek-flash") == 1
     assert model not in MODEL_CHOICES
     with pytest.raises(ValueError, match=f"unsupported model '{model}'"):

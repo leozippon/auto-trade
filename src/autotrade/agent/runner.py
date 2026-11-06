@@ -4,7 +4,7 @@ docs/AGENT_DESIGN.md plus docs/ENVIRONMENT_DESIGN.md §2.2 define the Agent
 session and tool-entrypoint contract: one conversation per session attempt,
 Steps share the session, only documented tools are callable, and the session
 budget is the master constraint. The session finishes when the ``test`` that
-brings the frontier to the end of the validation years returns; no other
+brings the test horizon to the end of the validation years returns; no other
 action ends it. The budget the pipeline hands over includes a trailing
 wrap-up grace window (``deadline_grace_seconds``): reaching the main deadline
 never interrupts the model — a single wrap-up prompt is injected and the
@@ -12,8 +12,9 @@ session keeps its full tool surface through the grace window; when the grace
 window, the model-call budget or the API spend cap is exhausted the session
 closes gracefully (``session_end`` with status ``deadline_exceeded``,
 ``call_budget_exhausted`` or ``api_spend_exhausted``) and the Pipeline
-records a ``deadline`` outcome and completes the rolling record from the
-frontier instead of failing the run. Main conversation calls and compactions
+records a ``deadline`` outcome and completes the validation record from the
+test horizon instead of failing the run; the readout follows from the host's
+forward replay. Main conversation calls and compactions
 are logged in the Agent trace (docs/ENVIRONMENT_DESIGN.md §2.4 and §4.2).
 """
 
@@ -112,7 +113,7 @@ class AgentSessionBudgetExhausted(SessionInterrupt):
     ``session_end`` (status ``deadline_exceeded``, ``call_budget_exhausted``
     or ``api_spend_exhausted``);
     the Pipeline records the ``deadline`` outcome with ``finish_reason`` and
-    ends the arm instead of failing the run. A SessionInterrupt subclass so it
+    ends the experiment instead of failing the run. A SessionInterrupt subclass so it
     re-raises through tool dispatch instead of being swallowed into an error
     observation.
     """
@@ -131,7 +132,7 @@ class AgentSessionBudgetExhausted(SessionInterrupt):
         self.llm_calls = llm_calls
 
 
-# ``test`` advances the validation frontier and, on the last step, ends the
+# ``test`` advances the test horizon and, on the last step, ends the
 # session: it waits for every sub-agent (the last step's close would discard
 # their reports) and a finishing call ends the turn.
 _TERMINAL_TOOLS = frozenset({"test"})
@@ -286,7 +287,7 @@ class _SubAgentJob:
     # The finished child's own transcript, kept for ``resume``.
     messages: tuple[ChatMessage, ...] | None = None
     # Parent instructions not yet read by the child (``action="message"``);
-    # the child drains it before each model round.
+    # the child drains it before each model turn.
     steer: deque[str] = field(default_factory=deque)
 
 
@@ -363,8 +364,8 @@ class AgentSessionRunner:
         self.time_budget = validate_time_budget_bindings(
             time_budget, tuple(bindings), owner="Agent runner"
         )
-        # The tail of the session clock the parent keeps for its own
-        # finalization; children and the parent's waits for them stop there.
+        # The tail of the session clock the parent keeps for its wrap-up;
+        # children and the parent's waits for them stop there.
         self._child_reserve_seconds = self._child_reserve_for_budget()
         if self.subagent is not None:
             self.subagent.parent_reserve_seconds = self._child_reserve_seconds
@@ -409,10 +410,9 @@ class AgentSessionRunner:
         ``preamble`` is inserted between the system prompt and the instruction:
         a resumed attempt puts the interrupted one's compaction summary there.
         ``complete_validations`` are the Validations earlier attempts recorded,
-        seeded as finalization candidates so the resumed session can nominate
-        them.
+        seeded so the resumed session can test them.
         ``budget_total_seconds`` is the whole session budget the time-budget
-        notices are measured against; a resumed attempt hands over the arm
+        notices are measured against; a resumed attempt hands over the experiment
         total while its time budget only holds what is left of it.
 
         However the conversation ends — a finish, an exhausted budget, an
@@ -571,7 +571,7 @@ class AgentSessionRunner:
                     "error": error,
                 }
                 if malformed:
-                    # Countable in an audit: this class costs one round, not a
+                    # Countable in an audit: this class costs one turn, not a
                     # repeated generation.
                     failure["error_type"] = "malformed_tool_call"
                 elif isinstance(exc, ProviderRefusalError):
@@ -928,7 +928,7 @@ class AgentSessionRunner:
                 # overlap a developer child that may still be writing the
                 # workspace. A finish waits for every child (the close discards
                 # their reports); a backtest waits only for children whose role
-                # can write, so a read-only audit never delays a ready round,
+                # can write, so a read-only audit never delays a ready turn,
                 # and refuses rather than snapshot candidates a writer may
                 # still be changing.
                 self._wait_subagent_jobs(
@@ -1030,9 +1030,9 @@ class AgentSessionRunner:
         three reports.
 
         Two exemptions, because a refusal that cannot be satisfied loses more
-        than the reports it protects. The session's own tail (hard finalization,
-        or the wrap-up grace, which hard finalization never enters) is where
-        finishing is the only remaining move. And whatever the phase, a child
+        than the reports it protects. The session's own tail, the wrap-up grace,
+        is where finishing is the only remaining move (the host completes the
+        record once the budget is spent). And whatever the phase, a child
         that outlives the teardown barrier's own window is one the session no
         longer has time to wait for.
         """
@@ -1154,8 +1154,8 @@ class AgentSessionRunner:
             # Validated here so a bad value is a tool error on the parent's
             # turn; the engine resolves the same precedence for the record.
             thinking = normalize_subagent_thinking(arguments.get("thinking"), role)
-            max_rounds = resolve_subagent_max_turns(
-                arguments.get("max_turns"), role, self.subagent.config.max_rounds
+            max_turns = resolve_subagent_max_turns(
+                arguments.get("max_turns"), role, self.subagent.config.max_turns
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
@@ -1220,7 +1220,7 @@ class AgentSessionRunner:
                 self.subagent.run_with_transcript,
                 task,
                 role=role,
-                max_rounds=max_rounds,
+                max_turns=max_turns,
                 parent_call_id=call_id,
                 thinking=thinking,
                 inherit_context=inherit,
@@ -1260,7 +1260,7 @@ class AgentSessionRunner:
     def _steer_subagent(self, arguments: Mapping[str, object]) -> dict[str, object]:
         """Queue one parent instruction for a child that has not finished.
 
-        The child reads it before its next model round (a queued child before
+        The child reads it before its next model turn (a queued child before
         its first), so the ack only says it was queued; delivery shows up as
         the child's ``subagent_steer`` event and as ``steers`` /
         ``steers_undelivered`` in its ``subagent_completed`` observation. A
@@ -1401,7 +1401,7 @@ class AgentSessionRunner:
         """The tail to withhold from the children of THIS session.
 
         A child shares the session clock, so it must stop before the parent's
-        finalization window opens: the child cancelled at the parent's deadline
+        wrap-up window opens: the child cancelled at the parent's deadline
         had spent shared LLM calls on a report nobody could receive. The tail
         is withheld only while there is a session outside it — a budget no
         larger than the tail belongs to a session that starts inside its own
@@ -1419,11 +1419,10 @@ class AgentSessionRunner:
     def _subagent_wait_floor(self) -> float | None:
         """Remaining seconds at which the parent stops waiting for a child.
 
-        ``None`` means it must not wait at all: once the wrap-up prompt is out
-        or hard finalization is active, what is left is finishing time. A session
-        with three complete Validations spent 55 minutes inside one such wait,
-        crossed the finalize window, the main deadline and the whole grace
-        without ever reaching the loop top, and ended selecting none of them.
+        ``None`` means it must not wait at all: once the wrap-up prompt is out,
+        what is left is finishing time. A session once spent 55 minutes inside
+        one such wait and crossed the main deadline and the whole grace without
+        ever reaching the loop top.
         """
 
         if self._wrap_up_sent:
@@ -1434,8 +1433,9 @@ class AgentSessionRunner:
         """Skip no_tool_call when a sub-agent is still running; wait for progress.
 
         Returns False once the wait floor is reached, so the turn falls through
-        to the ordinary nudge and the loop reaches its next top — where hard
-        finalization starts — instead of yielding the rest of the session.
+        to the ordinary nudge and the loop reaches its next top — where the
+        wrap-up notice and the deadline are checked — instead of yielding the
+        rest of the session.
         """
         uncollected = self._uncollected_subagent_jobs()
         if not uncollected:
@@ -1764,7 +1764,7 @@ class AgentSessionRunner:
             "estimated_tokens": estimated,
             "token_threshold": threshold,
             "message": (
-                f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}。请在当前一轮结果消化完后"
+                f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}。请在当前这一回合的结果消化完后"
                 "调用 compact(summary=...)：把策略现状、已做的决定与被否定的方向（带读数与节点 id）、"
                 "未完成的线索与 trace 里的定位写进摘要；达到阈值仍未压缩时宿主用压缩模型代劳。"
             ),

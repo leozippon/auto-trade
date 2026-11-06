@@ -96,7 +96,7 @@ class LocalDailyEvaluationBackend:
     ) -> None:
         if execution_mode not in {"sandbox", "trusted"}:
             raise ValueError("execution_mode must be sandbox or trusted")
-        # The arm's benchmark, which the style sidecar records; a plain daily
+        # The experiment's benchmark, which the style sidecar records; a plain daily
         # file carries no index series, so nothing is regressed against it.
         self.benchmark_index = benchmark_index
         self.daily_path = Path(daily_path).resolve(strict=True)
@@ -133,7 +133,7 @@ class LocalDailyEvaluationBackend:
 
         Same contract as the PIT backend: an unofficial smoke run gets the real
         replay path over a short window, never a short window dressed up as a
-        full Validation, and a test replays its span up to the frontier.
+        full Validation, and a test replays its span up to the test horizon.
         """
         if max_days is not None and max_days <= 0:
             raise ValueError("max_days must be a positive integer")
@@ -214,8 +214,8 @@ class LocalDailyEvaluationBackend:
 class DeterministicBaselineDeveloper:
     """Replay the template unchanged on the research span and nominate it.
 
-    Nothing is modified and nothing is judged: the arm's one session validates
-    the template twice on the full span (the freeze gate counts full-span
+    Nothing is modified and nothing is judged: the experiment's one session validates
+    the template twice on the full span (the registration check counts full-span
     validations, the nominee included, and needs two) and nominates the
     second replay for the gate.
     """
@@ -271,7 +271,7 @@ class DeterministicBaselineDeveloper:
                 )
             )
         # No agent tests anything here: the session ends as one whose budget
-        # ran out before a test, and the host freezes the baseline's last
+        # ran out before a test, and the host registers the baseline's last
         # Validation and completes the record with it.
         return ResearchSessionResult(
             f"deterministic_baseline_{request.run_id}",

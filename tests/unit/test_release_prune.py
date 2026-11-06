@@ -47,14 +47,14 @@ class ReleasePruneTest(unittest.TestCase):
         # g7 is the committed generation; one consumer of each kind records
         # each of g2..g5, and only ended consumers record g1.
         self._write(self.root / "data" / "seed_8y" / "provider.json", {"generation_id": "g2"})
-        self._arm("arm_stopped", state="stopped")
-        self._pin(self.root / "experiments" / "arm_stopped", "g3")
+        self._experiment("stopped_one", state="stopped")
+        self._pin(self.root / "experiments" / "stopped_one", "g3")
         # Not started yet, so nothing pinned: its seed, outside data/, names the release.
-        self._arm("arm_created", state=None, seed="seeds/elsewhere")
+        self._experiment("created_one", state=None, seed="seeds/elsewhere")
         self._write(self.root / "seeds" / "elsewhere" / "provider.json", {"generation_id": "g4"})
         self._book("book_live", "g5")
-        self._arm("arm_completed", state="completed")
-        self._pin(self.root / "experiments" / "arm_completed", "g1")
+        self._experiment("experiment_completed", state="completed")
+        self._pin(self.root / "experiments" / "experiment_completed", "g1")
         self._book("book_killed", "g1", killed=True)
         self.config = self.root / "schedule.json"
         self._write(self.config, {
@@ -78,7 +78,7 @@ class ReleasePruneTest(unittest.TestCase):
             generation_id=generation,
         )
 
-    def _arm(self, name: str, *, state: str | None, seed: str | None = None) -> None:
+    def _experiment(self, name: str, *, state: str | None, seed: str | None = None) -> None:
         hitl = self.root / "experiments" / name / "hitl"
         hitl.mkdir(parents=True)
         if state is not None:
@@ -113,32 +113,32 @@ class ReleasePruneTest(unittest.TestCase):
         result, lines = self.prune(apply=False)
         self.assertEqual(self.kept(), {
             "g2": ["seed data/seed_8y"],
-            "g3": ["experiment arm_stopped (stopped)"],
-            "g4": ["experiment arm_created (created)"],
-            "g5": ["Paper book book_live"],
+            "g3": ["experiment stopped_one (stopped)"],
+            "g4": ["experiment created_one (created)"],
+            "g5": ["Paper account book_live"],
             "g7": ["raw generation record"],
         })
         self.assertEqual([line["generation_id"] for line in lines if line["action"] == "remove"], ["g1", "g6"])
         self.assertEqual(result, {"mode": "dry_run", "releases": 7, "kept": 5, "unreferenced": 2, "leftovers": 0})
-        # An archived arm is over for good, whatever its status says, unless a
+        # An archived experiment is over for good, whatever its status says, unless a
         # worker still runs it.
-        self._arm("arm_archived", state="running_session")
-        self._pin(self.root / "experiments" / "arm_archived", "g6")
-        self._write(self.root / "experiments" / "arm_archived" / "hitl" / ARCHIVED_NAME, {"reason": "test"})
+        self._experiment("archived_one", state="running_session")
+        self._pin(self.root / "experiments" / "archived_one", "g6")
+        self._write(self.root / "experiments" / "archived_one" / "hitl" / ARCHIVED_NAME, {"reason": "test"})
         self.assertNotIn("g6", self.kept())
-        self._write(self.root / "experiments" / "arm_archived" / "hitl" / "status.json", {
+        self._write(self.root / "experiments" / "archived_one" / "hitl" / "status.json", {
             "schema_version": HITL_STATE_SCHEMA_VERSION, "state": "running_session",
             "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid()),
         })
-        self.assertEqual(self.kept()["g6"], ["experiment arm_archived (running_session)"])
-        self._arm_ends("arm_archived")
-        # A state retention cannot read is no proof the arm ended.
-        (self.root / "experiments" / "arm_stopped" / "hitl" / "status.json").write_text("{", encoding="utf-8")
-        self.assertEqual(self.kept()["g3"], ["experiment arm_stopped (unreadable)"])
+        self.assertEqual(self.kept()["g6"], ["experiment archived_one (running_session)"])
+        self._experiment_ends("archived_one")
+        # A state retention cannot read is no proof the experiment ended.
+        (self.root / "experiments" / "stopped_one" / "hitl" / "status.json").write_text("{", encoding="utf-8")
+        self.assertEqual(self.kept()["g3"], ["experiment stopped_one (unreadable)"])
         # Each consumer that ends lets its release go.
         shutil.rmtree(self.root / "data" / "seed_8y")
-        for arm in ("arm_stopped", "arm_created"):
-            self._arm_ends(arm)
+        for experiment in ("stopped_one", "created_one"):
+            self._experiment_ends(experiment)
         (self.root / "data" / "trading" / "paper" / "book_live" / "verdict.jsonl").write_text(
             json.dumps({"status": "killed"}) + "\n", encoding="utf-8"
         )
@@ -146,7 +146,7 @@ class ReleasePruneTest(unittest.TestCase):
         publish_release(self.root, "g8", datasets=("daily_basic",))
         self.assertEqual(self.kept(), {"g8": ["raw generation record"]})
 
-    def _arm_ends(self, name: str) -> None:
+    def _experiment_ends(self, name: str) -> None:
         self._write(
             self.root / "experiments" / name / "hitl" / "status.json",
             {"schema_version": HITL_STATE_SCHEMA_VERSION, "state": "completed"},
@@ -182,9 +182,9 @@ class ReleasePruneTest(unittest.TestCase):
             {path: (path.lstat().st_ino, path.read_bytes()) for path in raw.rglob("*") if path.is_file()}, lake_files
         )
         # A kept release still pins; a removed one is refused, never half read.
-        self._pin(self.root / "experiments" / "arm_new", "g2")
+        self._pin(self.root / "experiments" / "experiment_new", "g2")
         with self.assertRaisesRegex(RuntimeError, "missing or incomplete"):
-            self._pin(self.root / "experiments" / "arm_late", "g1")
+            self._pin(self.root / "experiments" / "experiment_late", "g1")
         again, _ = self.prune(apply=True)
         self.assertEqual((again["unreferenced"], again["freed_bytes"]), (0, 0))
 
@@ -256,7 +256,7 @@ class ReleasePruneTest(unittest.TestCase):
         with self.lock.open("rb") as updater, (self.releases / ".registry.lock").open("a+b") as registry:
             fcntl.flock(updater, fcntl.LOCK_EX)
             fcntl.flock(registry, fcntl.LOCK_EX)
-            threads = [pin("arm_named", "g6"), pin("arm_fallback", None)]
+            threads = [pin("experiment_named", "g6"), pin("experiment_fallback", None)]
             for thread in threads:
                 thread.join(0.5)
                 self.assertTrue(thread.is_alive())
@@ -265,10 +265,10 @@ class ReleasePruneTest(unittest.TestCase):
             fcntl.flock(registry, fcntl.LOCK_UN)
             for thread in threads:
                 thread.join(30)
-        self.assertRegex(str(outcomes["arm_named"]), "missing or incomplete")
-        self.assertFalse((self.root / "experiments" / "arm_named" / "research_release").exists())
-        self.assertIsNone(outcomes["arm_fallback"])
-        manifest = self.root / "experiments" / "arm_fallback" / "research_release" / "manifest.json"
+        self.assertRegex(str(outcomes["experiment_named"]), "missing or incomplete")
+        self.assertFalse((self.root / "experiments" / "experiment_named" / "research_release").exists())
+        self.assertIsNone(outcomes["experiment_fallback"])
+        manifest = self.root / "experiments" / "experiment_fallback" / "research_release" / "manifest.json"
         self.assertEqual(json.loads(manifest.read_text(encoding="utf-8"))["generation_id"], "g7")
 
 

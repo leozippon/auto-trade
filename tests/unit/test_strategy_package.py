@@ -189,7 +189,7 @@ def test_a_hardcoded_stage_path_is_refused_before_any_formal_replay(tmp_path: Pa
     The loader's path rules only look at what a strategy passes to an I/O
     method, so a bare stage-path constant passes them. Without this scan such
     an artifact cleared modification_check, every Validation replay and the
-    freeze, and first failed when the next Fold loaded it as its parent.
+    register, and first failed when the next Fold loaded it as its parent.
     """
 
     helper = "PREFIX = '/mnt/agent/workspace/debug'\n\n\ndef scaled(value):\n    return value\n"

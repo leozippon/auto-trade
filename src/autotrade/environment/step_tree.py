@@ -5,7 +5,7 @@ directory plus optional ``models/`` directory into
 ``/mnt/artifacts/steps/<node_id>/{output,models}/`` (validation attachments
 such as ``detailed_return.json`` sit at the node root) and appends a node
 (with a parent pointer) to ``steps/tree.json``. The tree accumulates across
-every attempt of the arm's research session: the Environment publishes it to
+every attempt of the experiment's research session: the Environment publishes it to
 the experiment after each recorded Validation and a resumed attempt continues
 it, so the Agent can read where it stands in the search history and branch
 from any validated node via the ``step_rollback`` tool.
@@ -25,7 +25,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import read_current_record, write_json_atomic
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
 from autotrade.environment.runtime import chmod_tree, sanitize_for_log, utc_now_iso
 
@@ -134,7 +134,7 @@ class StepTree:
         self.root = Path(root)
         self.tree_path = self.root / TREE_FILE
         if self.tree_path.exists():
-            self.data = read_json_object(self.tree_path)
+            self.data = read_current_record(self.tree_path)
         else:
             self.data = {"current_node_id": None, "nodes": []}
 

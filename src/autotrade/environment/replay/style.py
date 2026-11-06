@@ -8,7 +8,7 @@ Agent actually saw):
 - strategy daily returns: the window's own ``equity_curve``;
 - holdings: the replay result's end-of-day position snapshots;
 - cross-sectional style ranks: the replay slot's ``daily.parquet``;
-- benchmark: the arm's ``benchmark_index`` rows of ``index_daily`` inside
+- benchmark: the experiment's ``benchmark_index`` rows of ``index_daily`` inside
   the replay slot's ``macro.parquet``;
 - SW L1 industry: each replay slot's as-of ``universe.parquet``, the vintage
   the strategy's view publishes while that slot runs, so a span classifies each
@@ -19,7 +19,7 @@ Every replay writes one ``style_analysis.json`` beside its result
 ends), which is what the console serves — the web layer performs no
 attribution computation and touches no raw data.
 
-A formal replay's sidecar also carries its zero-skill panel
+A formal replay's sidecar also carries its random baseline
 (``null_control.run_null_control``): the composite's daily return beside the
 strategy's own, and the active series (strategy minus composite) read as it
 is (``stats.plain_statistics``), which is what ``pipelines/verdict.py``
@@ -55,9 +55,9 @@ from .stats import (
     total_return_from_curve,
 )
 
-# The benchmark an arm takes when its create request names none, and the one a
+# The benchmark an experiment takes when its create request names none, and the one a
 # legacy sidecar or book that records none is read under. Every call below takes
-# the arm's ``benchmark_index`` explicitly, so none can grade against this one
+# the experiment's ``benchmark_index`` explicitly, so none can grade against this one
 # by omission.
 BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
@@ -71,7 +71,7 @@ STYLE_ARTIFACT_NAME = "style_analysis.json"
 # ``active_excess`` figures replace the regressed ``neutralized_excess`` blocks.
 # 3 (2026-11-03): the value leg (``value_factor_daily``) joins the market and
 # size legs, and the regression is three-factor. Every version stores the
-# strategy, benchmark, size and panel series, so a reader takes any
+# strategy, benchmark, size and random baseline series, so a reader takes any
 # (``READABLE_STYLE_SCHEMA_VERSIONS``); a three-factor reading of a version
 # 1 or 2 sidecar finds no value leg and is not measured.
 STYLE_SCHEMA_VERSION = 3
@@ -99,7 +99,7 @@ def regression_method(benchmark_index: str) -> str:
     """The caliber sentence every factor loading and residual tracking error
     is computed under.
 
-    Names the arm's own benchmark: the market leg is index-specific, the size
+    Names the experiment's own benchmark: the market leg is index-specific, the size
     leg is built from the replay's own cross-section whatever the benchmark is.
     """
 
@@ -133,7 +133,7 @@ def slot_benchmark(
 ) -> dict[str, float]:
     """Benchmark daily returns of one replay slot, or of every slot of a span.
 
-    ``benchmark_index`` is the arm's own benchmark. Consecutive slots partition
+    ``benchmark_index`` is the experiment's own benchmark. Consecutive slots partition
     their rows, so a span's series is the union.
     """
     if replay_dir is None:
@@ -185,8 +185,8 @@ def slot_membership(
     ``index_weight`` rides in ``macro.parquet``: a replay slot carries the
     month-end cross-sections dated inside it and the decision view the history
     before its anchor, so a span's table is the union over both. None when no
-    slot mounts the dataset -- it is a per-arm selection, and a mounted one
-    writes its columns even where its window holds no row -- so an arm that
+    slot mounts the dataset -- it is a per-experiment selection, and a mounted one
+    writes its columns even where its window holds no row -- so an experiment that
     mounts it but whose release has no section of this index in the span gets
     an empty mapping, never the unmounted answer.
     """
@@ -565,9 +565,9 @@ def _style_exposures(
         "days": days,
         "tilts": {key: round(total / days, 3) for key, total in tilt_sums.items()},
         # The largest single SW L1 industry's share of the book, averaged over
-        # decision days. The zero-skill panel draws its names without regard
+        # decision days. The random baseline draws its names without regard
         # to industry, so a single-sector book's sector move scores as
-        # selection; the only frozen artifact that cleared every gate was
+        # selection; the only registered artifact that cleared every gate was
         # 82.5 % banks. ``industries`` stays host-side, so this one scalar is
         # what the compact block carries to the Agent.
         "top_industry_weight": round(max(industry_sums.values()) / days, 3),
@@ -591,7 +591,7 @@ def replay_style_analysis(
     replay_dir: Path | Sequence[Path] | None,
     universes: Sequence[tuple[str, Path]],
     mode: str,
-    panel: Mapping[str, object] | None = None,
+    baselines: Mapping[str, object] | None = None,
     benchmark_index: str,
 ) -> dict[str, object]:
     """Compute one result sidecar from the just-finished daily replay.
@@ -600,11 +600,11 @@ def replay_style_analysis(
     ``universes`` pairs each slot's first day with the as-of universe file the
     strategy's view published while that slot ran; a day's holdings are
     classified under the industry membership of the vintage in force that day.
-    ``benchmark_index`` is the arm's benchmark: the sidecar records it beside
+    ``benchmark_index`` is the experiment's benchmark: the sidecar records it beside
     the series it was measured on, so a stored result can never be read without
     knowing what it was graded against.
-    ``panel`` is the replay's zero-skill panel block
-    (``null_control.run_null_control(..., panel=True)``): its two daily series
+    ``baselines`` is the replay's random-baseline block
+    (``null_control.run_null_control(..., baselines=True)``): its two daily series
     are stored beside the strategy's, and the active series (strategy minus
     composite), the series the verdict grades, is read as it is. A truncated
     smoke replay passes none.
@@ -619,11 +619,11 @@ def replay_style_analysis(
     size = _size_factor(replay_daily)
     value = _value_factor(replay_daily)
     factors = {"method": method, **_factor_regression(strategy, benchmark, size, value)}
-    panel_blocks: dict[str, object] = {}
-    panel_compact: dict[str, object] = {}
-    if panel is not None:
+    baseline_blocks: dict[str, object] = {}
+    baseline_compact: dict[str, object] = {}
+    if baselines is not None:
         graded = active_analysis(
-            {"strategy_daily": strategy, "panel_daily": panel.get("panel_daily")}
+            {"strategy_daily": strategy, "baseline_daily": baselines.get("baseline_daily")}
         )
         active = [value for _date, value in _series_pairs(graded["strategy_daily"])] if graded else []
         plain = plain_statistics(active)
@@ -632,27 +632,27 @@ def replay_style_analysis(
             value = plain[key]
             return None if value is None else round(float(value), 4)
 
-        panel_blocks = {
-            "panel": {
+        baseline_blocks = {
+            "baseline": {
                 key: value
-                for key, value in panel.items()
-                if key not in ("panel_daily", "panel_draw_sd")
+                for key, value in baselines.items()
+                if key not in ("baseline_daily", "baseline_draw_sd")
             },
-            "panel_daily": panel.get("panel_daily"),
-            "panel_draw_sd": panel.get("panel_draw_sd"),
+            "baseline_daily": baselines.get("baseline_daily"),
+            "baseline_draw_sd": baselines.get("baseline_draw_sd"),
         }
-        panel_compact = {
+        baseline_compact = {
             # The graded series: the strategy's daily return minus the
-            # zero-skill panel composite of its own book, read as it is; the
+            # random-baseline composite of its own book, read as it is; the
             # sealed gate regresses it on the factor legs. Its drawdown is
-            # reported beside it and judged by neither the freeze registration
+            # reported beside it and judged by neither the final registration
             # (which holds the equity drawdown to max_drawdown) nor the
             # verdict: the Agent reads the series it is graded on.
             "active_excess": rounded("plain_excess"),
             "active_tracking_error": rounded("tracking_error"),
             "active_information_ratio": rounded("information_ratio"),
             "active_max_drawdown": compounded_drawdown(active) if graded else None,
-            "panel_draws": panel.get("k"),
+            "baseline_draws": baselines.get("k"),
         }
     style = _style_exposures(
         replay_daily, replay.equity_curve, _industry_vintages(universes)
@@ -679,7 +679,7 @@ def replay_style_analysis(
         "benchmark_daily": [[date, benchmark[date]] for date, _ in strategy if date in benchmark],
         "size_factor_daily": [[date, size[date]] for date, _ in strategy if date in size],
         "value_factor_daily": [[date, value[date]] for date, _ in strategy if date in value],
-        **panel_blocks,
+        **baseline_blocks,
         "compact": {
             "benchmark_return": benchmark_return,
             "excess_return": excess_return,
@@ -688,7 +688,7 @@ def replay_style_analysis(
             # loading on the benchmark.
             "tracking_error": factors.get("tracking_error"),
             "market_beta": factors.get("market_beta"),
-            **panel_compact,
+            **baseline_compact,
             "beta": regression.get("beta"),
             "n_days": regression.get("n_days"),
             "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
@@ -728,22 +728,22 @@ def _series_pairs(value: object) -> list[tuple[str, float]]:
 def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
     """The analysis with the strategy's series replaced by its ACTIVE series.
 
-    Active is the strategy's daily return minus the zero-skill panel composite
+    Active is the strategy's daily return minus the random-baseline composite
     of the same day, so every reader of ``strategy_daily`` -- the sub-span
     figure below, the verdict's statistics, bootstrap and drawdown -- measures
     the active series through the code that measures the strategy's own. ``None``
-    when the sidecar carries no panel (a truncated smoke replay, or a replay
-    recorded before panels existed). A panel that misses one of the strategy's
+    when the sidecar carries no random baseline (a truncated smoke replay, or a replay
+    recorded before random baselines existed). A random baseline that misses one of the strategy's
     days raises: a day graded against nothing would read as pure skill.
     """
 
-    composite = dict(_series_pairs(analysis.get("panel_daily")))
+    composite = dict(_series_pairs(analysis.get("baseline_daily")))
     if not composite:
         return None
     strategy = _series_pairs(analysis.get("strategy_daily"))
     missing = [date for date, _value in strategy if date not in composite]
     if missing:
-        raise ValueError(f"zero-skill panel has no return for {missing[0]}")
+        raise ValueError(f"random baseline has no return for {missing[0]}")
     return {
         **analysis,
         "strategy_daily": [[date, value - composite[date]] for date, value in strategy],

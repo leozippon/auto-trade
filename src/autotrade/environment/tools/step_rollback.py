@@ -121,7 +121,7 @@ def _unlock_for_replace(target: Path) -> None:
     """Clear a snapshot's read-only mode from a work copy about to be emptied.
 
     ``rmtree`` cannot unlink inside a 0o555 directory, and the Agent branches
-    by copying out of a locked Step snapshot or frozen artifact, which
+    by copying out of a locked Step snapshot or registered artifact, which
     reproduces those bits. Such a copy is made in the sandbox and owned by the
     container user, so :func:`chmod_tree` silently skips it (EPERM); the modes
     are therefore re-read, and a directory the host could not unlock is

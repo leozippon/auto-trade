@@ -1,4 +1,4 @@
-"""A Paper book that reads announcement titles decides only on landed titles."""
+"""A Paper account that reads announcement titles decides only on landed titles."""
 
 from __future__ import annotations
 

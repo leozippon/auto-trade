@@ -1,6 +1,6 @@
 """Creation-form parameter schema for the HITL console.
 
-Every field is a console parameter of ``pipelines.arm_params.ArmParams`` and
+Every field is a console parameter of ``pipelines.experiment_params.ExperimentParams`` and
 renders its default from ``hitl_state.WEB_CREATE_DEFAULTS`` (read off the
 record), so the form can never drift from what a create stamps. Each console
 parameter has a form field here or is named in ``_FORMLESS``; the check below
@@ -20,12 +20,12 @@ from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
-from autotrade.pipelines.arm_params import Surface, parameters
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
     acceptance_default,
 )
+from autotrade.pipelines.experiment_params import Surface, parameters
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
     OPERATING_MEMORY_LIBRARY,
@@ -38,7 +38,7 @@ _OPERATING_MEMORY_LIBRARY = Path(__file__).resolve().parents[3] / OPERATING_MEMO
 
 
 def _operating_memory_entries() -> list[dict[str, str]]:
-    """Curated operating-memory entries, used only to describe the mode field.
+    """Curated skill-library entries, used only to describe the mode field.
 
     A missing or malformed library degrades to an empty list (display-only
     concern); what actually mounts is decided by the session at run time."""
@@ -473,7 +473,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "int",
         "min": 1,
         "required": True,
-        "help": "研究几何的前这么多个研究年对会话可见，用于研究与验证；其余年份是验证年，由会话的每次 test 逐步揭示并形成滚动记录。十年包取 5、6 或 7。至少 1，且须留至少一个验证年；必填。",
+        "help": "研究几何的前这么多个研究年对会话可见，用于研究与验证；其余年份是验证年，由会话的每次 test 逐步揭示并形成验证记录。十年包取 5、6 或 7。至少 1，且须留至少一个验证年；必填。",
     },
     {
         "key": "test_step_months",
@@ -481,7 +481,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "测试步长（月）",
         "type": "int",
         "min": 1,
-        "help": "每次 test 把验证前沿推进的月数：默认 3（一个季度），允许 1；验证年总月数须能被它整除。",
+        "help": "每次 test 把测试终点推进的月数：默认 3（一个季度），允许 1；验证年总月数须能被它整除。",
     },
     {
         "key": "validates_per_step",
@@ -496,7 +496,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "残差统计量显著性水平",
         "type": "float",
-        "help": "残差信息比率的单侧显著性水平，须在 (0, 1)；门槛为 z(1−α)/√年数，只陈述在每个读数旁，不作裁决。全项目共用一个值，各臂的读数才能放在一起比。",
+        "help": "残差信息比率的单侧显著性水平，须在 (0, 1)；门槛为 z(1−α)/√年数，只陈述在每个读数旁，不作裁决。全项目共用一个值，各实验的读数才能放在一起比。",
     },
     {
         "key": "forward_confidence",
@@ -538,7 +538,7 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "operating_memory",
         "group": "运行控制",
-        "label": "跨实验运行记忆",
+        "label": "跨实验技能库",
         "type": "choice",
         "choices": list(OPERATING_MEMORY_MODES),
         "choice_labels": {
@@ -651,7 +651,7 @@ _FIELDS: list[dict[str, object]] = [
 ]
 
 # Console parameters a create request (a round file) may name but the form does
-# not offer: the reference pack, the retired approval mode, the attempt count,
+# not offer: the reference workspace, the retired approval mode, the attempt count,
 # the boards (stamped from the initial cash) and a snapshot-builder knob.
 _FORMLESS = frozenset(
     {
@@ -671,7 +671,7 @@ def _require_form_covers_the_console_parameters() -> None:
     missing = sorted(console - set(formed) - _FORMLESS)
     if stray or missing or len(formed) != len(set(formed)) or _FORMLESS & set(formed):
         raise RuntimeError(
-            f"creation form drifted from the arm parameters: fields {stray} are no "
+            f"creation form drifted from the experiment parameters: fields {stray} are no "
             f"console parameter and {missing} have no field"
         )
 

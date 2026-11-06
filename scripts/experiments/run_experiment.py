@@ -46,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     config = StrategyExperimentConfig(
         strategy_path=args.strategy,
         schedule=StrategySchedule(args.strategy_period, args.inference_time),
-        # Taxed, as every arm's account is. A single daily file carries no
+        # Taxed, as every experiment's account is. A single daily file carries no
         # ex-date table, so this runner credits no dividend and the tax never
         # has anything to charge; the profile still states the rule.
         broker_profile=BrokerProfile(initial_cash=args.initial_cash, dividend_tax=True),

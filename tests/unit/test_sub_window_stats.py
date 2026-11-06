@@ -2,7 +2,7 @@
 
 A whole-window number alone cannot say whether an edge persisted or one
 stretch of market carried it, so every replay result carries the same metrics
-per research year of its window, the years the arm's own geometry lays out
+per research year of its window, the years the experiment's own geometry lays out
 (``pipelines/calendar.py ResearchGeometry.research_years``). These tests pin the
 properties that make the rows readable next to the whole-window figures — they
 use the years the replay was requested over, they chain back to
@@ -202,25 +202,25 @@ class SubWindowBenchmarkTest(unittest.TestCase):
         self.assertAlmostEqual(rows[0]["excess_return"], 0.0 - (1.05 * 0.95 - 1.0), places=6)
         self.assertAlmostEqual(rows[1]["excess_return"], -0.1 - (1.10 * 0.90 - 1.0), places=6)
 
-    def test_each_year_carries_its_panel_compounded_only_where_one_was_drawn(self) -> None:
+    def test_each_year_carries_its_random_baseline_compounded_only_where_one_was_drawn(self) -> None:
         """The holder's year reads three returns side by side: the book's, the
-        index's and zero skill's on the same skeleton. A replay without a panel
+        index's and zero skill's on the same skeleton. A replay without a random baseline
         reports none rather than zero."""
 
         benchmark = [["20220601", 0.05], ["20220630", -0.05], ["20220704", 0.10], ["20230630", -0.10]]
         strategy = [["20220601", 0.10], ["20220630", -1 / 11], ["20220704", 0.20], ["20230630", -0.25]]
-        panel = [["20220601", 0.02], ["20220630", 0.01], ["20220704", -0.03], ["20230630", 0.04]]
+        baselines = [["20220601", 0.02], ["20220630", 0.01], ["20220704", -0.03], ["20230630", 0.04]]
         summary = self.summary()
         attach_sub_window_benchmark(
             summary,
-            {"benchmark_daily": benchmark, "strategy_daily": strategy, "panel_daily": panel},
+            {"benchmark_daily": benchmark, "strategy_daily": strategy, "baseline_daily": baselines},
         )
         rows = summary["sub_windows"]
-        self.assertAlmostEqual(rows[0]["panel_return"], 1.02 * 1.01 - 1.0, places=6)
-        self.assertAlmostEqual(rows[1]["panel_return"], 0.97 * 1.04 - 1.0, places=6)
+        self.assertAlmostEqual(rows[0]["baseline_return"], 1.02 * 1.01 - 1.0, places=6)
+        self.assertAlmostEqual(rows[1]["baseline_return"], 0.97 * 1.04 - 1.0, places=6)
         bare = self.summary()
         attach_sub_window_benchmark(bare, {"benchmark_daily": benchmark})
-        self.assertEqual([row.get("panel_return") for row in bare["sub_windows"]], [None, None])
+        self.assertEqual([row.get("baseline_return") for row in bare["sub_windows"]], [None, None])
 
     def test_a_slot_without_a_usable_benchmark_reports_nothing_not_zero(self) -> None:
         for sidecar in ({}, {"benchmark_daily": []}, {"benchmark_daily": "broken"}):
@@ -257,7 +257,7 @@ class SubWindowBenchmarkTest(unittest.TestCase):
         )
 
 
-# A ten-year arm laid out from 1 August, the geometry that made the hardcoded
+# A ten-year experiment laid out from 1 August, the geometry that made the hardcoded
 # July boundary wrong: 20150801..20250731 is exactly ten whole years, and its
 # last one ends on 31 July instead of leaving a 23-day July tail.
 AUGUST_GEOMETRY = ResearchGeometry(
@@ -334,7 +334,7 @@ def _round_trips(
 
 
 class SubWindowResearchYearTest(unittest.TestCase):
-    """The rows are the arm's own research years, not July-June calendar blocks."""
+    """The rows are the experiment's own research years, not July-June calendar blocks."""
 
     def setUp(self) -> None:
         self.windows = _year_windows(AUGUST_GEOMETRY)

@@ -13,7 +13,7 @@ from .openai_compatible import OpenAICompatibleConfig, OpenAICompatibleProxy
 
 # The one model DeepSeek serves under its own name (DeepSeek-V4.1-Flash). The
 # legacy names deepseek-v4-flash, deepseek-chat and deepseek-reasoner, and
-# deepseek-v4-pro since 2026-09-14, are routed to it server-side, so an arm
+# deepseek-v4-pro since 2026-09-14, are routed to it server-side, so an experiment
 # naming any of them would run on Flash under another label; they are refused.
 MODEL_CHOICES = ("deepseek-flash",)
 

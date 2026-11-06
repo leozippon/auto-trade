@@ -2,17 +2,17 @@
 
 The Environment attaches the devices a container is given and never chooses
 one. Choosing is one selection, ``pipelines.hitl_state.select_gpus``, under
-one rule: a card is eligible when no running arm claims it and it keeps at
+one rule: a card is eligible when no running experiment claims it and it keeps at
 least the host's floor free (``host_min_free_gpu_memory_mib``), the most free
-first (``gpus_with_free_memory``). The console takes an arm's cards there when
+first (``gpus_with_free_memory``). The console takes an experiment's cards there when
 it starts its worker, and every container of that worker attaches exactly
-those; whatever else needs a card -- a Paper book's morning run, a round's
+those; whatever else needs a card -- a Paper account's morning run, a round's
 smoke, an operator's replay -- takes its cards there for one run and pins them
 the same way.
 
 Every card nvidia-smi reports is a candidate, whoever else holds memory on it:
 no list of cards keeps the project off another tenant's card, the floor does,
-and a running arm's claim keeps everybody off the cards it holds. A container
+and a running experiment's claim keeps everybody off the cards it holds. A container
 that asks for a device and was given none refuses to start.
 
 The cards are shared -- by a batch's legs, and with services outside this
@@ -39,7 +39,7 @@ DEFAULT_GPU_NAME = "L20"
 # The free memory every selection requires on a card it takes
 # (``AUTOTRADE_GPU_MIN_FREE_GIB``, a positive whole number of GiB; unset means
 # ``MIN_FREE_GPU_MEMORY_MIB``). It is an admission floor, not a cap: on a host
-# whose cards all carry somebody else's work, a GPU arm or book still starts on
+# whose cards all carry somebody else's work, a GPU experiment or book still starts on
 # one that keeps this much free, and nothing reserves it. Read where a selection
 # is made, because a process only runs the settings it started with.
 MIN_FREE_GPU_GIB_ENV = "AUTOTRADE_GPU_MIN_FREE_GIB"
@@ -131,7 +131,7 @@ def list_gpus() -> list[dict[str, object]]:
 def gpus_with_free_memory(min_free_memory_mib: int, *, require_name: str | None = None) -> list[int]:
     """Indexes of the matching devices that keep at least ``min_free_memory_mib``
     free, the most free first, whoever else holds memory on them. Whether a
-    running arm claims one is the selection's to know: a running arm whose card
+    running experiment claims one is the selection's to know: a running experiment whose card
     shows nothing between its batches still holds it
     (``pipelines.hitl_state.gpu_claims``)."""
     rows = [

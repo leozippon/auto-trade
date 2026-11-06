@@ -1,40 +1,40 @@
-"""Readout statistics of one arm: the residual-IR instrument, the forward
+"""Readout statistics of one experiment: the residual-IR significance test, the forward
 and Held-out readings, and the registration conditions.
 
 Pure functions over frozen replay data (docs/PIPELINE_DESIGN.md). Every
 statistic grades one series, the ACTIVE one: the strategy's daily return
-minus the zero-skill panel composite the host drew from the strategy's own
+minus the random-baseline composite the host drew from the strategy's own
 realized book (``environment/replay/null_control.py``). What zero skill earns
 in an account's own shape is a property of the window and the pool, so the
-panel removes what the universe construction hands any zero-skill book (lot
+random baseline removes what the universe construction hands any zero-skill book (lot
 affordability, boards, equal weighting, the book's own schedule and cash).
 
-The instrument reads the factor residual of that series: OLS on the arm's
+The significance test reads the factor residual of that series: OLS on the experiment's
 benchmark (market), the size and the value legs of the replay's own
 cross-section (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio is read against ``z(1 − alpha) / √years`` for the
-series' length (:func:`residual_statistics`, :func:`residual_bar`), with
-its one-sided null p-value (:func:`null_p_value`). The rolling record is
-read this way (``rolling_record.record_instrument``), and so is every
+series' length (:func:`residual_statistics`, :func:`residual_threshold`), with
+its one-sided null p-value (:func:`null_p_value`). The validation record is
+read this way (``validation_record.record_significance``), and so is every
 forward and Held-out slice. Nothing is judged: the slices read the
 series as it is -- its annualised mean is its
 plain excess, its annualised standard deviation its tracking error and their
 ratio its IR (``stats.plain_statistics``) -- and its residual reading, which
-:func:`pooled_reading` pools across frozen strategies. The holder's readings
+:func:`pooled_reading` pools across registered strategies. The holder's readings
 are not regressed either: :func:`holder_readings` compounds the book, the benchmark
-and the panel as stored. The inputs are the daily series a
+and the random baseline as stored. The inputs are the daily series a
 ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
 forward and Held-out slices of one continuous replay are read from one
 sidecar.
 
-The rules are the arm's create-time rules, which every stage function takes
+The rules are the experiment's create-time rules, which every stage function takes
 whole (``rules``: a ``config.AcceptanceRules``); the module constants below
 are the defaults those fields take, and nothing here falls back to them. A
 slice that cannot be measured (fewer than two days, a slice shorter than one
 bootstrap block) raises ``ValueError``: a reading is never recorded off a
 number that was not measured. The registration conditions
 (:data:`CONDITIONS`, :func:`judge`) are the one place something is judged:
-whether a Step may be tested and frozen at all.
+whether a Step may be tested and registered at all.
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import pandas as pd
 
-from autotrade.environment.replay.null_control import PANEL_DRAWS
+from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
     compounded_drawdown,
@@ -76,7 +76,7 @@ FORWARD_CONFIDENCE = 0.80
 BOOTSTRAP_BLOCK_DAYS = 20
 BOOTSTRAP_DRAWS = 2_000
 # Minimum detectable annualised plain excess at 80 % power and one-sided
-# 10 % (the frozen block's ``forward_mde``), in standard errors:
+# 10 % (the registered block's ``forward_mde``), in standard errors:
 # Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. The reported F2 is a one-sided 20 % bound, so
 # this is a deliberately conservative planning figure (about 1.26 × the 1.68
 # that bound would give).
@@ -86,7 +86,7 @@ FORWARD_MDE_Z = 2.12
 ACTIVE_DAILY_COLUMNS = (
     "trade_date",
     "strategy_return",
-    "panel_return",
+    "baseline_return",
     "active_return",
     "active_cumulative",
     "active_drawdown",
@@ -157,10 +157,10 @@ def _regression_rows(
 class ExactFit(ValueError):
     """The factor legs explain a series exactly: no residual to read. The
     series itself is degenerate -- a book that stayed in cash against an
-    empty panel -- rather than its data missing."""
+    empty random baseline -- rather than its data missing."""
 
 
-def residual_bar(years: float, alpha: float) -> float:
+def residual_threshold(years: float, alpha: float) -> float:
     """The residual IR a reading over ``years`` must reach to be significant
     at the one-sided level ``alpha`` under the null of zero residual skill:
     ``z(1 − alpha) / √years``. A null reading's residual IR is normal with
@@ -184,17 +184,17 @@ def residual_statistics(
     alpha: float,
 ) -> dict[str, float]:
     """The factor-residual reading of one daily series: the one statistic
-    the rolling record, every validation and every forward slice is read with.
+    the validation record, every validation and every forward slice is read with.
 
     ``active`` is the daily active series (the strategy's return minus its
-    zero-skill panel composite, ``series: active``) and ``market``, ``size``
+    random-baseline composite, ``series: active``) and ``market``, ``size``
     and ``value`` the three legs over the same days. OLS of the series on an
     intercept and the legs (``style.factor_ols``) gives the three betas and
     the residuals;
     the residual information ratio is the intercept annualised over the
     residual standard deviation annualised, ``intercept × √244 / σ̂`` with σ̂
-    on n − 4 degrees of freedom. ``years`` is days / 244 and ``bar`` the
-    :func:`residual_bar` at ``alpha`` for that length. ``ValueError`` on
+    on n − 4 degrees of freedom. ``years`` is days / 244 and ``threshold`` the
+    :func:`residual_threshold` at ``alpha`` for that length. ``ValueError`` on
     series of unequal length, fewer than ``MIN_REGRESSION_DAYS`` days or
     collinear legs, and :class:`ExactFit` on a series the legs explain
     exactly.
@@ -222,7 +222,7 @@ def residual_statistics(
         "residual_tracking_error": sigma * scale,
         "residual_information_ratio": float(coefficients[0]) * scale / sigma,
         **{name: float(beta) for (name, _series), beta in zip(FACTOR_SERIES, coefficients[1:], strict=True)},
-        "bar": residual_bar(years, alpha),
+        "threshold": residual_threshold(years, alpha),
     }
 
 
@@ -231,7 +231,7 @@ def residual_reading(
 ) -> dict[str, object]:
     """:func:`residual_statistics` of one sidecar's graded series over a
     slice (empty bounds take the whole sidecar), with ``series`` naming it --
-    the active series where the sidecar carries a panel -- and
+    the active series where the sidecar carries a random baseline -- and
     ``dropped_days``, the days left out for a non-finite value.
     ``ValueError`` where it cannot be read (see :func:`residual_statistics`)."""
 
@@ -255,20 +255,20 @@ def _reported_residual(
 def null_p_value(residual_information_ratio: float, years: float) -> float:
     """The one-sided p-value of a residual reading under the null of no
     residual skill, whose residual IR is normal with standard deviation
-    ``1 / √years`` (:func:`residual_bar`): ``1 − Φ(IR × √years)``."""
+    ``1 / √years`` (:func:`residual_threshold`): ``1 − Φ(IR × √years)``."""
 
     return 1.0 - NormalDist().cdf(residual_information_ratio * math.sqrt(years))
 
 
 def pooled_reading(readings: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """Residual readings of independent frozen strategies pooled into one.
+    """Residual readings of independent registered strategies pooled into one.
 
     Each reading's residual IR is, under the null, normal with standard
     deviation ``1 / √years``, so the pool weighs each by its years: the
     pooled IR is ``Σ years × IR / Σ years``, its z-score the pooled IR ×
     √(Σ years) and its one-sided p-value :func:`null_p_value`. A reading
     that states no IR (``unmeasured``) is left out and counted. One forward
-    year cannot certify a strategy; the pool of every frozen strategy's
+    year cannot certify a strategy; the pool of every registered strategy's
     forward year is what the forward stage reads.
     """
 
@@ -349,7 +349,7 @@ def graded_statistics(
     """What every gate reads of one span's graded series.
 
     The graded series is the active one when the sidecar carries a zero-skill
-    panel, else the strategy's own, and ``series`` names which.
+    random baseline, else the strategy's own, and ``series`` names which.
     ``plain_excess`` is its annualised mean, ``tracking_error`` its
     annualised standard deviation and ``information_ratio`` their ratio
     (``None`` on a flat series), as ``stats.plain_statistics`` reads them;
@@ -398,14 +398,14 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
 
     One row per replayed day (``ACTIVE_DAILY_COLUMNS``), every column read off
     the computations the gate itself runs on this sidecar: the strategy's
-    return and the zero-skill panel composite as stored, the active return
+    return and the random-baseline composite as stored, the active return
     :func:`style.active_analysis` grades -- its annualised mean over its
     annualised standard deviation is the active IR -- its
     :func:`stats.compounded_path` (``active_cumulative`` is the equity minus
     1, ``active_drawdown`` the loss below the running peak, whose largest
     value is the ``active_max_drawdown``), and the three factor legs its
-    loadings are read against. Only the composite of the panel is stored, so
-    no draw's names can be read back. Without a panel every ``active_*``
+    loadings are read against. Only the composite of the random baseline is stored, so
+    no draw's names can be read back. Without a random baseline every ``active_*``
     column is empty.
     """
 
@@ -414,7 +414,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
         columns=["trade_date", "strategy_return"],
     )
     for column, key in (
-        ("panel_return", "panel_daily"),
+        ("baseline_return", "baseline_daily"),
         ("benchmark_return", "benchmark_daily"),
         ("size_factor_return", "size_factor_daily"),
         ("value_factor_return", "value_factor_daily"),
@@ -491,12 +491,12 @@ def _compounded(series: object, start: str, end: str) -> float | None:
     return compounded_return(values) if values else None
 
 
-def panel_return(analysis: Mapping[str, object]) -> float | None:
-    """What the zero-skill panel composite itself earned over the sidecar's
+def baseline_return(analysis: Mapping[str, object]) -> float | None:
+    """What the random-baseline composite itself earned over the sidecar's
     span, after its own costs: the return of the random-name copies of the
-    book's trade skeleton. ``None`` on a sidecar without a panel."""
+    book's trade skeleton. ``None`` on a sidecar without a random baseline."""
 
-    return _compounded(analysis.get("panel_daily"), "", "")
+    return _compounded(analysis.get("baseline_daily"), "", "")
 
 
 def holder_readings(
@@ -504,11 +504,11 @@ def holder_readings(
 ) -> dict[str, float | None]:
     """What a long-only holder of the book saw over one span, unregressed.
 
-    The book's own return after every cost (``strategy_return``), the arm's
-    benchmark price return (``benchmark_return``) and the zero-skill panel's
-    return after its costs (``panel_return``), each compounded from the stored
+    The book's own return after every cost (``strategy_return``), the experiment's
+    benchmark price return (``benchmark_return``) and the random baseline's
+    return after its costs (``baseline_return``), each compounded from the stored
     daily series over its days in ``start``..``end``; ``raw_excess`` is book
-    minus benchmark and ``plain_selection`` book minus panel, cumulative
+    minus benchmark and ``plain_selection`` book minus random baseline, cumulative
     differences like ``benchmark.excess_return``. ``plain_selection`` is the
     active series compounded: whether the names the book picked beat random
     names on its own skeleton. A series the sidecar does not carry over the
@@ -523,13 +523,13 @@ def holder_readings(
 
     strategy = _compounded(analysis.get("strategy_daily"), start, end)
     benchmark = _compounded(analysis.get("benchmark_daily"), start, end)
-    panel = _compounded(analysis.get("panel_daily"), start, end)
+    baseline = _compounded(analysis.get("baseline_daily"), start, end)
     return {
         "strategy_return": strategy,
         "benchmark_return": benchmark,
-        "panel_return": panel,
+        "baseline_return": baseline,
         "raw_excess": None if strategy is None or benchmark is None else strategy - benchmark,
-        "plain_selection": None if strategy is None or panel is None else strategy - panel,
+        "plain_selection": None if strategy is None or baseline is None else strategy - baseline,
     }
 
 
@@ -540,7 +540,7 @@ HOLDER_READINGS = tuple(holder_readings({}))
 def seed_replicate_slice(
     analysis: Mapping[str, object], *, start: str, end: str
 ) -> dict[str, object]:
-    """One seed replicate of the frozen book over one slice, unjudged.
+    """One seed replicate of the registered book over one slice, unjudged.
 
     A replicate is the book's strategy on another training seed, replayed
     exactly as the book is. Its slice carries what the book's own slice
@@ -559,7 +559,7 @@ def seed_replicate_slice(
 
 
 def seed_mean(blocks: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """The mean over the frozen book's slice and its replicates' slices.
+    """The mean over the registered book's slice and its replicates' slices.
 
     Each holder reading (``raw_readings``) and ``plain_excess`` averaged over
     the members, ``None`` where any member lacks it: a seed the replay could
@@ -614,14 +614,14 @@ def forward_lower_bound(
     excess of ``analyses`` together.
 
     The series is each sidecar's daily graded series over the slice, averaged
-    day by day over ``analyses``: the frozen book's sidecar, then one per seed
-    replicate its freeze registered, so a book frozen with none is judged on
+    day by day over ``analyses``: the registered book's sidecar, then one per seed
+    replicate the registration accepted, so a book registered with none is judged on
     its own series. Its annualised mean is the slice's ``plain_excess``, or
     with replicates ``seed_mean.plain_excess``, so the record carries the
     bound alone (:func:`bootstrap_lower_bound`, seeded by ``seed_key``). It is
     not ``raw_readings.plain_selection``, which compounds the book and the
-    panel each over the span before taking their difference. A member whose
-    replay graded another series (it carries no panel) or measured other days
+    random baseline each over the span before taking their difference. A member whose
+    replay graded another series (it carries no random baseline) or measured other days
     than the book's raises ``ValueError``: a seed is never dropped from the
     mean, nor averaged on another footing.
     """
@@ -630,13 +630,13 @@ def forward_lower_bound(
     graded = [_graded(analysis) for analysis in analyses]
     if any(series != graded[0][1] for _analysis, series in graded[1:]):
         raise ValueError(
-            f"a seed replicate's replay graded another series than the frozen book's over {start}..{end}"
+            f"a seed replicate's replay graded another series than the registered book's over {start}..{end}"
         )
     members = [dict(_strategy_returns(analysis, start, end)) for analysis, _series in graded]
     dates = list(members[0])
     if any(list(member) != dates for member in members[1:]):
         raise ValueError(
-            f"a seed replicate measured other days than the frozen book over {start}..{end}"
+            f"a seed replicate measured other days than the registered book over {start}..{end}"
         )
     daily = np.mean([list(member.values()) for member in members], axis=0)
     return bootstrap_lower_bound(daily, seed_key, confidence=confidence)
@@ -652,7 +652,7 @@ class ConditionStage(StrEnum):
 
 
 class ConditionReason(StrEnum):
-    """Every reason token a freeze registration records: one per condition of
+    """Every reason token a final registration records: one per condition of
     :data:`CONDITIONS`, and the two a registration records when it never read
     a nominee. The values are persisted in ledger records; a ledger judged
     under the sealed-gate rules also carries that gate's retired tokens."""
@@ -677,10 +677,10 @@ class ConditionReason(StrEnum):
 class Condition(NamedTuple):
     """One condition a stage judges on what it measured.
 
-    ``holds(measured, thresholds)`` reads the stage's own block and the bars
+    ``holds(measured, thresholds)`` reads the stage's own block and the thresholds
     its record states; a condition that does not hold records ``reason``.
     ``requires`` names the rule that turns a condition on, the tracking
-    mandate's cap (empty: every arm is held to it); an arm without a mandate
+    mandate's cap (empty: every experiment is held to it); an experiment without a mandate
     is not judged on it.
     """
 
@@ -713,7 +713,7 @@ def _refused_replicate(measured: Mapping[str, Any]) -> bool:
 
 _CAP = "tracking_error_cap"
 
-# Every condition the registration judges (``experiment.freeze_registration``,
+# Every condition the registration judges (``experiment.check_registration``,
 # read at every test), by stage and, within a stage, in the order its
 # failures are recorded. The one list of the reason tokens a record can
 # carry: each stage reads its failures off it (:func:`judge`), and the
@@ -724,14 +724,14 @@ CONDITIONS: tuple[Condition, ...] = (
     # IEEE comparison against NaN is False, so it would otherwise pass every
     # threshold; and an equity drawdown over ``max_drawdown`` across the
     # nominee's span, the account limit Paper also kills a running book at.
-    # It is the only drawdown this table judges: the rolling record's and
+    # It is the only drawdown this table judges: the validation record's and
     # the forward slices' drawdowns are recorded, never judged.
     # ``sharpe`` is read only for finiteness.
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_TOTAL_RETURN, lambda m, t: _finite(m.get("total_return"))),
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_MAX_DRAWDOWN, lambda m, t: _finite(m.get("max_drawdown"))),
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_SHARPE, lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
     Condition(ConditionStage.NOMINATION, ConditionReason.MAX_DRAWDOWN_ABOVE_LIMIT, lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
-    # How the nominee was registered (``experiment.freeze_registration``).
+    # How the nominee was registered (``experiment.check_registration``).
     Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NEEDS_FULL_SPAN_VALIDATION, lambda m, t: m.get("span") == FULL_SPAN),
     Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NOMINEE_IS_CONTROL, lambda m, t: m.get("control") is not True),
     # The tracking mandate over the nominee's span, when the rules set one.
@@ -790,7 +790,7 @@ def bootstrap_lower_bound(series: np.ndarray, seed_key: str, *, confidence: floa
     Moving-block bootstrap: ``BOOTSTRAP_DRAWS`` resamples of whole days in
     blocks of ``BOOTSTRAP_BLOCK_DAYS`` consecutive days, the mean read on
     each, the bound read as the percentile. The generator is seeded from a
-    SHA-256 of ``seed_key`` (the frozen artifact id), so one artifact always
+    SHA-256 of ``seed_key`` (the registered artifact id), so one artifact always
     gets the same bound, and two series over the same days resample the same
     days. The draws run in batches of ``_BOOTSTRAP_BATCH_BYTES``, which does
     not move the bound.
@@ -840,14 +840,14 @@ def forward_slice(
     mean_gross: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """The forward slice's readings under the arm's ``rules``: reported,
+    """The forward slice's readings under the experiment's ``rules``: reported,
     never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series is read as it is (:func:`graded_statistics`) and
-    through the residual-IR instrument (``residual_reading``, what
-    :func:`pooled_reading` pools across frozen strategies). F2 is
+    through the residual-IR significance test (``residual_reading``, what
+    :func:`pooled_reading` pools across registered strategies). F2 is
     ``lower_bound``, the ``forward_confidence`` lower bound of its plain
-    excess over the book and the seed replicates the freeze registered
+    excess over the book and the seed replicates the registration accepted
     together (:func:`forward_lower_bound`). ``seed_replicates`` are those
     replicates, replayed like the book, each as what names it and its
     replay's sidecar; with any, the slice also carries their own slices and
@@ -919,7 +919,7 @@ def forward_slice(
             "forward_confidence": rules.forward_confidence,
             "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
             "bootstrap_draws": BOOTSTRAP_DRAWS,
-            "panel_draws": PANEL_DRAWS,
+            "baseline_draws": BASELINE_DRAWS,
             "cost_stress_multiplier": rules.cost_stress_multiplier,
         },
     }
@@ -934,7 +934,7 @@ def heldout_slice(
     mean_gross: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """The Held-out slice's readings under the arm's ``rules``: reported,
+    """The Held-out slice's readings under the experiment's ``rules``: reported,
     never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series' statistics and its residual reading, the equity and

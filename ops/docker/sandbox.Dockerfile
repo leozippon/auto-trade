@@ -162,7 +162,7 @@ RUN pip freeze > /tmp/installed.txt \
     && python -c "import torch, causal_conv1d_cuda, fla, peft, vllm, triton, tokenspeed_triton, cutlass.cute"
 
 # Both containers run without a network and the only pretrained weights are
-# the store an arm's containers mount read-only (environment.pretrained), so
+# the store an experiment's containers mount read-only (environment.pretrained), so
 # the hub is switched off: a hub model id fails at once instead of waiting on
 # a connection that cannot exist. Hub caches live under XDG_CACHE_HOME like
 # every other cache, and so does Triton's: it holds the launcher modules
@@ -198,7 +198,7 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
     && rm /tmp/duckdb_cli.zip \
     && duckdb -c "select 1"
 
-# `free` is the resource check the research packs run. It is a sandbox tool,
+# `free` is the resource check the reference workspaces prescribe. It is a sandbox tool,
 # not part of the strategy contract, so it stays off the heavy install layer.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends procps \
@@ -243,7 +243,7 @@ RUN chmod -R a+rX /opt/autotrade
 RUN useradd --create-home --uid 61000 agent
 
 # Fixed mount points (populated by docker run -v / --mount). /strategy receives
-# the read-only bind of the frozen strategy package (the directory holding
+# the read-only bind of the registered strategy package (the directory holding
 # main.py and its sibling modules); the Agent session binds its decision view
 # at /mnt/snapshot.
 RUN mkdir -p /mnt/snapshot \

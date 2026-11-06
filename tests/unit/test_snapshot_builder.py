@@ -2964,7 +2964,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                 )
 
     def test_a_view_before_the_fundamental_history_builds_only_without_fundamentals(self):
-        # An eight-year arm's first decision views predate the PIT fundamental
+        # An eight-year experiment's first decision views predate the PIT fundamental
         # index (the lake's starts 2020-01). A selection carrying fundamentals
         # is refused there by name; one carrying none is not touched by the
         # fundamental gates and builds.

@@ -207,7 +207,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert geometry["research_period"] == f"{GEOMETRY.research_start}..{research[-1].end}"
     assert geometry["validation_period"] == f"{validation[0].start}..{GEOMETRY.research_end}"
     assert geometry["decision_time"] == validation[0].anchor.isoformat()
-    assert geometry["frontier"] == research[-1].end
+    assert geometry["test_horizon"] == research[-1].end
     assert (geometry["step"], geometry["steps"], geometry["steps_tested"]) == ("quarter", 12, 0)
     assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
     assert "session" not in facts["identity"]

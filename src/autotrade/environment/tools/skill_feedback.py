@@ -1,4 +1,4 @@
-"""Contradict a mounted operating-memory entry, so the researcher can fix it.
+"""Contradict a mounted skill-library entry, so the researcher can fix it.
 
 Mounted skills are read-only advice carried in from the curated library. A
 session that measures something the entry denies has no way to say so: it
@@ -97,7 +97,7 @@ def append_skill_feedback_resolution(
 class SkillFeedbackTool:
     spec = ToolSpec(
         "skill_feedback",
-        "Tell the human operators that one mounted operating-memory entry is "
+        "Tell the human operators that one mounted skill-library entry is "
         "contradicted by what this session measured. skill is the mounted "
         "reference '<source>/<name>' exactly as inputs/skills_index.json lists "
         "it (source 'curated'). claim is "
@@ -158,7 +158,7 @@ class SkillFeedbackTool:
         if not self.mounted:
             return ValueError(
                 f"unknown mounted skill: {skill!r}; this session mounts no "
-                "operating memory"
+                "skill library"
             )
         names = sorted(self.mounted)
         listed = ", ".join(names[:_MAX_HINT_ENTRIES])

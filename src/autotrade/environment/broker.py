@@ -40,16 +40,16 @@ BOARD_MIN_ASSETS_CNY: dict[str, float] = {"main": 0.0, "gem": 100_000.0, "star":
 
 def default_permitted_boards(initial_cash: float) -> tuple[str, ...]:
     """The boards an account opened with ``initial_cash`` may buy on, by the
-    exchanges' asset thresholds: what creation stamps on a new arm unless its
+    exchanges' asset thresholds: what creation stamps on a new experiment unless its
     request names the boards itself."""
 
     return tuple(board for board in BOARDS if initial_cash >= BOARD_MIN_ASSETS_CNY[board])
 
 
 def stamped_permitted_boards(params: Mapping[str, object]) -> tuple[str, ...] | None:
-    """The boards an arm's stamped parameters let its account buy on.
+    """The boards an experiment's stamped parameters let its account buy on.
 
-    None, for an arm stamped before the parameter existed: its account buys on
+    None, for an experiment stamped before the parameter existed: its account buys on
     every board, as it always did, and nothing re-derives a restriction for it.
     """
 
@@ -82,16 +82,16 @@ class BrokerProfile:
     max_total_holdings: int | None = None
     max_single_name_weight: float | None = None
     # Individual dividend tax under the record date's rule (dividend_tax.py),
-    # withheld on old-rule distributions and supplemented at sales. Every arm's
+    # withheld on old-rule distributions and supplemented at sales. Every experiment's
     # account pays it (``worker.resolve_worker_options``), and so does every
-    # Paper book opened from one; it reads each ex-date's bonus shares, which
+    # Paper account opened from one; it reads each ex-date's bonus shares, which
     # a bare Broker over data without an ex-date table does not have, so the
     # field's own default is off.
     dividend_tax: bool = False
     # The boards (``broker_core.BOARDS``) the account may buy on; a buy on any
     # other is rejected, a sale never is. None, no restriction, so that a
     # profile recorded before the field existed replays as it was recorded;
-    # creation stamps every new arm's boards (``default_permitted_boards``).
+    # creation stamps every new experiment's boards (``default_permitted_boards``).
     permitted_boards: tuple[str, ...] | None = None
     profile_id: str = "gjzq_cash"
     source: str = "docs/ENVIRONMENT_DESIGN.md §3.4"
@@ -130,7 +130,7 @@ class BrokerProfile:
 
     def to_record(self) -> dict[str, object]:
         """Every field by name: the one record of a profile, in a run
-        manifest and a Paper book alike, which ``from_record`` inverts."""
+        manifest and a Paper account alike, which ``from_record`` inverts."""
 
         return dataclass_record(self)
 
@@ -254,7 +254,7 @@ class Execution:
     reason: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
     # The order's session and limit price (``StrategyOrder``), recorded only
-    # when it named them: the zero-skill panel replays them.
+    # when it named them: the random baseline replays them.
     session: str | None = None
     limit_price: float | None = None
 
@@ -816,7 +816,7 @@ def ex_date_share_multiplier(
     A cash dividend never shrinks a holding -- flooring a price-derived 0.9997
     would shave a share off most of them, and leave a one-share holding with
     none. The one rule the Broker settles a holding by and the zero-skill
-    panel sizes its exits by.
+    random baseline sizes its exits by.
     """
 
     if not _price_reset(last_close, pre_close):

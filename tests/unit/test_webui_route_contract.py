@@ -244,7 +244,7 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
 
 
 def test_the_paper_page_names_each_books_own_benchmark() -> None:
-    """A book is measured against the index it froze, which the payloads name;
+    """A book is measured against the index it registered, which the payloads name;
     no Paper tile or note may name a fixed index in its place."""
     for name, payload in (("bookCard", "row"), ("paperEquityPanel", "payload")):
         body = _js_function_body(name)
@@ -353,9 +353,9 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
         "cardEquityNode",
         "endingBadge",
         "endingReason",
-        "armEquityHost",
+        "experimentEquityHost",
         "runningSubagentDock",
-        "frozenPanel",
+        "registeredPanel",
         "sliceStats",
         "subWindowSection",
         "elapsedClockNode",
@@ -438,7 +438,7 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
 
 
 def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
-    """A failed freeze-gate or verdict condition renders as its raw token when
+    """A failed register-gate or verdict condition renders as its raw token when
     the console has no label for it, so the label map is checked against every
     reason a record can carry -- the verdict's condition table and the gate
     that could not be measured -- and every session outcome too."""
@@ -488,8 +488,8 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
 
 
 def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
-    """A creation parameter must not be frozen into a Chinese label. 毕业成本压力倍数
-    is per-experiment, so an arm run at ×3 used to read "前推加倍滑点后超额"
+    """A creation parameter must not be registered into a Chinese label. 毕业成本压力倍数
+    is per-experiment, so an experiment run at ×3 used to read "前推加倍滑点后超额"
     beside a threshold column that correctly said ×3 — a reproducible mislabel.
     The three labels that name a threshold are functions of the `thresholds`
     block, and the multiplier is now stated in the name alone, not twice."""
@@ -506,35 +506,35 @@ def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
     # change to the pipeline constant cannot leave a page quoting the old one.
     written = set(re.findall(r"(\d+)% 下界", APP_JS.read_text(encoding="utf-8")))
     assert written == set(), sorted(written)
-    # The freeze gate is worded the same way: its record carries both limits, so
+    # The registration check is worded the same way: its record carries both limits, so
     # raising either one cannot leave the checklist quoting the old number.
-    gate = _js_function_body("freezeGateChecklist")
+    gate = _js_function_body("registrationChecklist")
     for key in ("min_full_span_validations", "min_deflated_sharpe_probability"):
         assert f"t.{key}" in gate, key
     assert not re.search(r"≥ [0-9]", gate), gate
 
 
-def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) -> None:
-    """The panels read the registry's arm projections by field name; a renamed
+def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: Path) -> None:
+    """The panels read the registry's experiment projections by field name; a renamed
     field would render an empty cell instead of failing. Checked against a
-    projection of a synthetic arm that carries its readout, frozen with seed
-    replicates so the fields only such an arm has are served too."""
+    projection of a synthetic experiment that carries its readout, frozen with seed
+    replicates so the fields only such an experiment has are served too."""
 
     from autotrade.pipelines.ledger import VERDICT_VOID_FIELDS
     from autotrade.webui.registry import experiment_detail
-    from tests.unit.webui_research_arm import build_arm
+    from tests.unit.webui_research_experiment import build_experiment
 
-    build_arm(tmp_path, "arm", "frozen_with_record", seeded=True)
-    detail = experiment_detail(tmp_path, "arm")
+    build_experiment(tmp_path, "experiment", "registered_with_record", seeded=True)
+    detail = experiment_detail(tmp_path, "experiment")
     [research, replay] = detail["sessions"]
     assert (research["kind"], replay["kind"]) == ("research", "forward")
-    frozen = set(detail["frozen"])
+    registered = set(detail["registered"])
     record = set(research["record"])
     validation = set(research["record"]["validations"][0])
     rolling = set(detail["record"])
     rolling_row = set(detail["record"]["rows"][0])
     readout = set(detail["forward"]["readout"])
-    gate = set(research["record"]["freeze_gate"])
+    gate = set(research["record"]["registration"])
     forward = set(detail["forward"])
     slices = detail["forward"]["slices"]
     # A slice's statistics table reads its holder's readings, and its residual
@@ -549,7 +549,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         return set(re.findall(rf"\b{var}\.([a-z_]+)", _js_function_body(name)))
 
     # A criterion or a statistics row whose own name states a threshold reads it
-    # from the same block, so its wording cannot freeze at today's defaults.
+    # from the same block, so its wording cannot register at today's defaults.
     labelled = set(
         re.findall(
             r"\bt\.([a-z_]+)",
@@ -562,7 +562,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
     slice_labelled = set(re.findall(r"\bt\.([a-z_]+)", _js_literal("const SLICE_ROWS = [", "\n];")))
 
     for name, read, served in (
-        ("frozenPanel", reads("frozenPanel", "frozen"), frozen),
+        ("registeredPanel", reads("registeredPanel", "registered"), registered),
         ("researchSessionPanel", reads("researchSessionPanel", "record"), record),
         ("evidenceTiles", reads("evidenceTiles", "record"), rolling),
         ("recordPanel", reads("recordPanel", "record"), rolling),
@@ -573,7 +573,7 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("accountTiles", reads("accountTiles", "raw"), set(slices["forward"]["raw_readings"])),
         ("readoutStagePanel", reads("readoutStagePanel", "withdrawn"), set(VERDICT_VOID_FIELDS)),
         ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
-        ("freezeGateChecklist", reads("freezeGateChecklist", "gate"), gate),
+        ("registrationChecklist", reads("registrationChecklist", "gate"), gate),
         ("forwardStagePanel", reads("forwardStagePanel", "forward"), forward),
         ("replayContext", reads("replayContext", "forward"), forward),
         ("readoutStagePanel", reads("readoutStagePanel", "forward"), forward),
@@ -585,13 +585,13 @@ def test_the_research_arm_fields_the_console_reads_are_served(tmp_path: Path) ->
         ("readoutStagePanel", reads("readoutStagePanel", "validations"), set(detail["research_validation_failures"])),
         ("readoutStagePanel", reads("readoutStagePanel", "research"), record),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
-        ("armEquityHost", reads("armEquityHost", "item"), set(detail)),
-        ("stepper", set(re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)), {"research", "frozen", "forward", "heldout", "readout"}),
+        ("experimentEquityHost", reads("experimentEquityHost", "item"), set(detail)),
+        ("stepper", set(re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)), {"research", "registered", "forward", "heldout", "readout"}),
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))
     # The same threshold keys are served before the replay, from the plan.
-    assert {"alpha", "bar"} <= set(replay["thresholds"])
+    assert {"alpha", "threshold"} <= set(replay["thresholds"])
     # The stage views' statistics rows are statistics their own slice carries,
     # and every row defined is one a view selects: two rows (残差跟踪误差, IR)
     # sat in the table definition that neither stage ever drew.

@@ -1,7 +1,7 @@
 """Daily equity series of one ledger-named replay result.
 
 The curve itself is ``replay.curve``'s projection of the result file and its
-style sidecar — the same one a Paper book copies at creation — so this module
+style sidecar — the same one a Paper account copies at creation — so this module
 only answers which results exist at all: ``registry.ledger_result``'s rule, by
 which the forward replay has no curve until its verdict is recorded.
 
@@ -51,13 +51,13 @@ def result_equity_payload(
     info = path.stat()
     curve = _curve(str(path), info.st_size, info.st_mtime_ns)
     benchmark = curve["benchmark"]
-    panel = curve["panel"]
+    baseline = curve["baseline"]
     return {
         "experiment_id": experiment_id,
         "result": name,
         "series": [_thin(line, points) for line in curve["series"]],  # type: ignore[union-attr]
         "benchmark": _thin(benchmark, points) if isinstance(benchmark, dict) else benchmark,
-        "panel": _thin(panel, points) if isinstance(panel, dict) else panel,
+        "baseline": _thin(baseline, points) if isinstance(baseline, dict) else baseline,
         "exposure": {
             key: _thin(line, points)
             for key, line in curve["exposure"].items()  # type: ignore[union-attr]

@@ -1,6 +1,6 @@
 """Orchestration contract of the HITL runner itself (docs/PIPELINE_DESIGN.md).
 
-`tests/unit/test_research_arm_worker.py` drives the worker end to end, so the
+`tests/unit/test_research_experiment_worker.py` drives the worker end to end, so the
 runner's own control-plane branches -- durable stop/pause at a session
 boundary, retries, resume, and which planned session is due -- are exercised
 here directly against a recording executor so each branch is observed,
@@ -33,9 +33,9 @@ from autotrade.pipelines.interactive import (
     ExperimentStopped,
     InteractiveExperimentRunner,
 )
-from autotrade.pipelines.ledger import ExperimentLedger, FrozenArtifactMutated
+from autotrade.pipelines.ledger import ExperimentLedger, RegisteredArtifactMutated
 
-# The plan of record of every arm: the research session, then the forward replay.
+# The plan of record of every experiment: the research session, then the forward replay.
 PLAN = planned_sessions()
 
 
@@ -43,7 +43,7 @@ class RecordingExecutor:
     """Appends the session's canonical ledger record, like the real pipeline.
 
     ``outcomes`` maps a session key to the research record's extra fields
-    (``frozen`` or ``arm_end``); without them the research record ends nothing,
+    (``frozen`` or ``experiment_end``); without them the research record ends nothing,
     which the real pipeline never writes, so most tests name one.
     """
 
@@ -119,11 +119,11 @@ class RunnerTestCase(unittest.TestCase):
 
 
 FROZEN = {"frozen": {"artifact_id": "strategy_research_x", "output_path": "unused"}}
-NO_EDGE = {"arm_end": {"status": "no_deliverable", "reason": "no_edge: nothing"}}
+NO_EDGE = {"experiment_end": {"status": "no_deliverable", "reason": "no_edge: nothing"}}
 
 
 class InteractiveRunnerTest(RunnerTestCase):
-    def test_the_research_session_runs_once_and_the_forward_replay_follows_a_freeze(self) -> None:
+    def test_the_research_session_runs_once_and_the_forward_replay_follows_a_registration(self) -> None:
         executor = RecordingExecutor(self.ledger, outcomes={"research": FROZEN})
         result = self.runner(PLAN, executor).run()
         self.assertEqual(result, {"status": "complete", "sessions_run": 2})
@@ -132,16 +132,16 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(status["completed_sessions"], 2)
         self.assertEqual(status["total_sessions"], 2)
 
-    def test_research_that_ends_without_a_freeze_runs_no_forward_replay(self) -> None:
+    def test_research_that_ends_without_a_registration_runs_no_forward_replay(self) -> None:
         executor = RecordingExecutor(self.ledger, outcomes={"research": NO_EDGE})
         result = self.runner(PLAN, executor).run()
         self.assertEqual(result["status"], "complete")
         self.assertEqual(executor.keys, ["research"])
 
-    def test_resume_after_a_freeze_runs_only_the_forward_replay(self) -> None:
+    def test_resume_after_a_registration_runs_only_the_forward_replay(self) -> None:
         self.runner(PLAN, RecordingExecutor(self.ledger, outcomes={"research": FROZEN}, record=True)).run()
         rows = self.ledger.read()
-        # Drop the forward record: the worker stopped between freeze and replay.
+        # Drop the forward record: the worker stopped between register and replay.
         self.ledger.path.write_text(
             "".join(json.dumps(row) + "\n" for row in rows if row["record_type"] != "forward"),
             encoding="utf-8",
@@ -217,7 +217,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(run_ids, [None, None])
         self.assertGreaterEqual(walls[1], 0.0)
 
-    def test_frozen_artifact_mutation_is_not_retried(self) -> None:
+    def test_registered_artifact_mutation_is_not_retried(self) -> None:
         class Mutating(RecordingExecutor):
             def __call__(self, session, context):
                 self.calls.append((session.session_key, dict(context)))
@@ -232,12 +232,12 @@ class InteractiveRunnerTest(RunnerTestCase):
                         "state_changed_during_test": True,
                     }
                 )
-                raise FrozenArtifactMutated(
+                raise RegisteredArtifactMutated(
                     "strategy or model artifacts changed during the forward replay"
                 )
 
         executor = Mutating(self.ledger, record=False)
-        with self.assertRaises(FrozenArtifactMutated):
+        with self.assertRaises(RegisteredArtifactMutated):
             self.runner(PLAN[:1], executor, session_max_attempts=3).run()
         self.assertEqual(len(executor.calls), 1)
         self.assertEqual(len(self.ledger.read("forward")), 1)
@@ -257,7 +257,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         )
         before = [row.get("run_id") for row in self.ledger.read()]
         executor = RecordingExecutor(self.ledger)
-        with self.assertRaises(FrozenArtifactMutated):
+        with self.assertRaises(RegisteredArtifactMutated):
             self.runner(PLAN, executor).run()
         self.assertEqual(executor.keys, [])
         self.assertEqual([row.get("run_id") for row in self.ledger.read()], before)
@@ -401,7 +401,7 @@ class WorkerEntrypointTest(unittest.TestCase):
         unwinds through the handler's `SystemExit`, which is not an `Exception`:
         while this entrypoint caught only `Exception`, `status.json` kept
         `running_session` and its dead pid for good, and the console showed a
-        finished arm as live.
+        finished experiment as live.
         """
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
         from experiments import run_interactive_experiment

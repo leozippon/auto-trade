@@ -8,7 +8,7 @@ same validation. The provider and session wiring itself lives in
 ``worker.build_experiment_pipeline``.
 
 The other two scripts do not use these groups: ``run_experiment.py`` drives a
-single ``DailyStrategyPipeline`` strategy replay rather than a research arm,
+single ``DailyStrategyPipeline`` strategy replay rather than a research experiment,
 and ``run_interactive_experiment.py`` only resumes an experiment whose
 parameters already exist.
 """
@@ -25,9 +25,12 @@ from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.llm import MODEL_CHOICES
 from autotrade.environment.sandbox import GpuMode
-from autotrade.pipelines.arm_params import NON_PERSISTABLE_PARAMS, ArmParams
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import REQUIRED_ACCEPTANCE_KEYS, AcceptanceRules
+from autotrade.pipelines.experiment_params import (
+    NON_PERSISTABLE_PARAMS,
+    ExperimentParams,
+)
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     select_gpus,
@@ -37,7 +40,7 @@ from autotrade.pipelines.worker import (
     load_worker_options,
 )
 
-# The console's defaults, so a headless run and a created arm agree.
+# The console's defaults, so a headless run and a created experiment agree.
 DEFAULT_AGENT_MODEL = str(WEB_CREATE_DEFAULTS["model"])
 DEFAULT_SUBAGENT_MODEL = str(WEB_CREATE_DEFAULTS["subagent_model"])
 DEFAULT_COMPACT_MODEL = str(WEB_CREATE_DEFAULTS["compact_model"])
@@ -116,9 +119,9 @@ def add_schedule_arguments(parser: argparse.ArgumentParser) -> None:
         choices=tuple(BENCHMARK_INDEXES),
         default=str(WEB_CREATE_DEFAULTS["benchmark_index"]),
         help=(
-            "The index this arm is measured against: the benchmark leg of the style "
+            "The index this experiment is measured against: the benchmark leg of the style "
             "attribution and the factor loadings, and the membership the "
-            "zero-skill panel draws replacements from."
+            "random baseline draws replacements from."
         ),
     )
 
@@ -307,7 +310,7 @@ def add_acceptance_arguments(parser: argparse.ArgumentParser) -> None:
     a tracking mandate only where ``--tracking-error-cap`` is given, drawdowns
     0.45 / 0.30 unless named and the statistical bars at today's constants. A
     rule without a default (``REQUIRED_ACCEPTANCE_KEYS``) takes the console's
-    creation value, as a console-created arm does, and is a required flag
+    creation value, as a console-created experiment does, and is a required flag
     where the console has none.
     """
     for rule in fields(AcceptanceRules):
@@ -400,7 +403,7 @@ def _build_worker_params(
         "compact_max_tokens": args.compact_max_tokens,
         "compact_max_calls": args.compact_max_calls,
         # Every create-time gate, read off the rules themselves: a field the
-        # parser does not expose raises here instead of pinning the arm at a
+        # parser does not expose raises here instead of pinning the experiment at a
         # default the operator asked to change.
         **{
             rule.name: getattr(args, rule.name) for rule in fields(AcceptanceRules)
@@ -420,7 +423,7 @@ def _build_worker_params(
         list(default_permitted_boards(float(stamped.get("initial_cash", WEB_CREATE_DEFAULTS["initial_cash"])))),  # type: ignore[arg-type]
     )
     # Every key a parameter of the record, every value of its type.
-    ArmParams.from_record(stamped)
+    ExperimentParams.from_record(stamped)
     return stamped
 
 

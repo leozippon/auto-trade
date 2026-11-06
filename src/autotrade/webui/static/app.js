@@ -19,7 +19,7 @@ const STATE_LABELS = {
   unknown: "未知",
 };
 // How the research session ended (pipelines/config.py SESSION_OUTCOMES). A
-// session that ended the arm says it in the arm's own ending word below.
+// session that ended the experiment says it in the experiment's own ending word below.
 const OUTCOME_LABELS = {
   completed: "验证期完成",
   freeze: "提名定版",
@@ -27,13 +27,13 @@ const OUTCOME_LABELS = {
   deadline: "预算耗尽",
   environment_blocked: "环境阻断",
 };
-// How an arm ended (webui/registry.py ENDING_STATES). The server classifies
+// How an experiment ended (webui/registry.py ENDING_STATES). The server classifies
 // the ending and writes its one-line reason; the console only words it, and
 // words it the same way on the card, the page header, the process list, the
 // 裁决 view. A graduation withdrawn afterwards is a failure, `rejected`, and
 // only its reason says it had graduated.
 const ENDING_LABELS = {
-  frozen_with_record: "已冻结，有记录",
+  registered_with_record: "已定版，有记录",
   graduated: "验收通过",
   rejected: "未通过",
   no_edge: "未发现超额",
@@ -41,12 +41,12 @@ const ENDING_LABELS = {
   environment_blocked: "环境阻断",
   broken: "失败",
 };
-// The way a Paper book came in (paper/book.py candidate_source), and where its
+// The way a Paper account came in (paper/book.py candidate_source), and where its
 // Paper verdict stands (paper/verdict.py): the status as [badge state, label],
 // and the reason a terminal row or an unmeasured reading carries. A value not
 // listed renders as written.
 const TRACK_LABELS = {
-  frozen: "冻结策略",
+  frozen: "定版策略",
   graduated: "验收通过",
   incubating: "模拟观察中",
 };
@@ -61,7 +61,7 @@ const VERDICT_REASON_LABELS = {
   kill_upper_bound_below_zero: "主动超额的终止上界低于 0",
   confirm_lower_bound_above_zero: "主动超额的确认下界高于 0",
 };
-// The conditions of the freeze gate and of the forward and Held-out verdict
+// The conditions of the registration check and of the forward and Held-out verdict
 // (pipelines/verdict.py), keyed by the token the pipeline records when one
 // fails, worded as the criterion so a checklist reads them with a pass or fail
 // mark. A token not listed renders as written. A criterion whose name states a
@@ -86,24 +86,24 @@ const REASON_LABELS = {
   freeze_beta_outside_band: "研究期市场 β",
   freeze_not_positive_at_cost_stress: (t) => `研究期滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
   freeze_unmeasurable: "研究期统计可算",
-  freeze_too_few_seed_replicates: "训练模型的提名登记了种子副本",
-  freeze_seed_replicate_invalid: "种子副本只改种子一行",
+  freeze_too_few_seed_replicates: "训练模型的提名登记了种子复现",
+  freeze_seed_replicate_invalid: "种子复现只改种子一行",
   freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
   sealed_strategy_error: "封存年份策略无报错",
   sealed_unmeasurable: "封存年份残差可读（不是全程空仓）",
   sealed_residual_ir_below_bar: "封存年份残差 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
-  replicate_strategy_error: "种子副本回测无报错",
+  replicate_strategy_error: "种子复现回测无报错",
 };
-// An arm judged on its active series -- its daily return minus the zero-skill
-// panel the host drew from its own book -- records `series: "active"`; an arm
-// judged before panels existed records nothing, and its figures are its own.
+// An experiment judged on its active series -- its daily return minus the random
+// baseline the host drew from its own book -- records `series: "active"`; an experiment
+// judged before random baselines existed records nothing, and its figures are its own.
 const SERIES_LABELS = { active: "主动（策略 − 随机对照组合）", absolute: "策略自身" };
 const ACTIVE_TITLE = "策略日收益减去随机对照组合合成收益后的序列；对照组合由宿主按该策略自己的成交骨架随机换名回放得到";
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
-// A gloss states no threshold: the freeze gate's own limits are carried by the
+// A gloss states no threshold: the registration check's own limits are carried by the
 // gate record, and the checklist draws both the measured value and the limit
 // from there.
 const DSR_TITLE = "去膨胀夏普概率（DSR）：按本实验试验数折减后，研究期 IR 仍高于 SR* 的概率";
@@ -113,21 +113,21 @@ const TRIALS_TITLE = "DSR 据以折减的试验数：本实验验证过的不同
 const EXCESS_TITLE = "主动序列（账户日收益 − 随机对照组合日收益，不做回归）的年化均值";
 const TRACKING_ERROR_TITLE = "主动序列日收益的年化标准差";
 const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
-const RECORD_IR_TITLE = "滚动记录各步的主动序列拼接后，对市场、规模、价值三条因子腿回归的残差 IR；门槛 z(1−α)/√年数";
+const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值三条因子腿回归的残差 IR；门槛 z(1−α)/√年数";
 const P_VALUE_TITLE = "零技能原假设下读到至少这么高的残差 IR 的单侧概率；只报告，不作判定";
 // The holder's money, which no active figure is: the account's own return
 // after every cost minus the benchmark index's price return over the same days.
 const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
-// The cost-stress reading the freeze gate and F5 judge (verdict.py
-// `excess_at_cost_stress`), at the arm's multiplier.
+// The cost-stress reading the registration check and F5 judge (verdict.py
+// `excess_at_cost_stress`), at the experiment's multiplier.
 const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；研究期每次验证与前推裁决读的是同一个数";
-const PANEL_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
+const BASELINE_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
 // What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
 // daily series' mean. The mean itself is the slice's `plain_excess`, or with
 // seed replicates `seed_mean.plain_excess`.
-const LOWER_BOUND_TITLE = "主动序列（登记了种子副本时为定版产物与各副本逐日平均）年化均值的移动块自助法单侧下界";
+const LOWER_BOUND_TITLE = "主动序列（登记了种子复现时为定版产物与各复现逐日平均）年化均值的移动块自助法单侧下界";
 // A replay slice as the holder reads it (verdict.py `holder_readings`): his
-// own account against the benchmark first, then against the zero-skill panel,
+// own account against the benchmark first, then against the random baseline,
 // then the active figures the gate grades.
 const HOLDER_TITLE = "定版产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
 const PLAIN_SELECTION_TITLE = "账户收益减随机对照组合收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
@@ -136,8 +136,8 @@ const ACTIVE_BETA_TITLE = "主动序列（账户 − 随机对照）对基准指
 // (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean` and
 // `forward_lower_bound`): a seed replicate is the same strategy with only its
 // seed line changed.
-const SEED_IR_TITLE = "提名节点与它的种子副本（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
-const SEED_MEAN_TITLE = "定版产物与它的种子副本各自读数的平均；只有登记了种子副本的提名才有";
+const SEED_IR_TITLE = "提名节点与它的种子复现（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
+const SEED_MEAN_TITLE = "定版产物与它的种子复现各自读数的平均；只有登记了种子复现的提名才有";
 
 function reasonLabel(reason, thresholds) {
   const label = REASON_LABELS[reason];
@@ -157,7 +157,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
   freezing: "定版策略",
-  completing_record: "宿主补完滚动记录",
+  completing_record: "宿主补完验证记录",
   forward_replay: "前推与 Held-out 连续回测",
   readout: "读出记录",
   publishing: "结果落盘",
@@ -308,7 +308,7 @@ function refreshCharts() {
   new ResizeObserver(sync).observe(bar);
 })();
 
-/* Pipeline step keys (research, frozen, forward, heldout, verdict) travel in
+/* Pipeline step keys (research, registered, forward, heldout, readout) travel in
    the hash as they are. */
 function stepKeyToUrl(key) {
   return encodeURIComponent(String(key));
@@ -323,7 +323,7 @@ function stepKeyFromUrl(segment) {
    map is the console's vocabulary only. */
 const STEP_LABELS = {
   research: "研究",
-  frozen: "定版",
+  registered: "定版",
   forward: "前推回测",
   heldout: "Held-out",
   readout: "读出",
@@ -731,7 +731,7 @@ function chainEquity(research, forward) {
   return {
     series: (research.series || []).map((entry) => chainSeries(entry, after(entry.key))),
     benchmark: chainSeries(research.benchmark, forward.benchmark),
-    panel: chainSeries(research.panel, forward.panel),
+    baseline: chainSeries(research.baseline, forward.baseline),
     exposure:
       exposure[0] && exposure[1]
         ? {
@@ -744,13 +744,13 @@ function chainEquity(research, forward) {
   };
 }
 
-/* One curve per arm: the research-period validation of the candidate the
+/* One curve per experiment: the research-period validation of the candidate the
    tiles name, in-sample and drawn under a band that says so, and once the
    ledger names the replay the forward and Held-out slices compounded on after
    a 定版 divider, the Held-out divider where that slice begins. Null until the
-   arm has a curve at all. `lazy` fetches the curve only when its box comes
+   experiment has a curve at all. `lazy` fetches the curve only when its box comes
    near the screen; a `mini` curve is drawn on a sample of its days. */
-function armEquityHost(item, opts = {}) {
+function experimentEquityHost(item, opts = {}) {
   const research = item.research_result || null;
   const forward = (item.forward || {}).result || null;
   if (!research && !forward) return null;
@@ -793,7 +793,7 @@ function chartSkeleton({ width = 680, height = 240, ddH = 90, mini = false } = {
 }
 
 /* Runs `load` once `node` comes within a screen of the visible part of the
-   page (the #app scroller). The home grid lists every arm ever run, and
+   page (the #app scroller). The home grid lists every experiment ever run, and
    fetching each card's curve up front made the first view wait on hundreds of
    replays it never shows. One observer serves the page; route() drops what it
    still watches when the page goes. */
@@ -834,21 +834,21 @@ function equityChart(payload, opts = {}) {
   const width = fitChartWidth(opts.width || 680);
   let { ddH = 90 } = opts;
   const INK = themeInk();
-  // A Paper book that follows real fills also draws its simulated track: the
+  // A Paper account that follows real fills also draws its simulated track: the
   // same strategy, so the same ink, dotted as what did not happen. A replay's
-  // zero-skill panel (random names on the book's own trades) is a reference
+  // random baseline (random names on the book's own trades) is a reference
   // like the benchmark, in the same quiet ink, finely dotted.
   const colorOf = {
     strategy: INK.strategyColor,
     simulated: INK.strategyColor,
     benchmark: INK.muted,
-    panel: INK.muted,
+    baseline: INK.muted,
   };
-  const dashOf = { benchmark: "6 4", simulated: "2 3", panel: "1 3" };
-  const reference = new Set(["benchmark", "panel"]);
+  const dashOf = { benchmark: "6 4", simulated: "2 3", baseline: "1 3" };
+  const reference = new Set(["benchmark", "baseline"]);
   const shown = (payload.series || []).filter((s) => (s.dates || []).length);
   if (!shown.length) return el("div", { class: "hint" }, "暂无日度收益数据");
-  for (const line of [payload.benchmark, payload.panel]) {
+  for (const line of [payload.benchmark, payload.baseline]) {
     if (line && (line.dates || []).length) shown.push(line);
   }
   const seriesList = shown.map((s) => ({
@@ -886,7 +886,7 @@ function equityChart(payload, opts = {}) {
   const showDD = ddH > 0;
   const showExp = expList.length > 0;
   const expH = showExp ? 64 : 0;
-  // Account pane (a Paper book): end-of-day equity and cash from one journal
+  // Account pane (a Paper account): end-of-day equity and cash from one journal
   // row per day, drawn on this chart's x-scale so a day's cash bar and equity
   // point sit directly under its return.
   const account = mini ? null : payload.account;
@@ -1379,7 +1379,7 @@ const BUDGET_ROWS = [
    one line, its bar across the block underneath — so six budgets read as six
    figures instead of one run-on line. `mini` is the home card's block: it says
    what was spent, never against its limit, and leaves the share used to the
-   bar alone. A budget the arm has a limit for but never metered (an arm from
+   bar alone. A budget the experiment has a limit for but never metered (an experiment from
    before that figure was recorded) keeps its block with a dash and an empty
    bar, so the grid stays six figures wherever it appears. Null while nothing
    was spent or no limit is known. */
@@ -1710,9 +1710,9 @@ function selectStep(key) {
     liveTimers.push(setInterval(() => tickElapsedClocks(detailView.barHost), 1000));
 }
 
-/* ---------------- the arm's pipeline, as one list of steps ----------------
+/* ---------------- the experiment's pipeline, as one list of steps ----------------
 
-   The research session, the freeze, the one continuous forward/Held-out
+   The research session, the registration, the one continuous forward/Held-out
    replay and the verdict, in the order the pipeline runs them. The listing
    summary and the experiment detail both carry the fields read here, so the
    experiment card's miniature stepper and the experiment page's process list
@@ -1723,23 +1723,23 @@ const STEP_STATUS_LABELS = {
   running: "运行中",
   paused: "已暂停",
   skipped: "未运行",
-  // The freeze has not been decided yet; the replay waits on that decision.
+  // The registration has not been decided yet; the replay waits on that decision.
   awaiting_nomination: "待定",
-  awaiting_freeze: "待定版",
-  frozen: "已定版",
-  not_frozen: "未定版",
+  awaiting_registration: "待定版",
+  registered: "已定版",
+  not_registered: "未定版",
   unrecorded: "待记录",
   replayed: "已回放",
   not_replayed: "不回放",
   undecided: "待判定",
 };
 
-/* How an ending draws the 读出 node: a frozen strategy with its record is
+/* How an ending draws the 读出 node: a registered strategy with its record is
    the step done; only a sealed-gate refusal of old is a failure of the step
    itself; an ending nothing judged is a terminus, and a broken worker wears
    its cross on the step that broke. */
 const ENDING_STEP_STATES = {
-  frozen_with_record: "done",
+  registered_with_record: "done",
   graduated: "done",
   rejected: "failed",
   no_edge: "ended",
@@ -1748,8 +1748,8 @@ const ENDING_STEP_STATES = {
   broken: "ended",
 };
 
-/* The research step: its recorded outcome once the session ended — a freeze
-   is the step done, anything else ended the arm — else where the worker is,
+/* The research step: its recorded outcome once the session ended — a
+   registration is the step done, anything else ended the experiment — else where the worker is,
    else how a session that ran stopped before it recorded anything. */
 function researchStep(item) {
   const status = item.status || {};
@@ -1757,9 +1757,9 @@ function researchStep(item) {
   if (item.research_outcome)
     return {
       ...step,
-      // The session did its work even when it delivered nothing, so an arm it
+      // The session did its work even when it delivered nothing, so an experiment it
       // ended is a terminus here rather than a failed step.
-      state: item.frozen_session ? "done" : "ended",
+      state: item.registered_session ? "done" : "ended",
       status: OUTCOME_LABELS[item.research_outcome] || item.research_outcome,
     };
   // The worker broke before the session could record an outcome at all: this
@@ -1770,26 +1770,27 @@ function researchStep(item) {
       ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
       : { ...step, state: "running", status: STEP_STATUS_LABELS.running };
   // Terminated, or its worker lost: the session has no record and can resume,
-  // so the step waits, worded in the arm's own state.
+  // so the step waits, worded in the experiment's own state.
   if (status.session_key === "research" && status.run_ref)
     return { ...step, state: "waiting", status: STATE_LABELS[item.state] || item.state };
   return { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
 }
 
-/* The freeze, the continuous replay and the readout. `frozen_session` is the
-   listing's own fact, so neither page infers a freeze from stage and verdict. */
+/* The registration, the continuous replay and the readout. `registered_session`
+   is the listing's own fact, so neither page infers a registration from stage
+   and verdict. */
 function pipelineTailSteps(item) {
   const status = item.status || {};
   const researchOver = item.stage !== "research";
-  const frozen = item.frozen_session;
-  const freeze = frozen
-    ? { state: "done", status: STEP_STATUS_LABELS.frozen }
+  const registered = item.registered_session;
+  const registration = registered
+    ? { state: "done", status: STEP_STATUS_LABELS.registered }
     : researchOver
-      ? { state: "skipped", status: STEP_STATUS_LABELS.not_frozen }
+      ? { state: "skipped", status: STEP_STATUS_LABELS.not_registered }
       : { state: "pending", status: STEP_STATUS_LABELS.awaiting_nomination };
   const replay = item.forward
     ? { state: "done", status: STEP_STATUS_LABELS.replayed }
-    : frozen
+    : registered
       ? {
           state:
             item.worker_alive && status.session_key === "forward"
@@ -1799,9 +1800,9 @@ function pipelineTailSteps(item) {
         }
       : researchOver
         ? { state: "skipped", status: STEP_STATUS_LABELS.not_replayed }
-        : { state: "pending", status: STEP_STATUS_LABELS.awaiting_freeze };
-  // The last step is the arm's ending, whatever ended it: the readout for
-  // an arm that got that far, the way research ended for one that did not.
+        : { state: "pending", status: STEP_STATUS_LABELS.awaiting_registration };
+  // The last step is the experiment's ending, whatever ended it: the readout for
+  // an experiment that got that far, the way research ended for one that did not.
   const decided = item.ending
     ? {
         state: ENDING_STEP_STATES[item.ending.state] || "ended",
@@ -1809,7 +1810,7 @@ function pipelineTailSteps(item) {
       }
     : { state: "pending", status: STEP_STATUS_LABELS.undecided };
   return [
-    { key: "frozen", label: STEP_LABELS.frozen, ...freeze },
+    { key: "registered", label: STEP_LABELS.registered, ...registration },
     { key: "forward", label: STEP_LABELS.forward, ...replay },
     { key: "heldout", label: STEP_LABELS.heldout, ...replay },
     { key: "readout", label: STEP_LABELS.readout, ...decided },
@@ -1834,7 +1835,7 @@ function stepNode(step, ...children) {
 }
 
 /* The experiment card's miniature stepper: five nodes on one rail, the step
-   the arm is on in full weight. */
+   the experiment is on in full weight. */
 function pipelineStepper(item) {
   return el(
     "div",
@@ -1934,8 +1935,8 @@ function homeView(payload) {
   return container;
 }
 
-/* The list's heading, with a quiet way to the arms the operator archived
-   (scripts/experiments/archive_arm.py), which the list leaves out. */
+/* The list's heading, with a quiet way to the experiments the operator archived
+   (scripts/experiments/archive_experiment.py), which the list leaves out. */
 function listHead(payload) {
   const archived = payload.archived || 0;
   return el(
@@ -1964,7 +1965,7 @@ async function refreshHomePage() {
   grid.replaceWith(experimentGrid(payload.experiments || []));
 }
 
-/* The archived arms, read once: none of them runs, so nothing here moves
+/* The archived experiments, read once: none of them runs, so nothing here moves
    until the operator archives or restores one. */
 async function renderArchivedPage() {
   const hash = location.hash;
@@ -2013,7 +2014,7 @@ function trackLabel(source) {
   return TRACK_LABELS[source] || source;
 }
 
-/* The ending as one badge; null while the arm can still run. */
+/* The ending as one badge; null while the experiment can still run. */
 function endingBadge(ending) {
   if (!ending || !ending.state) return null;
   return el(
@@ -2023,8 +2024,8 @@ function endingBadge(ending) {
   );
 }
 
-/* The one badge an arm wears: how it ended once it has, else where it is. */
-function armBadge(item) {
+/* The one badge an experiment wears: how it ended once it has, else where it is. */
+function experimentBadge(item) {
   return item.ending ? endingBadge(item.ending) : stateBadge(item.state);
 }
 
@@ -2036,9 +2037,9 @@ function endingReason(item) {
   return reason ? el("div", { class: "ending-reason" }, reason) : null;
 }
 
-/* What the operator has to look at on this arm (webui/registry.py
-   arm_attention): an arm the host ended on the environment, or an unresolved
-   issue report of an arm that can still run. One flagged line on the card. */
+/* What the operator has to look at on this experiment (webui/registry.py
+   experiment_attention): an experiment the host ended on the environment, or an unresolved
+   issue report of an experiment that can still run. One flagged line on the card. */
 function attentionLine(item) {
   const reason = (item.attention || {}).reason;
   return reason ? el("div", { class: "attention" }, `需关注 · ${reason}`) : null;
@@ -2072,7 +2073,7 @@ function fmtPValue(value) {
   return Number.isFinite(value) ? value.toFixed(3) : "—";
 }
 
-/* Whatever evidence the arm already has, one figure per tile: the rolling
+/* Whatever evidence the experiment already has, one figure per tile: the rolling
    record so far -- its steps, the residual IR over them, its p-value and the
    candidate changes -- and once the forward record exists the forward lower
    bound. Never a research-period number: nothing in sample ranks or reads as
@@ -2081,7 +2082,7 @@ function evidenceTiles(item) {
   const record = item.record || {};
   const forward = ((item.forward || {}).readout || {}).forward || {};
   const tiles = presentTiles([
-    { label: "已测步数", value: record.steps, fmt: String, title: "滚动记录里已记入的步数" },
+    { label: "已测步数", value: record.steps, fmt: String, title: "验证记录里已记入的步数" },
     { label: "记录残差 IR", value: record.residual_information_ratio, fmt: fmtSharpe, signed: true, title: RECORD_IR_TITLE },
     { label: "p 值", value: record.p_value, fmt: fmtPValue, title: P_VALUE_TITLE },
     { label: "换候选", value: record.candidate_changes, fmt: String, title: "相邻两步候选不同的次数；只记录，不作目标" },
@@ -2090,11 +2091,11 @@ function evidenceTiles(item) {
   return tiles.length ? statTilesRow(tiles) : null;
 }
 
-/* The ranking view: every frozen strategy with a readout, ranked by its
-   rolling record's residual IR (`registry.ranking`), with its p-value, steps,
+/* The ranking view: every registered strategy with a readout, ranked by its
+   validation record's residual IR (`registry.ranking`), with its p-value, steps,
    candidate changes and forward reading, and the Paper handoff beside each --
    the book it has, or a button that opens one within the cap, which the
-   server enforces. Null while no arm has a readout. */
+   server enforces. Null while no experiment has a readout. */
 function rankingPanel(payload) {
   const rows = payload.ranking || [];
   if (!rows.length) return null;
@@ -2161,7 +2162,7 @@ function rankingPanel(payload) {
   const panel = el(
     "div",
     { class: "panel", id: "ranking-panel" },
-    panelHead("冻结策略排名", el("span", { class: "meta-line" }, "按滚动记录残差 IR 排序；读数只报告，不作判定")),
+    panelHead("定版策略排名", el("span", { class: "meta-line" }, "按验证记录残差 IR 排序；读数只报告，不作判定")),
     table(),
   );
   panel.__signature = rankingSignature(payload);
@@ -2176,7 +2177,7 @@ function rankingPanel(payload) {
   return panel;
 }
 
-/* The arm's curve on its card, fetched when the card comes near the screen.
+/* The experiment's curve on its card, fetched when the card comes near the screen.
    The node is kept by id across the five-second grid rebuild, so the curve is
    neither refetched nor redrawn while the page sits open; it is rebuilt when
    the results it joins change. */
@@ -2186,17 +2187,17 @@ function cardEquityNode(item) {
   const id = `equity-card-${item.experiment_id}`;
   const existing = document.getElementById(id);
   if (existing && existing.dataset.result === key) return existing;
-  const host = armEquityHost(item, { width: 420, height: 130, mini: true, lazy: true });
+  const host = experimentEquityHost(item, { width: 420, height: 130, mini: true, lazy: true });
   host.id = id;
   host.dataset.result = key;
   return host;
 }
 
 /* Name and badges, then the stepper, the live activity, the budget, the
-   evidence and the curve — each only when the arm has it. A card shows every
+   evidence and the curve — each only when the experiment has it. A card shows every
    figure as one labelled value: no fraction, no figure against its limit or
    threshold (those are the experiment page's). The grid is rebuilt every
-   poll, so the activity clock needs no ticker. An archived arm (the archived
+   poll, so the activity clock needs no ticker. An archived experiment (the archived
    page's cards) offers no 恢复运行: the console never starts it again. */
 function experimentCard(item, { archived = false } = {}) {
   const readable = item.state !== "unreadable";
@@ -2212,7 +2213,7 @@ function experimentCard(item, { archived = false } = {}) {
       "h3",
       { title: `创建 ${fmtTs(item.created_at)}` },
       experimentName(item.experiment_id),
-      experimentBadges(armBadge(item)),
+      experimentBadges(experimentBadge(item)),
     ),
     item.error ? el("div", { class: "meta-line" }, item.error) : null,
     attentionLine(item),
@@ -2752,7 +2753,7 @@ async function renderDetailPage(experimentId, selectedKey) {
         : el("a", { class: "exp-back", href: "#/" }, "← 实验"),
       experimentName(detail.experiment_id, { link: false }),
       experimentBadges(
-        armBadge(detail),
+        experimentBadge(detail),
         archived
           ? el(
               "span",
@@ -2787,7 +2788,7 @@ async function renderDetailPage(experimentId, selectedKey) {
   let barHost = null;
   if (detail.kind === "hitl") {
     // The state, what the worker is doing, the budget and the controls that
-    // act on it; where the arm is, step by step, is the process list's job.
+    // act on it; where the experiment is, step by step, is the process list's job.
     barHost = controlPanel(detail);
     container.append(barHost);
   }
@@ -2837,7 +2838,7 @@ async function renderDetailPage(experimentId, selectedKey) {
   }, 4000);
 }
 
-/* The experiment page's process list: the research session, then the freeze,
+/* The experiment page's process list: the research session, then the registration,
    the continuous replay and the readout, each carrying what it left behind —
    a figure, a date span or a live stage. `filled` says whether the step has a
    right-pane detail yet. */
@@ -2846,12 +2847,12 @@ function processRows(detail) {
   const record = (session || {}).record;
   const research = researchStep(detail);
   const live = research.state === "running" || research.state === "waiting";
-  // The rolling record so far, as the ledger holds it.
+  // The validation record so far, as the ledger holds it.
   const rolling = detail.record;
   const replay =
     ((detail.sessions || []).find((entry) => entry.kind === "forward") || {})
       .replay || {};
-  const frozen = detail.frozen;
+  const registered = detail.registered;
   const note = {
     research: rolling
       ? el(
@@ -2862,15 +2863,15 @@ function processRows(detail) {
       : record
         ? `验证 ${record.validations.length} 次 · 尚无 test`
         : null,
-    frozen: frozen ? `${fmtPct(frozen.plain_excess)} · IR ${fmtSharpe(frozen.information_ratio)}` : null,
+    registered: registered ? `${fmtPct(registered.plain_excess)} · IR ${fmtSharpe(registered.information_ratio)}` : null,
     forward: replaySpanBar(replay, "forward", { mini: true, pending: !detail.forward }),
     heldout: replaySpanBar(replay, "heldout", { mini: true, pending: !detail.forward }),
     readout: null,
   };
   const filled = {
     research: Boolean(record) || live,
-    frozen: Boolean(frozen),
-    forward: Boolean(detail.frozen || detail.forward),
+    registered: Boolean(registered),
+    forward: Boolean(detail.registered || detail.forward),
     heldout: Boolean(detail.forward),
     readout: Boolean((detail.verdict || {}).status),
   };
@@ -2930,13 +2931,13 @@ function processListPanel(detail, selectedKey) {
 // whose name states a threshold reads it from the same `thresholds` block the
 // criteria do, so the table and the checklist above it never disagree.
 // The holder's readings lead: account, benchmark, the raw excess between them,
-// the panel and the plain selection against it, then the active series the
+// the random baseline and the plain selection against it, then the active series the
 // gates grade and its market loading.
 const SLICE_ROWS = [
   ["strategy_return", "账户收益", fmtPct, true, HOLDER_TITLE],
   ["benchmark_return", "基准收益", fmtPct, true],
   ["raw_excess", "原始超额（账户 − 基准）", fmtPct, true],
-  ["panel_return", "随机对照组合收益", fmtPct, true, PANEL_RETURN_TITLE],
+  ["baseline_return", "随机对照组合收益", fmtPct, true, BASELINE_RETURN_TITLE],
   ["plain_selection", "对随机对照（账户 − 对照组合）", fmtPct, true, PLAIN_SELECTION_TITLE],
   ["market_beta", "主动市场 β（对随机对照）", fmtSharpe, true, ACTIVE_BETA_TITLE],
   ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
@@ -2957,7 +2958,7 @@ const HOLDER_STAT_FIELDS = [
   "strategy_return",
   "benchmark_return",
   "raw_excess",
-  "panel_return",
+  "baseline_return",
   "plain_selection",
   "market_beta",
   "plain_excess",
@@ -3013,7 +3014,7 @@ function sliceStats(slice, fields, thresholds) {
 }
 
 /* A slice as one sentence in the holder's order: the account against the
-   benchmark, then against its zero-skill panel, then the active series the
+   benchmark, then against its random baseline, then the active series the
    gate graded. Null without readings. */
 function holderLine(label, slice) {
   const raw = (slice || {}).raw_readings;
@@ -3023,15 +3024,15 @@ function holderLine(label, slice) {
     "div",
     { class: "meta-line" },
     `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}）；` +
-      `随机对照组合 ${fmtPct(raw.panel_return)}（对随机对照 ${fmtPct(raw.plain_selection)}）；${active}`,
+      `随机对照组合 ${fmtPct(raw.baseline_return)}（对随机对照 ${fmtPct(raw.plain_selection)}）；${active}`,
   );
 }
 
-/* The frozen book beside its seed replicates and their mean, over the named
+/* The registered book beside its seed replicates and their mean, over the named
    slices (verdict.py `seed_replicate_slice` and `seed_mean`): one row per
    seed, one figure per cell — the account against the benchmark and against
-   its zero-skill panel, each compounded. Null for a record without replicates, so
-   an arm frozen on one seed shows nothing in its place. */
+   its random baseline, each compounded. Null for a record without replicates, so
+   an experiment registered on one seed shows nothing in its place. */
 const SLICE_NAMES = { forward: "前推", heldout: "Held-out " };
 
 function seedReadingsTable(slices, names) {
@@ -3095,10 +3096,10 @@ function thresholdCell(mark, value, fmt = fmtPct) {
 }
 
 
-/* The criteria an arm is held to only when its own thresholds state them: the
+/* The criteria an experiment is held to only when its own thresholds state them: the
    active-series drawdown, and the tracking mandate's two limits. `measured` is
    the slice or gate record carrying the figures; a threshold the record does
-   not carry draws no row, so an arm judged before these existed reads as it
+   not carry draws no row, so an experiment judged before these existed reads as it
    was judged. */
 function activeDrawdownRows(token, measured, row, t) {
   if (t.active_max_drawdown === undefined || t.active_max_drawdown === null) return [];
@@ -3144,10 +3145,10 @@ function stageHead(key, detail) {
   return panelHead(STEP_LABELS[key], el("span", { class: "badge kind" }, step.status));
 }
 
-/* Every frozen strategy's rolling record over this arm's validation window,
+/* Every registered strategy's validation record over this experiment's validation window,
    with its one-sided null p-value, its steps and candidate changes, and how
    many there are: what a single reading is weighed against. Nothing is
-   adjusted and no bar moves. */
+   adjusted and no threshold moves. */
 function validationWindowBlock(readouts) {
   const w = (readouts || {}).validation_window;
   if (!w || !w.count) return null;
@@ -3177,13 +3178,13 @@ function validationWindowBlock(readouts) {
   );
 }
 
-/* The forward-year residual readings of every frozen strategy replayed over
-   this arm's forward months, pooled: reported, never judged. */
+/* The forward-year residual readings of every registered strategy replayed over
+   this experiment's forward months, pooled: reported, never judged. */
 function forwardPoolBlock(readouts) {
   const p = (readouts || {}).forward_pool;
   if (!p) return null;
   const pooled = p.count
-    ? `${p.count} 个冻结策略 · 合并残差 IR ${fmtSharpe(p.residual_information_ratio)} · z = ${fmtSharpe(p.z)} · p = ${p.p_value.toFixed(3)}`
+    ? `${p.count} 个定版策略 · 合并残差 IR ${fmtSharpe(p.residual_information_ratio)} · z = ${fmtSharpe(p.z)} · p = ${p.p_value.toFixed(3)}`
     : "尚无可合并的读数";
   return el(
     "table",
@@ -3236,12 +3237,12 @@ function heldoutStagePanel(detail) {
   );
 }
 
-/* 读出: how the arm ended — its ending badge and reason — then the readout:
-   the rolling record read as one series (residual IR against its bar, the
+/* 读出: how the experiment ended — its ending badge and reason — then the readout:
+   the validation record read as one series (residual IR against its threshold, the
    one-sided p-value, steps and candidate changes) and the forward reading
    (the lower bound and residual IR, or the strategy error that left it
-   unread); the holder's lines and seed readings; every arm's record over the
-   same validation window and the pooled forward readings; what the arm cost
+   unread); the holder's lines and seed readings; every experiment's record over the
+   same validation window and the pooled forward readings; what the experiment cost
    and when it was recorded; and the Paper handoff. Nothing judges. A record
    written under the retired sealed gate shows its verdict as recorded (a
    withdrawn graduation with who, when, why and the evidence). An ending no
@@ -3257,7 +3258,7 @@ function readoutStagePanel(detail) {
   const badge =
     endingBadge(detail.ending) ||
     el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
-  const recordedAt = forward ? forward.recorded_at : research && research.arm_end ? research.recorded_at : null;
+  const recordedAt = forward ? forward.recorded_at : research && research.experiment_end ? research.recorded_at : null;
   const facts = [
     research && Number(research.attempts) > 1 ? kvRow("研究尝试", `${research.attempts} 次`) : null,
     validations.failed
@@ -3299,7 +3300,7 @@ function readoutStagePanel(detail) {
           el(
             "div",
             { class: "meta-line" },
-            "验证期走完或预算用尽后，宿主回放前推与 Held-out 并读出滚动记录；没有通过或不通过",
+            "验证期走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；没有通过或不通过",
           ),
     validationWindowBlock(detail.readouts),
     forwardPoolBlock(detail.readouts),
@@ -3308,8 +3309,8 @@ function readoutStagePanel(detail) {
   );
 }
 
-/* The readout as the record states it: the rolling record's instrument with
-   its bar and years, the steps and candidate changes, and the forward
+/* The readout as the record states it: the validation record's significance
+   test with its threshold and years, the steps and candidate changes, and the forward
    reading or the strategy error in its place. */
 function readoutBlock(readout) {
   const record = readout.record || {};
@@ -3319,10 +3320,10 @@ function readoutBlock(readout) {
     "table",
     { class: "kv section-gap" },
     kvRow(
-      "滚动记录",
+      "验证记录",
       record.unmeasured
         ? `未读出：${record.unmeasured}`
-        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.bar)}，${fmtSharpe(record.years)} 年）· p = ${fmtPValue(record.p_value)}`,
+        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· p = ${fmtPValue(record.p_value)}`,
     ),
     kvRow("步数 · 换候选", `${record.steps ?? "—"} 步 · 换候选 ${record.candidate_changes ?? "—"} 次`),
     kvRow(
@@ -3348,7 +3349,7 @@ function legacyVerdictLine(verdict) {
 // The one trading environment with a backend (docs/DEPLOYMENT_DOCUMENTATION.md).
 const PAPER_ENV = "paper";
 
-/* The Paper handoff: the arm's book once one exists, else, for a frozen
+/* The Paper handoff: the experiment's book once one exists, else, for a registered
    strategy with its forward record, a button that opens one within the cap
    the server enforces. Nothing opens a book by itself. */
 function paperHandoff(detail) {
@@ -3374,7 +3375,7 @@ function paperHandoff(detail) {
     },
     "建立模拟账户",
   );
-  // Only an arm with a Paper candidate can open a book here; any arm shows the book it has.
+  // Only an experiment with a Paper candidate can open a book here; any experiment shows the book it has.
   const host = el(
     "div",
     { class: "section-gap", hidden: detail.paper_candidate ? null : "" },
@@ -3402,13 +3403,13 @@ function paperHandoff(detail) {
   return host;
 }
 
-/* The frozen artifact and the research statistics it was frozen on. An
-   artifact frozen with seed replicates also shows the seed-mean IR beside
-   its own IR and the bar both were held to, and one row per seed. */
-function frozenPanel(detail) {
-  const frozen = detail.frozen;
-  if (!frozen) return null;
-  const seeds = frozen.seed_replicates || {};
+/* The registered artifact and the research statistics it was registered on. An
+   artifact registered with seed replicates also shows the seed-mean IR beside
+   its own IR and the threshold both were held to, and one row per seed. */
+function registeredPanel(detail) {
+  const registered = detail.registered;
+  if (!registered) return null;
+  const seeds = registered.seed_replicates || {};
   const panel = el(
     "div",
     { class: "panel section-gap" },
@@ -3428,13 +3429,13 @@ function frozenPanel(detail) {
       presentTiles([
         {
           label: "研究期主动超额（年化）",
-          value: frozen.plain_excess,
+          value: registered.plain_excess,
           fmt: fmtPct,
           signed: true,
           title: EXCESS_TITLE,
         },
-        { label: "主动跟踪误差", value: frozen.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
-        { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
+        { label: "主动跟踪误差", value: registered.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
+        { label: "IR", value: registered.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
         {
           label: "种子均值 IR",
           value: seeds.mean_information_ratio,
@@ -3450,45 +3451,45 @@ function frozenPanel(detail) {
         },
         {
           label: "DSR",
-          value: frozen.deflated_sharpe_probability,
+          value: registered.deflated_sharpe_probability,
           fmt: fmtSharpe,
           // The same gloss the other DSR tiles carry, then what this
           // nomination's probability was deflated against.
           title: [
             DSR_TITLE,
-            frozen.trials === null || frozen.trials === undefined ? null : `试验 ${frozen.trials} 个`,
-            frozen.sharpe_star === null || frozen.sharpe_star === undefined
+            registered.trials === null || registered.trials === undefined ? null : `试验 ${registered.trials} 个`,
+            registered.sharpe_star === null || registered.sharpe_star === undefined
               ? null
-              : `SR* ${fmtSharpe(frozen.sharpe_star)}`,
+              : `SR* ${fmtSharpe(registered.sharpe_star)}`,
           ]
             .filter(Boolean)
             .join(" · "),
         },
         {
           label: "前推可检出超额",
-          value: frozen.forward_mde,
+          value: registered.forward_mde,
           fmt: fmtPct,
           title: "前推检验以 80% 功效能检出的最小年化主动超额",
         },
       ]),
     ),
     chipsRow([
-      frozen.full_span_validations === null || frozen.full_span_validations === undefined
+      registered.full_span_validations === null || registered.full_span_validations === undefined
         ? null
-        : chip(`全区间验证 ${frozen.full_span_validations}`),
-      frozen.null_percentile === null || frozen.null_percentile === undefined
+        : chip(`全区间验证 ${registered.full_span_validations}`),
+      registered.null_percentile === null || registered.null_percentile === undefined
         ? null
-        : chip(`null 分位 ${fmtSharpe(frozen.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
-      chip(frozen.fit ? ["fit", frozen.refit_period ? `重训 ${frozen.refit_period}` : null].filter(Boolean).join(" · ") : "无 fit"),
-      frozen.source_step_id
-        ? chip(`节点 ${String(frozen.source_step_id).split("__").pop()}`, frozen.source_step_id)
+        : chip(`null 分位 ${fmtSharpe(registered.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
+      chip(registered.fit ? ["fit", registered.refit_period ? `重训 ${registered.refit_period}` : null].filter(Boolean).join(" · ") : "无 fit"),
+      registered.source_step_id
+        ? chip(`节点 ${String(registered.source_step_id).split("__").pop()}`, registered.source_step_id)
         : null,
     ]),
     seeds.replicates
       ? dataTable(
           [{ label: "种子" }, { label: "种子行" }, { label: "研究期 IR", num: true, title: IR_TITLE }],
           [
-            [{ value: "定版产物", title: frozen.source_step_id || null }, "—", { value: fmtSharpe(frozen.information_ratio), cls: signCls(frozen.information_ratio) }],
+            [{ value: "定版产物", title: registered.source_step_id || null }, "—", { value: fmtSharpe(registered.information_ratio), cls: signCls(registered.information_ratio) }],
             ...seeds.replicates.map((entry) => [
               { value: String(entry.step_id).split("__").pop(), title: entry.step_id },
               entry.seed_line,
@@ -3498,8 +3499,8 @@ function frozenPanel(detail) {
           { fit: true, box: "section-gap" },
         )
       : null,
-    subWindowSection("研究期分年度表现", frozen.blocks),
-    frozen.result ? styleCard(detail.experiment_id, frozen.result) : null,
+    subWindowSection("研究期分年度表现", registered.blocks),
+    registered.result ? styleCard(detail.experiment_id, registered.result) : null,
   );
   return panel;
 }
@@ -3582,7 +3583,7 @@ async function openParamsModal(detail) {
   ]);
 }
 
-/* The control panel: the arm's badge, what the worker is doing, the skills it
+/* The control panel: the experiment's badge, what the worker is doing, the skills it
    published (only once there are any), any pending request, the controls, the
    run's own error and the research budget as bars. The error lives here, with
    the run it belongs to and in full — the page head carries only the ending's
@@ -3593,14 +3594,14 @@ function controlPanel(detail) {
   const errorHost = el("div", {});
   const budgetHost = el("div", {});
   const skills = Number(detail.skills && detail.skills.count) || 0;
-  // The arm's one curve lives here, under the budget, not in any step's pane.
-  const curve = armEquityHost(detail, { width: 980, height: 240, ddH: 90 });
+  // The experiment's one curve lives here, under the budget, not in any step's pane.
+  const curve = experimentEquityHost(detail, { width: 980, height: 240, ddH: 90 });
   const panel = el(
     "div",
     { class: "panel section-gap" },
     controlBar(
       detail,
-      armBadge(detail),
+      experimentBadge(detail),
       activityHost,
       skills ? el("span", { class: "stat-chip", title: "本实验发布的 skills" }, `📚 Skills ${skills}`) : null,
     ),
@@ -3628,7 +3629,7 @@ function controlBar(detail, ...lead) {
   const control = detail.control || { request: null };
   const state = detail.state;
   const alive = detail.worker_alive;
-  // The console never starts an archived arm again (manager.start_worker), so
+  // The console never starts an archived experiment again (manager.start_worker), so
   // it offers neither 重启 nor 恢复运行.
   const archived = Boolean(detail.archived);
   const send = (payload, note) => sendControlAction(id, payload, note);
@@ -3816,21 +3817,21 @@ function stepPlaceholder(detail, key, title) {
 }
 
 /* The right pane of the process grid: whichever step the reader selected. The
-   research session has its own panel, the freeze opens the frozen artifact,
+   research session has its own panel, the registration opens the registered artifact,
    and 前推回测, Held-out and 读出 each open their own stage view. */
 function sessionDetailPanel(detail, selectedKey) {
   // Flex column with a uniform card gap: whichever cards are present, the
   // first one's top aligns with the process list in the left grid column.
   const panel = el("div", { class: "session-detail" });
   const session = (detail.sessions || []).find((entry) => entry.key === selectedKey);
-  // An arm with no plan yet (never started) serves no sessions at all: every
+  // An experiment with no plan yet (never started) serves no sessions at all: every
   // step answers with its status word.
   if (!(detail.sessions || []).length) {
     panel.append(stepPlaceholder(detail, selectedKey, sessionLabel(selectedKey)));
     return panel;
   }
-  if (selectedKey === "frozen") {
-    panel.append(frozenPanel(detail) || stepPlaceholder(detail, "frozen", "定版产物"));
+  if (selectedKey === "registered") {
+    panel.append(registeredPanel(detail) || stepPlaceholder(detail, "frozen", "定版产物"));
     return panel;
   }
   if (selectedKey === "forward") {
@@ -3852,7 +3853,7 @@ function sessionDetailPanel(detail, selectedKey) {
   // sessions have built, the live Trace below it is what is happening in the
   // current one, and the reader's own message box closes the column.
   panel.append(stepTreePanel(detail));
-  // The rolling record so far: every step the ledger holds, as it lands.
+  // The validation record so far: every step the ledger holds, as it lands.
   const record = recordPanel(detail);
   if (record) panel.append(record);
   if (session.record) panel.append(researchSessionPanel(detail, session));
@@ -3905,7 +3906,7 @@ function sessionDetailPanel(detail, selectedKey) {
   return panel;
 }
 
-/* Who recorded a step of the rolling record. */
+/* Who recorded a step of the validation record. */
 const SOURCE_LABELS = { test: "会话 test", host_completion: "宿主补完" };
 
 /* Drawdown of a cumulative-return series, from its running peak. */
@@ -3917,9 +3918,9 @@ function drawdownOf(cum) {
   });
 }
 
-/* The rolling record: the curve of the stitched entries -- the book and its
-   zero-skill panel compounded, a marker at every step whose candidate changed
-   -- then one row per step: its window, frontier, the candidate tested, who
+/* The validation record: the curve of the stitched entries -- the book and its
+   random baseline compounded, a marker at every step whose candidate changed
+   -- then one row per step: its window, test horizon, the candidate tested, who
    recorded it, its return, active return, drawdown, turnover and fees. Every
    figure is the ledger's own; null before the first step is recorded. */
 function recordPanel(detail) {
@@ -3940,19 +3941,19 @@ function recordPanel(detail) {
     .map((step) => ({ date: step.start, label: `第 ${step.step} 步换候选` }));
   const chart = dates.length
     ? equityChart(
-        { series: [series("strategy", "账户", curve.book || [])], panel: series("panel", "随机对照组合", curve.panel || []) },
+        { series: [series("strategy", "账户", curve.book || [])], baseline: series("baseline", "随机对照组合", curve.baseline || []) },
         { width: 980, height: 220, ddH: 0, markers },
       )
     : null;
   const headline = record.unmeasured
     ? `未读出：${record.unmeasured}`
-    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.bar)}）· p = ${fmtPValue(record.p_value)}`;
+    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}）· p = ${fmtPValue(record.p_value)}`;
   return el(
     "div",
     { class: "panel section-gap" },
     panelHead(
-      "滚动记录",
-      el("span", { class: "badge kind" }, `${record.steps} 步 · 前沿 ${record.frontier}`),
+      "验证记录",
+      el("span", { class: "badge kind" }, `${record.steps} 步 · 测试终点 ${record.test_horizon}`),
       el("span", { class: "meta-line" }, `${headline} · 换候选 ${record.candidate_changes} 次`),
     ),
     chart,
@@ -3987,16 +3988,16 @@ function recordPanel(detail) {
   );
 }
 
-/* The freeze gate as the pipeline judged the nomination: a failed
+/* The registration check as the pipeline judged the nomination: a failed
    precondition only when it failed, and the conditions the record's own
    thresholds state. A registration (since the sealed gate, 2026-11-03)
    states only its drawdown limit and mandate; a deflated-Sharpe gate before
-   it also states its full-span count, DSR and IR bars. Where the arm holds
+   it also states its full-span count, DSR and IR bars. Where the experiment holds
    seed replicates the gate records them (`seed_replicates`): a missing or
    invalid replicate is a precondition, each invalid one's problem in the
    row's hover, and an earlier gate's seed-mean IR against the nominee's IR
-   bar is a row whenever it read one. */
-function freezeGateChecklist(gate) {
+   threshold is a row whenever it read one. */
+function registrationChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
   const row = criteriaRow(gate, failed, t);
@@ -4052,7 +4053,7 @@ function freezeGateChecklist(gate) {
           row("freeze_too_few_positive_years", gate.positive_years ?? "—", `≥ ${t.min_positive_years ?? "—"}`),
         ]),
     ...activeDrawdownRows("freeze_active_drawdown_exceeded", gate, row, t),
-    // Judged only where the arm's rules hold it; such a gate states the
+    // Judged only where the experiment's rules hold it; such a gate states the
     // multiplier it was judged at.
     ...(t.cost_stress_multiplier === undefined || t.cost_stress_multiplier === null
       ? []
@@ -4082,7 +4083,7 @@ function freezeGateChecklist(gate) {
    nominated, the budget it spent, every Validation it ran, and its Trace. */
 function researchSessionPanel(detail, session) {
   const record = session.record;
-  const gate = record.freeze_gate;
+  const gate = record.registration;
   const attempts = Number(record.attempts) || 0;
   const budget = budgetBars(record.budget_used, detail.budget);
   const panel = el(
@@ -4093,7 +4094,7 @@ function researchSessionPanel(detail, session) {
       el(
         "span",
         {
-          class: `badge ${record.froze ? "state-completed" : "state-stopped"}`,
+          class: `badge ${record.registered ? "state-completed" : "state-stopped"}`,
           title: record.finish_reason || null,
         },
         OUTCOME_LABELS[record.outcome] || record.outcome,
@@ -4107,7 +4108,7 @@ function researchSessionPanel(detail, session) {
           "div",
           { class: "section-gap" },
           el("h4", { class: "subsection-title" }, "定版登记"),
-          freezeGateChecklist(gate),
+          registrationChecklist(gate),
         )
       : null,
     budget
@@ -4119,8 +4120,8 @@ function researchSessionPanel(detail, session) {
         )
       : null,
     record.reason ? el("blockquote", { class: "quote section-gap" }, record.reason) : null,
-    record.arm_end
-      ? el("div", { class: "meta-line" }, `结束实验 · ${record.arm_end.reason || "—"}`)
+    record.experiment_end
+      ? el("div", { class: "meta-line" }, `结束实验 · ${record.experiment_end.reason || "—"}`)
       : null,
   );
   if (record.validations.length)
@@ -4259,7 +4260,7 @@ function directivePanel(detail, session) {
 
 /* GPU status + per-session allocation picker, shown before the session starts.
    The chosen count rides in control.gpu_counts[session_key]; the session then
-   attaches that many of the cards claimed for the arm's worker
+   attaches that many of the cards claimed for the experiment's worker
    (detail.gpu_claim, in claim order) and no other, so those rows come first
    and are marked, and each bar tracks FREE memory (longer = more headroom). */
 function gpuAllocationRow(detail, session, send) {
@@ -4325,7 +4326,7 @@ function gpuAllocationRow(detail, session, send) {
     stamp,
   );
   wrap.append(statusHost, row);
-  // Render the cached inventory: the arm's claimed cards first, in claim
+  // Render the cached inventory: the experiment's claimed cards first, in claim
   // order, so the first N rows are the ones the picker's current count
   // attaches; bars track FREE memory (longer = more free), not machine-wide use.
   const claim = detail.gpu_claim || [];
@@ -4992,7 +4993,7 @@ const SUBAGENT_STATUS_LABELS = new Map([
   ["started", "已启动"],
   ["running", "进行中"],
   ["completed", "已完成"],
-  ["exhausted", "轮次用尽"],
+  ["exhausted", "回合用尽"],
   ["timeout", "超时"],
   ["error", "失败"],
   ["cancelled", "已取消"],
@@ -5049,14 +5050,14 @@ function subagentClockNode(block, className = "hint") {
   );
 }
 
-/* Rounds and LLM calls differ when a sub-agent is forced to write a closing
-   summary after its last round, so both are shown. */
+/* Turns and LLM calls differ when a sub-agent is forced to write a closing
+   summary after its last turn, so both are shown. */
 function subagentProgressParts(block) {
   const parts = [];
-  const rounds = Number(block.rounds) || 0;
+  const turns = Number(block.rounds) || 0;
   const llmCalls = Number(block.llm_calls) || 0;
   const toolCalls = Number(block.tool_calls) || 0;
-  if (rounds || llmCalls) parts.push(`${rounds} 轮 · 模型 ${llmCalls} 次`);
+  if (turns || llmCalls) parts.push(`${turns} 回合 · 模型 ${llmCalls} 次`);
   if (toolCalls) parts.push(`工具 ${toolCalls} 次`);
   const total = Number((block.usage || {}).total_tokens) || 0;
   if (total) parts.push(`Σ ${fmtTokens(total)}`);
@@ -5118,7 +5119,7 @@ function subagentDockBlock(block, detail, runRef) {
 }
 
 /* The child's own Trace, opened from its card or from the dock's pinned
-   block: its rounds, tool calls, wrap-up and final report, rendered by the
+   block: its turns, tool calls, wrap-up and final report, rendered by the
    same block renderer as the parent trace. It is a modal over the parent —
    the parent's scroll position and open folds stay exactly as they were, and
    closing returns to them. One box for the modal's lifetime, so a refresh
@@ -5156,7 +5157,7 @@ async function openSubagentTrace(detail, runRef, block) {
       previous: previousBlocks,
     });
     if (!(payload.blocks || []).length)
-      box.replaceChildren(el("div", { class: "empty" }, "该子代理尚未产生可展示的轮次。"));
+      box.replaceChildren(el("div", { class: "empty" }, "该子代理尚未产生可展示的回合。"));
     return isRunningSubagent(payload.header || block);
   };
   if (!(await load())) return;
@@ -5277,9 +5278,9 @@ function parentReasoningLabel(detail) {
 function renderAgentOutputBlock(node, block, detail) {
   const effort = parentReasoningLabel(detail);
   const model = String((block && block.model) || "").trim();
-  const round = Number(block.round) || 0;
-  const title = round
-    ? [`第 ${round} 轮`, model].filter(Boolean).join(" · ")
+  const turn = Number(block.round) || 0;
+  const title = turn
+    ? [`第 ${turn} 回合`, model].filter(Boolean).join(" · ")
     : ["Agent", model, effort ? `推理 ${effort}` : ""].filter(Boolean).join(" · ");
   node.append(
     el(
@@ -5346,14 +5347,14 @@ function subagentContextLabel(block) {
 }
 
 /* The one place sub-agent launch metadata is spelled out:
-   `model · 推理 xhigh · 上限 48 轮 · 独立上下文`. */
+   `model · 推理 xhigh · 上限 48 回合 · 独立上下文`. */
 function subagentMetaLine(block, detail) {
   const thinking = subagentThinkingLabel(block, detail);
-  const roundsLimit = Number(block.rounds_limit) || 0;
+  const turnsLimit = Number(block.rounds_limit) || 0;
   return [
     block.model ? String(block.model) : "",
     thinking ? `推理 ${thinking}` : "",
-    roundsLimit ? `上限 ${roundsLimit} 轮` : "",
+    turnsLimit ? `上限 ${turnsLimit} 回合` : "",
     subagentContextLabel(block),
   ]
     .filter(Boolean)
@@ -5378,7 +5379,7 @@ function subagentHeadMetaNode(block, detail) {
 }
 
 /* What a child reads as, from its one block: role · 状态, task, launch meta
-   and the ticking clock on the head, then the progress line — rounds, model
+   and the ticking clock on the head, then the progress line — turns, model
    calls, tools, tokens, latest tool. The card at the call position and the
    dock's pinned block share it, so they can never disagree. Spans
    throughout, so the dock can wrap the whole readout in a button; ``open``
@@ -5544,14 +5545,14 @@ function toolCallsNode(calls) {
   const list = el("div", { class: "trace-tool-list" });
   for (const call of calls || []) {
     const status = TOOL_STATUS_LABELS.get(String(call.status || "")) || "";
-    const round = Number(call.round) || 0;
+    const turn = Number(call.round) || 0;
     const row = el(
       "div",
       { class: "trace-tool-call" },
       el(
         "div",
         { class: "tool-brief" },
-        [String(call.name || "工具"), round ? `第 ${round} 轮` : "", status]
+        [String(call.name || "工具"), turn ? `第 ${turn} 回合` : "", status]
           .filter(Boolean)
           .join(" · "),
       ),
@@ -5614,7 +5615,7 @@ function toolRowsNode(tools) {
 
 /* ---------------- Step 产物树 ---------------- */
 
-/* Lineage of validated step artifacts across the arm's research sessions.
+/* Lineage of validated step artifacts across the experiment's research sessions.
    Branches appear when the Agent used step_rollback or validate, or a
    session started from the node its predecessor handed on. Built for large trees: collapsible subtrees, text filter,
    one shared viewport-clamped tooltip (never clipped by the scroll box),
@@ -5830,7 +5831,7 @@ function stepTreeRow(
     badges.push(
       el("span", { class: "badge state-running_session" }, "当前位置"),
     );
-  if (node.frozen)
+  if (node.registered)
     badges.push(el("span", { class: "badge state-completed" }, "已定版"));
   if (failed) badges.push(el("span", { class: "badge state-failed" }, "失败"));
   const actions = el("span", { class: "step-actions" });
@@ -5937,7 +5938,7 @@ function showStepTip(detail, node, row) {
     ),
     line("最大回撤", fmtPct(m.max_drawdown)),
     line("记录于", fmtTs(node.created_at)),
-    node.frozen ? line("定版", "本节点是定版产物") : null,
+    node.registered ? line("定版", "本节点是定版产物") : null,
     node.status === "failed" ? line("失败原因", node.error || "—") : null,
     node.has_snapshot ? null : line("快照", "无（失败尝试不留产物）"),
   );
@@ -5980,7 +5981,7 @@ function openStepNodeModal(detail, payload, node) {
       ),
       kvRow("最大回撤", fmtPct(m.max_drawdown)),
       kvRow("记录时间", fmtTs(node.created_at)),
-      node.frozen ? kvRow("定版", "本节点是定版产物") : null,
+      node.registered ? kvRow("定版", "本节点是定版产物") : null,
       node.status === "failed" ? kvRow("失败原因", node.error || "—") : null,
       kvRow("附件", (node.attachments || []).join("、") || "—"),
       kvRow("revision", el("code", {}, String(node.strategy_ref || "—"))),
@@ -6001,7 +6002,7 @@ function kvRow(key, value) {
 
 /* Per-year breakdown of one replay (stats.sub_windows): the same
    figures as the whole window, one row per year. "部分" marks a year the
-   window does not span end to end; 超额 is against the arm's benchmark. */
+   window does not span end to end; 超额 is against the experiment's benchmark. */
 function subWindowSection(title, rows) {
   if (!Array.isArray(rows) || !rows.length) return null;
   return el(
@@ -6069,7 +6070,7 @@ function styleCard(expId, result) {
       const style = payload.style || {};
       const tiles = presentTiles([
         {
-          // The arm's own benchmark, as its sidecar recorded it.
+          // The experiment's own benchmark, as its sidecar recorded it.
           label: `β（vs ${payload.benchmark?.label || "基准"}）`,
           value: reg.beta,
           fmt: fmtSharpe,
@@ -6285,7 +6286,7 @@ function ordersNode(experimentId, result) {
    and the researcher still commits it. Who may write is settled by how the console is
    reached (loopback bind, or the edge's login gate), not by this page.
 
-   Inside an experiment, 已挂载记忆 is THAT experiment's frozen snapshot: what
+   Inside an experiment, 已挂载技能库 is THAT experiment's frozen snapshot: what
    its sessions mount, not what the library holds now. */
 
 let memoryView = null;
@@ -7062,7 +7063,7 @@ function applyCuratedResult(result) {
   renderMemoryPane();
 }
 
-/* ---------------- 已挂载记忆 ----------------
+/* ---------------- 已挂载技能库 ----------------
    One list, not a per-session projection: an experiment resolves the curated
    library once, when it is created, and every session it runs mounts that same
    read-only snapshot. So there is nothing to compare between sessions here —
@@ -7072,13 +7073,13 @@ function mountedMemoryPanel(detail) {
   const host = el(
     "div",
     { class: "panel section-gap mounted-memory" },
-    el("div", { class: "hint" }, "读取已挂载记忆…"),
+    el("div", { class: "hint" }, "读取已挂载技能库…"),
   );
   api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/memory`)
     .then((payload) => host.replaceChildren(mountedMemorySection(detail, payload)))
     .catch((error) =>
       host.replaceChildren(
-        el("div", { class: "hint warn" }, `读不到已挂载记忆：${error.message}`),
+        el("div", { class: "hint warn" }, `读不到已挂载技能库：${error.message}`),
       ),
     );
   return host;
@@ -7146,14 +7147,14 @@ function mountedMemorySection(detail, payload) {
     return el(
       "div",
       { class: "hint warn" },
-      `运行记忆快照不可读：${payload.error}`,
+      `技能库快照不可读：${payload.error}`,
     );
   const snapshot = payload.snapshot;
   if (!snapshot)
     return el(
       "div",
       { class: "hint" },
-      `已挂载记忆 · ${payload.mode || "—"} · 快照待会话启动时补建`,
+      `已挂载技能库 · ${payload.mode || "—"} · 快照待会话启动时补建`,
     );
   const sources = snapshot.sources || [];
   const curated = sources.reduce(
@@ -7161,7 +7162,7 @@ function mountedMemorySection(detail, payload) {
     0,
   );
   const summary = [
-    "已挂载记忆",
+    "已挂载技能库",
     snapshot.mode || payload.mode || "—",
     `精选 ${curated}`,
   ].join(" · ");
@@ -7180,7 +7181,7 @@ function mountedMemorySection(detail, payload) {
     ),
     sources.length
       ? mountedEntriesList(detail.experiment_id, sources)
-      : el("div", { class: "empty compact" }, "本实验没有挂载运行记忆"),
+      : el("div", { class: "empty compact" }, "本实验没有挂载技能库"),
   );
   return fold;
 }

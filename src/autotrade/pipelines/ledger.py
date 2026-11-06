@@ -2,13 +2,13 @@
 
 One JSONL file per experiment. The pipeline writes three record types:
 
-- ``research_session``: the arm's one research session, its outcome and the
-  Steps of every attempt; it carries the arm's ``frozen`` block when the
-  nominee registered for the freeze, otherwise ``arm_end``;
-- ``test_step``: one step of the arm's rolling record, appended by a
-  session's ``test`` or by the host's completion (``rolling_record``);
-- ``forward``: the frozen artifact's continuous forward and Held-out
-  replay, the two slices and the arm's readout (``rolling_record.readout``);
+- ``research_session``: the experiment's one research session, its outcome and the
+  Steps of every attempt; it carries the experiment's ``frozen`` block when the
+  nominee registered, otherwise ``experiment_end``;
+- ``test_step``: one step of the experiment's validation record, appended by a
+  session's ``test`` or by the host's completion (``validation_record``);
+- ``forward``: the registered artifact's continuous forward and Held-out
+  replay, the two slices and the experiment's readout (``validation_record.readout``);
 - ``attempt_failed``: a session or replay that raised before its business
   record. It carries the error evidence and is ignored by every reader of the
   business types, so the attempt is re-runnable but auditable. A run killed
@@ -20,12 +20,12 @@ An operator may append one more, by hand and never by the pipeline:
 ``verdict_void`` withdraws a graduation recorded under the sealed-gate rules
 that later evidence showed was not one (who, when, why, and where the
 evidence is). The forward record stays as produced; :func:`experiment_verdict`
-reads the arm as ``voided``. Nothing grades a readout, so nothing voids one.
-Until 2026-11-03 an operator could incubate one node of an arm whose research
+reads the experiment as ``voided``. Nothing grades a readout, so nothing voids one.
+Until 2026-11-03 an operator could incubate one node of an experiment whose research
 ended without a graduation, which appended ``incubation`` (the node's
-entry-screen reading, the artifact it froze, its forward and Held-out reading
+entry-screen reading, the artifact it registered, its forward and Held-out reading
 and the forward screen on it); nothing appends one any more, and the
-frozen-tree prune keeps what one froze (:func:`incubation_record`). An arm
+frozen-tree prune keeps what one registered (:func:`incubation_record`). An experiment
 created before then with ``lineage_arms`` may also carry a ``lineage``
 record, which nothing reads.
 
@@ -51,7 +51,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 
-from autotrade.common.records import write_json_atomic
+from autotrade.common.records import with_current_keys, write_json_atomic
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
@@ -70,39 +70,39 @@ class Stage(StrEnum):
 
 
 class SessionKind(StrEnum):
-    """The arm's two planned sessions, the research session and the forward
+    """The experiment's two planned sessions, the research session and the forward
     replay: each one's kind and key, which is also its records' ``fold_id``."""
 
     RESEARCH = "research"
     FORWARD = "forward"
 
 
-# One step of the arm's rolling record (``pipelines/rolling_record.py``):
+# One step of the experiment's validation record (``pipelines/validation_record.py``):
 # appended by the session's ``test`` as the step completes, or by the host
 # completing the record after the session; a step is recorded exactly once.
 TEST_STEP_RECORD_TYPE = "test_step"
 # An operator's withdrawal of a recorded graduation (:func:`verdict_void_record`).
 VERDICT_VOID_RECORD_TYPE = "verdict_void"
-# An operator's incubation of one node of a finished arm, recorded before
+# An operator's incubation of one node of a finished experiment, recorded before
 # 2026-11-03; its link keys are ``epoch_id=forward``, ``fold_id=incubation``
 # and ``run_id=incubation_<hex>``.
 INCUBATION_RECORD_TYPE = "incubation"
-# How a research session ends the arm without a freeze (``arm_end.status``).
+# How a research session ends the experiment without a registration (``experiment_end.status``).
 # ``no_deliverable`` is a research outcome: the Agent's no_edge, a spent budget,
 # a nomination that did not register. ``environment_blocked`` is not one: the
 # host kept failing the session's replays on one span and ended the session
 # (``session_tools.EnvironmentBlocked``), so nothing there was tested. Such an
-# arm is flagged on the console's home list.
+# experiment is flagged on the console's home list.
 
 
 class VerdictStatus(StrEnum):
-    """An arm's terminal status (:func:`experiment_verdict`): a forward record's
-    readout, ``frozen_with_record``; the ``arm_end`` status of a research
-    session that ended the arm; or, on an arm judged under the sealed-gate
+    """An experiment's terminal status (:func:`experiment_verdict`): a forward record's
+    readout, ``registered_with_record``; the ``experiment_end`` status of a research
+    session that ended the experiment; or, on an experiment judged under the sealed-gate
     rules, its forward record's ``graduated`` or ``discarded`` and ``voided``
     over a withdrawn graduation, which stay readable."""
 
-    FROZEN_WITH_RECORD = "frozen_with_record"
+    REGISTERED_WITH_RECORD = "registered_with_record"
     GRADUATED = "graduated"
     DISCARDED = "discarded"
     VOIDED = "voided"
@@ -110,9 +110,9 @@ class VerdictStatus(StrEnum):
     ENVIRONMENT_BLOCKED = "environment_blocked"
 
 
-# Also the research session's outcome that ends the arm with this status.
+# Also the research session's outcome that ends the experiment with this status.
 ENVIRONMENT_BLOCKED = VerdictStatus.ENVIRONMENT_BLOCKED
-ARM_END_STATUSES = (VerdictStatus.NO_DELIVERABLE, VerdictStatus.ENVIRONMENT_BLOCKED)
+EXPERIMENT_END_STATUSES = (VerdictStatus.NO_DELIVERABLE, VerdictStatus.ENVIRONMENT_BLOCKED)
 PIPELINE_RECORD_TYPES = (
     "research_session",
     TEST_STEP_RECORD_TYPE,
@@ -134,13 +134,13 @@ VERDICT_VOID_FIELDS = ("voided_by", "reason", "evidence_ref", "recorded_at")
 # exception: the one replay failure that measures the strategy. Every other
 # failure fails the attempt and never reaches a business record.
 STRATEGY_ERROR = "strategy_error"
-# The key under which an arm frozen between 2026-11-03 and 2026-11-05 recorded
+# The key under which an experiment registered between 2026-11-03 and 2026-11-05 recorded
 # the ablation it registered: in its research session record's
 # ``freeze_gate`` and ``frozen`` blocks and its forward record's ``sealed``
 # block. The ablation was retired on 2026-11-05 with its registration, its
 # sealed replay and its increment, and nothing judges or replays it any more.
 # One reader still names it: the frozen tree it points at is kept from the
-# prune (``experiment._keep_frozen_artifact_ids``). Such an arm states the
+# prune (``experiment._keep_registered_artifact_ids``). Such an experiment states the
 # sealed gate's rules, so the readings check (``scripts/dev/check_verdicts.py``)
 # never judges it again.
 RETIRED_ABLATION_KEY = "ablation"
@@ -163,23 +163,23 @@ UNREADABLE_RUN_MARKER_ERROR = (
 UNKNOWN_MARKER_LINK_KEY = "unknown"
 
 
-class FrozenArtifactMutated(RuntimeError):
-    """Frozen output/models changed during a replay of the frozen artifact.
+class RegisteredArtifactMutated(RuntimeError):
+    """Frozen output/models changed during a replay of the registered artifact.
 
     The integrity record is already in the ledger. Same-process retries and
     resume must refuse until a human rolls back the dirty trees.
     """
 
 
-class FrozenArtifactRestoreFailed(FrozenArtifactMutated):
+class RegisteredArtifactRestoreFailed(RegisteredArtifactMutated):
     """Mutation was detected, but pre-evaluation frozen bytes could not be restored.
 
-    Worse than ``FrozenArtifactMutated``: the live trees must not be treated as
+    Worse than ``RegisteredArtifactMutated``: the live trees must not be treated as
     clean. The integrity record is still written when the caller can append it.
     """
 
 
-def is_frozen_artifact_mutation(record: Mapping[str, object]) -> bool:
+def is_registered_artifact_mutation(record: Mapping[str, object]) -> bool:
     """True when a row flags frozen output/models as changed."""
     return (
         record.get("record_type") in _INTEGRITY_RECORD_TYPES
@@ -196,14 +196,14 @@ def is_durable_success_record(
     types = record_types if record_types is not None else DURABLE_SUCCESS_TYPES
     if record.get("record_type") not in types:
         return False
-    return not is_frozen_artifact_mutation(record)
+    return not is_registered_artifact_mutation(record)
 
 
-def assert_no_frozen_artifact_mutation(records: list[dict[str, object]]) -> None:
+def assert_no_registered_artifact_mutation(records: list[dict[str, object]]) -> None:
     """Refuse further pipeline work while an integrity-failure row remains."""
     for record in records:
-        if is_frozen_artifact_mutation(record):
-            raise FrozenArtifactMutated(
+        if is_registered_artifact_mutation(record):
+            raise RegisteredArtifactMutated(
                 "strategy or model artifacts changed during the "
                 f"{record.get('record_type')} replay; refuse retry and resume "
                 "until the frozen trees are rolled back"
@@ -215,7 +215,7 @@ def recorded_path(experiment_dir: str | Path, reference: str | Path) -> Path:
 
     Records name what the pipeline wrote by the host path it was written at,
     and an experiment directory keeps its records when it moves (a renamed
-    checkout, an arm synced from another host). What is fixed is the path
+    checkout, an experiment synced from another host). What is fixed is the path
     below the experiment's own directory, so a recorded absolute path is read
     as its tail after the last ``<experiments root>/<experiment id>`` pair,
     named as ``experiment_dir`` is now, under ``experiment_dir``; a relative
@@ -253,21 +253,21 @@ def research_records(records: Sequence[Mapping[str, object]]) -> list[dict[str, 
     ]
 
 
-def frozen_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The research session record that froze the arm's artifact, or None.
+def registered_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    """The research session record that registered the experiment's artifact, or None.
 
-    An arm freezes at most once; a ledger holding two freezes is corrupt and
+    An experiment registers at most once; a ledger holding two registrations is corrupt and
     raises rather than letting a reader pick one.
     """
 
     frozen = [record for record in research_records(records) if record.get("frozen")]
     if len(frozen) > 1:
-        raise ValueError("the ledger holds more than one freeze for one arm")
+        raise ValueError("the ledger holds more than one registration for one experiment")
     return frozen[0] if frozen else None
 
 
 def forward_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The arm's forward verdict record, or None; an integrity row is not one."""
+    """The experiment's forward verdict record, or None; an integrity row is not one."""
 
     rows = [
         dict(record)
@@ -275,52 +275,52 @@ def forward_record(records: Sequence[Mapping[str, object]]) -> dict[str, object]
         if is_durable_success_record(record, record_types=("forward",))
     ]
     if len(rows) > 1:
-        raise ValueError("the ledger holds more than one forward verdict for one arm")
+        raise ValueError("the ledger holds more than one forward verdict for one experiment")
     return rows[0] if rows else None
 
 
 def verdict_void_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The operator's void of the arm's graduation, or None. At most one."""
+    """The operator's void of the experiment's graduation, or None. At most one."""
 
     rows = [
         dict(record) for record in records if record.get("record_type") == VERDICT_VOID_RECORD_TYPE
     ]
     if len(rows) > 1:
-        raise ValueError("the ledger holds more than one verdict void for one arm")
+        raise ValueError("the ledger holds more than one verdict void for one experiment")
     return rows[0] if rows else None
 
 
 def incubation_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The arm's one incubation, or None. Two are a corrupt ledger and raise."""
+    """The experiment's one incubation, or None. Two are a corrupt ledger and raise."""
 
     rows = [
         dict(record) for record in records if record.get("record_type") == INCUBATION_RECORD_TYPE
     ]
     if len(rows) > 1:
-        raise ValueError("the ledger holds more than one incubation for one arm")
+        raise ValueError("the ledger holds more than one incubation for one experiment")
     return rows[0] if rows else None
 
 
 def research_over(records: Sequence[Mapping[str, object]]) -> bool:
-    """Whether research has ended: an artifact froze, or a session ended the arm."""
+    """Whether research has ended: an artifact registered, or a session ended the experiment."""
 
-    return frozen_record(records) is not None or any(
-        record.get("arm_end") for record in research_records(records)
+    return registered_record(records) is not None or any(
+        record.get("experiment_end") for record in research_records(records)
     )
 
 
 def experiment_verdict(
     records: Sequence[Mapping[str, object]],
 ) -> dict[str, object] | None:
-    """The arm's terminal status: ``frozen_with_record`` from its forward
+    """The experiment's terminal status: ``registered_with_record`` from its forward
     record's readout (nothing gates; the record and the reading are the
-    status), the ``arm_end`` status (:data:`ARM_END_STATUSES`) when research
-    ended without a freeze, else None. A forward record judged under the
+    status), the ``experiment_end`` status (:data:`EXPERIMENT_END_STATUSES`) when research
+    ended without a registration, else None. A forward record judged under the
     sealed-gate rules reads ``graduated``/``discarded``, or ``voided`` when an
     operator withdrew that graduation.
 
     The single source for the terminal status, the console and Paper: a
-    voided arm is terminal, is no graduate to any of them, and keeps its
+    voided experiment is terminal, is no graduate to any of them, and keeps its
     forward record's own reasons beside the void.
     """
 
@@ -347,26 +347,26 @@ def experiment_verdict(
             "void": {key: void.get(key) for key in VERDICT_VOID_FIELDS},
         }
     if void is not None:
-        raise ValueError("a verdict void stands on an arm without a forward verdict")
-    if frozen_record(records) is not None:
+        raise ValueError("a verdict void stands on an experiment without a forward verdict")
+    if registered_record(records) is not None:
         return None
     ended = next(
-        (record for record in research_records(records) if record.get("arm_end")),
+        (record for record in research_records(records) if record.get("experiment_end")),
         None,
     )
     if ended is None:
         return None
-    arm_end = ended["arm_end"]
-    status = arm_end.get("status") if isinstance(arm_end, Mapping) else None
-    if not isinstance(arm_end, Mapping) or status not in ARM_END_STATUSES:
-        raise ValueError(f"research session record ends the arm with an unknown status {status!r}")
-    return {"status": status, "reasons": [str(arm_end.get("reason") or "")]}
+    experiment_end = ended["experiment_end"]
+    status = experiment_end.get("status") if isinstance(experiment_end, Mapping) else None
+    if not isinstance(experiment_end, Mapping) or status not in EXPERIMENT_END_STATUSES:
+        raise ValueError(f"research session record ends the experiment with an unknown status {status!r}")
+    return {"status": status, "reasons": [str(experiment_end.get("reason") or "")]}
 
 
 def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The artifact a Paper book trades: the frozen strategy of an arm with its
-    forward record (``frozen_with_record``) whose forward replay completed (a
-    book continues that replay's history), or the graduate of an arm judged
+    """The artifact a Paper account trades: the registered strategy of an experiment with its
+    forward record (``registered_with_record``) whose forward replay completed (a
+    book continues that replay's history), or the graduate of an experiment judged
     under the sealed-gate rules; else None."""
 
     forward = forward_record(records)
@@ -374,13 +374,13 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
         return None
     verdict = experiment_verdict(records)
     if verdict is None or verdict["status"] not in (
-        VerdictStatus.FROZEN_WITH_RECORD,
+        VerdictStatus.REGISTERED_WITH_RECORD,
         VerdictStatus.GRADUATED,
     ):
         return None
-    frozen = frozen_record(records)
+    frozen = registered_record(records)
     if frozen is None:
-        raise ValueError("an arm with a forward record has no frozen record")
+        raise ValueError("an experiment with a forward record has no registered record")
     block = frozen["frozen"]
     return {
         "artifact_id": str(block["artifact_id"]),
@@ -403,22 +403,22 @@ class ExperimentLedger:
         if (
             record_type == "research_session"
             and record.get("frozen")
-            and frozen_record(self.read()) is not None
+            and registered_record(self.read()) is not None
         ):
-            raise ValueError("the arm already froze an artifact; a second freeze is refused")
+            raise ValueError("the experiment already registered an artifact; a second registration is refused")
         if (
             record_type == "forward"
-            and not is_frozen_artifact_mutation(record)
+            and not is_registered_artifact_mutation(record)
             and forward_record(self.read()) is not None
         ):
-            raise ValueError("the arm already has its forward verdict")
+            raise ValueError("the experiment already has its forward verdict")
         if record_type == TEST_STEP_RECORD_TYPE:
             step = record.get("step")
             if any(
                 row.get("record_type") == TEST_STEP_RECORD_TYPE and row.get("step") == step
                 for row in self.read()
             ):
-                raise ValueError(f"the arm already recorded test step {step!r}; a step is replayed once")
+                raise ValueError(f"the experiment already recorded test step {step!r}; a step is replayed once")
         if record_type == VERDICT_VOID_RECORD_TYPE:
             require_voidable(self.read(), record)
         append_versioned_jsonl(
@@ -457,10 +457,14 @@ class ExperimentLedger:
         tmp.replace(self.path)
 
     def read(self, record_type: str | None = None) -> list[dict[str, object]]:
-        records = read_versioned_jsonl(
-            self.path,
-            schema_version=LEDGER_RECORD_SCHEMA_VERSION,
-            label="ledger record",
+        # Under today's key names: the one place a ledger written before a
+        # rename is read (``records.LEGACY_KEYS``).
+        records = with_current_keys(
+            read_versioned_jsonl(
+                self.path,
+                schema_version=LEDGER_RECORD_SCHEMA_VERSION,
+                label="ledger record",
+            )
         )
         if record_type is None:
             return records
@@ -470,7 +474,7 @@ class ExperimentLedger:
 def verdict_void(
     experiment_id: str, *, voided_by: str, reason: str, evidence_ref: str
 ) -> dict[str, object]:
-    """The record that withdraws one arm's recorded graduation.
+    """The record that withdraws one experiment's recorded graduation.
 
     Appended once, by an operator (``scripts/experiments/void_graduation.py``),
     never by a run: its ``run_id`` names the record type. ``recorded_at`` is
@@ -499,11 +503,11 @@ def require_voidable(
     if missing:
         raise ValueError(f"a verdict void must state {missing}")
     if verdict_void_record(records) is not None:
-        raise ValueError("the arm's graduation is already voided")
+        raise ValueError("the experiment's graduation is already voided")
     verdict = experiment_verdict(records)
     if verdict is None or verdict["status"] != VerdictStatus.GRADUATED:
         status = None if verdict is None else verdict["status"]
-        raise ValueError(f"only a recorded graduation can be voided; the arm's verdict is {status!r}")
+        raise ValueError(f"only a recorded graduation can be voided; the experiment's verdict is {status!r}")
 
 
 class RunMarkers:

@@ -38,7 +38,7 @@ from autotrade.webui import trading
 from autotrade.webui.equity import result_equity_payload
 from autotrade.webui.server import create_app
 from tests.unit.paper_book_fixture import engine_book, paper_root, write_book_record
-from tests.unit.webui_research_arm import REPLAY, build_arm
+from tests.unit.webui_research_experiment import REPLAY, build_experiment
 
 BOOK = "exp"
 # The panels one book's page reads, each under /api/trading/<env>/books/<book>/.
@@ -239,7 +239,7 @@ def test_performance_keys_return_equity_cash_and_csi300_by_the_same_settled_days
 
 
 def test_a_book_names_the_index_it_froze_wherever_the_benchmark_is_spoken_of(tmp_path: Path):
-    """A book is measured against its source arm's index, so its tiles, notes
+    """A book is measured against its source experiment's index, so its tiles, notes
     and curve all name that index; none of them may say CSI 300 for it."""
     root = engine_book(tmp_path, "20260105", "20260106", "20260107")
     write_book_record(root, benchmark_index="000905.SH")
@@ -262,11 +262,11 @@ def test_a_book_carries_the_source_curve_the_console_projects_for_that_result(tm
     therefore copied into the book when the book is created — projected by the
     same code the console projects that very result with."""
     experiments = tmp_path / "experiments"
-    arm = build_arm(experiments, "exp", "graduated")
+    experiment = build_experiment(experiments, "exp", "graduated")
     root = engine_book(tmp_path, "20260105", "20260106")
-    copy_source_history(root, arm)
+    copy_source_history(root, experiment)
     payload = trading.performance_payload(tmp_path, BOOK)
-    source, console = payload["source"], result_equity_payload(experiments, "exp", _forward_result(arm))
+    source, console = payload["source"], result_equity_payload(experiments, "exp", _forward_result(experiment))
     assert payload["source_error"] is None
     assert source["experiment_id"] == "exp" and source["heldout_start"] == REPLAY["heldout_start"]
     assert source["series"][0]["dates"] == console["series"][0]["dates"]
@@ -286,35 +286,35 @@ def test_a_book_carries_the_source_curve_the_console_projects_for_that_result(tm
     )
 
 
-def test_a_moved_arm_copies_its_forward_result_and_nothing_outside_it(tmp_path: Path):
+def test_a_moved_experiment_copies_its_forward_result_and_nothing_outside_it(tmp_path: Path):
     """The forward record names its replay by the host path it was written at.
-    A book opened from an arm moved since copies that replay from where the arm
-    now lives; a record naming a path outside the arm is refused."""
+    A book opened from an experiment moved since copies that replay from where the experiment
+    now lives; a record naming a path outside the experiment is refused."""
     old_root = tmp_path / "old/experiments"
-    build_arm(old_root, "exp", "graduated")
+    build_experiment(old_root, "exp", "graduated")
     experiments = tmp_path / "experiments"
     old_root.rename(experiments)
-    arm = experiments / "exp"
-    ledger = ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl")
+    experiment = experiments / "exp"
+    ledger = ExperimentLedger(experiment / "ledgers/experiment_ledger.jsonl")
     assert str(old_root / "exp") in json.dumps(ledger.read())
     root = engine_book(tmp_path, "20260105", "20260106")
-    copy_source_history(root, arm)
+    copy_source_history(root, experiment)
     source = trading.performance_payload(tmp_path, BOOK)["source"]
-    console = result_equity_payload(experiments, "exp", _forward_result(arm))
+    console = result_equity_payload(experiments, "exp", _forward_result(experiment))
     assert source["series"][0]["cum"] == console["series"][0]["cum"]
 
     (root / SOURCE_HISTORY_NAME).unlink()
     outside = {**forward_record(ledger.read()), "result_ref": str(tmp_path / "elsewhere/result.json")}
     with pytest.raises(FileNotFoundError, match="outside the experiment"):
-        copy_source_history(root, arm, outside)
+        copy_source_history(root, experiment, outside)
     assert not (root / SOURCE_HISTORY_NAME).exists()
 
 
-def test_an_arm_without_a_forward_record_has_no_history_to_copy(tmp_path: Path):
+def test_an_experiment_without_a_forward_record_has_no_history_to_copy(tmp_path: Path):
     """The forward record names the replay that carries the verdict's slices;
     without it there is nothing to copy, and init must say so rather than
     leaving a book that silently has no history."""
-    sealed = build_arm(tmp_path / "experiments", "sealed_arm", "sealed")
+    sealed = build_experiment(tmp_path / "experiments", "sealed_experiment", "sealed")
     root = engine_book(tmp_path, "20260105")
     with pytest.raises(ValueError, match="no forward verdict record"):
         copy_source_history(root, sealed)
@@ -443,10 +443,10 @@ def test_env_and_book_whitelists_reject_everything_else(tmp_path: Path):
     assert trading.book_dir(tmp_path, BOOK) == tmp_path / "data/trading/paper" / BOOK
 
 
-def test_the_console_opens_a_frozen_strategys_book_and_deletes_it_between_runs(tmp_path: Path):
+def test_the_console_opens_a_registered_strategys_book_and_deletes_it_between_runs(tmp_path: Path):
     experiments = tmp_path / "elsewhere"  # the console's experiments root
-    build_arm(experiments, "exp", "frozen_with_record")
-    build_arm(experiments, "loser", "discarded")
+    build_experiment(experiments, "exp", "registered_with_record")
+    build_experiment(experiments, "loser", "discarded")
     client = TestClient(create_app(tmp_path, experiments))
 
     def open_book(experiment_id: str, env: str = "paper"):
@@ -455,7 +455,7 @@ def test_the_console_opens_a_frozen_strategys_book_and_deletes_it_between_runs(t
     assert open_book("exp", env="live").status_code == 404
     assert open_book("missing").status_code == 404
     refused = open_book("loser")
-    assert refused.status_code == 400 and "no frozen strategy with a forward record" in refused.json()["detail"]
+    assert refused.status_code == 400 and "no registered strategy with a forward record" in refused.json()["detail"]
     assert open_book("exp").json() == {"env": "paper", "book_id": "exp"}
     assert [row["book_id"] for row in client.get("/api/trading/paper/books").json()["books"]] == ["exp"]
 

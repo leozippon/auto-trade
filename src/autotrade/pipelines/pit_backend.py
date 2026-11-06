@@ -27,7 +27,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    read_current_record,
+    read_json_object,
+    write_json_atomic,
+)
 from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
@@ -52,9 +56,9 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.null_control import (
-    PANEL_DRAWS,
+    BASELINE_DRAWS,
     NullControlSetupError,
-    ZeroSkillPanelError,
+    RandomBaselineError,
     run_null_control,
 )
 from autotrade.environment.replay.stats import (
@@ -258,7 +262,7 @@ class ResearchPITSnapshotProvider:
                         f"{existing.get('schema_version')!r}, this code requires {record['schema_version']}: "
                         "a view built under another format is never reused, so the cache must be rebuilt: "
                         f"remove {self.cache_root} and its views are rebuilt from the pinned release on the "
-                        "next start (a PIT view seed is rebuilt under a new directory instead)"
+                        "next start (a prebuilt view cache is rebuilt under a new directory instead)"
                     )
                 if contract_identity(existing) != contract_identity(record):
                     raise RuntimeError("PIT view cache is already bound to a different release or configuration")
@@ -762,18 +766,18 @@ def _span_corporate_actions(
     return pd.concat(filled, ignore_index=True)
 
 
-def panel_seed(start: str, end: str) -> int:
-    """The zero-skill panel's seed for a replay of ``start``..``end``.
+def baseline_seed(start: str, end: str) -> int:
+    """The random baseline's seed for a replay of ``start``..``end``.
 
-    The draws a panel makes are a function of this seed and of what was
+    The draws a random baseline makes are a function of this seed and of what was
     replayed: the book's own trade skeleton (entry, exit and money per round
     trip), the matching pool (the benchmark's membership, what a trip's money
-    can buy) and the slot's bars. Nothing naming the arm, the revision or the
-    session enters, so identical trades on one span meet the identical panel
-    in every arm -- paired arms and lineage follow-ups read the same number --
+    can buy) and the slot's bars. Nothing naming the experiment, the revision or the
+    session enters, so identical trades on one span meet the identical random baseline
+    in every experiment -- paired experiments and lineage follow-ups read the same number --
     and neither a resubmission nor a byte change that leaves the trades alone
-    can re-roll it; an arm's candidates and controls on a span share draws.
-    This makes a book's panel noise reproducible, not smaller.
+    can re-roll it; an experiment's candidates and controls on a span share draws.
+    This makes a book's random baseline noise reproducible, not smaller.
     """
 
     return null_control_seed(f"{start}:{end}", "panel")
@@ -854,9 +858,9 @@ class PITDailyEvaluationBackend:
             raise ValueError("execution_mode must be sandbox or trusted")
         self.results_root = Path(results_root).resolve()
         self.execution_mode = execution_mode
-        # The arm's benchmark, for every replay this backend runs: the series
+        # The experiment's benchmark, for every replay this backend runs: the series
         # the attribution and the verdict regress on, and the membership the
-        # zero-skill panel draws replacements from. Refused here if the lake
+        # random baseline draws replacements from. Refused here if the lake
         # does not carry it, so a wrong code cannot reach a replay.
         benchmark_index_label(benchmark_index)
         self.benchmark_index = benchmark_index
@@ -886,10 +890,10 @@ class PITDailyEvaluationBackend:
         the real as-of view, ABI and executor without being able to pass off a
         short window as a full Validation (the caller decides what the result
         is allowed to become; see ``SmokeBacktestTool``), and draws no
-        zero-skill panel. ``end_day`` is a test's: the window opens on the
+        random baseline. ``end_day`` is a test's: the window opens on the
         span's first day, so it writes the span's own as-of parts and is
-        graded against its matched panel like any Validation, and stops at the
-        frontier. A window that opens late still reads the same rolling as-of
+        graded against its matched random baseline like any Validation, and stops at the
+        test horizon. A window that opens late still reads the same rolling as-of
         view the whole span would have built by then: the view rolls every
         slot up to the first decision it is asked for.
         """
@@ -1083,39 +1087,39 @@ class PITDailyEvaluationBackend:
                     else {}
                 ),
             }
-            # The zero-skill panel the verdict grades this replay against, drawn
+            # The random baseline the verdict grades this replay against, drawn
             # from its completed executions once it is over: every draw runs
             # through a Broker of its own, so nothing here reaches the record
             # above. A smoke run is not a Validation and gets none; a test's
-            # window, cut only at the frontier, is graded like any other.
-            panel = None
+            # window, cut only at the test horizon, is graded like any other.
+            baselines = None
             if max_days is None and start_day is None:
-                panel_failure: Exception | None = None
-                with timer.phase("zero_skill_panel"):
+                baseline_failure: Exception | None = None
+                with timer.phase("random_baselines"):
                     try:
-                        panel = run_null_control(
+                        baselines = run_null_control(
                             replay,
                             daily,
                             slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index),
                             request.broker_profile,
                             request.schedule,
-                            seed=panel_seed(replay_start, replay_end),
+                            seed=baseline_seed(replay_start, replay_end),
                             corporate_actions=corporate_actions,
                             membership=slot_membership(
                                 (snapshot_dir, *replay_dirs),
                                 benchmark_index=self.benchmark_index,
                             ),
-                            panel=True,
+                            baselines=True,
                         )
-                    except Exception as exc:  # noqa: BLE001 - every panel failure is the host's
-                        panel_failure = exc
-                if panel_failure is not None:
+                    except Exception as exc:  # noqa: BLE001 - every random baseline failure is the host's
+                        baseline_failure = exc
+                if baseline_failure is not None:
                     # Raised outside the handler so it carries no context
-                    # either: see ZeroSkillPanelError.
-                    raise ZeroSkillPanelError(
-                        "the zero-skill panel failed after the candidate's own replay "
+                    # either: see RandomBaselineError.
+                    raise RandomBaselineError(
+                        "the random baseline failed after the candidate's own replay "
                         "finished; the candidate was not measured against it: "
-                        f"{type(panel_failure).__name__}: {panel_failure}"
+                        f"{type(baseline_failure).__name__}: {baseline_failure}"
                     )
             with timer.phase("style_analysis"):
                 style = replay_style_analysis(
@@ -1128,7 +1132,7 @@ class PITDailyEvaluationBackend:
                         for slot in slots
                     ],
                     mode=request.mode,
-                    panel=panel,
+                    baselines=baselines,
                     benchmark_index=self.benchmark_index,
                 )
             summary = record.get("stats")
@@ -1165,7 +1169,7 @@ class PITDailyEvaluationBackend:
             if not keep_result_dir:
                 shutil.rmtree(result_dir, ignore_errors=True)
 
-    def require_warm_start(self, request: EvaluationRequest) -> None:
+    def require_prebuilt_asof_state(self, request: EvaluationRequest) -> None:
         """Refuse a replay whose first slot has no prebuilt as-of state.
 
         A test replays the validation span from its first day, so the span
@@ -1173,7 +1177,7 @@ class PITDailyEvaluationBackend:
         (``pit_views_seed.plan_seed`` plans one per research-years choice,
         ``prebuild_asof_stash`` writes it). A seed without it would encode the
         slot's parts inside the session instead; the missing state is named
-        (``RuntimeError``) so the seed can be rebuilt for this arm's
+        (``RuntimeError``) so the seed can be rebuilt for this experiment's
         ``research_years``.
         """
 
@@ -1182,10 +1186,10 @@ class PITDailyEvaluationBackend:
         stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, request.schedule, request.mode)
         if not (stash_dir / _STASH_PREBUILD_RECORD).is_file():
             raise RuntimeError(
-                f"the PIT view seed carries no prebuilt as-of state for decision view "
+                f"the prebuilt view cache carries no prebuilt as-of state for decision view "
                 f"{snapshot_dir.name} and replay slot {replay_dir.name} (schedule "
-                f"{request.schedule.to_record()}); rebuild the seed with this arm's "
-                "research_years among its warm starts (scripts/data/prebuild_pit_views_seed.py)"
+                f"{request.schedule.to_record()}); rebuild the seed with this experiment's "
+                "research_years among its prebuilt as-of states (scripts/data/prebuild_pit_views_seed.py)"
             )
 
     def null_control(
@@ -1198,7 +1202,7 @@ class PITDailyEvaluationBackend:
         schedule: StrategySchedule,
         seed: int,
         step: tuple[str, str] | None = None,
-        k: int = PANEL_DRAWS,
+        k: int = BASELINE_DRAWS,
     ) -> dict[str, object]:
         """Random-portfolio null control for one completed evaluation.
 
@@ -1209,14 +1213,14 @@ class PITDailyEvaluationBackend:
         host-only record beside it rather than by this process's memory, and
         only their bars, benchmark, membership and ex-date tables are read, so
         no snapshot is rebuilt or decoded. The percentile is informational; the
-        panel a verdict grades against is the one ``evaluate`` stored with the
+        random baseline a verdict grades against is the one ``evaluate`` stored with the
         result.
         """
 
         result_json = _result_json(result_path)
         try:
             decision_dir, replay_dirs = _result_replay_slots(result_json)
-            record = read_json_object(result_json)
+            record = read_current_record(result_json)
             daily = _span_daily(replay_dirs, start, end)
             benchmark = slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index)
             membership = slot_membership(

@@ -2,7 +2,7 @@
 """Run an experiment's research session for a process audit.
 
 This is intentionally narrower than the interactive worker. It is for manual
-process audits where running the whole arm would hide the session being
+process audits where running the whole experiment would hide the session being
 inspected: the Prompt, Trace, Sandbox and artifact handoff of the research
 session alone, with a short budget.
 
@@ -66,14 +66,14 @@ def main() -> int:
     parser.add_argument(
         "--workspace-reference",
         help=(
-            "Repo-relative reference pack mounted read-only into the session, "
+            "Repo-relative reference workspace mounted read-only into the session, "
             "the way the console mounts an experiment's refs; none by default."
         ),
     )
     parser.add_argument(
         "--operating-memory",
         choices=OPERATING_MEMORY_MODES,
-        help="Operating-memory mode for this session; the console default when omitted.",
+        help="Skill-library mode for this session; the console default when omitted.",
     )
     parser.add_argument(
         "--directive-file",
@@ -132,7 +132,7 @@ def main() -> int:
         "run_id": record["run_id"],
         "outcome": record["outcome"],
         "validations": len(record.get("steps") or ()),
-        "frozen_strategy_artifact_id": (
+        "registered_strategy_artifact_id": (
             frozen.get("artifact_id") if isinstance(frozen, dict) else None
         ),
         "experiment_dir": str(options.experiment_dir),

@@ -1,6 +1,6 @@
 """The worker's parameter contract, its model roles and its runner controls.
 
-The research arm itself runs end to end in ``test_research_arm_worker.py``;
+The research experiment itself runs end to end in ``test_research_experiment_worker.py``;
 the scripted Agent helpers at the bottom of this module are shared with it.
 """
 
@@ -24,7 +24,7 @@ from autotrade.environment.llm import (
     ToolCall,
 )
 from autotrade.environment.tools import CommandResult
-from autotrade.pipelines.arm_params import RETIRED_NL_PARAMS
+from autotrade.pipelines.experiment_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     ControlState,
@@ -103,7 +103,7 @@ def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
 ) -> None:
     """The worker keeps no fallback of its own: a key the file leaves out
     reads the parameter's one declared default, the value a console create
-    stamps, so such a file runs as a console-created arm does -- each model
+    stamps, so such a file runs as a console-created experiment does -- each model
     role its own, the sub-agents not following the main model."""
     from autotrade.environment.llm import effective_max_output_tokens
     from autotrade.pipelines.worker import resolve_worker_options
@@ -158,7 +158,7 @@ def test_the_worker_attaches_exactly_the_cards_the_console_claimed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Without a claim the request names no device; with one the run pins
-    those devices, and a claim that disagrees with the arm's GPU count stops
+    those devices, and a claim that disagrees with the experiment's GPU count stops
     the worker instead of attaching some other number of cards."""
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
@@ -224,8 +224,8 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
 def test_worker_accepts_and_ignores_the_retired_nl_params(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Arms created before the host NL interface was removed carry its
-    parameters. Such an arm loads exactly as one without them, whatever they
+    """Experiments created before the host NL interface was removed carry its
+    parameters. Such an experiment loads exactly as one without them, whatever they
     say (a hosted model, a failing policy, values no check would pass), and
     no gateway is built for the retired role."""
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
@@ -336,13 +336,13 @@ def test_llm_key_puts_every_relay_role_on_the_chosen_key_at_each_start(
 
 
 
-def test_an_arm_without_the_boundary_keys_keeps_todays_containers_and_one_with_them_gets_its_own(
+def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one_with_them_gets_its_own(
     tmp_path: Path, monkeypatch
 ):
     """The strategy container's CPUs, memory and per-call inference limit are
-    arm parameters. An arm whose params.json predates them -- every arm created
+    experiment parameters. An experiment whose params.json predates them -- every experiment created
     before them, running or resumable -- starts with exactly the executor's
-    defaults in its strategy and session containers; an arm that names them
+    defaults in its strategy and session containers; an experiment that names them
     gets them in both, and in the facts its sessions read (through the run
     manifest, from the evaluator's own limits)."""
 
@@ -547,7 +547,7 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
 
 
 
-def test_a_console_default_arm_compacts_gpt6_astra_at_its_maximum(
+def test_a_console_default_experiment_compacts_gpt6_astra_at_its_maximum(
     tmp_path: Path,
     monkeypatch,
 ):
@@ -1192,7 +1192,7 @@ _REMOVED_BROWSER_BOUNDS = (
     ("max_drawdown", -0.5, "max_drawdown must be between zero and one"),
     ("active_max_drawdown", 1.5, "active_max_drawdown must be between zero and one"),
     ("tracking_error_cap", -0.08, "tracking_error_cap must be positive"),
-    # This arm's capital derives no tracking mandate, so a band has no cap.
+    # This experiment's capital derives no tracking mandate, so a band has no cap.
     ("beta_min", 0.9, "are set together or not at all"),
     ("max_llm_calls", 0, "max_llm_calls must be a positive integer"),
     ("initial_cash", 0.0, "initial_cash must be a positive finite number"),

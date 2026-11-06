@@ -16,7 +16,7 @@ VENV=/personal_fast_storage/envs/quant
 # The workflow passes its root as ZGCA_REMOTE_ROOT on every call. Another root
 # than this default (a validation deploy beside the live tree, which every
 # instance of the zone sees) keeps its venv inside it, so preparing it never
-# repoints the venv the live tree's console and arms run on.
+# repoints the venv the live tree's console and experiments run on.
 if [ "${ZGCA_REMOTE_ROOT:-$ROOT}" != "$ROOT" ]; then
     ROOT=$ZGCA_REMOTE_ROOT
     VENV=$ROOT/.venv
@@ -77,7 +77,7 @@ PY
 
 # Before a deploy's first transfer (after `dev bootstrap`): the directories the
 # transfers and the steps write into, and data/pretrained as the link to the
-# store on the instance's own disk. Arms pin only the store's manifest digest
+# store on the instance's own disk. Experiments pin only the store's manifest digest
 # and containers bind the link's target, so nothing else knows where it is. A
 # real directory there (a store from before the move) is not touched.
 dirs() {
@@ -133,12 +133,12 @@ print(f"tracked: {len(tracked)} listed; {len(removed)} stale removed under {', '
 PY
 }
 
-# The arms whose worker is alive and has not ended -- the console's own
-# notion, hitl_state.running_arms -- one id per line (none: empty output).
-running_arms() {
+# The experiments whose worker is alive and has not ended -- the console's own
+# notion, hitl_state.running_experiments -- one id per line (none: empty output).
+running_experiments() {
     "$VENV/bin/python" -c 'import sys
-from autotrade.pipelines.hitl_state import running_arms
-sys.stdout.writelines(f"{arm}\n" for arm in running_arms(sys.argv[1]))' "$ROOT/experiments"
+from autotrade.pipelines.hitl_state import running_experiments
+sys.stdout.writelines(f"{experiment}\n" for experiment in running_experiments(sys.argv[1]))' "$ROOT/experiments"
 }
 
 # The legacy builder on the platform's bridge network (no buildx, no host
@@ -174,12 +174,12 @@ build_image() {
 # beside the old layers; one that rebuilds the pip layer does not and dies of
 # ENOSPC after downloading everything. Nothing predicts which it will be, so
 # the build is tried as is and only an out-of-disk failure clears the store --
-# every unused image and stopped container -- for one cold rebuild. A running arm runs on the image it
+# every unused image and stopped container -- for one cold rebuild. A running experiment runs on the image it
 # pinned, so no rebuild is attempted beside it.
 rebuild_image() {
     local running log
-    running=$(running_arms | tr '\n' ' ')
-    [ -z "$running" ] || die "the sandbox image must be rebuilt, but arms are running (${running% }) and the disk cannot hold a second image beside the one they run on; wait for them to end"
+    running=$(running_experiments | tr '\n' ' ')
+    [ -z "$running" ] || die "the sandbox image must be rebuilt, but experiments are running (${running% }) and the disk cannot hold a second image beside the one they run on; wait for them to end"
     log="logs/zgca/image_build_$(date -u +%Y%m%dT%H%M%SZ).log"
     if ! build_image "$log" "$@"; then
         grep -q "No space left on device" "$log" || die "the image build failed (see $ROOT/$log)"
@@ -221,7 +221,7 @@ prepare() {
     cd "$ROOT"
     export DEBIAN_FRONTEND=noninteractive
     # The Agent's typed grep tool runs rg on the host; the worker refuses an
-    # LLM arm without it (7fdf506). rsync and tmux come from `dev bootstrap`.
+    # LLM experiment without it (7fdf506). rsync and tmux come from `dev bootstrap`.
     command -v rg >/dev/null || { echo "installing ripgrep"; apt-get -qq update && apt-get -qq install -y ripgrep; }
     if ! "$VENV/bin/python" -c 'import autotrade, fastapi, uvicorn, tushare' >/dev/null 2>&1; then
         [ -x "$BOX_PYTHON" ] || die "no interpreter at $BOX_PYTHON to create the venv from"
@@ -244,26 +244,26 @@ prepare() {
 
 # The console in tmux session CONSOLE_SESSION, answering /api/health. A console
 # serves the code it was started with, and `run` comes here before every
-# launcher, so with no arm running an existing console is restarted onto the
-# checkout the last deploy shipped before any arm is created: one left from
+# launcher, so with no experiment running an existing console is restarted onto the
+# checkout the last deploy shipped before any experiment is created: one left from
 # before a deploy validated creations against the old parameter schema and
-# refused them. While arms run it is kept, on the code it was started with.
+# refused them. While experiments run it is kept, on the code it was started with.
 console_up() {
     cd "$ROOT"
     require_venv
     local started="console started in tmux session $CONSOLE_SESSION (logs/webui/console.log)" running
     if tmux has-session -t "$CONSOLE_SESSION" 2>/dev/null; then
-        running=$(running_arms | tr '\n' ' ')
+        running=$(running_experiments | tr '\n' ' ')
         if [ -n "$running" ]; then
             started=""
-            echo "console kept: arms are running (${running% }), so it serves the code it was started with until they end"
+            echo "console kept: experiments are running (${running% }), so it serves the code it was started with until they end"
         else
             tmux kill-session -t "$CONSOLE_SESSION"
             # The old process must let go of the port first, or the health
             # check below would read it instead of the new one.
             for _ in $(seq 1 30); do health >/dev/null || break; sleep 1; done
             ! health >/dev/null || die "the console killed in tmux session $CONSOLE_SESSION still answers at $HEALTH"
-            started="console restarted on the current checkout in tmux session $CONSOLE_SESSION (no arm running)"
+            started="console restarted on the current checkout in tmux session $CONSOLE_SESSION (no experiment running)"
         fi
     fi
     if [ -n "$started" ]; then
@@ -332,9 +332,9 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from autotrade.pipelines.hitl_state import ENDED_STATES, running_arms
+from autotrade.pipelines.hitl_state import ENDED_STATES, running_experiments
 
-running = set(running_arms("experiments"))
+running = set(running_experiments("experiments"))
 rows, ended = [], 0
 for status in sorted(Path("experiments").glob("*/hitl/status.json")):
     name = status.parent.parent.name
@@ -353,7 +353,7 @@ for status in sorted(Path("experiments").glob("*/hitl/status.json")):
     beat = record.get("heartbeat_at")
     age = f"{time.time() - datetime.fromisoformat(str(beat)).timestamp():.0f} s ago" if beat else "none"
     rows.append(f"{name}: {state}, stage {record.get('environment_stage') or '-'}, heartbeat {age}, pid {record.get('pid')}")
-print(f"arms: {len(running)} running, {ended} ended")
+print(f"experiments: {len(running)} running, {ended} ended")
 for row in rows:
     print("  " + row)
 PY
@@ -385,27 +385,27 @@ PY
     fi
 }
 
-# One arm's recorded state, and a refusal while it runs: a running arm
+# One experiment's recorded state, and a refusal while it runs: a running experiment
 # rewrites its status every few seconds and grows its worker log, so no copy
 # of it could pass the transfer's verification.
-arm_state() {
-    local arm=$1 status="$ROOT/experiments/$1/hitl/status.json"
+experiment_state() {
+    local experiment=$1 status="$ROOT/experiments/$1/hitl/status.json"
     require_venv
-    [ -f "$status" ] || die "no arm $arm on the instance ($status is missing)"
-    "$VENV/bin/python" - "$ROOT/experiments" "$arm" <<'PY'
+    [ -f "$status" ] || die "no experiment $experiment on the instance ($status is missing)"
+    "$VENV/bin/python" - "$ROOT/experiments" "$experiment" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-from autotrade.pipelines.hitl_state import running_arms
+from autotrade.pipelines.hitl_state import running_experiments
 
-root, arm = Path(sys.argv[1]), sys.argv[2]
-record = json.loads((root / arm / "hitl" / "status.json").read_text(encoding="utf-8"))
+root, experiment = Path(sys.argv[1]), sys.argv[2]
+record = json.loads((root / experiment / "hitl" / "status.json").read_text(encoding="utf-8"))
 state, verdict = record.get("state"), record.get("verdict") or "-"
-print(f"{arm}: state {state}, verdict {verdict}, sessions {record.get('completed_sessions')}/{record.get('total_sessions')}")
-if arm in running_arms(root):
+print(f"{experiment}: state {state}, verdict {verdict}, sessions {record.get('completed_sessions')}/{record.get('total_sessions')}")
+if experiment in running_experiments(root):
     sys.exit(
-        f"ERROR: {arm} is still running (worker pid {record.get('pid')}): its status and log change "
+        f"ERROR: {experiment} is still running (worker pid {record.get('pid')}): its status and log change "
         "every few seconds, so a copy cannot be verified; sync it after it ends"
     )
 PY
@@ -421,6 +421,6 @@ case "$step" in
     console-up) console_up ;;
     round) [ $# -ge 1 ] || die "round needs the round file"; round "$@" ;;
     status) status ;;
-    arm-state) [ $# -eq 1 ] || die "arm-state needs one arm id"; arm_state "$1" ;;
+    experiment-state) [ $# -eq 1 ] || die "experiment-state needs one experiment id"; experiment_state "$1" ;;
     *) die "unknown remote step: '$step'" ;;
 esac

@@ -1,21 +1,21 @@
 #!/usr/bin/env python3
-"""Archive arms out of the console's home list, or restore them.
+"""Archive experiments out of the console's home list, or restore them.
 
-An arm is archived by one marker file inside its own directory,
+An experiment is archived by one marker file inside its own directory,
 ``hitl/archived.json``, which records when and why; ``--restore`` removes it.
-The directory never moves. The console's home list leaves the arm out (and
+The directory never moves. The console's home list leaves the experiment out (and
 never summarizes it) and offers it under 已归档 instead, its experiment page
 still opens but the console never starts its worker again, and
 ``prune_pit_views.py`` treats it as finished for good, so its derived PIT
 caches may go. Lineage, the consistency check, the round fill queue, the
-running caps and Paper read the arm exactly as before. The console need not
+running caps and Paper read the experiment exactly as before. The console need not
 be running.
 
-Only an arm that is over and holds nothing live is archived. Every arm named
+Only an experiment that is over and holds nothing live is archived. Every experiment named
 is checked before anything changes, and the command refuses them all when one
 has a live or launching worker, a graduation that has not been voided
-(``void_graduation.py``), or a Paper book. Archiving an archived arm keeps its
-marker, and restoring an arm that is not archived changes nothing.
+(``void_graduation.py``), or a Paper account. Archiving an archived experiment keeps its
+marker, and restoring an experiment that is not archived changes nothing.
 """
 
 from __future__ import annotations
@@ -58,7 +58,7 @@ def refusal(directory: Path, paper_root: Path) -> str | None:
         return "is a graduate; void the graduation first (void_graduation.py)"
     books = experiment_books(paper_root, directory.name)
     if books:
-        return f"has Paper book {', '.join(books)}"
+        return f"has Paper account {', '.join(books)}"
     return None
 
 
@@ -66,8 +66,8 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("experiments", nargs="+", metavar="EXPERIMENT", help="Experiment id.")
     action = parser.add_mutually_exclusive_group(required=True)
-    action.add_argument("--reason", help="Why the arms are archived, in a sentence.")
-    action.add_argument("--restore", action="store_true", help="Remove the arms' archive markers.")
+    action.add_argument("--reason", help="Why the experiments are archived, in a sentence.")
+    action.add_argument("--restore", action="store_true", help="Remove the experiments' archive markers.")
     parser.add_argument("--experiments-root", type=Path, default=REPO_ROOT / "experiments")
     parser.add_argument("--paper-state-root", type=Path, default=REPO_ROOT / PAPER_STATE_DIR)
     args = parser.parse_args()

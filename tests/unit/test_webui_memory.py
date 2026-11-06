@@ -1,4 +1,4 @@
-"""Operating-memory console model: the curated library, snapshots, curated CRUD.
+"""Skill-library console model: the curated library, snapshots, curated CRUD.
 
 The read view's invariants are what it refuses to show and what it refuses to
 invent: a malformed library reports an error rather than an empty shelf, an
@@ -73,7 +73,7 @@ def _library(repo_root: Path) -> Path:
 
 
 def _experiment(experiments_root: Path, name: str) -> Path:
-    """One research arm: its ledger's session record and its console state."""
+    """One research experiment: its ledger's session record and its console state."""
 
     directory = experiments_root / name
     # Before any ledger or artifact exists: the store refuses to initialize
@@ -200,7 +200,7 @@ def test_a_curated_body_is_served_verbatim_so_an_edit_round_trips(
 
 # ---- the snapshot one experiment froze -------------------------------------
 #
-# Operating memory is fixed per experiment: the curated library is resolved
+# Skill library is fixed per experiment: the curated library is resolved
 # once, when the experiment is created, and every session mounts that same
 # copy. So the block answers one question for the whole experiment, and a
 # library change after the fact belongs to the next experiment.
@@ -218,7 +218,7 @@ def _snapshot(
 
 
 def _retired_tier_snapshot(repo_root: Path, experiments: Path, experiment_id: str) -> None:
-    """The snapshot an arm created before 2026-11-05 froze: the curated
+    """The snapshot an experiment created before 2026-11-05 froze: the curated
     library beside one graduated experiment's skills, under the retired mode."""
 
     directory = experiments / experiment_id
@@ -268,10 +268,10 @@ def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> N
     assert RUN_ID not in json.dumps(payload, ensure_ascii=False)
 
 
-def test_an_arm_of_the_retired_graduated_tier_lists_what_it_still_mounts(
+def test_an_experiment_of_the_retired_graduated_tier_lists_what_it_still_mounts(
     tmp_path: Path,
 ) -> None:
-    """Every arm created before the graduated tier's retirement names its mode
+    """Every experiment created before the graduated tier's retirement names its mode
     and may hold graduated entries in its snapshot: the block opens, reads the
     mode as the curated library it is, keeps the snapshot's own record of the
     mode, and lists only the curated entries its sessions mount."""
@@ -388,7 +388,7 @@ def test_an_unreadable_snapshot_is_reported_not_hidden(tmp_path: Path) -> None:
     operating_memory_snapshot_path(directory).write_text("{truncated", encoding="utf-8")
     payload = memory.experiment_memory(experiments, "current")
     assert payload["snapshot"] is None
-    assert payload["error"].endswith("operating memory snapshot is unreadable")
+    assert payload["error"].endswith("skill library snapshot is unreadable")
     assert str(tmp_path) not in payload["error"]
 
 

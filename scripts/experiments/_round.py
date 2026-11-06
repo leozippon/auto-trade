@@ -1,25 +1,25 @@
 """One launcher for every checked-in round definition.
 
-A round is data: which arms it starts, which reference pack and exploration
-directive each arm gets, which PIT view seed and dataset selection they share,
+A round is data: which experiments it starts, which reference workspace and exploration
+directive each experiment gets, which prebuilt view cache and dataset selection they share,
 and the handful of parameters that round decides differently from the console
 creation form. Everything around that data -- merging the console defaults,
 refusing a default drift, running the console's own create-time validation
 offline, reporting a dry-run and POSTing the create requests -- is the same for
-every round and lives here, so a round file is its arms plus a two-line entry
+every round and lives here, so a round file is its experiments plus a two-line entry
 point.
 
 Two decisions are shared rather than per-round because the console runs rounds
 side by side and their verdicts only compare while they agree: BASE_OVERRIDES
 carries the research geometry, the account, the cost stress and the
 per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
-defaults every round relies on -- above all the model roles an arm does not
+defaults every round relies on -- above all the model roles an experiment does not
 name, so a change of the console's model defaults must stop the launcher
-rather than silently move an arm onto another model, and the residual
+rather than silently move an experiment onto another model, and the residual
 statistic's level. A round states what it decides for itself in `overrides`,
 and anything it states there stops being an expected default; the rules the
 console has no value for (`research_years`) it must state, for the round or
-per arm, or every request is refused. What
+per experiment, or every request is refused. What
 several rounds send alike -- a geometry, a model pair's hosted roles -- lives
 in `_profiles.py`; an open round imports from there and from here, never from
 another round file.
@@ -27,70 +27,70 @@ another round file.
 A round's id is the day it is launched, in Beijing time, with a letter suffix
 (b, c, ...) when that id is already taken -- by an earlier round of the same
 day, or by one of the rounds 20261008 to 20261015 that were named ahead of the
-calendar between 2026-10-03 and 10-08 -- and its arms' ids end in it. Nothing
-reads an order into these ids: the queue is the arm order of a round file,
+calendar between 2026-10-03 and 10-08 -- and its experiments' ids end in it. Nothing
+reads an order into these ids: the queue is the experiment order of a round file,
 and RETIRED_IDS and the reuse check compare whole ids.
 
-A round whose arms have all been created is marked `closed`, and so is one
-whose remaining arms are withdrawn: they leave its arm list and their ids go
-to RETIRED_IDS. Its `main` refuses every mode: the queue reads an arm without
-an experiment directory as pending, so an arm whose directory was deleted would
-be created again (archiving keeps the directory, see archive_arm.py).
-Once every arm of a closed round has ended, its file leaves the tree (git
+A round whose experiments have all been created is marked `closed`, and so is one
+whose remaining experiments are withdrawn: they leave its experiment list and their ids go
+to RETIRED_IDS. Its `main` refuses every mode: the queue reads an experiment without
+an experiment directory as pending, so an experiment whose directory was deleted would
+be created again (archiving keeps the directory, see archive_experiment.py).
+Once every experiment of a closed round has ended, its file leaves the tree (git
 history keeps it) and its ids join RETIRED_IDS.
 
 `normalize` runs the request-level checks the console applies on POST
 /api/experiments (ExperimentManager.create_experiment's closed, unknown,
 required and id rules, then the worker's own resolve_worker_options pre-flight,
 which type-checks every knob, refuses a malformed research geometry and, for a
-named PIT view seed, refuses a tree whose cache format or snapshot
+named prebuilt view cache, refuses a tree whose cache format or snapshot
 configuration is not this round's or whose prebuild has not finished,
 and reads the research release the seed was built from -- the release every
-arm will pin -- refusing it unless it is published here and reaches Held-out).
+experiment will pin -- refusing it unless it is published here and reaches Held-out).
 The console's deployment-state checks -- an experiment directory that already
 exists and a free running slot -- can only be decided against the live server
 and stay at POST time.
 
-`--dry-run` judges the round before its arms: a probe request carrying only
-what every arm shares goes through the same pre-flight, so the geometry and the
-seed contract are read even for a round that has no arms yet. Such a round can
+`--dry-run` judges the round before its experiments: a probe request carrying only
+what every experiment shares goes through the same pre-flight, so the geometry and the
+seed contract are read even for a round that has no experiments yet. Such a round can
 be dry-run but not created.
 
-`--fill` reads the arm list as an ordered queue and keeps the console's running
+`--fill` reads the experiment list as an ordered queue and keeps the console's running
 slots occupied: it asks /api/health how many are free under each of the two
-running-arm limits and which GPUs a GPU arm could take, skips the arms whose
+running-experiment limits and which GPUs a GPU experiment could take, skips the experiments whose
 experiment directory already exists -- running, completed and failed alike, the
 console's own rule -- and creates the next pending ones in file order through
-the same validation and POST path. A local arm reached while the local-model
-limit is full, and a GPU arm reached while too few cards are free, stays
-pending without stopping the queue, so the arms behind it still take the free
-slots; so does an arm whose PIT view seed has no contract yet or whose
+the same validation and POST path. A local experiment reached while the local-model
+limit is full, and a GPU experiment reached while too few cards are free, stays
+pending without stopping the queue, so the experiments behind it still take the free
+slots; so does an experiment whose prebuilt view cache has no contract yet or whose
 prebuild has not finished, which the next run creates once the seed reports
 status ok. Nothing pending or nothing free is the steady state and exits 0, so
 the mode is idempotent and safe on a timer; only a creation that was attempted
 and refused exits non-zero. A timer run writes one timestamped summary line --
-slots under both limits and the free GPUs, and how many arms were skipped,
+slots under both limits and the free GPUs, and how many experiments were skipped,
 created, refused and are still pending, and how many of those the local-model
-limit, the free GPUs and an unfinished seed hold back -- plus one line per arm
+limit, the free GPUs and an unfinished seed hold back -- plus one line per experiment
 it created or that was refused; with `--dry-run` it also lists each pending
-arm and whether it takes a free slot. The research cron
+experiment and whether it takes a free slot. The research cron
 (`ops/cron/research_fill.cron`) runs it over several round files in turn.
 
-Before an arm is created, and on every dry-run reading of it, `smoke` replays
-what the arm's `output/` starts as -- its pack's starter, else the contract
-template -- through the host's own evaluator on the arm's seed: a few days from
+Before an experiment is created, and on every dry-run reading of it, `smoke` replays
+what the experiment's `output/` starts as -- its reference workspace's starter, else the contract
+template -- through the host's own evaluator on the experiment's seed: a few days from
 each research-year start inside the full span, and the full span once. A seed
 whose views break the replay (round 20261015's five-year seed failed every
-replay crossing 2022-07-01, the untouched starter included) refuses the arm
+replay crossing 2022-07-01, the untouched starter included) refuses the experiment
 with the failure instead of letting a session discover it. The smoke exercises
 only what that strategy does; the contract template trades nothing (see
 `smoke`). The outcome is recorded under logs/research/smoke/, keyed by the
 seed, its contract, the geometry and the starter's bytes: a pass is not
 replayed again, and a failure keeps refusing until its record is deleted. A GPU
-arm's starter replays on cards the smoke takes for its duration, admitted as
+experiment's starter replays on cards the smoke takes for its duration, admitted as
 the console admits them (``gpu.host_min_free_gpu_memory_mib``: the cards that
-keep its margin free and that no running arm claims); with too few of those the
-arm is refused for that run only, and nothing is recorded.
+keep its margin free and that no running experiment claims); with too few of those the
+experiment is refused for that run only, and nothing is recorded.
 
 RETIRED_IDS records the experiment ids that have been used and archived, or
 withdrawn from a round's queue, or defined by a round whose file has left the
@@ -130,13 +130,13 @@ from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_mem
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import rmtree_keeping_file_modes
 from autotrade.environment.sandbox import GpuMode
-from autotrade.pipelines.arm_params import Surface, console_request, parameters
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     acceptance_for,
     research_span,
 )
+from autotrade.pipelines.experiment_params import Surface, console_request, parameters
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     select_gpus,
@@ -145,16 +145,16 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.pit_views_seed import UNFINISHED_BUILD_MARKER
 from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker_options
 
-# The console's own id, local-arm and GPU-request rules; importing them keeps
+# The console's own id, local-experiment and GPU-request rules; importing them keeps
 # this module from growing a second copy of the create contract.
 from autotrade.webui.manager import gpu_request, uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 ARCHIVE_ROOT = REPO_ROOT / "logs" / "archive"
-# Where an arm's reference pack lives when the arm does not name one.
+# Where an experiment's reference workspace lives when the experiment does not name one.
 PACKS_DIR = "configs/workspace_refs"
 # The id the round-level dry-run validates under. Never created: it only
-# carries the parameters every arm shares through the pre-flight.
+# carries the parameters every experiment shares through the pre-flight.
 PROBE_ID = "round_dry_run_probe"
 
 # Console defaults every round relies on. Values, not commentary: if the console
@@ -170,10 +170,10 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "screen_boards": (),
     "screen_min_circ_mv_yi": None,
     "screen_max_circ_mv_yi": None,
-    # Both the packs and the directives promise the Agent this many host null
+    # Both the reference workspaces and the directives promise the Agent this many host null
     # controls over the research session.
     "max_null_controls": 12,
-    # Derived from SandboxConfig.fit_timeout_seconds; packs promise the Agent a
+    # Derived from SandboxConfig.fit_timeout_seconds; reference workspaces promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
     "operating_memory": "curated",
@@ -183,14 +183,14 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "strategy_period": "day",
     # Every model role, as the console defaults it: the relay's gpt-6-astra
     # for the main conversation, its DeepSeek-V4.1-Flash for the sub-agents
-    # and compaction. A role an arm does not name runs on these; spelled out
+    # and compaction. A role an experiment does not name runs on these; spelled out
     # as literals on purpose, since a change of a console default is exactly
-    # the drift this has to catch. An arm that wants the local model for a
+    # the drift this has to catch. An experiment that wants the local model for a
     # role names it.
     "model": "gpt-6-astra",
     "subagent_model": "DeepSeek-V4.1-Flash",
     "compact_model": "DeepSeek-V4.1-Flash",
-    # Left to the console, which stamps the boards the arm's initial cash
+    # Left to the console, which stamps the boards the experiment's initial cash
     # qualifies for (`broker.default_permitted_boards`); a round that wants
     # others names them.
     "permitted_boards": None,
@@ -203,7 +203,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
 BASE_OVERRIDES: dict[str, object] = {
     # Research on four July-June years, the twelve forward months after them,
     # and a Held-out quarter the replay clips to the release end. Required by
-    # the console, and the geometry the PIT view seeds are planned over.
+    # the console, and the geometry the prebuilt view caches are planned over.
     "research_start": "20210701",
     "research_end": "20250630",
     "forward_end": "20260630",
@@ -213,32 +213,32 @@ BASE_OVERRIDES: dict[str, object] = {
     # snapshot configuration.
     "window_months": 60,
     # No GPU. The request travels with the experiment to the Agent session
-    # sandbox and the strategy container of every replay alike; an arm that
+    # sandbox and the strategy container of every replay alike; an experiment that
     # really trains on a card overrides this with 1.
     "gpu_count": 0,
     # The researcher's real account, where the CNY 5 minimum commission and lot
     # sizes are a real cost rather than a rounding error.
     "initial_cash": 100_000,
     # The forward verdict's cost stress. The drawdown limits and the tracking
-    # mandate are not stated here: an arm gets a mandate only by naming its own
+    # mandate are not stated here: an experiment gets a mandate only by naming its own
     # `tracking_error_cap` (config.acceptance_for). Unnamed drawdowns stay
-    # 0.45 / 0.30; an arm that wants other bars names them.
+    # 0.45 / 0.30; an experiment that wants other bars names them.
     "cost_stress_multiplier": 2.0,
     # The one research session's budgets, spent across every attempt.
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
 }
 
-# Both tables name console parameters of the arm record
-# (pipelines/arm_params.py): a pin or an override of anything else is a typo
+# Both tables name console parameters of the experiment record
+# (pipelines/experiment_params.py): a pin or an override of anything else is a typo
 # that would otherwise surface only when a round runs.
 _NOT_CONSOLE = sorted(
     {*BASE_EXPECTED_DEFAULTS, *BASE_OVERRIDES} - set(parameters(Surface.CONSOLE))
 )
 if _NOT_CONSOLE:
-    raise RuntimeError(f"not console parameters of the arm record: {_NOT_CONSOLE}")
+    raise RuntimeError(f"not console parameters of the experiment record: {_NOT_CONSOLE}")
 
-# Reported once per round on --dry-run: what every arm shares.
+# Reported once per round on --dry-run: what every experiment shares.
 ROUND_REPORT_KEYS: tuple[str, ...] = (
     "research_start",
     "research_end",
@@ -324,7 +324,7 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "order_flow_ranker_20260917",
         "site_visits_20260914",
         "value_regime_20260914",
-        # Every arm of the closed rounds 20260916 to 20261010, whose files were
+        # Every experiment of the closed rounds 20260916 to 20261010, whose files were
         # removed from the tree on 2026-10-06 (last in 0b1b07e); 211 of them were
         # archived on 2026-10-04, the rest finished and stay on disk.
         "abturn_chinext_1m_20260926",
@@ -612,10 +612,10 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "wtstab_alla_100k_20260927",
         "xs_transformer_1m_20260922",
         "xsattn_csi1000_8y_20260925",
-        # Every arm of the closed rounds 20261011, 20261012, 20261012b,
+        # Every experiment of the closed rounds 20261011, 20261012, 20261012b,
         # 20261012c and 20261012d, whose files were removed from the tree on
-        # 2026-10-06 (last in 6a0f487; 20261012b's file and pack in 0144b7c;
-        # 20261013's file and pack in 315e7c5); all finished and stay on disk
+        # 2026-10-06 (last in 6a0f487; 20261012b's file and reference workspace in 0144b7c;
+        # 20261013's file and reference workspace in 315e7c5); all finished and stay on disk
         # or in the archive.
         "incdraft2_100k_8y_qwen_20261013",
         "incdraft_100k_8y_mimo_20261012",
@@ -627,7 +627,7 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "seqnovel_ssm_100k_8y_mimo_20261012",
         "titlemap_100k_8y_mimo_20261012",
         "titlerank_100k_8y_qwen_20261012",
-        # Every arm of the closed round 20261015, whose file and packs left the
+        # Every experiment of the closed round 20261015, whose file and reference workspaces left the
         # tree with round 20261008b's launch; all ended no_edge and stay on disk.
         "open_chips_100k_5y_mimo_20261015",
         "open_cluster_100k_8y_mimo_20261015",
@@ -635,10 +635,10 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "open_ensemble_100k_8y_qwen_20261015",
         "open_micro_100k_8y_mimo_20261015",
         "open_tables_100k_5y_qwen_20261015",
-        # Every arm of rounds 20261008b, 20261014, 20261014b and 20261014d,
-        # whose files left the tree on 2026-10-15. The eleven arms of the first
+        # Every experiment of rounds 20261008b, 20261014, 20261014b and 20261014d,
+        # whose files left the tree on 2026-10-15. The eleven experiments of the first
         # two and the two of 20261014d ended and stay on disk; the two 20261014b
-        # arms were terminated on 2026-10-14 and their directories are no
+        # experiments were terminated on 2026-10-14 and their directories are no
         # longer on disk.
         "hcm_100k_8y_sol_dsf_20261014b",
         "hcm_100k_8y_sol_dsf_20261014d",
@@ -655,12 +655,12 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "open_free_100k_8y_qwen_20261014",
         "open_guidance_100k_8y_qwen_20261008b",
         "open_tables_100k_5y_qwen_20261008b",
-        # Both arms of round 20261014c, on the A100 instance; ended no_deliverable, synced here.
+        # Both experiments of round 20261014c, on the A100 instance; ended no_deliverable, synced here.
         "hcm_100k_8y_dsf_zgca_20261014c",
         "hcm_100k_8y_sol_dsf_zgca_20261014c",
-        # Every arm of rounds 20261019, 20261019b (on the A100 instance) and
+        # Every experiment of rounds 20261019, 20261019b (on the A100 instance) and
         # 20261022, whose files left the tree on 2026-10-24. Five ended
-        # no_deliverable and stay on disk; the A100 arm
+        # no_deliverable and stay on disk; the A100 experiment
         # egcu_lm_100k_8y_opus_zgca_20261019b was interrupted.
         "egcu_lm_100k_8y_opus_zgca_20261019b",
         "egcu_lm_100k_8y_sol_20261019",
@@ -668,23 +668,23 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "hcm_lm_100k_8y_sol_zgca_20261019b",
         "retrieval_lm_100k_8y_opus_20261022",
         "retrieval_lm_100k_8y_sol_20261022",
-        # Both arms of round 20261025 on the A100 instance, created and
+        # Both experiments of round 20261025 on the A100 instance, created and
         # withdrawn on 2026-10-25 before their first leg (terminated and
         # archived there) when the owner narrowed the direction; round
         # 20261025b replaces them.
         "open_lm_100k_8y_opus_zgca_20261025",
         "open_lm_100k_8y_sol_zgca_20261025",
-        # Every arm of rounds 20261025b, 20261027b and 20261027c on the A100
+        # Every experiment of rounds 20261025b, 20261027b and 20261027c on the A100
         # instance, whose files left the tree on 2026-10-28. All ended (the
-        # opus arm no_deliverable on 10-26, the sol arms no_edge, the argon
-        # arm rejected); their instance directories were deleted on 10-28,
+        # opus experiment no_deliverable on 10-26, the sol experiments no_edge, the argon
+        # experiment rejected); their instance directories were deleted on 10-28,
         # and the copies synced here stay on disk.
         "retrieval_100k_8y_argon_zgca_20261027c",
         "retrieval_100k_8y_opus_zgca_20261025b",
         "retrieval_100k_8y_sol_zgca_20261025b",
         "retrieval_100k_8y_sol_zgca_20261027b",
-        # Every arm of rounds 20261026, 20261027, 20261030 and 20261031, whose
-        # files and packs left the tree on 2026-11-02. None is running; the
+        # Every experiment of rounds 20261026, 20261027, 20261030 and 20261031, whose
+        # files and reference workspaces left the tree on 2026-11-02. None is running; the
         # directories that remain stay on disk.
         "memory_100k_10y_argon_local_20261031",
         "memory_100k_10y_astra_local_20261031",
@@ -698,8 +698,8 @@ RETIRED_IDS: frozenset[str] = frozenset(
         # Withdrawn from round 20261102's queue before it was created, when the
         # round was narrowed to Astra experiments alone.
         "memory_200k_10y_argon_local_20261102",
-        # Every arm of round 20261102 and the two memory arms of round
-        # 20261103, whose file, arms and memory packs left the tree on
+        # Every experiment of round 20261102 and the two memory experiments of round
+        # 20261103, whose file, experiments and memory reference workspaces left the tree on
         # 2026-11-05 with the memory machinery. All ended and stay on disk.
         "memory_200k_10y_astra_local_20261102",
         "memory_200k_10y_astra_local_20261102b",
@@ -721,11 +721,11 @@ def archived_ids() -> set[str]:
     if not ARCHIVE_ROOT.is_dir():
         return set()
     return {
-        arm.name
+        experiment.name
         for batch in ARCHIVE_ROOT.iterdir()
         if batch.is_dir() and not batch.is_symlink()
-        for arm in batch.iterdir()
-        if arm.is_dir() and not arm.is_symlink()
+        for experiment in batch.iterdir()
+        if experiment.is_dir() and not experiment.is_symlink()
     }
 
 
@@ -768,13 +768,13 @@ SMOKE_KEYS = (
 
 
 def smoke(merged: Mapping[str, object]) -> str:
-    """Replay an arm's starter on its seed before the arm is created; "" when it
+    """Replay an experiment's starter on its seed before the experiment is created; "" when it
     passed, else why not.
 
-    ``merged`` is the arm's validated params.json. What the session's
-    ``output/`` starts as is replayed: the pack's ``starter/``, or the arm's
-    strategy template (``strategy_path``) when the pack ships no ``starter/``
-    or there is no pack. A ``starter/`` without ``main.py`` is refused, since
+    ``merged`` is the experiment's validated params.json. What the session's
+    ``output/`` starts as is replayed: the reference workspace's ``starter/``, or the experiment's
+    strategy template (``strategy_path``) when the reference workspace ships no ``starter/``
+    or there is no reference workspace. A ``starter/`` without ``main.py`` is refused, since
     the session would silently start from the template instead. It is replayed
     by the host's own evaluator as a session's smoke_backtest and Validation
     replay it: over the full research span, a few days from each research-year
@@ -785,11 +785,11 @@ def smoke(merged: Mapping[str, object]) -> str:
     strategy's own reads, its ``fit`` or the order and fill path would hit is
     not caught. The outcome is recorded once per seed contract, geometry and
     starter bytes, so a pass is not replayed by the next timer run and a
-    failure is not retried until its record is deleted. A starter whose arm
+    failure is not retried until its record is deleted. A starter whose experiment
     asks for GPUs replays on cards it takes for the smoke under the console's
     admission margin (``gpu.host_min_free_gpu_memory_mib``); when too few pass
     it, ``GpuUnavailableError`` propagates and nothing is recorded, so a later
-    run smokes the arm again. An admission setting that cannot be read is
+    run smokes the experiment again. An admission setting that cannot be read is
     refused the same way: it is no verdict on the starter either.
     """
 
@@ -798,7 +798,7 @@ def smoke(merged: Mapping[str, object]) -> str:
     if not reference or not starter.exists():
         starter = (REPO_ROOT / str(merged["strategy_path"])).parent
     elif not (starter / "main.py").is_file():
-        return f"the pack's starter cannot be smoked: {starter} lacks main.py"
+        return f"the reference workspace's starter cannot be smoked: {starter} lacks main.py"
     digest = hashlib.sha256(
         json.dumps({key: merged.get(key) for key in SMOKE_KEYS}, sort_keys=True, default=str).encode("utf-8")
     )
@@ -860,7 +860,7 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         # duration, as scripts/experiments/_cli.py does for a command-line run:
         # a strategy container that asks for a GPU and names none refuses to start.
         # The admission margin is the console's own, so a card the console would
-        # start the arm on is not refused here for being busy.
+        # start the experiment on is not refused here for being busy.
         spec = options.agent_sandbox
         if spec is not None and spec.gpu == GpuMode.AUTO:
             try:
@@ -884,7 +884,7 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         ).pipeline
         output = scratch / "output"
         shutil.copytree(starter, output, ignore=shutil.ignore_patterns("__pycache__"))
-        # Every year of the geometry the arm replays, the validation years
+        # Every year of the geometry the experiment replays, the validation years
         # too: its tests replay those on the same seed.
         years = pipeline.research_spans(options.rolling.geometry.research_years)
         request = research_span(years, FULL_SPAN).request(
@@ -903,16 +903,16 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
     except GpuUnavailableError:
         # Too few admissible cards says nothing about the starter or its seed.
         raise
-    except Exception as exc:  # noqa: BLE001 - an arm that cannot even be assembled fails its smoke
+    except Exception as exc:  # noqa: BLE001 - an experiment that cannot even be assembled fails its smoke
         return f"the smoke could not be assembled: {type(exc).__name__}: {exc}"
     finally:
         rmtree_keeping_file_modes(scratch)
 
 
 def seed_ready(seed: str) -> bool:
-    """Whether a named PIT view seed has its contract and a finished prebuild;
+    """Whether a named prebuilt view cache has its contract and a finished prebuild;
     the console default (no seed) always is. Readiness alone: whether the tree
-    is this arm's is the pre-flight's to judge."""
+    is this experiment's is the pre-flight's to judge."""
 
     root = REPO_ROOT / seed
     return not seed or ((root / "provider.json").is_file() and not (root / UNFINISHED_BUILD_MARKER).exists())
@@ -961,7 +961,7 @@ HEALTH_KEYS = (
 
 
 def health(port: int) -> dict[str, object]:
-    """The console's running roster, its two running-arm limits and its free GPUs.
+    """The console's running roster, its two running-experiment limits and its free GPUs.
 
     Read rather than assumed: the limits are the console's constants and the
     roster and the cards change under the operator's hands, so a fill that
@@ -985,29 +985,29 @@ def health(port: int) -> dict[str, object]:
 
 @dataclass(frozen=True)
 class Round:
-    """One round definition: its arms and what it decides differently.
+    """One round definition: its experiments and what it decides differently.
 
-    ``arms`` maps experiment id to the per-arm part of the create request --
-    normally ``research_directive`` (the pack defaults to the one named after
-    the arm, see :meth:`request_params`), plus any parameter that arm alone
+    ``experiments`` maps experiment id to the per-experiment part of the create request --
+    normally ``research_directive`` (the reference workspace defaults to the one named after
+    the experiment, see :meth:`request_params`), plus any parameter that experiment alone
     changes. ``overrides`` is what the whole round decides on top of
-    BASE_OVERRIDES -- normally its dataset selection, and any default every arm
-    shares -- and ``pit_views_seed`` the prebuilt view tree every arm hardlinks
-    from. ``closed`` says every arm has been created: the file is then only
+    BASE_OVERRIDES -- normally its dataset selection, and any default every experiment
+    shares -- and ``pit_views_seed`` the prebuilt view tree every experiment hardlinks
+    from. ``closed`` says every experiment has been created: the file is then only
     the record of what was run, and :meth:`main` refuses it.
     """
 
-    arms: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    experiments: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     overrides: Mapping[str, object] = field(default_factory=dict)
     # Empty means the console default seed, which carries the default dataset
     # selection.
     pit_views_seed: str = ""
-    # Stated, not read from disk: an arm whose directory was deleted would look
+    # Stated, not read from disk: an experiment whose directory was deleted would look
     # pending.
     closed: bool = False
 
     def __post_init__(self) -> None:
-        reused = sorted(set(self.arms) & RETIRED_IDS)
+        reused = sorted(set(self.experiments) & RETIRED_IDS)
         if reused:
             raise ValueError(
                 "experiment ids that were already used and archived cannot be "
@@ -1016,7 +1016,7 @@ class Round:
 
     @property
     def common_overrides(self) -> dict[str, object]:
-        """What every arm of this round sends, seed included."""
+        """What every experiment of this round sends, seed included."""
         overrides = {**BASE_OVERRIDES, **self.overrides}
         if self.pit_views_seed:
             overrides["pit_views_seed"] = self.pit_views_seed
@@ -1051,9 +1051,9 @@ class Round:
     def request_params(self, experiment_id: str) -> dict[str, object]:
         """The create request body: console defaults, the round's decisions, the id.
 
-        ``PROBE_ID`` stands for the part every arm shares; any other id must be
-        one of the round's arms. An arm's pack is the one named after it,
-        ``configs/workspace_refs/<id>``, unless the arm or the round names
+        ``PROBE_ID`` stands for the part every experiment shares; any other id must be
+        one of the round's experiments. An experiment's reference workspace is the one named after it,
+        ``configs/workspace_refs/<id>``, unless the experiment or the round names
         another (``""`` for none); the pre-flight refuses one that is missing.
         """
         base = {
@@ -1061,16 +1061,16 @@ class Round:
             for key, value in WEB_CREATE_DEFAULTS.items()
         }
         common = self.common_overrides
-        arm = {} if experiment_id == PROBE_ID else dict(self.arms[experiment_id])
-        if experiment_id != PROBE_ID and "workspace_reference" not in {*arm, *common}:
-            arm["workspace_reference"] = f"{PACKS_DIR}/{experiment_id}"
-        return {**base, **common, **arm, "experiment_id": experiment_id}
+        own = {} if experiment_id == PROBE_ID else dict(self.experiments[experiment_id])
+        if experiment_id != PROBE_ID and "workspace_reference" not in {*own, *common}:
+            own["workspace_reference"] = f"{PACKS_DIR}/{experiment_id}"
+        return {**base, **common, **own, "experiment_id": experiment_id}
 
     def validated(self, experiment_id: str) -> tuple[dict[str, object] | None, str]:
-        """params.json for one arm (or the probe), or ``(None, reason)``.
+        """params.json for one experiment (or the probe), or ``(None, reason)``.
 
         The refusal is returned rather than raised because a dry-run should
-        read every arm before it stops.
+        read every experiment before it stops.
         """
         try:
             return normalize(self.request_params(experiment_id)), ""
@@ -1084,9 +1084,9 @@ class Round:
                     " failed, until it reports status ok, then re-run --"
                     " no parameter needs changing"
                 )
-            elif "pit_views_seed" in str(exc) or "view seed" in str(exc):
+            elif "pit_views_seed" in str(exc) or "view cache" in str(exc):
                 reason += (
-                    f"\n  every arm shares one prebuilt view tree ({self.pit_views_seed});"
+                    f"\n  every experiment shares one prebuilt view tree ({self.pit_views_seed});"
                     " build it with scripts/data/prebuild_pit_views_seed.py for exactly"
                     " this dataset selection and research geometry before creating or"
                     " dry-running the round"
@@ -1097,13 +1097,13 @@ class Round:
         """One line on the shared seed, printed before anything is validated.
 
         Says whether the tree's contract can be read at all and which release
-        every arm will pin; whether it matches this round's selection, whether
+        every experiment will pin; whether it matches this round's selection, whether
         its build finished and whether that release is published and reaches
         Held-out is the pre-flight's own verdict below.
         """
         if not self.pit_views_seed:
             return (
-                "seed: this round names none, so its arms use the console default tree"
+                "seed: this round names none, so its experiments use the console default tree"
                 " and cold-build anything it does not carry"
             )
         provider = REPO_ROOT / self.pit_views_seed / "provider.json"
@@ -1125,7 +1125,7 @@ class Round:
             )
         return (
             f"seed {self.pit_views_seed}: contract present (snapshot cache format {version},"
-            f" release {record.get('generation_id')}, which every arm pins); the pre-flight"
+            f" release {record.get('generation_id')}, which every experiment pins); the pre-flight"
             " below compares this round's selection against it, refuses a tree whose prebuild"
             " has not finished and checks that release is published and reaches Held-out."
         )
@@ -1133,20 +1133,20 @@ class Round:
     def fill(
         self, port: int, *, dry_run: bool
     ) -> tuple[list[str], list[str], dict[str, list[str]], str]:
-        """The arms to create now, every pending arm, the pending arms held
+        """The experiments to create now, every pending experiment, the pending experiments held
         back by each reason that clears by itself, and the slot part of the
         summary line.
 
-        The queue is the arm order of the round file. An arm whose experiment
+        The queue is the experiment order of the round file. An experiment whose
         directory exists has been created already -- the console refuses a
         second one whatever state it reached -- so only the rest are pending.
-        They take the console's free slots in order, except that an arm the
+        They take the console's free slots in order, except that an experiment the
         console would refuse for a reason that clears by itself is held: it
-        stays pending and the arms behind it go ahead. That is a local arm (the
+        stays pending and the experiments behind it go ahead. That is a local experiment (the
         console's own ``uses_local_model``) reached while the local-model limit
-        is full, an arm asking for more GPUs (``gpu_request``) than the console
-        has free cards for, and an arm whose seed has no contract yet or an
-        unfinished prebuild (``seed_ready``). A dry-run lists the pending arms;
+        is full, an experiment asking for more GPUs (``gpu_request``) than the console
+        has free cards for, and an experiment whose seed has no contract yet or an
+        unfinished prebuild (``seed_ready``). A dry-run lists the pending experiments;
         a timer run only counts them.
         """
         record = health(port)
@@ -1165,7 +1165,7 @@ class Round:
             f"GPUs {gpus_free} free ({', '.join(cards) or 'none'})"
             + (f", unreadable: {record['gpu_error']}" if record.get("gpu_error") else "")
         )
-        pending = [arm for arm in self.arms if not (EXPERIMENTS_ROOT / arm).exists()]
+        pending = [experiment for experiment in self.experiments if not (EXPERIMENTS_ROOT / experiment).exists()]
         chosen: list[str] = []
         held: dict[str, list[str]] = {"local": [], "gpu": [], "seed": []}
         for experiment_id in pending:
@@ -1194,7 +1194,7 @@ class Round:
             }
             for experiment_id in pending:
                 slot = next(
-                    (waits[reason] for reason, arms in held.items() if experiment_id in arms),
+                    (waits[reason] for reason, experiments in held.items() if experiment_id in experiments),
                     "takes a free slot" if experiment_id in chosen else "waits for a free slot",
                 )
                 print(f"{experiment_id}: pending, {slot}")
@@ -1204,7 +1204,7 @@ class Round:
         """`<port> [--dry-run] [--fill] [experiment_id ...]`, shared by every round file."""
         if self.closed:
             raise SystemExit(
-                "this round is closed: every arm it defines has been created, and the file"
+                "this round is closed: every experiment it defines has been created, and the file"
                 " is only the record of what was run"
             )
         # A mistyped flag must never fall through to the real POST path: without
@@ -1221,13 +1221,13 @@ class Round:
         dry_run = "--dry-run" in argv
         fill = "--fill" in argv
         wanted = {arg for arg in argv[2:] if not arg.startswith("--")}
-        unknown_ids = sorted(wanted - set(self.arms))
+        unknown_ids = sorted(wanted - set(self.experiments))
         if unknown_ids:
             raise SystemExit("not in this round: " + ", ".join(unknown_ids))
         if fill and wanted:
             raise SystemExit("--fill reads the queue itself; name no experiment id")
-        if not dry_run and not self.arms:
-            raise SystemExit("this round has no arms to create; --dry-run validates its geometry and seed")
+        if not dry_run and not self.experiments:
+            raise SystemExit("this round has no experiments to create; --dry-run validates its geometry and seed")
         self.check_console_defaults()
         if not fill or dry_run:
             # A timer run's log carries its summary line, not the seed's
@@ -1235,7 +1235,7 @@ class Round:
             print(self.seed_status())
         shared, reason = self.validated(PROBE_ID)
         if shared is None:
-            # Every arm sends these parameters, so no arm can pass either.
+            # Every experiment sends these parameters, so no experiment can pass either.
             print(f"{_now()} {reason}" if fill else reason, file=sys.stderr)
             return 1
         if dry_run:
@@ -1245,15 +1245,15 @@ class Round:
             # anything is sent.
             selected, pending, held, slots = self.fill(port, dry_run=dry_run)
         else:
-            selected = [arm for arm in self.arms if not wanted or arm in wanted]
+            selected = [experiment for experiment in self.experiments if not wanted or experiment in wanted]
         created: list[str] = []
         failed: list[str] = []
         for experiment_id in selected:
             merged, reason = self.validated(experiment_id)
             if merged is None:
-                # On a dry-run the refusal is a reading, so the remaining arms
+                # On a dry-run the refusal is a reading, so the remaining experiments
                 # are read too and the exit code still reports it; on the POST
-                # path nothing more is sent after a rejected arm.
+                # path nothing more is sent after a rejected experiment.
                 print(reason, file=sys.stderr)
                 failed.append(experiment_id)
                 if dry_run:
@@ -1275,7 +1275,7 @@ class Round:
                     continue
                 break
             if dry_run:
-                # What this arm decides for itself: everything it sends that
+                # What this experiment decides for itself: everything it sends that
                 # differs from the round it belongs to.
                 own = {
                     key: value
@@ -1285,8 +1285,8 @@ class Round:
                 directive = str(merged["research_directive"])
                 print(json.dumps(own, ensure_ascii=False))
                 print("  smoke: the starter replayed from every research-year start and over the full span")
-                # The gates this arm would be judged by: the defaults with
-                # whatever the arm names, mandate included.
+                # The gates this experiment would be judged by: the defaults with
+                # whatever the experiment names, mandate included.
                 rules = acceptance_for(merged)
                 print("  acceptance:", json.dumps(rules.to_record(), ensure_ascii=False))
                 print(f"  directive: {len(directive.splitlines())} lines, {len(directive)} chars")
@@ -1300,8 +1300,8 @@ class Round:
         if fill:
             done = len(selected) - len(failed) if dry_run else len(created)
             print(
-                f"{_now()} fill {Path(argv[0]).stem}: {slots}; queue {len(self.arms)}: "
-                f"{len(self.arms) - len(pending)} skipped (created already), "
+                f"{_now()} fill {Path(argv[0]).stem}: {slots}; queue {len(self.experiments)}: "
+                f"{len(self.experiments) - len(pending)} skipped (created already), "
                 f"{done} {'would be created' if dry_run else 'created'}, "
                 f"{len(failed)} refused, {len(pending) - done - len(failed)} pending "
                 f"({len(held['local'])} held by the local-model limit, {len(held['gpu'])} by the free GPUs,"

@@ -1,4 +1,4 @@
-"""Operating-memory model for the console: the read view and the curated writes.
+"""Skill-library model for the console: the read view and the curated writes.
 
 Both halves stand on the two places the pipeline already treats as
 authoritative: the curated library committed under ``configs/operating_memory/``
@@ -54,7 +54,7 @@ HOST_RUN_MANIFEST_NAME = "host_run_manifest.json"
 # Errors reach the browser as a category plus a stable phrase: the underlying
 # exceptions embed absolute ledger and library paths in their messages.
 _UNREADABLE_LIBRARY = "curated memory library is unreadable"
-_UNREADABLE_SNAPSHOT = "operating memory snapshot is unreadable"
+_UNREADABLE_SNAPSHOT = "skill library snapshot is unreadable"
 
 
 def _error(exc: Exception, phrase: str) -> str:
@@ -125,7 +125,7 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
 
 
 def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, object]:
-    """This experiment's operating memory: one list, frozen when it was created.
+    """This experiment's skill library: one list, frozen when it was created.
 
     Nothing here is per session. The experiment resolved the curated library
     once, at creation, and every one of its sessions mounts that same snapshot
@@ -182,7 +182,7 @@ def experiment_memory_entry(
     mount_source, entry_name = validate_memory_entry_ref(f"{source}/{name}")
     record = read_operating_memory_snapshot(directory)
     if record is None:
-        raise KeyError(f"{experiment_id} has no operating memory snapshot")
+        raise KeyError(f"{experiment_id} has no skill library snapshot")
     item = operating_memory_snapshot_root(directory) / mount_source / entry_name
     if not (item / SKILL_FILENAME).is_file():
         raise KeyError(f"{experiment_id} did not mount {mount_source}/{entry_name}")
@@ -377,7 +377,7 @@ def delete_curated_entry(repo_root: Path, name: str) -> dict[str, object]:
 
 
 def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object]:
-    """The whole operating-memory page in one read: the curated library, and
+    """The whole skill-library page in one read: the curated library, and
     the experiments the page's two inboxes can be narrowed to."""
 
     return {

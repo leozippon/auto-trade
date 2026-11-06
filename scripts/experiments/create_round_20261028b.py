@@ -1,24 +1,24 @@
 #!/usr/bin/env python
-"""The 2026-10-28 b round: round 20261028's gemini-4-argon arm again, after the first one failed on the relay.
+"""The 2026-10-28 b round: round 20261028's gemini-4-argon experiment again, after the first one failed on the relay.
 
 `ttt_100k_8y_argon_zgca_20261028` failed at 05:54 UTC on 10-28 after eight
 relay answers of `HTTP 403: This API method requires billing to be enabled`
-for gemini-4-argon with both keys, an outage on the relay's side. This arm
-relaunches it when the relay answers again: everything it sends is that arm's
+for gemini-4-argon with both keys, an outage on the relay's side. This experiment
+relaunches it when the relay answers again: everything it sends is that experiment's
 -- the pack `ttt_100k_8y_20261028`, the directive word for word, the relay's
 alternate key, DeepSeek-V4.1-Flash sub-agents and compaction with the
 threshold pinned at 221,184, the 10-24 seed and geometry, one A100, four
 replays per batch, three times round 20261027's budgets and a strategy
 container of 16 CPUs and 64 GiB with 10,800 s per `fit` and 1,080 s per
 `generate_orders` -- except its id. A round file never imports another
-(tests/unit/test_round_arms.py), so this definition is a copy, held equal to
-round 20261028's argon arm by tests/unit/test_ttt_pack.py.
+(tests/unit/test_round_experiments.py), so this definition is a copy, held equal to
+round 20261028's argon experiment by tests/unit/test_ttt_pack.py.
 
-| Arm | Main session | Sub-agents / compaction |
+| Experiment | Main session | Sub-agents / compaction |
 | --- | --- | --- |
 | `ttt_100k_8y_argon_zgca_20261028b` | gemini-4-argon | DeepSeek-V4.1-Flash |
 
-The console refuses to create a GPU arm while too few cards are free
+The console refuses to create a GPU experiment while too few cards are free
 (`ExperimentManager._claimable_gpus`), so queue it with `--fill`, which creates
 it once a card is free:
 
@@ -73,7 +73,7 @@ DIRECTIVE = (
     "重做其中一个，需要一个真正新的机制。"
 )
 
-ARMS: dict[str, dict[str, object]] = {
+EXPERIMENTS: dict[str, dict[str, object]] = {
     "ttt_100k_8y_argon_zgca_20261028b": {
         "model": ARGON,
         "subagent_model": FLASH,
@@ -88,11 +88,11 @@ ARMS: dict[str, dict[str, object]] = {
 }
 
 ROUND = Round(
-    # Closed with the sealed gate (2026-11-03): its arms were created under the
+    # Closed with the sealed gate (2026-11-03): its experiments were created under the
     # deflated-Sharpe gate, whose bars it sent through the profile until they
     # left it (git history keeps them), and none states sealed_years.
     closed=True,
-    arms=ARMS,
+    experiments=EXPERIMENTS,
     pit_views_seed=FUND_TITLE_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_EIGHT_YEAR_100K,

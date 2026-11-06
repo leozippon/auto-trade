@@ -1,4 +1,4 @@
-"""A Paper book that follows its owner's recorded fills (``paper.fills``).
+"""A Paper account that follows its owner's recorded fills (``paper.fills``).
 
 Each book here runs the real engine over two synthetic names with the default
 cost model (1 bp commission, 5 CNY minimum, transfer fee, stamp duty, 5 bp

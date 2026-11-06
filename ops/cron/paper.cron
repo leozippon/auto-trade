@@ -1,4 +1,4 @@
-# ADM-Cube Paper books: the pre-open order sheet of every SSE session, per book.
+# ADM-Cube Paper accounts: the pre-open order sheet of every SSE session, per book.
 # Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block paper
 #
 # Books live in data/trading/paper/<book>/ (run_paper.py init). Each run goes
@@ -30,9 +30,9 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # with a 45-minute budget for one attempt: the strategy container's start
 # clock (15 min) plus the Paper decision clock (30 min,
 # PAPER_DECISION_TIMEOUT_SECONDS, one decision call in every book, whatever its
-# arm's). A book's whole run -- its PIT build, the replay of its earlier
+# experiment's). A book's whole run -- its PIT build, the replay of its earlier
 # decisions and one decision -- takes 8-13 min on a quiet host and 42 min
-# measured with four research arms on the box. Books run one after another.
+# measured with four research experiments on the box. Books run one after another.
 # The clocks bound each call, not the run: a run that ends after 09:10 still
 # writes its sheet -- the same decision, too late for the opening auction.
 #
@@ -52,8 +52,8 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # are a budget apart, so a 07:40 retry that runs one book in full has ended
 # when the last one starts. The PIT event build is the part of the chain that
 # can push past 05:40 under load (03:35-05:32 on a quiet night, 03:35-07:14 on
-# 2026-09-16 with four arms running); a night where it runs past 08:25 needs
-# the arms throttled, not another retry.
+# 2026-09-16 with four experiments running); a night where it runs past 08:25 needs
+# the experiments throttled, not another retry.
 #
 # A GPU book takes its card only as its strategy container starts; with no
 # eligible card it looks again every 60 s until 165 min after its run began

@@ -19,7 +19,7 @@ from autotrade.environment.gpu import (
     host_min_free_gpu_memory_mib,
 )
 
-from .arm_params import (
+from .experiment_params import (
     NON_PERSISTABLE_PARAMS,
     PARAMETERS,
     Surface,
@@ -35,20 +35,20 @@ PARAMS_NAME = "params.json"
 CONTROL_NAME = "control.json"
 STATUS_NAME = "status.json"
 SCHEDULE_NAME = "schedule.json"
-# The GPUs the console handed an arm when it last started its worker
+# The GPUs the console handed an experiment when it last started its worker
 # (webui.manager.start_worker). That worker attaches exactly these to every
 # container it starts, and they are held while it lives (``gpu_claims``).
 GPU_CLAIM_NAME = "gpu_claim.json"
-# The marker the operator's archive (scripts/experiments/archive_arm.py) writes
-# in an arm's hitl/ directory, recording when and why; removing it restores the
-# arm. Archiving is the operator's final word that the arm is over: the console
+# The marker the operator's archive (scripts/experiments/archive_experiment.py) writes
+# in an experiment's hitl/ directory, recording when and why; removing it restores the
+# experiment. Archiving is the operator's final word that the experiment is over: the console
 # lists it apart and never starts its worker again, and the derived-cache prunes
-# treat it as finished for good (``arm_is_archived``).
+# treat it as finished for good (``experiment_is_archived``).
 ARCHIVED_NAME = "archived.json"
 
 
-class ArmState(StrEnum):
-    """An arm's ``state`` in ``status.json``, as its worker, the console and
+class ExperimentState(StrEnum):
+    """An experiment's ``state`` in ``status.json``, as its worker, the console and
     the operator's tools write it, plus the two the console derives when it
     reads one: ``interrupted`` (an active state whose worker died) and
     ``unreadable`` (a status file it cannot read). The values are persisted."""
@@ -67,12 +67,12 @@ class ArmState(StrEnum):
     UNREADABLE = "unreadable"
 
 
-LIVE_RUN_STATES = {ArmState.RUNNING_SESSION}
-# The states a worker ends in: an arm in one of them runs nothing.
-ENDED_STATES = frozenset({ArmState.COMPLETED, ArmState.FAILED, ArmState.STOPPED})
+LIVE_RUN_STATES = {ExperimentState.RUNNING_SESSION}
+# The states a worker ends in: an experiment in one of them runs nothing.
+ENDED_STATES = frozenset({ExperimentState.COMPLETED, ExperimentState.FAILED, ExperimentState.STOPPED})
 
 
-# The console's views of the arm parameters (``arm_params.ArmParams``): what a
+# The console's views of the experiment parameters (``experiment_params.ExperimentParams``): what a
 # create request may name and what each defaults to, the values the console
 # stamps for the parameters it manages, the keys it refuses (managed, host-only
 # and the never-persistable endpoint overrides) and the ones a request must
@@ -96,7 +96,7 @@ class ControlState:
     skip_to_heldout: bool = False
     resource_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
     # Per-session sandbox GPU allocation set before the session starts: that
-    # many of the cards the arm holds.
+    # many of the cards the experiment holds.
     gpu_counts: dict[str, int] = field(default_factory=dict)
     # A pending re-run token per session: the worker re-runs the session
     # whose latest ledger record has not absorbed this id yet.
@@ -214,7 +214,7 @@ def write_gpu_claim(hitl: str | Path, devices: list[int]) -> None:
 
 
 def read_gpu_claim(hitl: str | Path) -> tuple[int, ...] | None:
-    """The devices of an arm's GPU claim, or ``None`` when it has none."""
+    """The devices of an experiment's GPU claim, or ``None`` when it has none."""
     path = Path(hitl) / GPU_CLAIM_NAME
     payload = read_json_object(path, missing_ok=True)
     if not payload:
@@ -229,16 +229,16 @@ def read_gpu_claim(hitl: str | Path) -> tuple[int, ...] | None:
     return tuple(devices)
 
 
-def arm_is_archived(directory: str | Path) -> bool:
-    """Whether the operator archived this arm: it carries ``ARCHIVED_NAME`` and
+def experiment_is_archived(directory: str | Path) -> bool:
+    """Whether the operator archived this experiment: it carries ``ARCHIVED_NAME`` and
     is finished for good, whatever its status and ledger say."""
 
     return (Path(directory) / HITL_DIR_NAME / ARCHIVED_NAME).is_file()
 
 
-def running_arms(experiments_root: str | Path) -> list[str]:
-    """The arms under ``experiments_root`` whose worker is alive and has not
-    ended, by id. An arm whose status cannot be read runs nothing."""
+def running_experiments(experiments_root: str | Path) -> list[str]:
+    """The experiments under ``experiments_root`` whose worker is alive and has not
+    ended, by id. An experiment whose status cannot be read runs nothing."""
 
     root = Path(experiments_root)
     if not root.is_dir():
@@ -257,17 +257,17 @@ def running_arms(experiments_root: str | Path) -> list[str]:
 
 
 def gpu_claims(experiments_root: str | Path) -> dict[str, list[int]]:
-    """The devices every running arm holds, by arm.
+    """The devices every running experiment holds, by experiment.
 
-    An arm holds the cards claimed for its worker for as long as that worker
+    An experiment holds the cards claimed for its worker for as long as that worker
     lives, whether or not they show memory in use: between batches, while its
-    model thinks, they show none. An arm that asked for no GPU has no claim,
+    model thinks, they show none. An experiment that asked for no GPU has no claim,
     and the claim an ended worker left behind holds nothing.
     """
 
     root = Path(experiments_root)
     claims: dict[str, list[int]] = {}
-    for name in running_arms(root):
+    for name in running_experiments(root):
         claim = read_gpu_claim(root / name / HITL_DIR_NAME)
         if claim is not None:
             claims[name] = list(claim)
@@ -283,9 +283,9 @@ def free_gpus(
     """The GPUs eligible to take, the most free memory first: the devices
     matching ``require_name`` that keep at least ``min_free_memory_mib`` free
     (the host's floor, ``gpu.host_min_free_gpu_memory_mib``, when it is not
-    given) and that no running arm under ``experiments_root`` claims
+    given) and that no running experiment under ``experiments_root`` claims
     (:func:`gpu_claims`). Somebody else's memory on a card does not keep it
-    out; only too little free memory or a running arm's claim does.
+    out; only too little free memory or a running experiment's claim does.
     """
 
     floor = host_min_free_gpu_memory_mib() if min_free_memory_mib is None else min_free_memory_mib
@@ -306,11 +306,11 @@ def select_gpus(
 ) -> list[int]:
     """The one way a GPU is chosen: the first ``count`` of :func:`free_gpus`.
 
-    The console takes an arm's cards here when it starts the worker and
-    records them as its claim. Whatever else needs a card -- a Paper book's
+    The console takes an experiment's cards here when it starts the worker and
+    records them as its claim. Whatever else needs a card -- a Paper account's
     morning run, a round's smoke, a session audited from the command line, an
     operator's replay -- takes its cards here for that run and pins them on its
-    containers, so it is never given a card a running arm holds. Every caller
+    containers, so it is never given a card a running experiment holds. Every caller
     gets the same rule; ``min_free_memory_mib`` defaults to the host's floor.
     ``GpuUnavailableError`` names the eligible cards and who holds the rest
     when the request cannot be met, or says why the devices could not be read.
@@ -323,8 +323,8 @@ def select_gpus(
     holders = "; ".join(f"{name} {devices}" for name, devices in gpu_claims(experiments_root).items())
     raise GpuUnavailableError(
         f"requested {count} GPU(s), {len(free)} free ({', '.join(map(str, free)) or 'none'}); "
-        f"a card is free only when it keeps {floor} MiB free and no running arm claims it; "
-        f"claimed by running arms: {holders or 'none'}"
+        f"a card is free only when it keeps {floor} MiB free and no running experiment claims it; "
+        f"claimed by running experiments: {holders or 'none'}"
     )
 
 
@@ -336,7 +336,7 @@ class StatusReporter:
         self.heartbeat_seconds = heartbeat_seconds
         pid = os.getpid()
         self._state: dict[str, object] = {
-            "state": ArmState.INITIALIZING,
+            "state": ExperimentState.INITIALIZING,
             "pid": pid,
             "pid_start_ticks": proc_start_ticks(pid),
             "session_key": None,
@@ -417,7 +417,7 @@ class PlannedSession:
 
 
 def planned_sessions() -> tuple[PlannedSession, ...]:
-    """The arm's plan: its one research session, then the forward replay."""
+    """The experiment's plan: its one research session, then the forward replay."""
 
     return (
         PlannedSession(SessionKind.RESEARCH, SessionKind.RESEARCH),

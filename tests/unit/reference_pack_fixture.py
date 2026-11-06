@@ -1,4 +1,4 @@
-"""What the reference-pack tests share."""
+"""What the reference-workspace tests share."""
 
 # How a reading after the research period is quoted. A pack mounts into a
 # research session, which never sees Forward or Held-out results, so no file a

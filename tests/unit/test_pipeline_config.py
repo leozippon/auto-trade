@@ -40,7 +40,7 @@ from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
-#: new experiment hardlinks the PIT view seed. Period, screen, compact, and
+#: new experiment hardlinks the prebuilt view cache. Period, screen, compact, and
 #: loop knobs that a researcher gets without touching the form live here.
 _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_keep_recent_messages": 10,
@@ -61,7 +61,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
     # The research session's budgets: minutes and calls, spent across every
-    # attempt of the arm's one session.
+    # attempt of the experiment's one session.
     "max_research_minutes": 2400,
     "max_llm_calls": 6400,
     "model": "gpt-6-astra",
@@ -143,7 +143,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
         self.assertEqual(rules.evaluate(ok), [])
         # A drawdown breach is a HARD reject, sign-independent: F4/H3 enforce
-        # the same limit forward, so freezing a book that already breached it
+        # the same limit forward, so registering a book that already breached it
         # spends a forward test on a candidate the verdict must reject.
         for drawdown in (0.30, -0.30):
             with self.subTest(drawdown=drawdown):
@@ -224,7 +224,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
         self.assertEqual(AcceptanceRules.from_record(rules.to_record()), rules)
         # A params.json or run manifest written before the required rules
-        # existed -- every arm created under the deflated-Sharpe gate -- is
+        # existed -- every experiment created under the deflated-Sharpe gate -- is
         # refused, never read under a value it did not state.
         for missing in REQUIRED_RULES:
             stated = {key: value for key, value in REQUIRED_RULES.items() if key != missing}
@@ -234,8 +234,8 @@ class AcceptanceRulesTest(unittest.TestCase):
                 acceptance_for({"max_drawdown": 0.25, **stated})
             with self.assertRaises(TypeError):
                 AcceptanceRules(max_drawdown=0.25, **stated)  # type: ignore[arg-type]
-        # A record that states them rebuilds the rules it names, retired bars
-        # ignored, with no tracking mandate, and the forward bars it leaves out
+        # A record that states them rebuilds the rules it names, retired thresholds
+        # ignored, with no tracking mandate, and the forward thresholds it leaves out
         # resolve to today's defaults.
         old = AcceptanceRules.from_record(
             {
@@ -300,9 +300,9 @@ class AcceptanceRulesTest(unittest.TestCase):
 
     def test_the_agent_facts_state_the_rules_from_their_single_sources(self) -> None:
         """The ``acceptance_rules`` fact is derived, never retyped: the
-        residual statistic and its bar come from ``verdict`` and this
+        residual statistic and its threshold come from ``verdict`` and this
         experiment's own rules, registration lists only what it checks, the
-        validation block states the arm's steps, and no date of any period
+        validation block states the experiment's steps, and no date of any period
         appears in it."""
 
         rules = AcceptanceRules(
@@ -311,17 +311,17 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
         facts = rules.agent_facts(validation_years=5)
         self.assertEqual(
-            sorted(facts), ["forward", "graded_series", "instrument", "registration", "validation"]
+            sorted(facts), ["forward", "graded_series", "registration", "significance", "validation"]
         )
-        self.assertIn(str(verdict.PANEL_DRAWS), facts["graded_series"])
+        self.assertIn(str(verdict.BASELINE_DRAWS), facts["graded_series"])
         self.assertIn("benchmark.active_information_ratio", facts["graded_series"])
-        statistic = facts["instrument"]
+        statistic = facts["significance"]
         self.assertIn("intercept times sqrt(244) over the residual standard deviation", statistic["statistic"])
         self.assertIn("the size leg and the value leg", statistic["statistic"])
-        self.assertIn("z(1 - alpha) / sqrt(years)", statistic["bar"])
+        self.assertIn("z(1 - alpha) / sqrt(years)", statistic["threshold"])
         self.assertEqual(statistic["alpha"], 0.05)
-        self.assertEqual(statistic["bar_over_one_year"], 1.645)
-        self.assertEqual(statistic["bar_over_validation_period"], round(verdict.residual_bar(5.0, 0.05), 3))
+        self.assertEqual(statistic["threshold_over_one_year"], 1.645)
+        self.assertEqual(statistic["threshold_over_validation_period"], round(verdict.residual_threshold(5.0, 0.05), 3))
         with self.assertRaises(ValueError):
             rules.agent_facts(validation_years=0)
         validation = facts["validation"]
@@ -348,7 +348,7 @@ class AcceptanceRulesTest(unittest.TestCase):
     def test_one_series_is_stated_and_nothing_gates(self) -> None:
         """Every reading is of the active series: the facts name it once and
         no neutralized figure. The forward bound and the cost stress are
-        stated as readings, over the frozen book and its seed replicates, that
+        stated as readings, over the registered book and its seed replicates, that
         decide nothing; no fact names a gate."""
 
         facts = AcceptanceRules(**REQUIRED_RULES).agent_facts(validation_years=1)
@@ -362,7 +362,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         forward = facts["forward"]
         self.assertEqual(sorted(forward), ["reported"])
         self.assertIn("80% block-bootstrap lower bound", forward["reported"])
-        self.assertIn("frozen book and its seed replicates", forward["reported"])
+        self.assertIn("registered book and its seed replicates", forward["reported"])
         self.assertIn("deciding nothing", forward["reported"])
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
@@ -472,7 +472,7 @@ class DefaultsDriftTest(unittest.TestCase):
         # A retired switch is no parameter a request can name.
         self.assertFalse(RETIRED_SWITCHES & set(WEB_CREATE_DEFAULTS))
         # Drawdowns and the mandate switch stay empty so the form does not pin
-        # a mandate onto every arm, and the research years have no console
+        # a mandate onto every experiment, and the research years have no console
         # value: every request states them (WEB_REQUIRED_PARAMS). Every other
         # rule shows what an empty request would stamp.
         stated = {"research_years"}
@@ -535,7 +535,7 @@ class DefaultsDriftTest(unittest.TestCase):
 
     def test_the_retired_switches_are_accepted_and_inert_and_any_other_key_refused(self) -> None:
         """Every params.json written before 2026-10-07 carries the retired
-        switches. The worker loads such an arm as if they were absent, whatever
+        switches. The worker loads such an experiment as if they were absent, whatever
         their values, and runs it under the one rule set: its account pays the
         dividend tax, which the run facts state. A key it does not know is
         refused as ever."""
@@ -595,15 +595,15 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual((old["final_rate_beyond"], new["final_rate_beyond"]), (0.05, 0.0))
 
     def test_the_retired_ablation_rule_loads_inert_and_no_request_may_name_it(self) -> None:
-        """Every arm created from 2026-11-03 until the freeze's ablation was
+        """Every experiment created from 2026-11-03 until the registration's ablation was
         retired states ``ablation_required`` in its params.json and in the
         acceptance rules its runs recorded. The worker loads it as the same
-        arm without the key, whatever its value; the rules rebuilt from a
+        experiment without the key, whatever its value; the rules rebuilt from a
         record carrying it are the rules without it; and a create request may
         no longer name it, nor any other key no parameter declares."""
         import tempfile
 
-        from autotrade.pipelines.arm_params import console_request
+        from autotrade.pipelines.experiment_params import console_request
         from autotrade.pipelines.worker import resolve_worker_options
 
         self.assertIn("ablation_required", OBSOLETE_KEYS)
@@ -649,8 +649,8 @@ class DefaultsDriftTest(unittest.TestCase):
                 work_root="work",
             )
 
-    def test_the_permitted_boards_are_pinned_per_arm_and_stated_only_where_pinned(self) -> None:
-        """An arm without the key buys on every board and its facts say nothing
+    def test_the_permitted_boards_are_pinned_per_experiment_and_stated_only_where_pinned(self) -> None:
+        """An experiment without the key buys on every board and its facts say nothing
         new; a stamped value reaches the Broker profile, an invalid one is
         refused by the pre-flight the console runs before creating."""
         import tempfile
@@ -696,7 +696,7 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertIsNone(recorded.to_record()["permitted_boards"])
         self.assertEqual(pinned.permitted_boards, ("main", "gem"))
         self.assertEqual(pinned.to_record()["permitted_boards"], ["main", "gem"])
-        # A profile read back from the JSON a Paper book keeps is the same profile.
+        # A profile read back from the JSON a Paper account keeps is the same profile.
         self.assertEqual(BrokerProfile.from_record(json.loads(json.dumps(pinned.to_record()))), pinned)
         # The run facts state the boards only where the profile pins them.
         self.assertNotIn("permitted_boards", _broker_replay_facts({"broker_profile": recorded.to_record()}))
@@ -840,7 +840,7 @@ class DefaultsDriftTest(unittest.TestCase):
                 self.assertEqual(actual, expected, key)
 
     def test_worker_accepts_exactly_the_console_parameters(self) -> None:
-        from autotrade.pipelines.arm_params import PARAMETERS
+        from autotrade.pipelines.experiment_params import PARAMETERS
 
         # Every knob the console can write must be one the worker accepts,
         # otherwise creating an experiment produces a worker that refuses it.
@@ -906,7 +906,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
         }
 
     def test_every_restored_parameter_is_rendered_and_accepted(self) -> None:
-        from autotrade.pipelines.arm_params import PARAMETERS
+        from autotrade.pipelines.experiment_params import PARAMETERS
 
         fields = self._schema_fields()
         for key in RESTORED_CONSOLE_PARAMETERS:
@@ -918,7 +918,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                 self.assertTrue(fields[key].get("help"), f"{key} has no help text")
 
     def test_every_rendered_field_is_a_parameter_the_worker_accepts(self) -> None:
-        from autotrade.pipelines.arm_params import PARAMETERS
+        from autotrade.pipelines.experiment_params import PARAMETERS
 
         fields = self._schema_fields()
         # Rendering a field the worker rejects is a control that 400s on submit.
@@ -1083,7 +1083,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
     """Which prebuilt PIT views an experiment may reuse is its own parameter.
 
     The default tree is an optimisation and stays lenient; a tree named
-    explicitly is the only way an arm with a non-default dataset selection gets
+    explicitly is the only way an experiment with a non-default dataset selection gets
     prebuilt views at all, so it is checked at create time instead of turning
     into hours of silent cold building.
     """
@@ -1183,7 +1183,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
                 self._resolve(repo_root, {"pit_views_seed": "data/never_built"})
             with self.assertRaisesRegex(ValueError, "must stay inside the repository"):
                 self._resolve(repo_root, {"pit_views_seed": "../elsewhere"})
-            # Built for the default selection, asked for by an arm that adds a
+            # Built for the default selection, asked for by an experiment that adds a
             # dataset: the mismatch names both contracts instead of silently
             # cold-building every view.
             self._seed(repo_root, "pit_views_seed_default", {})
@@ -1201,7 +1201,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
 
     def test_a_seed_and_its_release_deployed_without_a_live_lake_are_accepted(self) -> None:
         """A deployment that carries only a seed and the release it was built
-        from (the A100 instance) creates the arm as the workstation does: the
+        from (the A100 instance) creates the experiment as the workstation does: the
         seed's recorded release path names the host that built it, the
         release manifest's sources are read relative to the repository, and
         no live ``data/raw`` or PIT root is required at pre-flight or create."""
@@ -1229,10 +1229,10 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertTrue((instance / "experiments" / "seed_demo" / "research_release").is_dir())
 
     def test_a_benchmark_index_the_release_cannot_key_fails_the_create(self) -> None:
-        """An arm is refused where it names its benchmark, not at replay end.
+        """An experiment is refused where it names its benchmark, not at replay end.
 
         The parameter selects the benchmark's own bars and its constituent
-        table out of the release the arm pins; a release published before an
+        table out of the release the experiment pins; a release published before an
         index carries neither, and a replay would only report an unmeasured
         benchmark hours later. An index the lake does not carry at all is
         refused before any release is read.
@@ -1267,7 +1267,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertEqual(options.rolling.benchmark_index, "000905.SH")
 
     def test_a_benchmark_history_that_starts_inside_research_fails_the_create(self) -> None:
-        """An eight-year arm is refused where it names a release whose
+        """An eight-year experiment is refused where it names a release whose
         benchmark history starts after its research start, not graded with
         unmeasured first years; the four-year geometry on the same release is
         accepted."""
@@ -1401,9 +1401,9 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertFalse(options.pit_views_seed_required)
 
 
-def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path) -> None:
-    """The research session's request is derived from the arm's config in one
-    place: a value the arm sets reaches the session, and the budgets are the
+def test_a_session_request_takes_every_experiment_field_from_its_config(tmp_path: Path) -> None:
+    """The research session's request is derived from the experiment's config in one
+    place: a value the experiment sets reaches the session, and the budgets are the
     ones handed over after the HITL override, not the config's."""
 
     from datetime import UTC, datetime
@@ -1417,7 +1417,7 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
 
     config = make_config(
         tmp_path,
-        experiment_id="arm_request",
+        experiment_id="experiment_request",
         window_months=36,
         benchmark_index="000905.SH",
         record_failed_attempts=False,
@@ -1431,7 +1431,7 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
         "deadline_seconds": 600.0,
         "deadline_grace_seconds": 60.0,
     }
-    request = ResearchSessionRequest.for_arm(
+    request = ResearchSessionRequest.for_experiment(
         config,
         budgets=budgets,
         run_id="run_1",
@@ -1449,8 +1449,8 @@ def test_a_session_request_takes_every_arm_field_from_its_config(tmp_path: Path)
         request.max_null_controls,
         request.batch_validate_max_concurrency,
         request.modification_constraints,
-    ) == ("arm_request", 36, "000905.SH", False, 4, 2, config.step_constraints)
+    ) == ("experiment_request", 36, "000905.SH", False, 4, 2, config.step_constraints)
     assert request.acceptance_rules == config.acceptance.to_record()
     assert {name: getattr(request, name) for name in budgets} == budgets
     with pytest.raises(TypeError):
-        ResearchSessionRequest.for_arm(config, budgets=budgets, window_months=12)
+        ResearchSessionRequest.for_experiment(config, budgets=budgets, window_months=12)
