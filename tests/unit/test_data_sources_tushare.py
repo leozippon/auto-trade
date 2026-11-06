@@ -7844,8 +7844,9 @@ class UuidCommitIdentityTest(unittest.TestCase):
         # since the four disclosure-table re-pulls became the history_repull
         # policy and its operator command (2026-10-24); 36 with the weekly
         # research-release retention; 37 with the standalone share_float
-        # repair (2026-10-27).
-        self.assertEqual(len(config["jobs"]), 37)
+        # repair (2026-10-27); 38 with the anns_d available_at repair
+        # (2026-11-06).
+        self.assertEqual(len(config["jobs"]), 38)
         for name, tier in (
             ("manual_history_backfill_reference", "reference"),
             ("manual_history_backfill_macro", "macro"),
@@ -7940,6 +7941,22 @@ class UuidCommitIdentityTest(unittest.TestCase):
             cron_update.build_job_commands(context),
             [["python", "scripts/data/tushare_download.py", "repair-event-available-at", "--raw-dir", "raw",
               "--datasets", "margin", "margin_detail"]],
+        )
+        self.assertIn(job["operation"], cron_update.MUTATING_OPERATIONS)
+
+    def test_text_available_at_repair_runs_as_a_mutating_job(self) -> None:
+        root = Path(__file__).resolve().parents[2]
+        config = json.loads((root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))
+        job = config["jobs"]["manual_text_available_at_repair"]
+        context = cron_update.RunContext(
+            config={"default_raw_dir": "raw"}, repo_root=Path("."), python="python",
+            job_name="manual_text_available_at_repair", job=job,
+            start_date="20200101", end_date="20260930", timezone_name="Asia/Shanghai",
+        )
+        self.assertEqual(
+            cron_update.build_job_commands(context),
+            [["python", "scripts/data/tushare_download.py", "repair-text-available-at", "--raw-dir", "raw",
+              "--datasets", "anns_d"]],
         )
         self.assertIn(job["operation"], cron_update.MUTATING_OPERATIONS)
 
