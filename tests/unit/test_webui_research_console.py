@@ -244,6 +244,20 @@ def test_a_sealed_gate_record_still_opens_its_forward_replay(tmp_path: Path, sta
     assert equity["exposure"]["strategy"]["long"][0] == pytest.approx(0.9)
     orders = client.get(f"/api/experiments/experiment/results/{forward['result']}/orders").json()
     assert orders["row_count"] == 2
+    # Its sealed reading, and the sealed replay it was read off, which the
+    # record names and the console therefore serves.
+    sealed = record["sealed"]
+    assert forward["sealed"] == {
+        "label": "Y4",
+        "start": sealed["start"],
+        "end": sealed["end"],
+        "result": Path(sealed["result_ref"]).parent.name,
+        "residual_information_ratio": sealed["slice"]["residual_information_ratio"],
+        "bar": sealed["slice"]["bar"],
+        "years": sealed["slice"]["years"],
+    }
+    for route in ("equity", "style", "orders"):
+        assert client.get(f"/api/experiments/experiment/results/{forward['sealed']['result']}/{route}").status_code == 200
     if status == "graduated":
         assert detail["verdict"]["reasons"] == []
         assert detail["paper_candidate"] == {"artifact_id": "strategy_research_abc"}
@@ -790,6 +804,8 @@ def test_an_ended_experiment_is_read_off_its_ledger_and_never_judged_again(
     recorded = _records(root / "recorded")[-1]
     assert details["recorded"]["forward"]["readout"] == recorded["readout"]
     assert rows["recorded"]["record"]["steps"] == recorded["readout"]["record"]["steps"]
+    # Only a sealed-gate record carries a sealed reading for the page to show.
+    assert details["recorded"]["forward"]["sealed"] is None and details["refused"]["forward"]["sealed"]
 
 
 def test_a_page_poll_keeps_one_request_in_flight() -> None:

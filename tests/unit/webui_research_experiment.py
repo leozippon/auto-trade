@@ -534,8 +534,10 @@ def build_experiment(
             sealed_analysis = _analysis(sealed_ref)
             sealed_end = sealed_analysis["strategy_daily"][-1][0]
             reading = residual_reading(sealed_analysis, start=SEALED[0], end=sealed_end, alpha=RULES.alpha)
-            reasons = [] if reading["residual_information_ratio"] >= reading["threshold"] else ["sealed_residual_ir_below_bar"]
-            thresholds = {"alpha": RULES.alpha, "bar": reading["threshold"]}
+            # That code named the threshold ``bar``.
+            reading["bar"] = reading.pop("threshold")
+            reasons = [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
+            thresholds = {"alpha": RULES.alpha, "bar": reading["bar"]}
             sealed = {
                 "start": SEALED[0],
                 "end": sealed_end,

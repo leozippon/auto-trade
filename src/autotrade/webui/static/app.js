@@ -3294,6 +3294,7 @@ function readoutStagePanel(detail) {
     forward ? holderLine("Held-out", slices.heldout) : null,
     seedReadingsTable(slices, ["forward", "heldout"]),
     forward && forward.verdict ? legacyVerdictLine(forward.verdict) : null,
+    forward && forward.sealed ? legacySealedBlock(detail.experiment_id, forward.sealed) : null,
     forward
       ? null
       : endingReason(detail) ||
@@ -3343,6 +3344,31 @@ function legacyVerdictLine(verdict) {
     "div",
     { class: "meta-line section-gap" },
     `封存门裁决（旧规则）：${ENDING_LABELS[verdict.status] || verdict.status}${reasons.length ? ` · ${reasons.join(" · ")}` : ""}`,
+  );
+}
+
+/* The sealed reading a record judged under the retired sealed gate carries
+   beside that verdict: the registered strategy's residual IR over the sealed
+   research years against its threshold, and the trades of the replay it was
+   read off. A record without one requests nothing. */
+function legacySealedBlock(experimentId, s) {
+  return el(
+    "div",
+    { class: "section-gap" },
+    el(
+      "table",
+      { class: "kv" },
+      kvRow(
+        `封存读数（旧规则）· ${s.label || "—"}`,
+        `${fmtDate(s.start)} ～ ${fmtDate(s.end)} · 残差 IR ${fmtSharpe(s.residual_information_ratio)}（门槛 ${fmtSharpe(s.bar)}，${fmtSharpe(s.years)} 年）`,
+      ),
+    ),
+    s.result
+      ? Object.assign(
+          lazyDetails("封存回测交易明细", () => ordersNode(experimentId, s.result)),
+          { className: "fold section-gap" },
+        )
+      : null,
   );
 }
 

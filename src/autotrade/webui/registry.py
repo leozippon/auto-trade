@@ -527,7 +527,8 @@ def _forward_view(
 ) -> dict[str, object] | None:
     """The forward record: replay span, slice statistics and readout, as the
     record stores them (a record judged under the sealed gate carries its
-    verdict instead), a record from before 2026-10-28 on today's scale
+    verdict and its sealed reading instead, :func:`_sealed_view`), a record
+    from before 2026-10-28 on today's scale
     (:func:`_slice_view`, :func:`_recorded_reasons`). ``None`` until the record
     exists, which is also when the verdict does. A slice recorded before
     slices carried the holder's readings shows none: nothing is read again
@@ -537,6 +538,7 @@ def _forward_view(
         return None
     null = _mapping(record.get("null_control"))
     verdict = _mapping(record.get("verdict"))
+    sealed = _mapping(record.get("sealed"))
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
@@ -554,6 +556,25 @@ def _forward_view(
         # the sealed-gate rules carries its verdict instead.
         "readout": dict(_mapping(record.get("readout"))) or None,
         "verdict": {**verdict, "reasons": _recorded_reasons(verdict.get("reasons"))} if verdict else None,
+        "sealed": _sealed_view(sealed) if sealed else None,
+    }
+
+
+def _sealed_view(block: Mapping[str, object]) -> dict[str, object]:
+    """The sealed reading a record judged under the retired sealed gate
+    (2026-11-03..05) carries beside its verdict: the registered strategy's
+    residual IR over the sealed research years against its threshold, and the
+    replay it was read off. Nothing writes one any more."""
+
+    reading = _mapping(block.get("slice"))
+    return {
+        "label": block.get("label"),
+        "start": block.get("start"),
+        "end": block.get("end"),
+        "result": _result_name(block.get("result_ref")),
+        "residual_information_ratio": _number(reading.get("residual_information_ratio")),
+        "bar": _number(reading.get("bar")),
+        "years": _number(reading.get("years")),
     }
 
 
@@ -1477,7 +1498,9 @@ def _ledger_result_refs(
     """Every replay result the experiment has recorded: the research session's
     Validations — from the ledger once the session is recorded, from the host
     sidecars while it runs — and, once it is recorded with its verdict, the
-    forward replay. The replay itself has no sidecar, so it stays sealed."""
+    forward replay, and the sealed replay a record judged under the retired
+    sealed gate names. The forward replay itself has no sidecar, so nothing
+    of it is served while it runs."""
 
     for record in research_records(records):
         for row in record.get("steps") or ():
@@ -1488,6 +1511,7 @@ def _ledger_result_refs(
     forward = forward_record(records)
     if forward is not None:
         yield forward.get("result_ref")
+        yield _mapping(forward.get("sealed")).get("result_ref")
 
 
 def ledger_result(root: Path, experiment_id: str, name: str) -> Path:

@@ -644,8 +644,9 @@ def replay_style_analysis(
         baseline_compact = {
             # The graded series: the strategy's daily return minus the
             # random-baseline composite of its own book, read as it is; the
-            # sealed gate regresses it on the factor legs. Its drawdown is
-            # reported beside it and judged by neither the final registration
+            # validation record's significance test regresses it on the factor
+            # legs. Its drawdown is reported beside it and judged by neither
+            # the final registration
             # (which holds the equity drawdown to max_drawdown) nor the
             # verdict: the Agent reads the series it is graded on.
             "active_excess": rounded("plain_excess"),
