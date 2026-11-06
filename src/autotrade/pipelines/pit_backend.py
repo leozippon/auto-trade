@@ -27,7 +27,11 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    read_current_record,
+    read_json_object,
+    write_json_atomic,
+)
 from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
@@ -1216,7 +1220,7 @@ class PITDailyEvaluationBackend:
         result_json = _result_json(result_path)
         try:
             decision_dir, replay_dirs = _result_replay_slots(result_json)
-            record = read_json_object(result_json)
+            record = read_current_record(result_json)
             daily = _span_daily(replay_dirs, start, end)
             benchmark = slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index)
             membership = slot_membership(

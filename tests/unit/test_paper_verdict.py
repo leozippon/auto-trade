@@ -235,7 +235,7 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     assert handed["membership"] == {"20251231": frozenset({A, B}), "20260106": frozenset({A})}
     # The random baseline is drawn through the book's pinned profile, so on its boards only.
     assert handed["profile"] is book.profile
-    assert reading["panel"]["matched"] == MATCHED_MEMBERSHIP and reading["panel"]["round_trips"] == 1
+    assert reading["baseline"]["matched"] == MATCHED_MEMBERSHIP and reading["baseline"]["round_trips"] == 1
     assert reading["index_return"] == pytest.approx(np.prod([1 + index_pct[day] / 100 for day in settled]) - 1)
     # Under one bootstrap block: measured, not yet bounded.
     assert reading["status"] == "observing" and reading["plain"]["confirm_lower_bound"] is None

@@ -105,7 +105,7 @@ def _forward(analysis, **overrides):
     leaves every graded figure the book's own
     (:func:`test_a_zero_random_baseline_reproduces_the_ungraded_figures_exactly`)."""
 
-    if "panel_daily" not in analysis:
+    if "baseline_daily" not in analysis:
         analysis = _with_baselines(analysis, np.zeros(len(analysis["strategy_daily"])))
     arguments = {
         "start": FORWARD_START,
@@ -258,7 +258,7 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
         "forward_confidence": 0.8,
         "bootstrap_block_days": verdict.BOOTSTRAP_BLOCK_DAYS,
         "bootstrap_draws": verdict.BOOTSTRAP_DRAWS,
-        "panel_draws": verdict.BASELINE_DRAWS,
+        "baseline_draws": verdict.BASELINE_DRAWS,
         "cost_stress_multiplier": 2.0,
     }
 
@@ -281,7 +281,7 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
 def _with_baselines(analysis, baselines):
     return {
         **analysis,
-        "panel_daily": [
+        "baseline_daily": [
             [day, float(value)]
             for (day, _own), value in zip(analysis["strategy_daily"], baselines, strict=True)
         ],
@@ -302,7 +302,7 @@ def test_a_zero_random_baseline_reproduces_the_ungraded_figures_exactly():
         _segment(FORWARD_DAYS, 0.10, rng), _segment(HELDOUT_DAYS, 0.02, rng, te=0.05)
     )
 
-    panel_readings = ("panel_return", "plain_selection")
+    panel_readings = ("baseline_return", "plain_selection")
 
     def without_series(block):
         kept = {key: value for key, value in block.items() if key != "series"}
@@ -343,10 +343,10 @@ def test_a_zero_random_baseline_reproduces_the_ungraded_figures_exactly():
         assert without_series(own) == without_series(graded)
         if "raw_readings" in own:
             assert {key: own["raw_readings"][key] for key in panel_readings} == {
-                "panel_return": None,
+                "baseline_return": None,
                 "plain_selection": None,
             }
-            assert graded["raw_readings"]["panel_return"] == 0.0
+            assert graded["raw_readings"]["baseline_return"] == 0.0
             assert graded["raw_readings"]["plain_selection"] == own["raw_readings"]["strategy_return"]
 
 
@@ -372,7 +372,7 @@ def test_the_graded_series_is_the_strategy_minus_its_random_baseline():
         assert graded[key] == pytest.approx(verdict.graded_statistics(alone)[key], rel=1e-9)
 
     registered = verdict.registered_mandate(book, rules=AcceptanceRules(**REQUIRED_RULES))
-    own = verdict.graded_statistics({**book, "panel_daily": []})
+    own = verdict.graded_statistics({**book, "baseline_daily": []})
     assert registered["mandate"]["market_beta"] == pytest.approx(own["market_beta"], rel=1e-12)
     assert registered["mandate"]["market_beta"] == pytest.approx(0.95, abs=0.03)
     # The mandate's tracking error is the residual one, below the series' own.
@@ -386,7 +386,7 @@ def test_the_graded_series_is_the_strategy_minus_its_random_baseline():
     ]
 
     # A day the random baseline does not cover would be graded against nothing.
-    short = {**book, "panel_daily": book["panel_daily"][:-1]}
+    short = {**book, "baseline_daily": book["baseline_daily"][:-1]}
     with pytest.raises(ValueError, match="random baseline has no return"):
         verdict.graded_statistics(short)
 
@@ -463,7 +463,7 @@ def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slic
 def test_the_random_baseline_return_is_what_the_random_baseline_composite_compounded_to():
     days = _weekdays("20210701", "20210730")
     baselines = [-0.001] * len(days)
-    sidecar = {"panel_daily": [[day, value] for day, value in zip(days, baselines)]}
+    sidecar = {"baseline_daily": [[day, value] for day, value in zip(days, baselines)]}
     assert verdict.baseline_return(sidecar) == pytest.approx((1 - 0.001) ** len(days) - 1)
     assert verdict.baseline_return({}) is None
 
@@ -557,7 +557,7 @@ def test_f2_is_the_lower_bound_of_the_plain_mean():
     series = np.array(
         [
             own - drawn
-            for (_day, own), (_same, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)
+            for (_day, own), (_same, drawn) in zip(book["strategy_daily"], book["baseline_daily"], strict=True)
         ]
     )
     bound = _forward(book, forward_confidence=0.9)
@@ -593,12 +593,12 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     raw = forward["raw_readings"]
     strategy = compound("strategy_daily", FORWARD_START, FORWARD_END)
     benchmark = compound("benchmark_daily", FORWARD_START, FORWARD_END)
-    baselines = compound("panel_daily", FORWARD_START, FORWARD_END)
+    baselines = compound("baseline_daily", FORWARD_START, FORWARD_END)
     assert raw == pytest.approx(
         {
             "strategy_return": strategy,
             "benchmark_return": benchmark,
-            "panel_return": baselines,
+            "baseline_return": baselines,
             "raw_excess": strategy - benchmark,
             "plain_selection": strategy - baselines,
         },
@@ -606,12 +606,12 @@ def test_the_holders_readings_are_the_stored_series_compounded():
     )
     active = [
         own - drawn
-        for (day, own), (_day, drawn) in zip(book["strategy_daily"], book["panel_daily"], strict=True)
+        for (day, own), (_day, drawn) in zip(book["strategy_daily"], book["baseline_daily"], strict=True)
         if FORWARD_START <= day <= FORWARD_END
     ]
     assert forward["plain_excess"] == pytest.approx(np.mean(active) * TRADING_DAYS_PER_YEAR, rel=1e-12)
-    # The whole-span reading of a sidecar is the panel_return of before.
-    assert verdict.holder_readings(book)["panel_return"] == pytest.approx(verdict.baseline_return(book))
+    # The whole-span reading of a sidecar is the baseline_return of before.
+    assert verdict.holder_readings(book)["baseline_return"] == pytest.approx(verdict.baseline_return(book))
     # A span with no stored day reads nothing rather than zero.
     assert verdict.holder_readings(book, start="20300101", end="20301231") == dict.fromkeys(raw)
 
@@ -652,7 +652,7 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
     members = [book, *(sidecar for _identity, sidecar in others)]
     daily = np.mean(
         [
-            [own - drawn for (_day, own), (_same, drawn) in zip(m["strategy_daily"], m["panel_daily"], strict=True)]
+            [own - drawn for (_day, own), (_same, drawn) in zip(m["strategy_daily"], m["baseline_daily"], strict=True)]
             for m in members
         ],
         axis=0,
@@ -673,7 +673,7 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
 
     # A replicate without a random baseline, or one that measured other days.
     with pytest.raises(ValueError, match="another series"):
-        _forward(book, seed_replicates=[replicate({**others[0][1], "panel_daily": []})])
+        _forward(book, seed_replicates=[replicate({**others[0][1], "baseline_daily": []})])
     short = _selection_book(rng, 0.10, days=FORWARD_DAYS[:-1])
     with pytest.raises(ValueError, match="measured other days than the registered book"):
         _forward(book, seed_replicates=[replicate(short)])

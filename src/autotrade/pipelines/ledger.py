@@ -51,7 +51,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 
-from autotrade.common.records import write_json_atomic
+from autotrade.common.records import with_current_keys, write_json_atomic
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
@@ -243,18 +243,11 @@ def recorded_path(experiment_dir: str | Path, reference: str | Path) -> Path:
     return path
 
 
-# Research session keys a ledger written before 2026-11-06 names differently,
-# each mapped to today's name. Every reader takes the records through
-# :func:`research_records`, so this is the one place the old name is read.
-LEGACY_RESEARCH_KEYS = {"arm_end": "experiment_end"}
-
-
 def research_records(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """The research sessions' records, in the order they ran, each key under
-    today's name (:data:`LEGACY_RESEARCH_KEYS`)."""
+    """The research sessions' records, in the order they ran."""
 
     return [
-        {LEGACY_RESEARCH_KEYS.get(key, key): value for key, value in record.items()}
+        dict(record)
         for record in records
         if record.get("record_type") == "research_session"
     ]
@@ -464,10 +457,14 @@ class ExperimentLedger:
         tmp.replace(self.path)
 
     def read(self, record_type: str | None = None) -> list[dict[str, object]]:
-        records = read_versioned_jsonl(
-            self.path,
-            schema_version=LEDGER_RECORD_SCHEMA_VERSION,
-            label="ledger record",
+        # Under today's key names: the one place a ledger written before a
+        # rename is read (``records.LEGACY_KEYS``).
+        records = with_current_keys(
+            read_versioned_jsonl(
+                self.path,
+                schema_version=LEDGER_RECORD_SCHEMA_VERSION,
+                label="ledger record",
+            )
         )
         if record_type is None:
             return records

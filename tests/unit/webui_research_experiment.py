@@ -254,7 +254,7 @@ def _with_baselines(result_ref: str, scale: float, *, series: str = "strategy_da
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
     sidecar = json.loads(path.read_text(encoding="utf-8"))
-    sidecar["panel_daily"] = [[day, scale * value] for day, value in sidecar[series]]
+    sidecar["baseline_daily"] = [[day, scale * value] for day, value in sidecar[series]]
     write_json_atomic(path, sidecar)
 
 

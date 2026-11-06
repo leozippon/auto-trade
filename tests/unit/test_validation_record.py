@@ -102,7 +102,7 @@ def _replay(days: list[str], rng: np.random.Generator, *, edge: float = 0.002):
     replay = {"equity_curve": curve, "executions": executions}
     analysis = {
         "strategy_daily": [[day, float(v)] for day, v in zip(days, strategy, strict=True)],
-        "panel_daily": [[day, float(v)] for day, v in zip(days, baselines, strict=True)],
+        "baseline_daily": [[day, float(v)] for day, v in zip(days, baselines, strict=True)],
         "benchmark_daily": [[day, float(v)] for day, v in zip(days, market, strict=True)],
         "size_factor_daily": [[day, float(v)] for day, v in zip(days, size, strict=True)],
         "value_factor_daily": [[day, float(v)] for day, v in zip(days, value, strict=True)],
@@ -123,7 +123,7 @@ def test_an_entry_reads_one_window_of_a_replay_and_nothing_outside_it() -> None:
     with pytest.raises(ValueError, match="holds no day"):
         step_entry(replay, analysis, start="20210801", end="20211031")
     # A replay without a random baseline over the window is no entry.
-    partial = {**analysis, "panel_daily": analysis["panel_daily"][1:]}
+    partial = {**analysis, "baseline_daily": analysis["baseline_daily"][1:]}
     with pytest.raises(ValueError, match="random baseline"):
         step_entry(replay, partial, start="20200801", end="20201031")
     # The table a test returns reads its replay step by step: one row per

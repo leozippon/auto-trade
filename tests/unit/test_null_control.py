@@ -638,7 +638,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
     assert block["dropped_trips_mean"] == 0.0
     assert block["unpaired_sell_shares"] == 0
     assert "step" not in block
-    assert "panel_daily" not in block
+    assert "baseline_daily" not in block
 
     assert (
         run_null_control(
@@ -693,22 +693,22 @@ def test_the_random_baseline_is_the_draws_mean_daily_return_and_leaves_the_resul
 
     assert (result.equity_curve, result.executions) == before
     assert block["matched"] == MATCHED_MEMBERSHIP
-    assert [date for date, _value in block["panel_daily"]] == list(DAYS)
-    assert [date for date, _value in block["panel_draw_sd"]] == list(DAYS)
+    assert [date for date, _value in block["baseline_daily"]] == list(DAYS)
+    assert [date for date, _value in block["baseline_draw_sd"]] == list(DAYS)
     draws = [
         run_null_control(*arguments, k=1, seed=seed, membership={"20251231": set(SMALL)}, baselines=True)
         for seed in range(40)
     ]
     # One draw's random baseline is that draw itself, so no two seeds need agree, and the
     # composite of four is flat before the first entry and moves after it.
-    assert len({tuple(value for _date, value in draw["panel_daily"]) for draw in draws}) > 1
-    values = np.asarray([value for _date, value in block["panel_daily"]])
+    assert len({tuple(value for _date, value in draw["baseline_daily"]) for draw in draws}) > 1
+    values = np.asarray([value for _date, value in block["baseline_daily"]])
     assert np.all(values[:2] == 0.0) and np.any(values[2:] != 0.0)
-    assert all(value >= 0.0 for _date, value in block["panel_draw_sd"])
+    assert all(value >= 0.0 for _date, value in block["baseline_draw_sd"])
     # The percentile block is the same with or without the series.
     plain = run_null_control(*arguments, k=4, seed=17, membership={"20251231": set(SMALL)})
     assert plain == {
-        key: value for key, value in block.items() if key not in ("panel_daily", "panel_draw_sd")
+        key: value for key, value in block.items() if key not in ("baseline_daily", "baseline_draw_sd")
     }
 
 
@@ -764,8 +764,8 @@ def test_a_result_with_no_filled_trade_has_no_null_and_runs_no_replay(monkeypatc
         result, _frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"),
         seed=3, baselines=True,
     )
-    assert idle["panel_daily"] == [[day, 0.0] for day in DAYS]
-    assert idle["panel_draw_sd"] == [[day, 0.0] for day in DAYS]
+    assert idle["baseline_daily"] == [[day, 0.0] for day in DAYS]
+    assert idle["baseline_draw_sd"] == [[day, 0.0] for day in DAYS]
 
 
 def _fill(

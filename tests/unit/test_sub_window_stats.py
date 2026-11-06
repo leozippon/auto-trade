@@ -213,14 +213,14 @@ class SubWindowBenchmarkTest(unittest.TestCase):
         summary = self.summary()
         attach_sub_window_benchmark(
             summary,
-            {"benchmark_daily": benchmark, "strategy_daily": strategy, "panel_daily": baselines},
+            {"benchmark_daily": benchmark, "strategy_daily": strategy, "baseline_daily": baselines},
         )
         rows = summary["sub_windows"]
-        self.assertAlmostEqual(rows[0]["panel_return"], 1.02 * 1.01 - 1.0, places=6)
-        self.assertAlmostEqual(rows[1]["panel_return"], 0.97 * 1.04 - 1.0, places=6)
+        self.assertAlmostEqual(rows[0]["baseline_return"], 1.02 * 1.01 - 1.0, places=6)
+        self.assertAlmostEqual(rows[1]["baseline_return"], 0.97 * 1.04 - 1.0, places=6)
         bare = self.summary()
         attach_sub_window_benchmark(bare, {"benchmark_daily": benchmark})
-        self.assertEqual([row.get("panel_return") for row in bare["sub_windows"]], [None, None])
+        self.assertEqual([row.get("baseline_return") for row in bare["sub_windows"]], [None, None])
 
     def test_a_slot_without_a_usable_benchmark_reports_nothing_not_zero(self) -> None:
         for sidecar in ({}, {"benchmark_daily": []}, {"benchmark_daily": "broken"}):

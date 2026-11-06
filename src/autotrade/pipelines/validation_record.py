@@ -43,7 +43,7 @@ from .verdict import null_p_value, residual_reading
 # The columns of one entry's daily rows, in order: the date, the book's return,
 # the random baseline's, and the three factor legs the significance test regresses on.
 DAILY_COLUMNS = ("trade_date", "strategy_return", "baseline_return", *(name for name, _series in FACTOR_SERIES))
-_DAILY_SERIES = ("strategy_daily", "panel_daily", *(series for _name, series in FACTOR_SERIES))
+_DAILY_SERIES = ("strategy_daily", "baseline_daily", *(series for _name, series in FACTOR_SERIES))
 # Where a test_step record came from: the session's own test, or the host
 # filling the record after the session.
 SOURCE_TEST = "test"
@@ -112,7 +112,7 @@ def step_entry(
     strategy = _in_window(analysis.get("strategy_daily"), start, end)
     if not strategy:
         raise ValueError(f"the replay holds no day in {start}..{end}")
-    baseline = dict(_in_window(analysis.get("panel_daily"), start, end))
+    baseline = dict(_in_window(analysis.get("baseline_daily"), start, end))
     if set(baseline) != {day for day, _value in strategy}:
         raise ValueError(f"the replay carries no random baseline over every day of {start}..{end}")
     legs = {series: dict(_in_window(analysis.get(series), start, end)) for _name, series in FACTOR_SERIES}

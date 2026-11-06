@@ -1377,7 +1377,7 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
     equity = client.get(f"/api/experiments/experiment/results/{detail['forward']['result']}/equity").json()
     assert equity["baseline"]["dates"] == equity["series"][0]["dates"]
     assert equity["baseline"]["final"] == pytest.approx(
-        float(np.prod([1.0 + value for _day, value in sidecar["panel_daily"]]) - 1.0), abs=1e-6
+        float(np.prod([1.0 + value for _day, value in sidecar["baseline_daily"]]) - 1.0), abs=1e-6
     )
 
 

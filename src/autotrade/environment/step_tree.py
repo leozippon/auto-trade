@@ -25,7 +25,7 @@ from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import read_current_record, write_json_atomic
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
 from autotrade.environment.runtime import chmod_tree, sanitize_for_log, utc_now_iso
 
@@ -134,7 +134,7 @@ class StepTree:
         self.root = Path(root)
         self.tree_path = self.root / TREE_FILE
         if self.tree_path.exists():
-            self.data = read_json_object(self.tree_path)
+            self.data = read_current_record(self.tree_path)
         else:
             self.data = {"current_node_id": None, "nodes": []}
 

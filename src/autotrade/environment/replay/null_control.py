@@ -237,8 +237,8 @@ def run_null_control(
     dated before its entry fails the whole call before the first draw
     (``NullControlSetupError``).
 
-    ``baselines`` adds the draws' daily return series to the block: ``panel_daily``
-    is their equal-weight mean per trading day and ``panel_draw_sd`` the
+    ``baselines`` adds the draws' daily return series to the block: ``baseline_daily``
+    is their equal-weight mean per trading day and ``baseline_draw_sd`` the
     cross-draw standard deviation. A result that never filled a trade has an
     idle cash account as its zero-skill copy, so its random baseline is zero every day.
     """
@@ -266,8 +266,8 @@ def run_null_control(
         }
         if baselines:
             returns = daily_returns_from_curve(result.equity_curve)
-            idle["panel_daily"] = [[date, 0.0] for date, _value in returns]
-            idle["panel_draw_sd"] = [[date, 0.0] for date, _value in returns]
+            idle["baseline_daily"] = [[date, 0.0] for date, _value in returns]
+            idle["baseline_draw_sd"] = [[date, 0.0] for date, _value in returns]
         return idle
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe, members, profile.permitted_boards) for trip in skeleton]
@@ -347,10 +347,10 @@ def run_null_control(
             raise ValueError("null draws cover different trading days")
         values = np.asarray([[value for _date, value in draw] for draw in series])
         spread = values.std(axis=0, ddof=1) if k > 1 else np.zeros(len(days))
-        block["panel_daily"] = [
+        block["baseline_daily"] = [
             [date, float(value)] for date, value in zip(days, values.mean(axis=0), strict=True)
         ]
-        block["panel_draw_sd"] = [
+        block["baseline_draw_sd"] = [
             [date, float(value)] for date, value in zip(days, spread, strict=True)
         ]
     return block

@@ -86,7 +86,7 @@ FORWARD_MDE_Z = 2.12
 ACTIVE_DAILY_COLUMNS = (
     "trade_date",
     "strategy_return",
-    "panel_return",
+    "baseline_return",
     "active_return",
     "active_cumulative",
     "active_drawdown",
@@ -414,7 +414,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
         columns=["trade_date", "strategy_return"],
     )
     for column, key in (
-        ("panel_return", "panel_daily"),
+        ("baseline_return", "baseline_daily"),
         ("benchmark_return", "benchmark_daily"),
         ("size_factor_return", "size_factor_daily"),
         ("value_factor_return", "value_factor_daily"),
@@ -496,7 +496,7 @@ def baseline_return(analysis: Mapping[str, object]) -> float | None:
     span, after its own costs: the return of the random-name copies of the
     book's trade skeleton. ``None`` on a sidecar without a random baseline."""
 
-    return _compounded(analysis.get("panel_daily"), "", "")
+    return _compounded(analysis.get("baseline_daily"), "", "")
 
 
 def holder_readings(
@@ -506,7 +506,7 @@ def holder_readings(
 
     The book's own return after every cost (``strategy_return``), the experiment's
     benchmark price return (``benchmark_return``) and the random baseline's
-    return after its costs (``panel_return``), each compounded from the stored
+    return after its costs (``baseline_return``), each compounded from the stored
     daily series over its days in ``start``..``end``; ``raw_excess`` is book
     minus benchmark and ``plain_selection`` book minus random baseline, cumulative
     differences like ``benchmark.excess_return``. ``plain_selection`` is the
@@ -523,11 +523,11 @@ def holder_readings(
 
     strategy = _compounded(analysis.get("strategy_daily"), start, end)
     benchmark = _compounded(analysis.get("benchmark_daily"), start, end)
-    baseline = _compounded(analysis.get("panel_daily"), start, end)
+    baseline = _compounded(analysis.get("baseline_daily"), start, end)
     return {
         "strategy_return": strategy,
         "benchmark_return": benchmark,
-        "panel_return": baseline,
+        "baseline_return": baseline,
         "raw_excess": None if strategy is None or benchmark is None else strategy - benchmark,
         "plain_selection": None if strategy is None or baseline is None else strategy - baseline,
     }
@@ -919,7 +919,7 @@ def forward_slice(
             "forward_confidence": rules.forward_confidence,
             "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
             "bootstrap_draws": BOOTSTRAP_DRAWS,
-            "panel_draws": BASELINE_DRAWS,
+            "baseline_draws": BASELINE_DRAWS,
             "cost_stress_multiplier": rules.cost_stress_multiplier,
         },
     }

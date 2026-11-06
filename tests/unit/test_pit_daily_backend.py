@@ -626,13 +626,13 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     style = json.loads(
         (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    assert style["panel"]["k"] == 20 and style["panel"]["round_trips"] == 1
-    assert style["panel"]["matched"] == "circ_mv_decile+affordability"
-    assert style["panel"]["dropped_trips_mean"] == 0.0
-    assert [day for day, _value in style["panel_daily"]] == ["20240102", "20240103"]
-    assert [day for day, _value in style["panel_draw_sd"]] == ["20240102", "20240103"]
+    assert style["baseline"]["k"] == 20 and style["baseline"]["round_trips"] == 1
+    assert style["baseline"]["matched"] == "circ_mv_decile+affordability"
+    assert style["baseline"]["dropped_trips_mean"] == 0.0
+    assert [day for day, _value in style["baseline_daily"]] == ["20240102", "20240103"]
+    assert [day for day, _value in style["baseline_draw_sd"]] == ["20240102", "20240103"]
     smoke = backend.evaluate(request, max_days=1)
-    assert "panel_daily" not in json.loads(
+    assert "baseline_daily" not in json.loads(
         (Path(smoke.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
     # The random baseline is drawn after the replay it grades and through Brokers of its
@@ -640,7 +640,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     # wall-clock fields differ between two runs.
     monkeypatch.setattr(
         "autotrade.pipelines.pit_backend.run_null_control",
-        lambda *_args, **_kwargs: {"k": 0, "panel_daily": [], "panel_draw_sd": []},
+        lambda *_args, **_kwargs: {"k": 0, "baseline_daily": [], "baseline_draw_sd": []},
     )
     bare = json.loads(Path(backend.evaluate(request).result_ref).read_text(encoding="utf-8"))
     monkeypatch.undo()
@@ -665,7 +665,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
             (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
         )
 
-    assert style["panel"]["seed"] == baseline_seed("20240102", "20240103")
+    assert style["baseline"]["seed"] == baseline_seed("20240102", "20240103")
     resubmitted = baselines_of(
         backend.evaluate(
             dataclasses.replace(
@@ -673,8 +673,8 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
             )
         )
     )
-    assert resubmitted["panel"]["seed"] == style["panel"]["seed"]
-    assert resubmitted["panel_daily"] == style["panel_daily"]
+    assert resubmitted["baseline"]["seed"] == style["baseline"]["seed"]
+    assert resubmitted["baseline_daily"] == style["baseline_daily"]
     other_experiment = baselines_of(
         PITDailyEvaluationBackend(
             tmp_path / "other_experiment" / "results",
@@ -686,9 +686,9 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
             )
         )
     )
-    assert other_experiment["panel"] == style["panel"]
-    assert other_experiment["panel_daily"] == style["panel_daily"]
-    assert other_experiment["panel_draw_sd"] == style["panel_draw_sd"]
+    assert other_experiment["baseline"] == style["baseline"]
+    assert other_experiment["baseline_daily"] == style["baseline_daily"]
+    assert other_experiment["baseline_draw_sd"] == style["baseline_draw_sd"]
 
     # Drawing the random baseline is the host's work: a failure there is never a
     # measurement of the candidate, even when it comes through the engine
@@ -1930,7 +1930,7 @@ def generate_orders(context):
     # A smoke window, cut by days or opened late, draws no random baseline.
     for result in (short, late):
         sidecar = json.loads((Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
-        assert not sidecar.get("panel_daily")
+        assert not sidecar.get("baseline_daily")
 
     # A test's window is cut at the test horizon only: it opens on the span's
     # first day, records the days it covered and is graded against its random baseline
@@ -1941,7 +1941,7 @@ def generate_orders(context):
     assert [row["trade_date"] for row in horizon_record["equity_curve"]] == ["20240102"]
     assert "asof_date_ranges" not in horizon_record["pit"]
     sidecar = json.loads((Path(test_horizon.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
-    assert [day for day, _value in sidecar["panel_daily"]] == ["20240102"]
+    assert [day for day, _value in sidecar["baseline_daily"]] == ["20240102"]
 
     for days in (0, -1):
         with pytest.raises(ValueError, match="max_days must be a positive integer"):
@@ -2385,14 +2385,14 @@ def test_the_random_baseline_a_book_meets_depends_only_on_what_is_replayed(tmp_p
     first_experiment = sidecar(tmp_path / "first_experiment" / "results", slots["a"], slots["b"])
     second_experiment = sidecar(tmp_path / "second_experiment" / "results", slots["a"], slots["b"])
     assert first_experiment["strategy_daily"] == second_experiment["strategy_daily"]
-    assert first_experiment["panel"]["round_trips"] > 0
-    assert first_experiment["panel"] == second_experiment["panel"]
-    assert first_experiment["panel_daily"] == second_experiment["panel_daily"]
-    assert first_experiment["panel_draw_sd"] == second_experiment["panel_draw_sd"]
-    assert first_experiment["panel"]["seed"] == baseline_seed("20240101", "20240105")
+    assert first_experiment["baseline"]["round_trips"] > 0
+    assert first_experiment["baseline"] == second_experiment["baseline"]
+    assert first_experiment["baseline_daily"] == second_experiment["baseline_daily"]
+    assert first_experiment["baseline_draw_sd"] == second_experiment["baseline_draw_sd"]
+    assert first_experiment["baseline"]["seed"] == baseline_seed("20240101", "20240105")
     shorter = sidecar(tmp_path / "first_experiment" / "results_a", slots["a"])
-    assert shorter["panel"]["seed"] == baseline_seed("20240101", "20240103")
-    assert shorter["panel"]["seed"] != first_experiment["panel"]["seed"]
+    assert shorter["baseline"]["seed"] == baseline_seed("20240101", "20240103")
+    assert shorter["baseline"]["seed"] != first_experiment["baseline"]["seed"]
 
 
 def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> None:
@@ -2568,8 +2568,8 @@ def test_an_experiment_replays_grades_and_records_its_own_benchmark_index(tmp_pa
     assert "中证500" in graded["factor_regression"]["method"]
     assert "沪深300" in plain["factor_regression"]["method"]
     # The random baseline draws replacements from each experiment's own membership.
-    assert graded["panel"]["matched"] == "index_membership+affordability"
-    assert plain["panel"]["matched"] == "index_membership+affordability"
+    assert graded["baseline"]["matched"] == "index_membership+affordability"
+    assert plain["baseline"]["matched"] == "index_membership+affordability"
     # The result record itself names the benchmark beside its figures.
     record = json.loads(Path(csi500.result_ref).read_text(encoding="utf-8"))
     benchmark = record["stats"]["benchmark"]

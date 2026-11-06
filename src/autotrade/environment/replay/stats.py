@@ -416,7 +416,7 @@ def sub_window_stats(
     ``benchmark_return`` / ``excess_return`` stay ``None`` until the
     evaluation backend joins the benchmark series in
     (``attach_sub_window_benchmark``): the replay itself never reads an index.
-    ``panel_return`` and ``active_excess_return`` are added there too, on a
+    ``baseline_return`` and ``active_excess_return`` are added there too, on a
     replay that carries a random baseline.
     """
 
@@ -534,10 +534,10 @@ def attach_sub_window_benchmark(
         if active is not None:
             excess = window_plain_excess(active, start=start, end=end)
             row["active_excess_return"] = None if excess is None else _round(excess)
-            row["panel_return"] = _round(
+            row["baseline_return"] = _round(
                 compounded_return(
                     value
-                    for day, value in _series_pairs(style_analysis.get("panel_daily"))
+                    for day, value in _series_pairs(style_analysis.get("baseline_daily"))
                     if start <= day <= end
                 )
             )

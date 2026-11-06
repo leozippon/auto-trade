@@ -266,7 +266,11 @@ def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path)
     rules = record["verdict_rules"]
     assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
     assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
-    assert isinstance(rules["panel_seed"], int) and book.verdict_rules == rules
+    assert isinstance(rules["baseline_seed"], int) and book.verdict_rules == rules
+    # A book created before 2026-11-06 names its seed panel_seed and loads the same.
+    record["verdict_rules"] = {**{k: v for k, v in rules.items() if k != "baseline_seed"}, "panel_seed": rules["baseline_seed"]}
+    (book.root / BOOK_NAME).write_text(json.dumps(record), encoding="utf-8")
+    assert load_book(book.root).verdict_rules == rules
 
     incubating = _incubate(tmp_path, "inc")
     assert read_json_object(incubating.root / BOOK_NAME)["candidate_source"] == "incubating"

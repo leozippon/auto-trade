@@ -623,7 +623,7 @@ def replay_style_analysis(
     baseline_compact: dict[str, object] = {}
     if baselines is not None:
         graded = active_analysis(
-            {"strategy_daily": strategy, "panel_daily": baselines.get("panel_daily")}
+            {"strategy_daily": strategy, "baseline_daily": baselines.get("baseline_daily")}
         )
         active = [value for _date, value in _series_pairs(graded["strategy_daily"])] if graded else []
         plain = plain_statistics(active)
@@ -633,13 +633,13 @@ def replay_style_analysis(
             return None if value is None else round(float(value), 4)
 
         baseline_blocks = {
-            "panel": {
+            "baseline": {
                 key: value
                 for key, value in baselines.items()
-                if key not in ("panel_daily", "panel_draw_sd")
+                if key not in ("baseline_daily", "baseline_draw_sd")
             },
-            "panel_daily": baselines.get("panel_daily"),
-            "panel_draw_sd": baselines.get("panel_draw_sd"),
+            "baseline_daily": baselines.get("baseline_daily"),
+            "baseline_draw_sd": baselines.get("baseline_draw_sd"),
         }
         baseline_compact = {
             # The graded series: the strategy's daily return minus the
@@ -652,7 +652,7 @@ def replay_style_analysis(
             "active_tracking_error": rounded("tracking_error"),
             "active_information_ratio": rounded("information_ratio"),
             "active_max_drawdown": compounded_drawdown(active) if graded else None,
-            "panel_draws": baselines.get("k"),
+            "baseline_draws": baselines.get("k"),
         }
     style = _style_exposures(
         replay_daily, replay.equity_curve, _industry_vintages(universes)
@@ -737,7 +737,7 @@ def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
     days raises: a day graded against nothing would read as pure skill.
     """
 
-    composite = dict(_series_pairs(analysis.get("panel_daily")))
+    composite = dict(_series_pairs(analysis.get("baseline_daily")))
     if not composite:
         return None
     strategy = _series_pairs(analysis.get("strategy_daily"))

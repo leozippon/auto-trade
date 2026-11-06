@@ -21,7 +21,11 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 
 from autotrade.agent.compact import safe_error_summary
-from autotrade.common.records import read_json_object, redact_host_paths
+from autotrade.common.records import (
+    read_current_record,
+    read_json_object,
+    redact_host_paths,
+)
 from autotrade.environment.artifacts import (
     READONLY_FILES,
     ArtifactRevision,
@@ -118,7 +122,7 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
     """The style sidecar beside one recorded Validation's result."""
 
     result_dir = Path(step.validation.result_ref).parent
-    return read_json_object(result_dir / STYLE_ARTIFACT_NAME)
+    return read_current_record(result_dir / STYLE_ARTIFACT_NAME)
 
 
 def _public_error_text(exc: Exception) -> str:
@@ -586,7 +590,7 @@ def write_active_daily(result_ref: str) -> Path:
     """
 
     result_dir = Path(result_ref).parent
-    analysis = read_json_object(result_dir / STYLE_ARTIFACT_NAME)
+    analysis = read_current_record(result_dir / STYLE_ARTIFACT_NAME)
     target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
     staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
@@ -1233,7 +1237,7 @@ BATCH_SUB_WINDOW_KEYS = (
     "label",
     "return",
     "benchmark_return",
-    "panel_return",
+    "baseline_return",
     "excess_return",
     "active_excess_return",
     "sharpe",
@@ -1421,7 +1425,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "running while the candidates replay concurrently. Returns one row per "
         "candidate: node id with its short handle (valid_002, which every tool "
         "taking a node_id accepts), headline metrics, the per-year return, "
-        "benchmark_return, panel_return (the random baseline's own), excess, "
+        "benchmark_return, baseline_return (the random baseline's own), excess, "
         "active excess and Sharpe of sub_windows, residual_reading (the residual "
         "statistic over the row's own span, as acceptance_rules.residual_statistic "
         "defines it: residual_information_ratio, residual_excess, "
@@ -1432,7 +1436,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "cost_stress_multiplier x the slippage on the span's turnover; a reading, "
         "never a pass or a fail), raw_readings (the holder's money, which active "
         "readings are not, under the names a forward slice carries: "
-        "strategy_return, benchmark_return and panel_return, what the book after "
+        "strategy_return, benchmark_return and baseline_return, what the book after "
         "every cost, benchmark_index and the random baseline after its costs each "
         "compounded to over the span, with raw_excess, book minus benchmark, and "
         "plain_selection, book minus random baseline, both compounded; "
@@ -1461,7 +1465,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "replay record, and its daily_series (validation/active_daily.csv in the "
         "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "
         "graded series, one row per trading day of the span: strategy_return, "
-        "panel_return (the zero-skill composite), active_return (their "
+        "baseline_return (the zero-skill composite), active_return (their "
         "difference), active_cumulative and active_drawdown (its compounded path "
         "and the loss below its running peak, whose maximum is "
         "active_max_drawdown), benchmark_return, size_factor_return and "

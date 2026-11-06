@@ -37,6 +37,7 @@ from pathlib import Path
 
 from autotrade.common.records import (
     dataclass_from_record,
+    read_current_record,
     read_json_object,
     write_json_atomic,
 )
@@ -128,7 +129,7 @@ class Book:
     fundamental_events_status: Path
     benchmark_index: str
     # Pinned at creation: checkpoint_days, kill_confidence,
-    # confirm_confidence, max_drawdown, active_max_drawdown, panel_seed.
+    # confirm_confidence, max_drawdown, active_max_drawdown, baseline_seed.
     verdict_rules: dict[str, object]
     artifact_fingerprint: str = ""
 
@@ -260,7 +261,7 @@ def create_book(
             # The experiment's own drawdown limits, which its verdict and gate used.
             "max_drawdown": options.rolling.acceptance.max_drawdown,
             "active_max_drawdown": options.rolling.acceptance.active_max_drawdown,
-            "panel_seed": null_control_seed(artifact_id, "paper"),
+            "baseline_seed": null_control_seed(artifact_id, "paper"),
         },
     }
     write_json_atomic(root / BOOK_NAME, record, private=True, sort_keys=False)
@@ -350,7 +351,7 @@ def copy_source_history(
 
 def load_book(state_root: str | Path) -> Book:
     root = Path(state_root).resolve()
-    record = read_json_object(root / BOOK_NAME, missing_ok=True)
+    record = read_current_record(root / BOOK_NAME, missing_ok=True)
     if not record:
         raise FileNotFoundError(f"no Paper account at {root}; create one with `run_paper.py init`")
     if record.get("schema_version") == 2:

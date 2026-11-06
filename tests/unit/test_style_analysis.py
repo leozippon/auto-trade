@@ -779,8 +779,8 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
         "seed": 5,
         "matched": "index_membership+affordability",
         "dropped_trips_mean": 0.0,
-        "panel_daily": [[day, float(value)] for day, value in zip(days, rng.normal(0.0005, 0.008, len(days)))],
-        "panel_draw_sd": [[day, 0.004] for day in days],
+        "baseline_daily": [[day, float(value)] for day, value in zip(days, rng.normal(0.0005, 0.008, len(days)))],
+        "baseline_draw_sd": [[day, 0.004] for day in days],
     }
 
     def analyse(block):
@@ -790,9 +790,9 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
 
     graded, bare = analyse(baselines), analyse(None)
 
-    assert graded["panel_daily"] == baselines["panel_daily"]
-    assert graded["panel_draw_sd"] == baselines["panel_draw_sd"]
-    assert graded["panel"] == {
+    assert graded["baseline_daily"] == baselines["baseline_daily"]
+    assert graded["baseline_draw_sd"] == baselines["baseline_draw_sd"]
+    assert graded["baseline"] == {
         "k": 20, "seed": 5, "matched": "index_membership+affordability", "dropped_trips_mean": 0.0,
     }
     assert graded["strategy_daily"] == bare["strategy_daily"]
@@ -806,7 +806,7 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
     # The mandate's figures are the strategy's own regression's.
     assert compact["tracking_error"] == round(_mandate(bare, "", "")["tracking_error"], 4)
     assert compact["market_beta"] == round(own["market_beta"], 3)
-    assert compact["panel_draws"] == 20
+    assert compact["baseline_draws"] == 20
     # The active drawdown the verdict holds to its limit is the one the Agent
     # reads: two sessions rebuilt it from proxies because no row had it.
     assert compact["active_max_drawdown"] == _max_slice_drawdown(active_analysis(graded), "", "")
@@ -825,7 +825,7 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
         "active_tracking_error",
         "active_information_ratio",
         "active_max_drawdown",
-        "panel_draws",
+        "baseline_draws",
     }
     assert {key: compact[key] for key in without_baselines} == without_baselines
     visible = batch_candidate_stats({"total_return": 0.1, "benchmark": compact})

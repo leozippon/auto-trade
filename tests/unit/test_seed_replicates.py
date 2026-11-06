@@ -133,9 +133,9 @@ class SeedEvaluator:
         sidecar = Path(result.result_ref).parent / STYLE_ARTIFACT_NAME
         analysis = json.loads(sidecar.read_text(encoding="utf-8"))
         if seed == self.bare_seed and request.mode == "heldout":
-            del analysis["panel_daily"]
+            del analysis["baseline_daily"]
         else:
-            analysis["panel_daily"] = [
+            analysis["baseline_daily"] = [
                 [day, 0.9 * market + 0.2 * size]
                 for (day, market), (_day, size) in zip(
                     analysis["benchmark_daily"], analysis["size_factor_daily"], strict=True
@@ -287,7 +287,7 @@ def test_a_model_nominee_registers_with_its_seed_replicate_and_both_replay_forwa
         block = forward["slices"][name]
         members = [block, *block["seed_replicates"]]
         assert block["seed_mean"]["members"] == 3
-        for key in ("plain_selection", "strategy_return", "panel_return"):
+        for key in ("plain_selection", "strategy_return", "baseline_return"):
             assert block["seed_mean"]["raw_readings"][key] == pytest.approx(
                 sum(member["raw_readings"][key] for member in members) / 3
             )

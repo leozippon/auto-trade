@@ -2937,7 +2937,7 @@ const SLICE_ROWS = [
   ["strategy_return", "账户收益", fmtPct, true, HOLDER_TITLE],
   ["benchmark_return", "基准收益", fmtPct, true],
   ["raw_excess", "原始超额（账户 − 基准）", fmtPct, true],
-  ["panel_return", "随机对照组合收益", fmtPct, true, BASELINE_RETURN_TITLE],
+  ["baseline_return", "随机对照组合收益", fmtPct, true, BASELINE_RETURN_TITLE],
   ["plain_selection", "对随机对照（账户 − 对照组合）", fmtPct, true, PLAIN_SELECTION_TITLE],
   ["market_beta", "主动市场 β（对随机对照）", fmtSharpe, true, ACTIVE_BETA_TITLE],
   ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
@@ -2958,7 +2958,7 @@ const HOLDER_STAT_FIELDS = [
   "strategy_return",
   "benchmark_return",
   "raw_excess",
-  "panel_return",
+  "baseline_return",
   "plain_selection",
   "market_beta",
   "plain_excess",
@@ -3024,7 +3024,7 @@ function holderLine(label, slice) {
     "div",
     { class: "meta-line" },
     `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}）；` +
-      `随机对照组合 ${fmtPct(raw.panel_return)}（对随机对照 ${fmtPct(raw.plain_selection)}）；${active}`,
+      `随机对照组合 ${fmtPct(raw.baseline_return)}（对随机对照 ${fmtPct(raw.plain_selection)}）；${active}`,
   );
 }
 

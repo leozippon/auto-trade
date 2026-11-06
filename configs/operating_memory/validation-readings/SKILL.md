@@ -25,11 +25,11 @@
 | `residual_reading.active_excess_at_cost_stress` | 主动序列，年化，滑点按本实验倍数 | 什么也不判：登记与验证记录的统计量都不读它，定版之后前推期及其后的回放报告同一个量，只记入读出 |
 | `stats.cost_sensitivity.excess_at_2x_slippage` | 账户对基准指数的原始超额，整段累计，固定两倍滑点 | 什么也不判 |
 
-主动读数赢了对照组合，账户却可能没赢基准：对照组合本身扣费后也会亏（`raw_readings.panel_return`），赢一个亏钱的对照组合不等于账户赚钱。
+主动读数赢了对照组合，账户却可能没赢基准：对照组合本身扣费后也会亏（`raw_readings.baseline_return`），赢一个亏钱的对照组合不等于账户赚钱。
 
 ## 账户、基准与对照组合
 
-账户、基准指数与随机选股对照组合各自扣费后的收益——逐年行 `sub_windows[]` 的 `return`、`benchmark_return`、`panel_return`，本行整段与最后两个研究年（`raw_readings` 与 `raw_readings.last_two_years`）的 `strategy_return`、`benchmark_return`、`panel_return`——两两相减是三种不经回归的读法：账户减基准是账户相对基准的原始超额（`raw_excess`，逐年行里是 `excess_return`）；账户减对照组合是选股本身是否赢了随机名字（`plain_selection`）；对照组合减基准是骨架与股票池相对基准的部分，与选股无关。
+账户、基准指数与随机选股对照组合各自扣费后的收益——逐年行 `sub_windows[]` 的 `return`、`benchmark_return`、`baseline_return`，本行整段与最后两个研究年（`raw_readings` 与 `raw_readings.last_two_years`）的 `strategy_return`、`benchmark_return`、`baseline_return`——两两相减是三种不经回归的读法：账户减基准是账户相对基准的原始超额（`raw_excess`，逐年行里是 `excess_return`）；账户减对照组合是选股本身是否赢了随机名字（`plain_selection`）；对照组合减基准是骨架与股票池相对基准的部分，与选股无关。
 
 主动超额是主动序列逐日差的年化均值，`plain_selection` 是两条复利收益之差；两者同号居多，但不是同一个数。
 

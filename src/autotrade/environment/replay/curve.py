@@ -12,7 +12,7 @@ from __future__ import annotations
 import math
 from pathlib import Path
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import read_current_record
 
 from .style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
 
@@ -31,7 +31,7 @@ def read_result(path: Path) -> dict[str, object]:
     """One ``result.json``; an unreadable or non-object file reads as empty."""
 
     try:
-        payload = read_json_object(Path(path))
+        payload = read_current_record(Path(path))
     except (OSError, ValueError):
         return {}
     return payload if isinstance(payload, dict) else {}
@@ -138,7 +138,7 @@ def result_curve(result_file: Path) -> dict[str, object]:
     days = {day for day, _value in returns}
     benchmark = [(day, value) for day, value in benchmark_returns(result_file) if day in days]
     baseline = [
-        (day, value) for day, value in _sidecar_returns(result_file, "panel_daily") if day in days
+        (day, value) for day, value in _sidecar_returns(result_file, "baseline_daily") if day in days
     ]
     exposure = result_exposures(payload)
     return {

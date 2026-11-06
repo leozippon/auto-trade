@@ -34,7 +34,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    read_current_record,
+    read_json_object,
+    write_json_atomic,
+)
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.snapshot import load_snapshot_manifest
 from autotrade.environment.replay.null_control import run_null_control
@@ -71,7 +75,7 @@ def paper_reading(book: Book) -> dict[str, object]:
     """
 
     equity, executions = _journals(book.root)
-    previous = read_json_object(book.root / VERDICT_NAME, missing_ok=True)
+    previous = read_current_record(book.root / VERDICT_NAME, missing_ok=True)
     if not equity:
         return evidence_reading(book, equity, executions, None, {}, previous=previous)
     slot = newest_replay_slot(book.root)
@@ -133,7 +137,7 @@ def evidence_reading(
         return {
             **reading, "status": stored, "transition": transition, "checked_through": checked,
             "next_checkpoint": checkpoint, "plain": None, "account_return": None,
-            "index_return": None, "account_max_drawdown": None, "active_max_drawdown": None, "panel": None,
+            "index_return": None, "account_max_drawdown": None, "active_max_drawdown": None, "baseline": None,
         }
     if len(set(dates)) != len(dates) or dates != sorted(dates):
         raise ValueError(f"{book.root.name}'s equity journal does not hold each settled day once, in order")
@@ -149,13 +153,13 @@ def evidence_reading(
         benchmark,
         book.profile,
         book.schedule,
-        seed=int(rules["panel_seed"]),
+        seed=int(rules["baseline_seed"]),
         corporate_actions=corporate_actions,
         membership=membership,
         baselines=True,
     )
     account = daily_returns_from_curve(curve)
-    zero_skill = {str(day): float(value) for day, value in baselines["panel_daily"]}
+    zero_skill = {str(day): float(value) for day, value in baselines["baseline_daily"]}
     if [day for day, _value in account] != dates or list(zero_skill) != dates:
         raise ValueError(f"{book.root.name}'s account and random baseline measured different days")
     missing = [day for day in dates if day not in benchmark]
@@ -178,7 +182,7 @@ def evidence_reading(
         "index_return": float(compounded_return(benchmark[day] for day in dates)),
         "account_max_drawdown": float(max(drawdown for _equity, drawdown in compounded_path(account_returns))),
         "active_max_drawdown": float(max(drawdown for _equity, drawdown in compounded_path(active))),
-        "panel": {
+        "baseline": {
             key: baselines.get(key) for key in ("k", "seed", "matched", "round_trips", "dropped_trips_mean", "reason")
         },
     }

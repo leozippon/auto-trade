@@ -52,7 +52,7 @@ from autotrade.pipelines.experiment import (
 )
 from autotrade.pipelines.experiment_params import read_param
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
-from autotrade.pipelines.ledger import recorded_path
+from autotrade.pipelines.ledger import ExperimentLedger, recorded_path
 from autotrade.pipelines.validation_record import readout
 
 
@@ -144,9 +144,7 @@ def check_experiment(experiment: Path) -> list[Judgement]:
     """Every stored reading of one experiment against today's reading of it."""
 
     params = read_json_object(experiment / HITL_DIR_NAME / PARAMS_NAME)
-    ledger = experiment / "ledgers" / "experiment_ledger.jsonl"
-    lines = ledger.read_text(encoding="utf-8").splitlines() if ledger.is_file() else []
-    records = [json.loads(line) for line in lines if line]
+    records = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
     rules = acceptance_for(params)
     slippage = float(read_param(params, "slippage_bps"))  # type: ignore[arg-type]
     found: list[Judgement] = []

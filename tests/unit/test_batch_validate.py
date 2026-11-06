@@ -308,7 +308,7 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
             [day, float(value)]
             for day, value in zip(days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days)))
         ],
-        "panel_daily": [[day, float(value)] for day, value in zip(days, baselines)],
+        "baseline_daily": [[day, float(value)] for day, value in zip(days, baselines)],
     }
     write_json_atomic(directory / "style_analysis.json", sidecar)
 
@@ -1303,12 +1303,12 @@ class BatchValidateRunTest(unittest.TestCase):
                 list(raw), [*HOLDER_READINGS, "active_market_beta", "last_two_years"]
             )
             book, benchmark, baselines = (
-                compound(key) for key in ("strategy_daily", "benchmark_daily", "panel_daily")
+                compound(key) for key in ("strategy_daily", "benchmark_daily", "baseline_daily")
             )
             for name, expected in (
                 ("strategy_return", book),
                 ("benchmark_return", benchmark),
-                ("panel_return", baselines),
+                ("baseline_return", baselines),
                 ("raw_excess", book - benchmark),
                 ("plain_selection", book - baselines),
             ):
@@ -1334,11 +1334,11 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(late["span"], "Y3..Y4")
             book, benchmark, baselines = (
                 compound(key, "20230701", "20250630")
-                for key in ("strategy_daily", "benchmark_daily", "panel_daily")
+                for key in ("strategy_daily", "benchmark_daily", "baseline_daily")
             )
             self.assertAlmostEqual(late["strategy_return"], book, places=6)
             self.assertAlmostEqual(late["benchmark_return"], benchmark, places=6)
-            self.assertAlmostEqual(late["panel_return"], baselines, places=6)
+            self.assertAlmostEqual(late["baseline_return"], baselines, places=6)
             self.assertAlmostEqual(late["plain_selection"], book - baselines, places=6)
             self.assertNotEqual(late["strategy_return"], raw["strategy_return"])
             # A probe row reads the same over its own span; it does not reach
@@ -1350,7 +1350,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertIn("active_excess_at_cost_stress", probe["residual_reading"])
             # A row's year carries the benchmark and the random baseline beside its return.
             self.assertTrue(
-                {"return", "benchmark_return", "panel_return"}
+                {"return", "benchmark_return", "baseline_return"}
                 <= set(row["stats"]["sub_windows"][0])
             )
 
@@ -1514,9 +1514,9 @@ class DailySeriesTest(unittest.TestCase):
                     [day for day, _value in sidecar["strategy_daily"]],
                 )
                 strategy = np.asarray([value for _day, value in sidecar["strategy_daily"]])
-                baselines = np.asarray([value for _day, value in sidecar["panel_daily"]])
+                baselines = np.asarray([value for _day, value in sidecar["baseline_daily"]])
                 np.testing.assert_allclose(frame["strategy_return"], strategy, rtol=1e-9)
-                np.testing.assert_allclose(frame["panel_return"], baselines, rtol=1e-9)
+                np.testing.assert_allclose(frame["baseline_return"], baselines, rtol=1e-9)
                 np.testing.assert_allclose(
                     frame["active_return"], strategy - baselines, rtol=1e-8, atol=1e-12
                 )

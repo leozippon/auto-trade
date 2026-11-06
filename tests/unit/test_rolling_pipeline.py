@@ -139,7 +139,7 @@ class Evaluator:
             # one that stays in cash does against an empty random baseline.
             sidecar = Path(result.result_ref).parent / "style_analysis.json"
             analysis = json.loads(sidecar.read_text(encoding="utf-8"))
-            analysis["strategy_daily"] = analysis["panel_daily"]
+            analysis["strategy_daily"] = analysis["baseline_daily"]
             sidecar.write_text(json.dumps(analysis), encoding="utf-8")
         return result
 
@@ -204,7 +204,7 @@ def _write_result(directory: Path, days: list[str], *, alpha: float, seed: int) 
                 ],
                 # The random baseline: random names on the book's skeleton,
                 # riding the market as the book does.
-                "panel_daily": [[day, float(0.9 * value)] for day, value in zip(days, benchmark)],
+                "baseline_daily": [[day, float(0.9 * value)] for day, value in zip(days, benchmark)],
             }
         ),
         encoding="utf-8",
@@ -674,16 +674,34 @@ def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_experiment
     assert experiment_verdict(ledger.read()) == {"status": "environment_blocked", "reasons": [reason]}
 
 
-def test_a_ledger_that_names_the_end_arm_end_still_reads_as_ended() -> None:
-    """Ledgers written before 2026-11-06 name the research end ``arm_end``;
-    they read exactly as one naming ``experiment_end``."""
+def test_files_written_under_the_retired_key_names_read_under_todays(tmp_path: Path) -> None:
+    """Ledgers, replay results and sidecars written before 2026-11-06 name the
+    research end ``arm_end`` and the random baselines' readings ``panel*``.
+    Their loaders read them exactly as files that name today's keys."""
 
     end = {"status": "no_deliverable", "reason": "no_edge: nothing"}
-    for key in ("arm_end", "experiment_end"):
-        records = [{"record_type": "research_session", "frozen": None, key: end}]
-        assert research_over(records)
-        assert experiment_verdict(records) == {"status": "no_deliverable", "reasons": ["no_edge: nothing"]}
-        assert research_records(records)[0]["experiment_end"] == end
+    step = {"step_id": "s1", "summary": {"sub_windows": [{"return": 0.1, "panel_return": 0.02}]}}
+    ledger_path = tmp_path / "ledgers" / "experiment_ledger.jsonl"
+    ledger_path.parent.mkdir(parents=True)
+    old = {"record_type": "research_session", "schema_version": 1, "frozen": None, "arm_end": end, "steps": [step]}
+    ledger_path.write_text(json.dumps(old) + "\n", encoding="utf-8")
+    records = ExperimentLedger(ledger_path).read()
+    assert research_over(records)
+    assert experiment_verdict(records) == {"status": "no_deliverable", "reasons": ["no_edge: nothing"]}
+    row = research_records(records)[0]
+    assert row["experiment_end"] == end and "arm_end" not in row
+    assert row["steps"][0]["summary"]["sub_windows"][0] == {"return": 0.1, "baseline_return": 0.02}
+
+    result = tmp_path / "valid" / "result.json"
+    result.parent.mkdir()
+    result.write_text(json.dumps({"summary": {"benchmark": {"panel_draws": 20}}}), encoding="utf-8")
+    (result.parent / STYLE_ARTIFACT_NAME).write_text(
+        json.dumps({"panel": {"k": 20}, "panel_daily": [["20240102", 0.001]], "panel_draw_sd": [["20240102", 0.0]]}),
+        encoding="utf-8",
+    )
+    replay, analysis = replay_and_analysis(str(result))
+    assert replay["summary"]["benchmark"] == {"baseline_draws": 20}
+    assert analysis == {"baseline": {"k": 20}, "baseline_daily": [["20240102", 0.001]], "baseline_draw_sd": [["20240102", 0.0]]}
 
 
 def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):
@@ -1024,7 +1042,7 @@ def test_an_unmeasurable_slice_fails_the_attempt(tmp_path: Path):
             sidecar = Path(result.result_ref).parent / "style_analysis.json"
             analysis = json.loads(sidecar.read_text(encoding="utf-8"))
             # A day the random baseline does not cover would be graded against nothing.
-            analysis["panel_daily"] = analysis["panel_daily"][:-1]
+            analysis["baseline_daily"] = analysis["baseline_daily"][:-1]
             sidecar.write_text(json.dumps(analysis), encoding="utf-8")
             return result
 

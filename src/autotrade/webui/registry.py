@@ -32,7 +32,11 @@ from autotrade.agent.runner import (
     LLM_CALL_BUDGET_EXHAUSTED,
 )
 from autotrade.common.ids import is_experiment_id
-from autotrade.common.records import dataclass_record, read_json_object
+from autotrade.common.records import (
+    dataclass_record,
+    read_current_record,
+    read_json_object,
+)
 from autotrade.environment.replay.style import (
     READABLE_STYLE_SCHEMA_VERSIONS,
     STYLE_ARTIFACT_NAME,
@@ -963,7 +967,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
         key = (str(directory), path.stem)
         row = _LIVE_STEP_CACHE.get(key)
         if row is None:
-            record = read_json_object(path, missing_ok=True)
+            record = read_current_record(path, missing_ok=True)
             try:
                 reference = str(
                     recorded_path(directory, str(record.get("result_ref") or ""))
@@ -1518,7 +1522,7 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
 
     sidecar = ledger_result(root, experiment_id, name).parent / STYLE_ARTIFACT_NAME
     try:
-        payload = read_json_object(sidecar, missing_ok=True)
+        payload = read_current_record(sidecar, missing_ok=True)
     except (OSError, ValueError):
         return {"available": False, "reason": "unreadable"}
     if (
@@ -1540,7 +1544,7 @@ def result_orders(
     """
     path = ledger_result(root, experiment_id, name)
     try:
-        payload = read_json_object(path)
+        payload = read_current_record(path)
     except (OSError, ValueError) as exc:
         raise KeyError(f"unreadable result: {name}") from exc
     rows = payload.get("executions") if isinstance(payload, dict) else None

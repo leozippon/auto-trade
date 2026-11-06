@@ -22,7 +22,7 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import read_current_record, read_json_object
 from autotrade.environment.artifacts import (
     ArtifactRevision,
     RegisteredArtifact,
@@ -1471,7 +1471,7 @@ def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> di
     (``ledger.recorded_path``)."""
 
     result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
-    return read_json_object(result.parent / STYLE_ARTIFACT_NAME)
+    return read_current_record(result.parent / STYLE_ARTIFACT_NAME)
 
 
 def null_control_seed(key: str, role: str) -> int:
@@ -1508,7 +1508,7 @@ def validation_statistics(result_ref: str) -> dict[str, object] | None:
     """
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
-    return _measured_or_none(read_json_object(path))
+    return _measured_or_none(read_current_record(path))
 
 
 def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, object]]:
@@ -1516,8 +1516,8 @@ def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, o
 
     path = Path(result_ref)
     return (
-        read_json_object(path),
-        read_json_object(path.parent / STYLE_ARTIFACT_NAME),
+        read_current_record(path),
+        read_current_record(path.parent / STYLE_ARTIFACT_NAME),
     )
 
 

@@ -88,7 +88,7 @@ class _WindowEvaluator:
             directory / "style_analysis.json",
             {
                 "strategy_daily": [[day, float(value)] for (day, *_r), value in zip(rows, strategy, strict=True)],
-                "panel_daily": [[day, float(baselines)] for day, _m, _s, _v, baselines, _n in rows],
+                "baseline_daily": [[day, float(baselines)] for day, _m, _s, _v, baselines, _n in rows],
                 "benchmark_daily": [[day, float(market)] for day, market, *_r in rows],
                 "size_factor_daily": [[day, float(size)] for day, _m, size, *_r in rows],
                 "value_factor_daily": [[day, float(value)] for day, _m, _s, value, *_r in rows],
