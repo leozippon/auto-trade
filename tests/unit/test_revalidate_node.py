@@ -34,7 +34,8 @@ def _arm(root: Path, *, tamper: bool = False) -> Path:
     session = {"record_type": "research_session", "arm_end": {"status": "no_deliverable"}, "steps": [row]}
     ledger.write_text(json.dumps(session) + "\n", encoding="utf-8")
     (arm / "hitl").mkdir()
-    (arm / "hitl" / "params.json").write_text(json.dumps({"experiment_id": "arm"}), encoding="utf-8")
+    params = {"experiment_id": "arm", "alpha": 0.05, "research_years": 1}
+    (arm / "hitl" / "params.json").write_text(json.dumps(params), encoding="utf-8")
     return arm
 
 
@@ -66,6 +67,23 @@ def test_a_refused_node_writes_nothing(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.setattr(tool, "EXPERIMENTS_ROOT", tmp_path)
     monkeypatch.setattr(tool, "REVALIDATE_ROOT", tmp_path / "revalidate")
     assert tool.main(["--experiment", "arm", "--node", "valid_099", "--label", "l"]) == 2
+    assert not (tmp_path / "revalidate").exists()
+    assert sorted(path.relative_to(arm) for path in arm.rglob("*")) == before
+
+
+def test_an_arm_without_research_years_is_refused_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Its full span would otherwise be every year of the geometry: a record
+    from before the rolling validation is refused, as its worker refuses it."""
+
+    arm = _arm(tmp_path)
+    (arm / "hitl" / "params.json").write_text(json.dumps({"experiment_id": "arm", "alpha": 0.05}), encoding="utf-8")
+    before = sorted(path.relative_to(arm) for path in arm.rglob("*"))
+    monkeypatch.setattr(tool, "EXPERIMENTS_ROOT", tmp_path)
+    monkeypatch.setattr(tool, "REVALIDATE_ROOT", tmp_path / "revalidate")
+    assert tool.main(["--experiment", "arm", "--node", "valid_012", "--label", "l"]) == 2
+    assert "lack the required research_years" in capsys.readouterr().err
     assert not (tmp_path / "revalidate").exists()
     assert sorted(path.relative_to(arm) for path in arm.rglob("*")) == before
 
