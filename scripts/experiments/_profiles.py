@@ -78,8 +78,9 @@ FUND_TITLE_PIT_VIEWS_SEED = "data/pit_views_seed_research_8y_fundanns_20261104"
 # quarter the replay clips to the release end, and decision views reaching 132
 # months back from the research end, the ten years plus the one their start
 # reads, a window every domain inherits. Part of the seed's contract, like
-# EIGHT_YEAR; the seed is prebuilt at snapshot cache format 15 from release
-# 56b289cf02db41e68a33abf66de49016, the eight-year seed's.
+# EIGHT_YEAR. Its seed is prebuilt at snapshot cache format 16 from release
+# 85cd2284caa943689c72117369f9ca0c for research years 5, 6 and 7
+# (logs/data/seed_build_20261106_10y.log).
 FUND_TITLE_TEN_YEAR: dict[str, object] = {
     **FUND_TITLE_EIGHT_YEAR,
     "research_start": "20150801",
@@ -88,7 +89,7 @@ FUND_TITLE_TEN_YEAR: dict[str, object] = {
     "heldout_end": "20261031",
     "window_months": 132,
 }
-FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_fundanns_20261104"
+FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_fundanns_20261106"
 
 # That selection graded against CSI 1000: the drawdown limits round 20261005
 # set for the index (FUND_EIGHT_YEAR_100K). The account and the budgets are
