@@ -17,9 +17,9 @@ from autotrade.pipelines.rolling_record import (
     ValidationSteps,
     candidate_changes,
     frontier_after,
-    month_table,
     record_instrument,
     step_entry,
+    step_table,
 )
 
 VALIDATION = (
@@ -126,10 +126,22 @@ def test_an_entry_reads_one_window_of_a_replay_and_nothing_outside_it() -> None:
     partial = {**analysis, "panel_daily": analysis["panel_daily"][1:]}
     with pytest.raises(ValueError, match="zero-skill panel"):
         step_entry(replay, partial, start="20200801", end="20201031")
-    months = month_table(replay, analysis, start="20200801", end="20201031")
-    assert [row["month"] for row in months] == ["202008", "202009", "202010"]
-    assert all("daily" not in row for row in months)
-    assert sum(row["days"] for row in months) == entry["days"]
+    # The table a test returns reads its replay step by step: one row per
+    # step up to the one tested, each the step's entry without daily rows.
+    monthly = ValidationSteps("20200801", "20201031", step_windows("20200801", "20201031", 1))
+    rows = step_table(replay, analysis, monthly, through=3)
+    assert [(row["step"], row["start"], row["end"]) for row in rows] == [
+        (1, "20200801", "20200831"),
+        (2, "20200901", "20200930"),
+        (3, "20201001", "20201031"),
+    ]
+    assert all("daily" not in row for row in rows)
+    assert sum(row["days"] for row in rows) == entry["days"]
+    quarterly = ValidationSteps("20200801", "20210731", step_windows("20200801", "20210731", 3))
+    [quarter] = step_table(replay, analysis, quarterly, through=1)
+    assert {key: value for key, value in quarter.items() if key != "step"} == {
+        key: value for key, value in entry.items() if key != "daily"
+    }
 
 
 def test_the_instrument_reads_the_stitched_entries_with_the_bar_for_their_length() -> None:

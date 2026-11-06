@@ -16,8 +16,8 @@ rows stitched in step order with the residual statistic every other reading
 uses (``pipelines/verdict.py``): the residual information ratio of the active
 series on the market, size and value legs, its betas, the bar for the record's
 length and the one-sided null p-value, beside the stitched return, drawdown
-and turnover. The per-month table a test returns (:func:`month_table`) reads
-the same replay month by month.
+and turnover. The per-step table a test returns (:func:`step_table`) reads
+its own replay step by step.
 """
 
 from __future__ import annotations
@@ -139,17 +139,20 @@ def step_entry(
     }
 
 
-def month_table(
-    replay: Mapping[str, object], analysis: Mapping[str, object], *, start: str, end: str
+def step_table(
+    replay: Mapping[str, object], analysis: Mapping[str, object], steps: ValidationSteps, *, through: int
 ) -> list[dict[str, object]]:
-    """One row per calendar month of ``start..end`` (a month start and a month
-    end), each :func:`step_entry` without its daily rows."""
+    """One row per test step 1..``through`` of a replay from the validation
+    start, each the step's :func:`step_entry` without its daily rows, so the
+    rows follow the step length: quarterly for quarterly steps, monthly for
+    monthly ones."""
 
     rows = []
-    for first, last in step_windows(start, end, 1):
+    for step in range(1, through + 1):
+        first, last = steps.window(step)
         entry = step_entry(replay, analysis, start=first, end=last)
         del entry["daily"]
-        rows.append({"month": first[:6], **entry})
+        rows.append({"step": step, **entry})
     return rows
 
 
@@ -325,10 +328,10 @@ __all__ = [
     "ValidationSteps",
     "candidate_changes",
     "frontier_after",
-    "month_table",
     "readout",
     "record_instrument",
     "step_entry",
+    "step_table",
     "test_step_record",
     "test_step_records",
 ]

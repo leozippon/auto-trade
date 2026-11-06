@@ -90,9 +90,9 @@ from .ledger import ExperimentLedger, Stage
 from .rolling_record import (
     SOURCE_TEST,
     ValidationSteps,
-    month_table,
     record_instrument,
     step_entry,
+    step_table,
     test_step_record,
 )
 from .session_resume import record_step_sidecar
@@ -2170,9 +2170,11 @@ TEST_DESCRIPTION = (
     "these results are how the validation years reach you. Returns: the new frontier "
     "and the steps left; "
     "the candidate's whole-replay statistics (stats, raw_readings and residual_reading "
-    "as a validate row carries them); months, a per-month table from the validation "
-    "start to the frontier (return, max_drawdown, turnover, fees, active_return against "
-    "the panel, index_return); record, the record to date, one row per step with the "
+    "as a validate row carries them); step_table, one row per step from the validation "
+    "start to the frontier, each over that step's window, so the rows are quarters for "
+    "quarterly steps and months for monthly ones (return, max_drawdown, turnover, fees, "
+    "active_return against the panel, index_return); record, the record to date, one row "
+    "per step with the "
     "candidate that produced it; and instrument, the record's residual information "
     "ratio of the stitched daily active series on the market, size and value legs, the "
     "betas, the one-sided p_value and the bar for the record's current length. These "
@@ -2376,7 +2378,7 @@ class TestTool(SessionTimeBudgetAware):
             **batch_candidate_resources(evaluation.summary.get("resources")),
             "raw_readings": {name: _rounded(v) for name, v in holder_readings(analysis).items()},
             "residual_reading": backtest.residual_reading_of(analysis, evaluation.summary),
-            "months": [_rounded_row(row) for row in month_table(replay, analysis, start=steps.start, end=frontier)],
+            "step_table": [_rounded_row(row) for row in step_table(replay, analysis, steps, through=step)],
             "record": [backtest.record_row(row) for row in backtest.tests],
             "instrument": _rounded_row(record_instrument([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
             "test_replays": backtest.test_replays,

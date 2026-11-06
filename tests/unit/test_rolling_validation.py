@@ -151,7 +151,12 @@ def test_a_test_advances_the_frontier_one_step_and_records_it_once() -> None:
         record_rows = second.value["record"]
         assert [(row["step"], row["candidate"]["node_id"]) for row in record_rows] == [(1, node), (2, node)]
         assert second.value["instrument"]["steps"] == 2 and "residual_information_ratio" in second.value["instrument"]
-        assert [row["month"] for row in second.value["months"]] == ["202507", "202508", "202509", "202510", "202511", "202512"]
+        # Its table has one row per quarterly step tested, read off this replay.
+        assert [(row["step"], row["start"], row["end"]) for row in second.value["step_table"]] == [
+            (1, "20250701", "20250930"),
+            (2, "20251001", "20251231"),
+        ]
+        assert "months" not in second.value
         frontiers = [row["frontier"] for row in harness.records()]
         assert frontiers == sorted(frontiers) and len(set(frontiers)) == len(frontiers)
 
@@ -226,9 +231,11 @@ def test_nothing_returned_to_the_agent_dates_past_the_frontier() -> None:
         assert frontier == "20250731"
         dates = set(DATE.findall(json.dumps(result.value)))
         assert dates and max(dates) <= frontier, sorted(dates)[-3:]
-        # The replay stopped at the frontier.
+        # The replay stopped at the frontier, and its table has one monthly row.
         assert harness.evaluator.requests[-1][2] == frontier
-        assert all(day <= frontier for day in (row["end"] for row in result.value["months"]))
+        assert [(row["step"], row["start"], row["end"]) for row in result.value["step_table"]] == [
+            (1, "20250701", "20250731")
+        ]
 
 
 def test_a_test_whose_replay_fails_leaves_the_frontier_where_it_was() -> None:

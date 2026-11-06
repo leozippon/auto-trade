@@ -423,7 +423,7 @@ class AcceptanceRules:
                     "replays the candidate as a fresh book from the validation start to the "
                     "new frontier with its matched panel, records the newest step as the "
                     "rolling record's entry for that step and returns the whole replay's "
-                    "statistics, a per-month table, the record to date and its residual "
+                    "statistics, a per-step table, the record to date and its residual "
                     "statistic. The session's data view stays at the end of the research "
                     "years, so the validation years reach it only through these results. "
                     "The candidate must register (registration below) and may change at any step"
