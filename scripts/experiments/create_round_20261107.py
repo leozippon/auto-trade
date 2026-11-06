@@ -26,14 +26,17 @@ Creation requires the seed's finished prebuild and its published release, read
 from `provider.json` at pre-flight.
 
 The main session runs gpt-6-astra at reasoning effort xhigh; sub-agents and
-compaction run DeepSeek-V4.1-Flash. The experiment takes the instance's one
-A100 (`gpu_count` 1), claimed by the console when it starts the worker. The
-budgets are the launcher's and the console's defaults, and the experiment entry
-overrides none of them: 2,400 minutes and 6,400 model calls
-(`_round.BASE_OVERRIDES`), USD 50, 12 null controls, six `validate` calls
-between two tests, 3,600 s per `fit` and 360 s per `generate_orders`, a
-strategy container of 8 CPUs and 32 GiB, and three replays at a time in
-`validate`.
+compaction run DeepSeek-V4.1-Flash with the compaction threshold at 221,184
+tokens: the relay bills a gpt-6-astra request whose prompt exceeds 272,000
+tokens at twice every prompt price and 1.5 times the completion price, so the
+window-bound default (959,040) would spend most of the cap in that tier, and
+this threshold keeps every call in the short one, as both earlier ZGCA rounds
+did. The experiment takes the instance's one A100 (`gpu_count` 1), claimed by
+the console when it starts the worker. The budgets are round 20261103's: 7,200
+minutes, 19,200 model calls, USD 150 and 36 null controls; the rest are the
+launcher's and the console's defaults (six `validate` calls between two tests,
+3,600 s per `fit` and 360 s per `generate_orders`, a strategy container of
+8 CPUs and 32 GiB, three replays at a time in `validate`).
 
 The console refuses to create a GPU experiment while too few cards are free
 (`ExperimentManager._claimable_gpus`), so queue it on the instance with
@@ -76,6 +79,8 @@ from scripts.experiments._round import Round
 PACK = "configs/workspace_refs/open_200k_20261107"
 ASTRA = "gpt-6-astra"
 FLASH = "DeepSeek-V4.1-Flash"
+# Below the relay's 272,000-token prompt tier for gpt-6-astra (see the docstring).
+COMPACT_TOKEN_THRESHOLD = 221_184
 
 # Point at the pack. Do not restate it or the system prompt's rules, name a
 # reading after the research years, or send the session to a repository document
@@ -91,6 +96,7 @@ EXPERIMENTS: dict[str, dict[str, object]] = {
         "model": ASTRA,
         "subagent_model": FLASH,
         "compact_model": FLASH,
+        "compact_token_threshold": COMPACT_TOKEN_THRESHOLD,
         "workspace_reference": PACK,
         "research_directive": DIRECTIVE,
     },
@@ -107,6 +113,11 @@ ROUND = Round(
         # The instance's one A100, claimed by the console when it starts the
         # worker; the session and every replay's strategy container share it.
         "gpu_count": 1,
+        # Round 20261103's budgets. An experiment entry may override them at create.
+        "max_api_spend_usd": 150.0,
+        "max_llm_calls": 19_200,
+        "max_research_minutes": 7_200,
+        "max_null_controls": 36,
     },
 )
 
