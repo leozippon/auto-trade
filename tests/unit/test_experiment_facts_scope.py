@@ -9,6 +9,8 @@ import json
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from autotrade.agent.experiment_facts import (
     BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     SEARCH_ROOT_SHELL_NOTE,
@@ -69,14 +71,15 @@ def test_the_session_facts_state_the_research_period_and_the_session_place() -> 
     scope = facts["research_scope"]
     assert "The experiment's one research session researches the period 20210701..20250630" in scope["research"]
     assert "No other session follows" in scope["research"]
-    assert "validation years" in scope["research"]
+    assert "validation period" in scope["research"]
+    assert "on a data view that ends there for the whole session" in scope["research"]
     assert scope["universe"].startswith("The universe is unfiltered")
     assert "ST names included" in scope["universe"]
     assert "every trading day at 08:30" in scope["strategy_cadence"]
     assert "own rebalance cadence" in scope["strategy_cadence"]
     assert "session" not in facts["identity"]
     assert facts["visibility_policy"]["visible_research_period"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_the_frontier"]
+    assert "不进入任何会话" in facts["visibility_policy"]["after_the_research_years"]
     rendered = json.dumps(facts, ensure_ascii=False)
     for later in ("2026", "202507", "2025-07"):
         assert later not in rendered
@@ -358,7 +361,6 @@ def test_an_early_research_year_does_not_advertise_history_before_the_store() ->
         test_step_months=3,
         steps_tested=0,
         window_months=108,
-        decision_time="2018-06-30T23:59:59+08:00",
     )
     # 108 months before 2017-06-30 is 2008-07-01. Daily bars start in 2010.
     assert record["years"][0]["input_window"] == "20100101..20170630"
@@ -376,6 +378,38 @@ def test_an_early_research_year_does_not_advertise_history_before_the_store() ->
         test_step_months=3,
         steps_tested=0,
         window_months=24,
-        decision_time="2023-06-30T23:59:59+08:00",
     )
     assert later["years"][0]["input_window"] == "20200701..20220630"
+
+
+def test_the_session_view_stays_at_the_research_end_while_the_frontier_moves() -> None:
+    """The geometry fact states one data view, the research year's end, at
+    every attempt; only the record's frontier follows the steps tested."""
+
+    from types import SimpleNamespace
+
+    from autotrade.pipelines.research_session import research_geometry_record
+
+    def record(steps_tested: int) -> dict[str, object]:
+        return research_geometry_record(
+            [
+                SimpleNamespace(label="Y1", start="20220701", end="20230630"),
+                SimpleNamespace(label="Y2", start="20230701", end="20240630"),
+            ],
+            research_years=1,
+            test_step_months=3,
+            steps_tested=steps_tested,
+            window_months=24,
+        )
+
+    opening, resumed = record(0), record(2)
+    for geometry in (opening, resumed):
+        assert (geometry["decision_time"], geometry["input_window"]) == (
+            "2023-06-30T23:59:59+08:00",
+            "20210701..20230630",
+        )
+        assert "past the research years is refused" in geometry["spans"]
+    assert (opening["frontier"], opening["steps_tested"]) == ("20230630", 0)
+    assert (resumed["frontier"], resumed["steps_tested"], resumed["steps"]) == ("20231231", 2, 4)
+    with pytest.raises(ValueError, match=r"steps_tested must be 0\.\.4"):
+        record(5)

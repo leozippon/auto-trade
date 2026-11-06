@@ -1,5 +1,6 @@
 """The validation lived through in steps: ``test``, the frontier, the
-per-interval ``validate`` allowance and what reaches the agent."""
+per-interval ``validate`` allowance, the research-years bound on ``validate``
+and what reaches the agent."""
 
 from __future__ import annotations
 
@@ -7,8 +8,6 @@ import hashlib
 import json
 import re
 import uuid
-from dataclasses import replace
-from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -19,8 +18,7 @@ import pytest
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.executor import StrategyExecutionError, StrategyRaised
 from autotrade.pipelines import rolling_record, session_tools
-from autotrade.pipelines.calendar import anchor_on
-from autotrade.pipelines.config import EvaluationResult, SnapshotBundle
+from autotrade.pipelines.config import EvaluationResult
 from autotrade.pipelines.rolling_record import (
     SOURCE_TEST,
     ValidationSteps,
@@ -107,16 +105,8 @@ class _Harness:
         backtest = self.session.backtest
         self.evaluator = _WindowEvaluator(self.session.evaluator.results_root, raise_for=raise_for)
         backtest.evaluator = self.evaluator
-        self.anchors: list[datetime] = []
-        self.views: list[tuple[str, str]] = []
-
-        def decision_view_at(anchor):
-            self.anchors.append(anchor)
-            return SnapshotBundle(f"view_{anchor:%Y%m%d}", f"decision_{anchor:%Y%m%d}", "")
-
-        backtest.request = replace(backtest.request, decision_view_at=decision_view_at)
         # Through the module: pytest would otherwise collect the class by its name.
-        self.test = session_tools.TestTool(backtest, advance_view=lambda bundle, frontier: self.views.append((bundle.snapshot_id, frontier)))
+        self.test = session_tools.TestTool(backtest)
 
     @property
     def backtest(self):
@@ -146,12 +136,10 @@ def test_a_test_advances_the_frontier_one_step_and_records_it_once() -> None:
         value = first.value
         assert (value["step"], value["steps"], value["steps_left"], value["frontier"]) == (1, 4, 3, "20250930")
         assert harness.backtest.frontier == "20250930"
-        # Durable before the view moved: the ledger holds the step, the view
-        # mounted next is the one at the new frontier.
+        # Durable before the result returned: the ledger holds the step.
         [record] = harness.records()
         assert (record["step"], record["frontier"], record["source"]) == (1, "20250930", SOURCE_TEST)
         assert record["candidate"]["step_id"] == node and record["entry"]["start"] == "20250701"
-        assert harness.anchors == [anchor_on("20250930")] and harness.views == [("view_20250930", "20250930")]
         # The replay ran from the validation start to the new frontier.
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20250930")
         assert value["test_replays"] == 1
@@ -179,12 +167,12 @@ def test_an_unregistrable_candidate_is_refused_without_advancing_or_counting() -
             assert refused.value.error_type == "test_registration_refused"
             assert reason in str(refused.value) and "frontier did not move" in str(refused.value)
         assert harness.records() == [] and harness.backtest.frontier == "20250630"
-        assert harness.backtest.test_replays == 0 and harness.views == []
+        assert harness.backtest.test_replays == 0
         # Nothing was replayed for a refused candidate.
         assert all(end_day is None for _s, _e, end_day in harness.evaluator.requests)
 
 
-def test_validate_is_bounded_per_interval_and_freed_by_a_test() -> None:
+def test_validate_is_bounded_per_interval_freed_by_a_test_and_kept_to_the_research_years() -> None:
     with TemporaryDirectory() as tmp:
         harness = _Harness(Path(tmp), validates_per_step=2)
         node = harness.node("a", "1")
@@ -199,12 +187,18 @@ def test_validate_is_bounded_per_interval_and_freed_by_a_test() -> None:
         assert harness.backtest.validates_in_interval == 0
         result = harness.session.call("c")
         assert result.ok and result.value["validates_in_step"] == 1 and result.value["validates_per_step"] == 2
-        # The frontier has entered the validation year: a span naming it is
-        # replayed up to the frontier, and says so.
+        # The view does not move with the frontier: a span reaching into the
+        # validation year is refused by name after a test as before it, and
+        # the refusal neither replays nor counts.
         harness.session.candidate("d", _strategy("4"))
-        cut = harness.session.call("d", span="Y5")
-        assert cut.ok and cut.value["span"]["end"] == "20250930"
-        assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20250930")
+        replays = len(harness.evaluator.requests)
+        for span in ("Y5", "Y4..Y5"):
+            with pytest.raises(ToolError) as refused:
+                harness.session.call("d", span=span)
+            assert refused.value.error_type == "schema_error"
+            assert "past the end of the research years 20250630" in str(refused.value)
+            assert "replayed only by test" in str(refused.value)
+        assert len(harness.evaluator.requests) == replays and harness.backtest.validates_in_interval == 1
 
 
 def test_the_last_test_finishes_the_session_with_its_candidate() -> None:
@@ -219,8 +213,6 @@ def test_the_last_test_finishes_the_session_with_its_candidate() -> None:
         records = harness.records()
         assert [row["candidate"]["step_id"] for row in records] == [a, a, b, b]
         assert candidate_changes(harness.backtest.ledger.read()) == 1
-        # The last step restarts no container: the session ends.
-        assert len(harness.views) == 3
         with pytest.raises(ToolError, match="validation period is complete"):
             harness.test.invoke({"candidate": b})
 
@@ -234,8 +226,8 @@ def test_nothing_returned_to_the_agent_dates_past_the_frontier() -> None:
         assert frontier == "20250731"
         dates = set(DATE.findall(json.dumps(result.value)))
         assert dates and max(dates) <= frontier, sorted(dates)[-3:]
-        # The view mounted next is the frontier's, and the replay stopped there.
-        assert harness.views == [(f"view_{frontier}", frontier)]
+        # The replay stopped at the frontier.
+        assert harness.evaluator.requests[-1][2] == frontier
         assert all(day <= frontier for day in (row["end"] for row in result.value["months"]))
 
 
@@ -266,7 +258,7 @@ def test_a_test_whose_replay_fails_leaves_the_frontier_where_it_was() -> None:
             harness.test.invoke({"candidate": environment})
         assert failed.value.details["cause"] == "environment" and "resent unchanged" in str(failed.value)
         assert harness.records() == [] and harness.backtest.frontier == "20250630"
-        assert harness.backtest.test_replays == 2 and harness.views == []
+        assert harness.backtest.test_replays == 2
         # A second host failure in a row ends the attempt, not the research.
         with pytest.raises(EnvironmentBlocked, match="2 replays failed on the environment"):
             harness.test.invoke({"candidate": environment})
@@ -274,16 +266,16 @@ def test_a_test_whose_replay_fails_leaves_the_frontier_where_it_was() -> None:
         assert harness.test.invoke({"candidate": good}).value["step"] == 1
 
 
-def test_a_seed_that_lacks_the_frontiers_view_ends_the_attempt_by_name() -> None:
+def test_a_seed_that_lacks_the_warm_start_ends_the_attempt_by_name() -> None:
     with TemporaryDirectory() as tmp:
         harness = _Harness(Path(tmp))
         node = harness.node("a", "1")
 
-        def missing(anchor):
-            raise FileNotFoundError(f"the PIT view seed carries no decision view at {anchor.isoformat()}")
+        def missing(request):
+            raise RuntimeError(f"the PIT view seed carries no prebuilt as-of state for replay slot {request.start}")
 
-        harness.backtest.request = replace(harness.backtest.request, decision_view_at=missing)
-        with pytest.raises(EnvironmentBlocked, match="no decision view at 2025-09-30T23:59:59"):
+        harness.evaluator.require_warm_start = missing
+        with pytest.raises(EnvironmentBlocked, match=r"test step 1: .*no prebuilt as-of state for replay slot 20250701"):
             harness.test.invoke({"candidate": node})
         assert harness.records() == [] and harness.evaluator.requests[-1][2] is None
 

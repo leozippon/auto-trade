@@ -24,7 +24,7 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 from autotrade.environment.strategy import CN_TZ
 from autotrade.pipelines import rolling_record
-from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry, anchor_on
+from autotrade.pipelines.calendar import FULL_SPAN, ResearchGeometry
 from autotrade.pipelines.config import (
     EvaluationRequest,
     EvaluationResult,
@@ -338,7 +338,7 @@ def test_the_research_session_opens_at_the_validation_start(tmp_path: Path):
     assert (request.full_span.label, request.full_span.mode) == ("full", "valid")
     assert (request.full_span.start, request.full_span.end) == ("20220701", "20230630")
     # ``full`` and the research year end before the validation start; the
-    # validation year parses but is the frontier's to allow.
+    # validation year parses, and the session refuses it (only test replays it).
     for label in ("full", "Y1"):
         assert research_span(request.years, label, research_years=1).end < validation_start
     assert research_span(request.years, "Y2", research_years=1).start == validation_start
@@ -588,10 +588,11 @@ def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path
 
 def test_a_resumed_attempt_continues_from_the_frontier_and_the_record(tmp_path: Path):
     """An attempt interrupted after a test leaves the step in the ledger. The
-    next attempt opens at the frontier that step reached, with the record so
-    far; when its budget ends before another test, the host freezes the tested
-    candidate -- not the Validation the attempt added -- and completes only the
-    record's remaining steps."""
+    next attempt continues the record from the frontier that step reached, on
+    the same view at the end of the research years; when its budget ends
+    before another test, the host freezes the tested candidate -- not the
+    Validation the attempt added -- and completes only the record's remaining
+    steps."""
 
     pipeline, snapshots, evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
@@ -633,9 +634,12 @@ def test_a_resumed_attempt_continues_from_the_frontier_and_the_record(tmp_path: 
 
     request = developer.requests[-1]
     assert request.resume is not None and request.resume.attempt == 2
-    assert [row["step"] for row in request.tests_before] == [1]
-    assert request.frontier == frontier == "20230930"
-    assert request.decision_time == anchor_on(frontier) and snapshots.decisions[-1] == anchor_on(frontier)
+    assert [row["step"] for row in request.tests_before] == [1] and frontier == "20230930"
+    # The view does not follow the frontier: every attempt opens on the
+    # research years' end.
+    view = pipeline.research_view_time()
+    assert view.strftime("%Y%m%d") == "20230630"
+    assert request.decision_time == view and set(snapshots.decisions) == {view}
     assert [step.step_id for step in request.steps_before] == [node_id]
     # The tested candidate is frozen, not the Validation this attempt added.
     assert record["frozen"]["source_step_id"] == node_id != record["steps"][-1]["step_id"]

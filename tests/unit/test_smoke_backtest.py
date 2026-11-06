@@ -94,7 +94,6 @@ def _tool(
         decision_time=datetime(2025, 9, 30, 23, 59, 59, tzinfo=UTC),
         years=(ReplaySpan("Y1", "valid", DAYS[0], DAYS[-1], snapshot),),
         validation=ReplaySpan("validation", "valid", "20260101", "20261231", snapshot),
-        decision_view_at=lambda _anchor: snapshot,
         window_months=24,
         max_llm_calls=200,
         deadline_seconds=1200.0,

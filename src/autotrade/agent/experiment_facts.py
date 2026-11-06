@@ -95,14 +95,15 @@ SEARCH_ROOT_SHELL_NOTE = (
     "transcript 只能用 `read_file`/`grep` 读。"
 )
 
-# What a session knows about the data past its frontier: the validation years
-# by their dates (``research_geometry.validation_years``), revealed one test
+# What a session knows about the data past its research years: the validation
+# period by its dates (``research_geometry.validation_period``), whose data is
+# never mounted and which reaches the session only through test results, one
 # step at a time; the periods after the geometry's last year only as hidden,
 # never their dates, slots or results.
 HIDDEN_PERIODS_NOTE = (
-    "研究年之后是验证年（research_geometry.validation_years）：它们的数据只随每次 `test` 推进的前沿逐步可见，"
-    "前沿之后的数据、回测区间与结果不进入会话；验证年之后是前推期与 Held-out，由宿主在会话结束后回测，"
-    "其日期与读数不进入任何会话。"
+    "研究年之后是验证期（research_geometry.validation_period）：会话的数据视图止于研究年末且整个会话不变，"
+    "验证期的数据不挂载，只通过每次 `test` 的结果逐步揭开，前沿之后的结果不进入会话；"
+    "验证期之后是前推期与 Held-out，由宿主在会话结束后回测，其日期与读数不进入任何会话。"
 )
 
 
@@ -172,7 +173,7 @@ def build_experiment_facts(
         },
         "visibility_policy": {
             "visible_research_period": True,
-            "after_the_frontier": HIDDEN_PERIODS_NOTE,
+            "after_the_research_years": HIDDEN_PERIODS_NOTE,
             "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
         },
         "research_geometry": _as_mapping(manifest.get("research")) or None,
@@ -242,9 +243,11 @@ def _research_scope(
     period = research.get("research_period")
     research_sentence = (
         f"The experiment's one research session researches the period {period}, one "
-        "complete year per label, then lives through the validation years "
-        "(research_geometry.validation_years) one test step at a time; it ends when "
-        "the frontier reaches their end, and the candidate of the last test is the "
+        "complete year per label, on a data view that ends there for the whole "
+        "session, then lives through the validation period "
+        "(research_geometry.validation_period) one test step at a time, seeing it "
+        "only through the test results; it ends when the frontier reaches its end, "
+        "and the candidate of the last test is the "
         "frozen strategy. No other session follows; the host then replays the frozen "
         "strategy over the periods after the geometry's last year and records the "
         "readings."

@@ -66,7 +66,7 @@ from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.environment.trace import TraceEvent
 
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
-from .calendar import FULL_SPAN, anchor_on, yyyymmdd
+from .calendar import FULL_SPAN, yyyymmdd
 from .config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MIN_CANDIDATES,
@@ -77,7 +77,6 @@ from .config import (
     EvaluationResult,
     ReplaySpan,
     ResearchSessionRequest,
-    SnapshotBundle,
     StepResult,
     research_span,
 )
@@ -455,8 +454,8 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         """The probe date, refused unless it is inside the research period.
 
         The session may measure a fit anywhere in the research years, and
-        nowhere else: a date past them would replay data the frontier may not
-        have revealed, and a date before them has no slot.
+        nowhere else: a date past them would replay the validation years,
+        which only ``test`` replays, and a date before them has no slot.
         """
 
         raw = arguments.get("start")
@@ -694,7 +693,8 @@ class SessionValidations:
 
     @property
     def frontier(self) -> str:
-        """The last day the session may read: the end of the last tested step."""
+        """The rolling record's frontier: the end of the last tested step, the
+        end of the research years before the first test."""
 
         return self.steps_plan.frontier_after(len(self.tests))
 
@@ -748,10 +748,10 @@ class SessionValidations:
     def span(self, label: object) -> ReplaySpan:
         """The span ``label`` names, or a schema error naming the valid ones.
 
-        A span may reach past the research years only as far as the frontier:
-        one whose first year the frontier has not entered is refused, and one
-        the frontier cuts is replayed to it (``validate`` passes
-        :attr:`frontier` as the evaluator's ``end_day``).
+        A Validation replays inside the research years only: the session's
+        data view ends with them for the whole session, and the validation
+        years are replayed by ``test`` alone, so a span reaching past the
+        research years is refused by name however far the tests have gone.
         """
 
         try:
@@ -762,19 +762,17 @@ class SessionValidations:
             raise ToolError(
                 str(exc), error_type="schema_error", blocked_target="span"
             ) from exc
-        if span.start > self.frontier:
+        research = self.request.full_span
+        if span.end > research.end:
             raise ToolError(
-                f"span {span.label} begins at {span.start}, after the frontier {self.frontier}: "
-                "the validation years are revealed one test at a time",
+                f"span {span.label} ends at {span.end}, past the end of the research years "
+                f"{research.end}: validate replays only the research years "
+                f"({research.start}..{research.end}); the validation years are replayed "
+                "only by test, whose results report them step by step",
                 error_type="schema_error",
                 blocked_target="span",
             )
         return span
-
-    def span_end_day(self, span: ReplaySpan) -> str | None:
-        """Where the frontier cuts ``span``; None for a span inside it."""
-
-        return self.frontier if span.end > self.frontier else None
 
     def registration(
         self,
@@ -1378,16 +1376,16 @@ class ValidateTool(SessionTimeBudgetAware):
         "validate",
         "Replay "
         f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "PRE-REGISTERED candidates over one span of the years the frontier has "
-        "revealed, in one call; this is the only way to create a node that test "
-        "can take. span is full (the research years, the default), one year such "
-        "as Y2, or contiguous years such as Y2..Y4, as the research_geometry fact "
-        "lists them; a span may name a validation year only once the frontier has "
-        "entered it, and is then replayed up to the frontier; each span is replayed "
-        "as one continuous book from the decision view at its first year. Calls are "
-        "counted per interval: at most acceptance_rules.validation.validates_per_step "
-        "before the first test and between two tests, after which the next call is "
-        "refused until a test advances the frontier. Each candidate is {name, "
+        "PRE-REGISTERED candidates over one span of the research years, in one "
+        "call; this is the only way to create a node that test can take. span is "
+        "full (the research years, the default), one research year such as Y2, or "
+        "contiguous research years such as Y2..Y4, as the research_geometry fact "
+        "lists them; a span reaching into the validation years is refused, since "
+        "only test replays them; each span is replayed as one continuous book from "
+        "the decision view at its first year. Calls are counted per interval: at "
+        "most acceptance_rules.validation.validates_per_step before the first test "
+        "and between two tests, after which the next call is refused until the "
+        "next test. Each candidate is {name, "
         "hypothesis, path, control}, as their "
         "parameters define them: path is a "
         "workspace directory laid out like output/ (main.py plus its sibling "
@@ -1407,8 +1405,8 @@ class ValidateTool(SessionTimeBudgetAware):
         "by another process, a sandbox that never started or broke protocol), which "
         "measured nothing, so resubmitting that candidate unchanged is a reasonable "
         "move. The returned validates_in_step/validates_per_step are the interval's "
-        "counters. The whole batch is refused before anything runs if the span names "
-        "a year the frontier has not reached, if the interval's calls are used up, "
+        "counters. The whole batch is refused before anything runs if the span "
+        "reaches past the research years, if the interval's calls are used up, "
         "if two candidates are byte-identical, or if one fails modification_check; "
         "a refused batch is not counted. The same refusal repeated is answered the "
         "same way: the third identical one states the recovery for it, so fix what "
@@ -1475,8 +1473,8 @@ class ValidateTool(SessionTimeBudgetAware):
                     "minLength": 1,
                     "maxLength": 20,
                     "description": (
-                        "full (default: the research years), one year Yk, or "
-                        "contiguous years Yi..Yj up to the frontier. Iterate on "
+                        "full (default: the research years), one research year "
+                        "Yk, or contiguous research years Yi..Yj. Iterate on "
                         "years; test takes a full-span validation."
                     ),
                 },
@@ -1600,7 +1598,7 @@ class ValidateTool(SessionTimeBudgetAware):
                 f"validate refused: acceptance_rules.validation.validates_per_step allows "
                 f"{self.backtest.validates_per_step} validate call(s) before the first test and "
                 f"between two tests, and this interval has made {self.backtest.validates_in_interval}; "
-                "0 remain until a test advances the frontier",
+                "0 remain until the next test",
                 error_type="validates_per_step_exhausted",
                 details={
                     "validates_in_step": self.backtest.validates_in_interval,
@@ -1667,7 +1665,6 @@ class ValidateTool(SessionTimeBudgetAware):
                     "control": candidate.control,
                     "source_path": candidate.path,
                     "span": span.label,
-                    **({"end": end_day} if (end_day := self.backtest.span_end_day(span)) else {}),
                 }
                 if evaluation is None:
                     shared = (
@@ -1726,7 +1723,7 @@ class ValidateTool(SessionTimeBudgetAware):
                 "span": {
                     "label": span.label,
                     "start": span.start,
-                    "end": self.backtest.span_end_day(span) or span.end,
+                    "end": span.end,
                     "years": span.slots,
                 },
                 "candidates": rows,
@@ -1984,14 +1981,9 @@ class ValidateTool(SessionTimeBudgetAware):
             request = self.backtest.validation_request(revisions[index], span)
             if card is not None:
                 request = replace(request, gpu_devices=(card,))
-            end_day = self.backtest.span_end_day(span)
             started = time.perf_counter()
             try:
-                evaluation = (
-                    self.backtest.evaluator.evaluate(request, end_day=end_day)
-                    if end_day is not None
-                    else self.backtest.evaluator.evaluate(request)
-                )
+                evaluation = self.backtest.evaluator.evaluate(request)
             except SessionInterrupt:
                 raise
             except Exception as exc:  # noqa: BLE001 - the text IS this row's result
@@ -2173,9 +2165,10 @@ TEST_DESCRIPTION = (
     "replay. Its result over the newest step becomes that step's entry in the arm's "
     "rolling record and is never rewritten. The step always runs to completion; a "
     "candidate whose own code raises during the replay is refused with the error and "
-    "the frontier does not move. Then the frontier advances: the session container "
-    "restarts on the decision view at the new frontier with the same workspace, and "
-    "the validate allowance starts again. Returns: the new frontier and the steps left; "
+    "the frontier does not move. Then the frontier advances and the validate allowance "
+    "starts again; the session's data view stays at the end of the research years, so "
+    "these results are how the validation years reach you. Returns: the new frontier "
+    "and the steps left; "
     "the candidate's whole-replay statistics (stats, raw_readings and residual_reading "
     "as a validate row carries them); months, a per-month table from the validation "
     "start to the frontier (return, max_drawdown, turnover, fees, active_return against "
@@ -2243,11 +2236,9 @@ class TestTool(SessionTimeBudgetAware):
         self,
         backtest: SessionValidations,
         *,
-        advance_view: Callable[[SnapshotBundle, str], None],
         trace_emit: Callable[[TraceEvent, dict[str, object]], object] | None = None,
     ) -> None:
         self.backtest = backtest
-        self._advance_view = advance_view
         self._trace_emit = trace_emit
         # Consecutive test replays the host, not the strategy, failed: the
         # second ends the attempt, as ``validate`` does for one span.
@@ -2297,11 +2288,9 @@ class TestTool(SessionTimeBudgetAware):
         frontier = steps.frontier_after(step)
         candidate = next(item for item in backtest.steps if item.step_id == node_id)
         with backtest.time_budget.pause():
-            # The view the session mounts next must exist before the replay
-            # runs, and so must the warm start the replay opens on: a seed
-            # that lacks either ends the attempt by name.
+            # The warm start the replay opens on must be in the seed before
+            # the replay runs: a seed that lacks it ends the attempt by name.
             try:
-                bundle = backtest.request.decision_view_at(anchor_on(frontier))
                 require_warm = getattr(backtest.evaluator, "require_warm_start", None)
                 request = backtest.validation_request(
                     backtest.artifact_store.revision(candidate.revision_id),
@@ -2359,14 +2348,12 @@ class TestTool(SessionTimeBudgetAware):
                 registration=registration,
                 source=SOURCE_TEST,
             )
-            # Durable before anything is returned or mounted: a resumed
-            # attempt continues from this frontier.
+            # Durable before anything is returned: a resumed attempt
+            # continues from this frontier.
             backtest.ledger.append(record)
             backtest.tests.append(record)
             backtest.validates_in_interval = 0
             finished = step == steps.count
-            if not finished:
-                self._advance_view(bundle, frontier)
         if self._trace_emit is not None:
             self._trace_emit(
                 TraceEvent.TOOL_CALL_STARTED,

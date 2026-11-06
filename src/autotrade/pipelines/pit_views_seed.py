@@ -47,12 +47,7 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree, rmtree_keeping_file_modes
-from autotrade.pipelines.calendar import (
-    ResearchGeometry,
-    Slot,
-    anchor_before,
-    step_windows,
-)
+from autotrade.pipelines.calendar import ResearchGeometry, Slot
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 
 # What a finished view carries: a snapshot restates its manifest and a bundle
@@ -70,29 +65,25 @@ UNFINISHED_BUILD_MARKER = "prebuild_unfinished.json"
 RESEARCH_PHASE = "valid"
 FORWARD_PHASE = "heldout"
 # The research_years an arm may choose on a seed: the seed carries a warm as-of
-# start at each, and step-boundary decision views from the earliest validation
-# start on. A choice the geometry cannot take (it must leave at least one
-# validation year) is planned for nothing.
+# start at each validation start. A choice the geometry cannot take (it must
+# leave at least one validation year) is planned for nothing.
 DEFAULT_RESEARCH_YEARS_CHOICES = (5, 6, 7)
-# The finest test step (``config.TEST_STEP_MONTHS``): a decision view at every
-# month boundary of the validation years serves monthly and quarterly steps.
-_STEP_VIEW_MONTHS = 1
 
 
 @dataclass(frozen=True)
 class SeedPlan:
     """The views a seed carries for one research geometry and one release.
 
-    Research reads the decision views at each research year's anchor, at
-    every step boundary of the validation years (the view a session mounts
-    after each test; the earliest validation start is the smallest
-    ``research_years_choices`` entry) and at research end -- the data summary
-    bundle describes that one -- plus the research-year slots. The forward and
-    Held-out slots belong to the pipeline's forward replay alone, so no
-    research item is stamped after research end. The as-of stash follows the
-    continuous replays: the full research chain from the first year's anchor,
-    one validation chain per research-years choice (the span a test replays
-    from its first day), and the forward chain from research end.
+    Research reads the decision views at each research year's anchor (the
+    anchor of the first validation year is the view a session with that
+    ``research_years`` reads for the whole session) and at research end --
+    the data summary bundle describes that one -- plus the research-year
+    slots. The forward and Held-out slots belong to the pipeline's forward
+    replay alone, so no research item is stamped after research end. The
+    as-of stash follows the continuous replays: the full research chain from
+    the first year's anchor, one validation chain per research-years choice
+    (the span a test replays from its first day), and the forward chain from
+    research end.
     """
 
     geometry: ResearchGeometry
@@ -109,27 +100,11 @@ class SeedPlan:
             )
 
     @property
-    def step_decision_times(self) -> tuple[datetime, ...]:
-        """The month-boundary views of the validation years that are not a
-        year anchor, from the earliest validation start to research end."""
-
-        if not self.research_years_choices:
-            return ()
-        validation = self.research_slots[min(self.research_years_choices) :]
-        anchors = {slot.anchor for slot in self.research_slots} | {self.geometry.research_decision_time}
-        return tuple(
-            anchor_before(start)
-            for start, _end in step_windows(validation[0].start, validation[-1].end, _STEP_VIEW_MONTHS)
-            if anchor_before(start) not in anchors
-        )
-
-    @property
     def decision_times(self) -> tuple[datetime, ...]:
         return tuple(
             sorted(
                 {
                     *(slot.anchor for slot in self.research_slots),
-                    *self.step_decision_times,
                     self.geometry.research_decision_time,
                 }
             )
@@ -160,7 +135,6 @@ class SeedPlan:
             "geometry": self.geometry.to_record(),
             "research_years_choices": list(self.research_years_choices),
             "decision_views": [value.isoformat() for value in self.decision_times],
-            "step_decision_views": [value.isoformat() for value in self.step_decision_times],
             "research_slots": [slot.to_record() for slot in self.research_slots],
             "forward_slots": [slot.to_record() for slot in self.forward_slots],
             "bundle": self.geometry.research_decision_time.isoformat(),

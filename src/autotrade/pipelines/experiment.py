@@ -16,6 +16,7 @@ import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -55,7 +56,7 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.trace import agent_trace_path
 
 from .agent_inbox import expire_experiment_session_inbox
-from .calendar import FULL_SPAN, VALIDATION_SPAN, Slot, anchor_on
+from .calendar import FULL_SPAN, VALIDATION_SPAN, Slot
 from .config import (
     AcceptanceRules,
     ArtifactStore,
@@ -290,25 +291,30 @@ class RollingExperimentPipeline:
             )
         return tuple(spans)
 
-    def research_inputs(
-        self, records: Sequence[Mapping[str, object]] = ()
-    ) -> tuple[SnapshotBundle, tuple[ReplaySpan, ...]]:
-        """The decision view at the arm's frontier and every year of the
-        geometry as :meth:`research_spans`: what a research session gets.
+    def research_inputs(self) -> tuple[SnapshotBundle, tuple[ReplaySpan, ...]]:
+        """The decision view at :meth:`research_view_time` and every year of
+        the geometry as :meth:`research_spans`: what a research session gets.
 
         The first ``research_years`` of the arm's rules are the research years
-        (``ResearchGeometry.split_research``); the frontier is the validation
-        start before any test and the end of the last step the ledger
-        ``records`` hold afterwards (``rolling_record.frontier_after``). The
-        spans a Validation may replay are bounded by the frontier in the
-        session (``session_tools.SessionValidations.span``), so no row past it
-        reaches a research session; the tests replay the validation years
-        (:meth:`validation_span`).
+        (``ResearchGeometry.split_research``). The session's view is the one
+        at their end for the whole session, and the spans a Validation may
+        replay stay inside them (``session_tools.SessionValidations.span``),
+        so no row of the validation years reaches a research session: only
+        the tests replay them (:meth:`validation_span`), and only their
+        results reach the session.
         """
 
         years = self.research_spans(self.config.geometry.research_years)
-        frontier = frontier_after(records, self.validation_steps())
-        return self.decision_view_at(anchor_on(frontier)), years
+        return self.snapshots.prepare_decision(decision_time=self.research_view_time()), years
+
+    def research_view_time(self) -> datetime:
+        """The anchor of the session's data view: 23:59:59 of the research
+        years' last day, the day before the validation years begin."""
+
+        _research, validation = self.config.geometry.split_research(
+            self.config.acceptance.research_years
+        )
+        return validation[0].anchor
 
     def validation_steps(self) -> ValidationSteps:
         """The validation years tiled into the arm's test steps."""
@@ -317,16 +323,6 @@ class RollingExperimentPipeline:
             self.config.acceptance.research_years
         )
         return ValidationSteps.of(validation, self.config.acceptance.test_step_months)
-
-    def decision_view_at(self, decision_time) -> SnapshotBundle:
-        """The decision view a session mounts at a frontier: one the provider
-        already holds where it can tell (``require_decision_view``, which
-        refuses a view the seed lacks by name), else prepared."""
-
-        require = getattr(self.snapshots, "require_decision_view", None)
-        if callable(require):
-            return require(decision_time=decision_time)
-        return self.snapshots.prepare_decision(decision_time=decision_time)
 
     def validation_span(self) -> ReplaySpan:
         """The validation years as one span, replayed as one book from the
@@ -344,8 +340,9 @@ class RollingExperimentPipeline:
     ) -> dict[str, object]:
         """Run the arm's one research session and record its outcome.
 
-        The session sees the data up to its frontier (:meth:`research_inputs`)
-        and ends when its tests reach the end of the validation years
+        The session sees the research years' data (:meth:`research_inputs`),
+        the validation years only through its tests' results, and ends when
+        its tests reach the end of the validation years
         (``completed``): the last test's candidate is frozen, checked for
         registration alone (:func:`freeze_registration`), never for a score.
         A session whose budget ran out (``deadline``) is completed by the
@@ -389,20 +386,17 @@ class RollingExperimentPipeline:
         self.run_markers.begin(attempt)
         try:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.RESEARCH)
-            decision, years = self.research_inputs(records)
-            tests_before = tuple(test_step_records(records))
-            frontier = frontier_after(records, self.validation_steps())
+            decision, years = self.research_inputs()
             session = self.developer(
                 ResearchSessionRequest.for_arm(
                     self.config,
                     budgets=budgets,
                     run_id=run_id,
                     snapshot=decision,
-                    decision_time=anchor_on(frontier),
+                    decision_time=self.research_view_time(),
                     years=years,
                     validation=self.validation_span(),
-                    decision_view_at=self.decision_view_at,
-                    tests_before=tests_before,
+                    tests_before=tuple(test_step_records(records)),
                     directive=str(context.get("directive") or ""),
                     sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
                     snapshot_config=_snapshot_config_record(self.snapshots),

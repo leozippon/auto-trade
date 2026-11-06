@@ -106,8 +106,7 @@ YEARS = (
     ("Y3", "20230701", "20240630"),
     ("Y4", "20240701", "20250630"),
 )
-# The validation year the frontier reveals one test at a time; a span may
-# name it only once the frontier has entered it.
+# The validation year: only test replays it, so no span may name it.
 VALIDATION_YEAR = ("Y5", "20250701", "20260630")
 TEMPLATE_README = "# Strategy output contract\n\nRead-only template text.\n"
 
@@ -379,7 +378,6 @@ class _Session:
             validation=ReplaySpan(
                 "validation", "valid", VALIDATION_YEAR[1], VALIDATION_YEAR[2], SnapshotBundle("snap_v", "decision_v", "replay_v")
             ),
-            decision_view_at=lambda _anchor: snapshot,
             window_months=60,
             max_llm_calls=10,
             deadline_seconds=deadline_seconds,
@@ -675,11 +673,13 @@ class BatchValidateSpanTest(unittest.TestCase):
                     session.call("a", span=label)
                 self.assertIn("span must be full", str(caught.exception))
                 self.assertEqual(caught.exception.error_type, "schema_error")
-            # The validation year is a year of the geometry, but the frontier
-            # has not entered it: refused by name until a test moves it.
-            with self.assertRaises(ToolError) as caught:
-                session.call("a", span="Y5")
-            self.assertIn("after the frontier 20250630", str(caught.exception))
+            # The validation year is a year of the geometry, but validate stays
+            # inside the research years: a span reaching it is refused by name.
+            for label in ("Y5", "Y4..Y5", "Y1..Y5"):
+                with self.assertRaises(ToolError) as caught:
+                    session.call("a", span=label)
+                self.assertIn("past the end of the research years 20250630", str(caught.exception))
+                self.assertEqual(caught.exception.error_type, "schema_error")
             self.assertEqual(session.evaluator.calls, 0)
 
     def test_the_null_control_ranks_a_node_over_its_own_span(self) -> None:

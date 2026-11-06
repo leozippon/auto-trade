@@ -142,9 +142,6 @@ def _research_prompt(
     geometry = rolling.geometry
     budgets = _session_budgets(rolling, resource_override)
     sandbox = context.strategy_sandbox
-    # The session opens at the validation start, as ``experiment.research_inputs``
-    # hands it the geometry.
-    _research, validation = geometry.split_research(rolling.acceptance.research_years)
     manifest: dict[str, object] = {
         "experiment_id": rolling.experiment_id,
         "epoch_id": "research",
@@ -156,7 +153,6 @@ def _research_prompt(
             test_step_months=rolling.acceptance.test_step_months,
             steps_tested=0,
             window_months=rolling.window_months,
-            decision_time=validation[0].anchor.isoformat(),
         ),
         "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),

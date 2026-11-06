@@ -148,7 +148,6 @@ def _research_request() -> ResearchSessionRequest:
         decision_time=moment,
         years=(ReplaySpan("Y1", "valid", "20240701", "20250630", snapshot),),
         validation=ReplaySpan("validation", "valid", "20250701", "20260630", snapshot),
-        decision_view_at=lambda _anchor: snapshot,
         window_months=24,
         max_llm_calls=3,
         deadline_seconds=2.0,
