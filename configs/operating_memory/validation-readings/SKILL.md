@@ -1,10 +1,10 @@
 # 验证记录的读数口径：主动回撤、换手、成本与账户表现
 
-验证行与 `result_ref` 记录里有几组名字相近、口径不同的读数，各字段的定义在 `validate` 的说明里，哪条条件读哪个字段在运行事实 `acceptance_rules` 里；拿它们比较、外推或预估封存检验与定版登记之前，先认清下面这些容易读错的地方。
+验证行、`test` 的返回与 `result_ref` 记录里有几组名字相近、口径不同的读数，各字段的定义在 `validate` 与 `test` 的说明里，哪条登记条件读哪个字段在运行事实 `acceptance_rules.registration` 里；拿它们比较、外推或预估滚动记录与登记之前，先认清下面这些容易读错的地方。
 
 ## 回撤
 
-主动回撤读 `benchmark.active_max_drawdown`，权益回撤读 `stats.max_drawdown`，每一行两个都有。定版登记在回撤上只比权益回撤，上限在 `acceptance_rules.freeze_registration.max_drawdown`；封存检验不读回撤，定版之后前推期及其后的回放报告的两种回撤都只记录，不参与裁决。两种回撤给候选的排序可以相反，比哪条限就读哪个字段，不用另一种或等权组合去代。
+主动回撤读 `benchmark.active_max_drawdown`，权益回撤读 `stats.max_drawdown`，每一行两个都有。登记在回撤上只比权益回撤，上限在 `acceptance_rules.registration.max_drawdown`，每次 `test` 都查；滚动记录的统计量不读回撤，`test` 返回的整段统计与冻结之后前推期及其后的回放报告的两种回撤都只记录，不判任何事。两种回撤给候选的排序可以相反，比哪条限就读哪个字段，不用另一种或等权组合去代。
 
 ## 换手
 
@@ -22,7 +22,7 @@
 
 | 读数 | 序列与口径 | 谁用它 |
 |---|---|---|
-| `residual_reading.active_excess_at_cost_stress` | 主动序列，年化，滑点按本实验倍数 | 什么也不判：定版登记与封存检验都不读它，定版之后前推期及其后的回放报告同一个量，只记录 |
+| `residual_reading.active_excess_at_cost_stress` | 主动序列，年化，滑点按本实验倍数 | 什么也不判：登记与滚动记录的统计量都不读它，冻结之后前推期及其后的回放报告同一个量，只记入读出 |
 | `stats.cost_sensitivity.excess_at_2x_slippage` | 账户对基准指数的原始超额，整段累计，固定两倍滑点 | 什么也不判 |
 
 主动读数赢了对照组合，账户却可能没赢基准：对照组合本身扣费后也会亏（`raw_readings.panel_return`），赢一个亏钱的对照组合不等于账户赚钱。
@@ -33,6 +33,6 @@
 
 主动超额是主动序列逐日差的年化均值，`plain_selection` 是两条复利收益之差；两者同号居多，但不是同一个数。
 
-`raw_readings.active_market_beta` 是主动序列对市场（`benchmark_index`）、规模、价值三条腿回归里市场腿的载荷，与 `residual_reading.market_beta` 同一个数。为负说明账户持有的名字比随机副本更低 β：指数大涨的年份主动序列落后于对照组合，大跌的年份领先。封存检验读的是同一回归的截距除以残差波动（`residual_reading.residual_information_ratio`），三条腿能解释的部分不算在里面。某一年的读数用 `daily_series`（`validation/active_daily.csv`）里该年的 `active_return` 对 `benchmark_return`、`size_factor_return`、`value_factor_return` 回归即得。
+`raw_readings.active_market_beta` 是主动序列对市场（`benchmark_index`）、规模、价值三条腿回归里市场腿的载荷，与 `residual_reading.market_beta` 同一个数。为负说明账户持有的名字比随机副本更低 β：指数大涨的年份主动序列落后于对照组合，大跌的年份领先。滚动记录与每个验证行的统计量（`acceptance_rules.instrument`）读的是同一回归的截距除以残差波动（`residual_reading.residual_information_ratio`），三条腿能解释的部分不算在里面。某一年的读数用 `daily_series`（`validation/active_daily.csv`）里该年的 `active_return` 对 `benchmark_return`、`size_factor_return`、`value_factor_return` 回归即得。
 
-跟踪约束不读主动序列的市场载荷：设了跟踪约束的实验，定版登记比的是策略自身收益的 `benchmark.market_beta` 与 `benchmark.tracking_error`（`acceptance_rules.freeze_registration.tracking_mandate`）。
+跟踪约束不读主动序列的市场载荷：设了跟踪约束的实验，登记比的是策略自身收益的 `benchmark.market_beta` 与 `benchmark.tracking_error`（`acceptance_rules.registration.tracking_mandate`）。
