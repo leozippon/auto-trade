@@ -28,6 +28,7 @@ from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_CAP,
     BOOK_NAME,
+    PAPER_DECISION_TIMEOUT_SECONDS,
     PAPER_INITIAL_CASH,
     STRATEGY_COPY_NAME,
     VERDICT_LOG_NAME,
@@ -457,7 +458,8 @@ def test_a_schema_2_book_loads_as_the_book_it_was(tmp_path: Path):
     record = read_json_object(book.root / BOOK_NAME)
     assert BrokerProfile.from_record(record["profile"]) == book.profile
     assert SnapshotConfig.from_record(record["snapshot_config"]).to_record() == record["snapshot_config"]
-    assert SandboxConfig.from_record(record["sandbox"]) == book.sandbox
+    clocked = {**record["sandbox"], "timeout_seconds": PAPER_DECISION_TIMEOUT_SECONDS}
+    assert SandboxConfig.from_record(clocked) == book.sandbox
     legacy = schema_2_record(record, book)
     (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
     assert load_book(book.root) == book
@@ -465,6 +467,23 @@ def test_a_schema_2_book_loads_as_the_book_it_was(tmp_path: Path):
     (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
     with pytest.raises(ValueError, match="missing keys \\['screen_boards'\\]"):
         load_book(book.root)
+
+
+def test_every_book_decides_under_the_paper_decision_clock(tmp_path: Path):
+    """A new book carries no decision clock, and the arm's clock an older book
+    copied (schema 3 or 2) is not read: every Paper decision call runs under
+    PAPER_DECISION_TIMEOUT_SECONDS, whatever the arm's."""
+    book = _graduated_book(tmp_path)
+    record = read_json_object(book.root / BOOK_NAME)
+    assert "timeout_seconds" not in record["sandbox"]
+    assert book.sandbox.timeout_seconds == PAPER_DECISION_TIMEOUT_SECONDS != SandboxConfig().timeout_seconds
+    copied = {**record, "sandbox": {**record["sandbox"], "timeout_seconds": 360.0}}
+    (book.root / BOOK_NAME).write_text(json.dumps(copied), encoding="utf-8")
+    assert load_book(book.root) == book
+    legacy = schema_2_record(record, book)
+    legacy["sandbox"]["limits"]["timeout_seconds"] = 360.0
+    (book.root / BOOK_NAME).write_text(json.dumps(legacy), encoding="utf-8")
+    assert load_book(book.root) == book
 
 
 @pytest.mark.parametrize(

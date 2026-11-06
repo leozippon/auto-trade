@@ -26,12 +26,14 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # the decision time stays the moment the strategy's data is as of, wherever in
 # the morning the run falls.
 #
-# The runs work back from 09:10 with a 45-minute budget for one attempt: a
-# book's run -- its PIT build, the replay of its earlier decisions and one
-# decision -- takes 8-13 min on a quiet host and 42 min measured with four
-# research arms on the box. Books run one after another. No clock enforces the
-# budget: the per-call clocks init froze into each book.json (decision, fit,
-# container start) only stop a runaway, and a run that ends after 09:10 still
+# The runs work back from 09:10 (PAPER_SHEET_DUE in src/autotrade/paper/book.py)
+# with a 45-minute budget for one attempt: the strategy container's start
+# clock (15 min) plus the Paper decision clock (30 min,
+# PAPER_DECISION_TIMEOUT_SECONDS, one decision call in every book, whatever its
+# arm's). A book's whole run -- its PIT build, the replay of its earlier
+# decisions and one decision -- takes 8-13 min on a quiet host and 42 min
+# measured with four research arms on the box. Books run one after another.
+# The clocks bound each call, not the run: a run that ends after 09:10 still
 # writes its sheet -- the same decision, too late for the opening auction.
 #
 # 05:40 is the first, after the nightly chain has committed the previous

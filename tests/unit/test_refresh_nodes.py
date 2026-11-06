@@ -40,7 +40,9 @@ from autotrade.environment.data.contracts import (
     visible_cutoff,
 )
 from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
+from autotrade.paper.book import PAPER_DECISION_TIMEOUT_SECONDS, PAPER_SHEET_DUE
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -264,13 +266,12 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         self.assertLess(launch, min(at for at in others if at >= noon))
 
     def test_every_paper_attempt_has_its_budget_before_the_sheet_is_due(self) -> None:
-        # The operator needs every sheet at 09:10, five minutes before the
-        # opening call auction, whatever the decision time (still 08:00 by
-        # default). One attempt is budgeted 45 min (42 measured for one book
-        # with four research arms on the host). The first run follows the
-        # nightly chain at 05:40; the last retry starts at least the budget
-        # before the sheet is due, and a GPU book of the first run waits for a
-        # card until the last retry starts, never past it.
+        # The operator needs every sheet at PAPER_SHEET_DUE, whatever the
+        # decision time (still 08:00 by default). One attempt's budget is the
+        # container-start clock plus the Paper decision clock. The first run
+        # follows the nightly chain at 05:40; the last retry starts at least
+        # the budget before the sheet is due, and a GPU book of the first run
+        # waits for a card until the last retry starts, never past it.
         from scripts.paper import run_paper
 
         day = date(2026, 11, 6)
@@ -281,8 +282,8 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
             )
         )
         self.assertEqual(StrategySchedule().at("20261106").strftime("%H:%M"), "08:00")
-        due = datetime.combine(day, time(9, 10))
-        budget = timedelta(minutes=45)
+        due = datetime.combine(day, PAPER_SHEET_DUE)
+        budget = timedelta(seconds=SandboxConfig().startup_timeout_seconds + PAPER_DECISION_TIMEOUT_SECONDS)
         self.assertEqual(paper[0].time(), time(5, 40))
         self.assertLessEqual(paper[-1] + budget, due)
         self.assertEqual(paper[0] + timedelta(minutes=run_paper.GPU_WAIT_MINUTES), paper[-1])

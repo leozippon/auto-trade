@@ -4,12 +4,13 @@ A book is created once from an experiment's Paper candidate and never changes
 afterwards. Creation copies the frozen artifact into the book and resolves the
 experiment's own parameters with the pipeline's resolver, so the book trades
 the snapshot configuration, Broker profile, schedule and strategy sandbox the
-research replays used; everything is then read from ``book.json``, never from
-the experiment again, and the experiment may be archived. Creation also copies
-the artifact's out-of-sample curve (the forward and Held-out replay its verdict
-named) into ``source_history.json``, so the book keeps the history its own days
-continue. A different capital, artifact or environment is a new book in a new
-state root.
+research replays used, but for the decision clock: every Paper decision runs
+under ``PAPER_DECISION_TIMEOUT_SECONDS``. Everything is then read from
+``book.json``, never from the experiment again, and the experiment may be
+archived. Creation also copies the artifact's out-of-sample curve (the forward
+and Held-out replay its verdict named) into ``source_history.json``, so the
+book keeps the history its own days continue. A different capital, artifact or
+environment is a new book in a new state root.
 
 A book's track is recorded as its ``candidate_source``. A ``frozen`` book
 trades the frozen strategy of an arm with its forward record (the arm's Paper
@@ -31,7 +32,7 @@ from __future__ import annotations
 import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, time
 from pathlib import Path
 
 from autotrade.common.records import (
@@ -81,6 +82,15 @@ BOOK_CAP = 4
 # whatever the arm's own initial_cash (the owner's decision of 2026-11-06); a
 # book keeps the capital it was created with.
 PAPER_INITIAL_CASH = 200_000.0
+# When every book's order sheet is due, Beijing time: five minutes before the
+# 09:15 opening call auction, whatever the book's decision time (the owner's
+# decision of 2026-11-06). ops/cron/paper.cron starts its last retry at least
+# the container-start clock plus PAPER_DECISION_TIMEOUT_SECONDS before it.
+PAPER_SHEET_DUE = time(9, 10)
+# The wall clock of one decision call in every Paper run -- the day's decision
+# and the replay of each earlier one -- in place of the arm's
+# strategy_inference_timeout_seconds, which is sized for research replays.
+PAPER_DECISION_TIMEOUT_SECONDS = 1800.0
 # The Paper verdict's rules, pinned into every new book. A statistical check
 # runs only every CHECKPOINT_DAYS settled Paper sessions (half a year): kill
 # when the KILL_CONFIDENCE upper bound of the plain active mean is below zero
@@ -235,7 +245,9 @@ def create_book(
         # instead of splicing two different indexes into one line.
         "benchmark_index": options.rolling.benchmark_index,
         "profile": profile.to_record(),
-        "sandbox": sandbox.to_record(),
+        # Without a decision clock: every Paper decision runs under
+        # PAPER_DECISION_TIMEOUT_SECONDS (load_book).
+        "sandbox": {key: value for key, value in sandbox.to_record().items() if key != "timeout_seconds"},
         "snapshot_config": options.snapshot_config.to_record(),
         "max_intraday_row_group_rows": options.max_intraday_row_group_rows,
         "raw_dir": str(options.raw_dir),
@@ -363,7 +375,12 @@ def load_book(state_root: str | Path) -> Book:
         models_dir=root / str(record["models_dir"]) if record.get("models_dir") else None,
         schedule=StrategySchedule(**record["schedule"]),
         profile=BrokerProfile.from_record(record["profile"]),
-        sandbox=SandboxConfig.from_record(record["sandbox"]),
+        # A book created before 2026-11-06 still records its arm's decision
+        # clock; it is replaced, never read: every Paper decision runs under
+        # PAPER_DECISION_TIMEOUT_SECONDS.
+        sandbox=SandboxConfig.from_record(
+            {**record["sandbox"], "timeout_seconds": PAPER_DECISION_TIMEOUT_SECONDS}
+        ),
         snapshot_config=SnapshotConfig.from_record(record["snapshot_config"]),
         max_intraday_row_group_rows=int(record["max_intraday_row_group_rows"]),
         raw_dir=Path(record["raw_dir"]),
@@ -458,7 +475,8 @@ def _schema_2_upgraded(record: dict[str, object]) -> dict[str, object]:
     )
     config = SandboxConfig(
         spec=spec,
-        timeout_seconds=limits["timeout_seconds"],
+        # The arm's copied decision clock is not read (PAPER_DECISION_TIMEOUT_SECONDS).
+        timeout_seconds=PAPER_DECISION_TIMEOUT_SECONDS,
         fit_timeout_seconds=limits["fit_timeout_seconds"],
         startup_timeout_seconds=limits["startup_timeout_seconds"],
         max_output_chars=limits["max_output_chars"],
@@ -492,7 +510,9 @@ _SCHEMA_2_LIMIT_KEYS = frozenset(
 __all__ = [
     "BOOK_CAP",
     "BOOK_NAME",
+    "PAPER_DECISION_TIMEOUT_SECONDS",
     "PAPER_INITIAL_CASH",
+    "PAPER_SHEET_DUE",
     "SOURCE_HISTORY_NAME",
     "TRACKS",
     "VERDICT_LOG_NAME",
