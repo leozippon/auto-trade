@@ -88,8 +88,8 @@ def test_the_directive_starts_with_the_packs_direction_and_names_no_model() -> N
 
 
 # The per-experiment budgets the owner's 2026-10-27 directive tripled for this round;
-# the replay-year budget, tripled to 288 too, was retired since and has no
-# console value left to triple.
+# the replay-year budget, tripled to 288 too, was retired since: it has no
+# console value left to triple, and the round file no longer sends it.
 TRIPLED = (
     "max_null_controls",
     "max_api_spend_usd",
@@ -142,7 +142,6 @@ def test_both_experiments_send_the_selection_on_one_card_and_their_own_choices()
             "research_directive": DIRECTIVE,
             "batch_validate_max_concurrency": 4,
             **tripled,
-            "max_replay_years": 288,
             "strategy_cpus": 16,
             "strategy_memory": "64g",
         }

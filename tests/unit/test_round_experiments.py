@@ -31,7 +31,6 @@ from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
-    OBSOLETE_KEYS,
     SNAPSHOT_CACHE_FORMAT_VERSION,
     acceptance_for,
 )
@@ -88,13 +87,8 @@ def _rounds() -> dict[str, Round]:
 
 
 ROUNDS = _rounds()
-# A round written under rules since retired (``config.OBSOLETE_KEYS``) is
-# history: the console refuses its request, so it is read but never dry-run.
-ROUND_IDS = sorted(
-    name
-    for name, rnd in ROUNDS.items()
-    if not rnd.closed and not OBSOLETE_KEYS & set(rnd.common_overrides)
-)
+# A closed round is history: it is read but never dry-run.
+ROUND_IDS = sorted(name for name, rnd in ROUNDS.items() if not rnd.closed)
 EXPERIMENTS = [(name, experiment) for name in ROUND_IDS for experiment in ROUNDS[name].experiments]
 # The packs the open rounds' experiments mount: every research attempt copies its
 # pack from the repository, so these are the packs a session can still read.
