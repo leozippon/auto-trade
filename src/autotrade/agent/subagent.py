@@ -133,7 +133,7 @@ OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 # "be concise" instruction is a stuck loop, not an unfinished answer.
 SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
 OUTPUT_TRUNCATED_CONTINUATION = (
-    "上一轮输出在 {limit} token 上限被截断且没有工具调用。"
+    "上一回合的输出在 {limit} token 上限被截断且没有工具调用。"
     "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
 )
 # The forced final summary came back with no content (a reply that spent its
@@ -141,7 +141,7 @@ OUTPUT_TRUNCATED_CONTINUATION = (
 # last call: the reply's own reasoning, else the last assistant text still in
 # the transcript, is delivered under this marker with status ``exhausted`` —
 # ``ok`` stays False at the parent, so it is never read as a full report.
-SUBAGENT_DEGRADED_SUMMARY_MARKER = "[轮次用尽：以下内容由{source}恢复，不是子代理的正式汇报]"
+SUBAGENT_DEGRADED_SUMMARY_MARKER = "[回合用尽：以下内容由{source}恢复，不是子代理的正式汇报]"
 SUBAGENT_DEGRADED_SUMMARY_ERROR = (
     "Sub-agent rounds exhausted; summary recovered without a final report"
 )
@@ -255,16 +255,16 @@ _WRITE_PROMPT = """\
 你是研究会话的一级 `{role}` sub-agent：{mission}。你可用已注入工具修改共享策略、模型或 skills，但父 Agent 独占正式回测（`validate`）、`test` 与候选选择。
 
 # 边界
-- 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。有复用价值、而挂载的运行记忆与数据引用里还没有的知识写入 skill，而不是堆入策略或汇报。
+- 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。有复用价值、而挂载的技能库与数据引用里还没有的知识写入 skill，而不是堆入策略或汇报。
 - 只完成父任务；不得再委托子代理、读取研究年末之后的数据、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
 - 实现或评估候选时严格按 task 给定的机制、股票池、持有与证伪条件做：不得静默回退、换机制或改预登记条件，做不到就如实汇报；汇报里的数据事实（行数、字段、统计量、错误原文）逐字给出，不只给概括。
 {tool_calls}
-- 工具 schema 决定实际能力。同一轮的只读调用并发执行；写、检查与 shell 按因果顺序分轮调用。shell 只做有界前台工作，不启动后台任务（父会话起的本机模型服务可以直接请求）、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
+- 工具 schema 决定实际能力。同一回合的只读调用并发执行；写、检查与 shell 按因果顺序分回合调用。shell 只做有界前台工作，不启动后台任务（父会话起的本机模型服务可以直接请求）、sleep/等待包装、轮询状态或隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，再分块运行并把中间结果落盘，每块都要在 shell 超时内完成。
 - 工作区是父 Agent 与并行子代理共用的同一棵实时目录树：没有各自的副本，也没有结束时的回并，你的写入即时生效且不可撤销。只在 task 给定的路径下创建、修改与删除，并在汇报里写明删了什么。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
-用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一轮去读：表格、逐列清单、代码与日志写进工作区 `notes/<topic>/` 下的文件，汇报只给结论、关键数字和这些文件的路径。\
+用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一个回合去读：表格、逐列清单、代码与日志写进工作区 `notes/<topic>/` 下的文件，汇报只给结论、关键数字和这些文件的路径。\
 """
 
 _READ_PROMPT = """\
@@ -274,11 +274,11 @@ _READ_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
 {tool_calls}
-- 工具 schema 决定实际能力；同一轮的多个只读调用并发执行。不得再委托子代理、读取研究年末之后的数据、安装依赖或伪造结果；分钟和竞价不是策略时钟。
+- 工具 schema 决定实际能力；同一回合的多个只读调用并发执行。不得再委托子代理、读取研究年末之后的数据、安装依赖或伪造结果；分钟和竞价不是策略时钟。
 - 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
 
 # 返回
-用简洁中文说明结论、关键证据、限制和建议，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一轮去读：不抄录原文，给结论、关键数字和出处（根名、路径与行号），父 Agent 需要时自己去读。\
+用简洁中文说明结论、关键证据、限制和建议，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一个回合去读：不抄录原文，给结论、关键数字和出处（根名、路径与行号），父 Agent 需要时自己去读。\
 """
 
 # The single place the sub-agent mechanism is explained to the model; the
@@ -290,7 +290,7 @@ AGENT_TOOL_DESCRIPTION = (
     "可选 description、max_turns、thinking、inherit_context。"
     "用于读库、探索、计算、样板实现或审计等能独立完成的任务：把大量阅读与计算留在子代理里以保护主上下文；"
     "目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。"
-    f"同一轮可发起多个（默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队），可写的子代理同样可以并行；"
+    f"同一回合可发起多个（默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队），可写的子代理同样可以并行；"
     "并行的子代理范围须互斥，每个只写 task 指定的路径；"
     "返回值列出正在运行和排队的子代理（task_id、角色、description），已在进行的范围不要再启动一次。\n"
     "2. resume（不是 action，是 launch 的一个参数）：{\"agent\": <与原来相同的角色>, \"task\": <后续任务>, "
@@ -299,22 +299,22 @@ AGENT_TOOL_DESCRIPTION = (
     "只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。\n"
     "3. message（action=message）：{\"action\": \"message\", \"task_id\": <运行中或排队的 task_id>, \"text\": <指令>}。"
     "给一个仍在运行的子代理发中途指令：立即返回 status=queued，"
-    "指令在它下一轮模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一轮前收到），"
+    "指令在它下一回合模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一回合前收到），"
     "它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。"
     "只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，"
     "后续任务用 resume 或新子代理，已完成的子代理不能 message。\n"
     # Roles are not described here: the same tool payload carries the generated
     # per-role table on the ``agent`` property (``_role_schema_text``); a
     # hand-written copy could only drift from SUBAGENT_ROLE_TABLE.
-    "轮次与思考：子代理拥有自己模型的完整上下文窗口、按该窗口推导的压缩阈值和与你相同的输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
-    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮：倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，"
-    "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多轮次时显式给 max_turns。"
+    "回合与思考：子代理拥有自己模型的完整上下文窗口、按该窗口推导的压缩阈值和与你相同的输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
+    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 回合：倒数第 {SUBAGENT_GRACE_ROUNDS} 回合起收到收尾提示，"
+    "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多回合时显式给 max_turns。"
     f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
     "有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium："
-    f"每轮输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，把它全部耗在思考里而发不出工具调用的一轮只得到最多 "
+    f"每回合输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，把它全部耗在思考里而发不出工具调用的一个回合只得到最多 "
     f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后该次委托记为 error。"
     "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
-    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 轮）；生效值记入该子代理的 subagent_task 事件。\n"
+    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 回合）；生效值记入该子代理的 subagent_task 事件。\n"
     f"汇报：最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长的汇报只内联开头（summary_truncated=true），"
     "全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；"
     "子代理的角色提示里写着这个上限：可写的子代理把长材料写进工作区文件、汇报给路径，只读的子代理给出处而不抄原文。"
@@ -358,7 +358,7 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "maxLength": SUBAGENT_STEER_MAX_CHARS,
                 "description": (
                     f"message：中途指令正文（≤{SUBAGENT_STEER_MAX_CHARS} 字符），"
-                    "在子代理下一轮模型调用前作为 `[父代理指令]` 消息送达。"
+                    "在子代理下一回合模型调用前作为 `[父代理指令]` 消息送达。"
                 ),
             },
             "description": {
@@ -371,9 +371,9 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "type": "integer",
                 "minimum": 1,
                 "description": (
-                    f"子代理最多的模型轮次，≥1；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_MAX_ROUNDS} 轮），"
-                    f"倒数第 {SUBAGENT_GRACE_ROUNDS} 轮起收到收尾提示，上限后强制简洁总结；显式值按原值生效。"
-                    "子代理的上下文与你同样大并自动压缩，轮次只约束工作量。没有 schema 上限，但每轮占用会话共享调用配额中的一次子代理调用"
+                    f"子代理最多的模型回合，≥1；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_MAX_ROUNDS} 回合），"
+                    f"倒数第 {SUBAGENT_GRACE_ROUNDS} 回合起收到收尾提示，上限后强制简洁总结；显式值按原值生效。"
+                    "子代理的上下文与你同样大并自动压缩，回合只约束工作量。没有 schema 上限，但每回合占用会话共享调用配额中的一次子代理调用"
                     "（全部子代理累计不超过会话 max_llm_calls 的一半），配额耗尽的子代理以 error 结束，所以不要设得远超任务需要。"
                 ),
             },
@@ -383,7 +383,7 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "description": (
                     f"子代理思考强度 off/low/medium/xhigh；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_THINKING}），不继承父会话。"
                     "需要判断的任务保留默认；有界的机械工作显式给 low/medium，"
-                    f"因为把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算全部耗在思考里而发不出工具调用的一轮"
+                    f"因为把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算全部耗在思考里而发不出工具调用的一个回合"
                     f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
                     "high 与 max 是 xhigh 的别名，会被接受并记为 xhigh；off 关闭扩展思考。"
                 ),
@@ -840,7 +840,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     messages.append(
                         ChatMessage(
                             "user",
-                            f"还剩 {remaining_rounds} 轮模型调用（上限 {rounds_limit}）："
+                            f"还剩 {remaining_rounds} 回合模型调用（上限 {rounds_limit}）："
                             "请立即收尾，用简洁中文汇报结论、关键证据与剩余风险，不要再开新的探索。",
                         )
                     )
@@ -1469,7 +1469,7 @@ def _recovered_summary(
     empty case, and it stays an error.
     """
 
-    text, source = (response.reasoning_content or "").strip(), "本轮推理内容"
+    text, source = (response.reasoning_content or "").strip(), "本回合推理内容"
     if not text:
         source = "最后一条助手正文"
         for message in reversed(messages):

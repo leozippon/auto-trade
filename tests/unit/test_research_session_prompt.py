@@ -226,10 +226,10 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "你能读到的数据止于研究年末，整个会话都不变",
         "验证期的数据不会挂载，只通过 `test` 的结果一步一步揭开",
         "用 `validate` 在研究年内回测",
-        "`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的滚动记录",
-        "前沿推进一步",
-        "已记入滚动记录的条目不会改写",
-        "验证期最后一步测试完，会话结束，最后测试的候选被冻结",
+        "`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的验证记录",
+        "测试终点推进一步",
+        "已记入验证记录的条目不会改写",
+        "验证期最后一步测试完，会话结束，最后测试的候选定版",
         "会话不能主动结束",
         "宿主用最后测试的候选跑完剩下的步",
         "运行 Forward 与 Held-out 两个阶段，读数不回到会话",
@@ -239,7 +239,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         assert clause in process, clause
     # The host reads the record; the statistic and its threshold; no pass or fail.
     for clause in (
-        "宿主读的是滚动记录",
+        "宿主读的是验证记录",
         "随机选股对照组合",
         "残差信息比率",
         "z(1−α)/√年数",
@@ -247,7 +247,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "是读数，不是判决",
     ):
         assert clause in readings, clause
-    assert "参考包、研究方向与研究者指令都不能放宽它们" in stable
+    assert "参考工作区、研究方向与研究者指令都不能放宽它们" in stable
     assert "读取研究年末之后的数据" in stable and "模型自身的知识" in stable
     assert "验证期只通过 `test` 的结果了解" in stable
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
@@ -264,7 +264,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         for retired in (
             "freeze",
             "finish_session",
-            "定版",
+            "冻结",
             "no_edge",
             "未发现超额",
             "没有超额",
@@ -359,7 +359,7 @@ def test_the_session_surfaces_word_the_experiment_the_current_way() -> None:
     # The wording the surfaces do use, stated once where each is defined.
     assert "AI 首席量化研究官" in surfaces["system_prompt"]
     assert "随机选股对照组合" in surfaces["system_prompt"]
-    assert "冻结" in surfaces["system_prompt"]
+    assert "定版" in surfaces["system_prompt"]
 
 
 # Forward and Held-out results never enter a session (agent-design §1.2): the

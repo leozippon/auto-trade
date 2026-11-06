@@ -307,7 +307,7 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
     # the forward lower bound.
     readout = rows["registered_with_record"]["forward"]["readout"]
     assert endings["registered_with_record"]["reason"] == (
-        f"滚动记录 残差 IR {readout['record']['residual_information_ratio']:.2f}"
+        f"验证记录 残差 IR {readout['record']['residual_information_ratio']:.2f}"
         f" · p {readout['record']['p_value']:.2f} · 换候选 0 次"
         f" · 前推下界 {readout['forward']['lower_bound'] * 100:+.2f}%"
     )

@@ -46,7 +46,7 @@ const ENDING_LABELS = {
 // and the reason a terminal row or an unmeasured reading carries. A value not
 // listed renders as written.
 const TRACK_LABELS = {
-  frozen: "冻结策略",
+  frozen: "定版策略",
   graduated: "验收通过",
   incubating: "模拟观察中",
 };
@@ -86,15 +86,15 @@ const REASON_LABELS = {
   freeze_beta_outside_band: "研究期市场 β",
   freeze_not_positive_at_cost_stress: (t) => `研究期滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
   freeze_unmeasurable: "研究期统计可算",
-  freeze_too_few_seed_replicates: "训练模型的提名登记了种子副本",
-  freeze_seed_replicate_invalid: "种子副本只改种子一行",
+  freeze_too_few_seed_replicates: "训练模型的提名登记了种子复现",
+  freeze_seed_replicate_invalid: "种子复现只改种子一行",
   freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
   sealed_strategy_error: "封存年份策略无报错",
   sealed_unmeasurable: "封存年份残差可读（不是全程空仓）",
   sealed_residual_ir_below_bar: "封存年份残差 IR",
   forward_strategy_error: "前推期策略无报错",
   heldout_strategy_error: "Held-out 期策略无报错",
-  replicate_strategy_error: "种子副本回测无报错",
+  replicate_strategy_error: "种子复现回测无报错",
 };
 // An experiment judged on its active series -- its daily return minus the random
 // baseline the host drew from its own book -- records `series: "active"`; an experiment
@@ -113,7 +113,7 @@ const TRIALS_TITLE = "DSR 据以折减的试验数：本实验验证过的不同
 const EXCESS_TITLE = "主动序列（账户日收益 − 随机对照组合日收益，不做回归）的年化均值";
 const TRACKING_ERROR_TITLE = "主动序列日收益的年化标准差";
 const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
-const RECORD_IR_TITLE = "滚动记录各步的主动序列拼接后，对市场、规模、价值三条因子腿回归的残差 IR；门槛 z(1−α)/√年数";
+const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值三条因子腿回归的残差 IR；门槛 z(1−α)/√年数";
 const P_VALUE_TITLE = "零技能原假设下读到至少这么高的残差 IR 的单侧概率；只报告，不作判定";
 // The holder's money, which no active figure is: the account's own return
 // after every cost minus the benchmark index's price return over the same days.
@@ -125,7 +125,7 @@ const BASELINE_RETURN_TITLE = "随机对照组合（同一成交骨架随机换�
 // What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
 // daily series' mean. The mean itself is the slice's `plain_excess`, or with
 // seed replicates `seed_mean.plain_excess`.
-const LOWER_BOUND_TITLE = "主动序列（登记了种子副本时为定版产物与各副本逐日平均）年化均值的移动块自助法单侧下界";
+const LOWER_BOUND_TITLE = "主动序列（登记了种子复现时为定版产物与各复现逐日平均）年化均值的移动块自助法单侧下界";
 // A replay slice as the holder reads it (verdict.py `holder_readings`): his
 // own account against the benchmark first, then against the random baseline,
 // then the active figures the gate grades.
@@ -136,8 +136,8 @@ const ACTIVE_BETA_TITLE = "主动序列（账户 − 随机对照）对基准指
 // (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean` and
 // `forward_lower_bound`): a seed replicate is the same strategy with only its
 // seed line changed.
-const SEED_IR_TITLE = "提名节点与它的种子副本（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
-const SEED_MEAN_TITLE = "定版产物与它的种子副本各自读数的平均；只有登记了种子副本的提名才有";
+const SEED_IR_TITLE = "提名节点与它的种子复现（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
+const SEED_MEAN_TITLE = "定版产物与它的种子复现各自读数的平均；只有登记了种子复现的提名才有";
 
 function reasonLabel(reason, thresholds) {
   const label = REASON_LABELS[reason];
@@ -157,7 +157,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
   freezing: "定版策略",
-  completing_record: "宿主补完滚动记录",
+  completing_record: "宿主补完验证记录",
   forward_replay: "前推与 Held-out 连续回测",
   readout: "读出记录",
   publishing: "结果落盘",
@@ -2082,7 +2082,7 @@ function evidenceTiles(item) {
   const record = item.record || {};
   const forward = ((item.forward || {}).readout || {}).forward || {};
   const tiles = presentTiles([
-    { label: "已测步数", value: record.steps, fmt: String, title: "滚动记录里已记入的步数" },
+    { label: "已测步数", value: record.steps, fmt: String, title: "验证记录里已记入的步数" },
     { label: "记录残差 IR", value: record.residual_information_ratio, fmt: fmtSharpe, signed: true, title: RECORD_IR_TITLE },
     { label: "p 值", value: record.p_value, fmt: fmtPValue, title: P_VALUE_TITLE },
     { label: "换候选", value: record.candidate_changes, fmt: String, title: "相邻两步候选不同的次数；只记录，不作目标" },
@@ -2162,7 +2162,7 @@ function rankingPanel(payload) {
   const panel = el(
     "div",
     { class: "panel", id: "ranking-panel" },
-    panelHead("冻结策略排名", el("span", { class: "meta-line" }, "按滚动记录残差 IR 排序；读数只报告，不作判定")),
+    panelHead("定版策略排名", el("span", { class: "meta-line" }, "按验证记录残差 IR 排序；读数只报告，不作判定")),
     table(),
   );
   panel.__signature = rankingSignature(payload);
@@ -3184,7 +3184,7 @@ function forwardPoolBlock(readouts) {
   const p = (readouts || {}).forward_pool;
   if (!p) return null;
   const pooled = p.count
-    ? `${p.count} 个冻结策略 · 合并残差 IR ${fmtSharpe(p.residual_information_ratio)} · z = ${fmtSharpe(p.z)} · p = ${p.p_value.toFixed(3)}`
+    ? `${p.count} 个定版策略 · 合并残差 IR ${fmtSharpe(p.residual_information_ratio)} · z = ${fmtSharpe(p.z)} · p = ${p.p_value.toFixed(3)}`
     : "尚无可合并的读数";
   return el(
     "table",
@@ -3300,7 +3300,7 @@ function readoutStagePanel(detail) {
           el(
             "div",
             { class: "meta-line" },
-            "验证期走完或预算用尽后，宿主回放前推与 Held-out 并读出滚动记录；没有通过或不通过",
+            "验证期走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；没有通过或不通过",
           ),
     validationWindowBlock(detail.readouts),
     forwardPoolBlock(detail.readouts),
@@ -3320,7 +3320,7 @@ function readoutBlock(readout) {
     "table",
     { class: "kv section-gap" },
     kvRow(
-      "滚动记录",
+      "验证记录",
       record.unmeasured
         ? `未读出：${record.unmeasured}`
         : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· p = ${fmtPValue(record.p_value)}`,
@@ -3952,8 +3952,8 @@ function recordPanel(detail) {
     "div",
     { class: "panel section-gap" },
     panelHead(
-      "滚动记录",
-      el("span", { class: "badge kind" }, `${record.steps} 步 · 前沿 ${record.test_horizon}`),
+      "验证记录",
+      el("span", { class: "badge kind" }, `${record.steps} 步 · 测试终点 ${record.test_horizon}`),
       el("span", { class: "meta-line" }, `${headline} · 换候选 ${record.candidate_changes} 次`),
     ),
     chart,
@@ -4993,7 +4993,7 @@ const SUBAGENT_STATUS_LABELS = new Map([
   ["started", "已启动"],
   ["running", "进行中"],
   ["completed", "已完成"],
-  ["exhausted", "轮次用尽"],
+  ["exhausted", "回合用尽"],
   ["timeout", "超时"],
   ["error", "失败"],
   ["cancelled", "已取消"],
@@ -5057,7 +5057,7 @@ function subagentProgressParts(block) {
   const rounds = Number(block.rounds) || 0;
   const llmCalls = Number(block.llm_calls) || 0;
   const toolCalls = Number(block.tool_calls) || 0;
-  if (rounds || llmCalls) parts.push(`${rounds} 轮 · 模型 ${llmCalls} 次`);
+  if (rounds || llmCalls) parts.push(`${rounds} 回合 · 模型 ${llmCalls} 次`);
   if (toolCalls) parts.push(`工具 ${toolCalls} 次`);
   const total = Number((block.usage || {}).total_tokens) || 0;
   if (total) parts.push(`Σ ${fmtTokens(total)}`);
@@ -5157,7 +5157,7 @@ async function openSubagentTrace(detail, runRef, block) {
       previous: previousBlocks,
     });
     if (!(payload.blocks || []).length)
-      box.replaceChildren(el("div", { class: "empty" }, "该子代理尚未产生可展示的轮次。"));
+      box.replaceChildren(el("div", { class: "empty" }, "该子代理尚未产生可展示的回合。"));
     return isRunningSubagent(payload.header || block);
   };
   if (!(await load())) return;
@@ -5280,7 +5280,7 @@ function renderAgentOutputBlock(node, block, detail) {
   const model = String((block && block.model) || "").trim();
   const round = Number(block.round) || 0;
   const title = round
-    ? [`第 ${round} 轮`, model].filter(Boolean).join(" · ")
+    ? [`第 ${round} 回合`, model].filter(Boolean).join(" · ")
     : ["Agent", model, effort ? `推理 ${effort}` : ""].filter(Boolean).join(" · ");
   node.append(
     el(
@@ -5347,14 +5347,14 @@ function subagentContextLabel(block) {
 }
 
 /* The one place sub-agent launch metadata is spelled out:
-   `model · 推理 xhigh · 上限 48 轮 · 独立上下文`. */
+   `model · 推理 xhigh · 上限 48 回合 · 独立上下文`. */
 function subagentMetaLine(block, detail) {
   const thinking = subagentThinkingLabel(block, detail);
   const roundsLimit = Number(block.rounds_limit) || 0;
   return [
     block.model ? String(block.model) : "",
     thinking ? `推理 ${thinking}` : "",
-    roundsLimit ? `上限 ${roundsLimit} 轮` : "",
+    roundsLimit ? `上限 ${roundsLimit} 回合` : "",
     subagentContextLabel(block),
   ]
     .filter(Boolean)
@@ -5552,7 +5552,7 @@ function toolCallsNode(calls) {
       el(
         "div",
         { class: "tool-brief" },
-        [String(call.name || "工具"), round ? `第 ${round} 轮` : "", status]
+        [String(call.name || "工具"), round ? `第 ${round} 回合` : "", status]
           .filter(Boolean)
           .join(" · "),
       ),
@@ -6286,7 +6286,7 @@ function ordersNode(experimentId, result) {
    and the researcher still commits it. Who may write is settled by how the console is
    reached (loopback bind, or the edge's login gate), not by this page.
 
-   Inside an experiment, 已挂载记忆 is THAT experiment's frozen snapshot: what
+   Inside an experiment, 已挂载技能库 is THAT experiment's frozen snapshot: what
    its sessions mount, not what the library holds now. */
 
 let memoryView = null;
@@ -7063,7 +7063,7 @@ function applyCuratedResult(result) {
   renderMemoryPane();
 }
 
-/* ---------------- 已挂载记忆 ----------------
+/* ---------------- 已挂载技能库 ----------------
    One list, not a per-session projection: an experiment resolves the curated
    library once, when it is created, and every session it runs mounts that same
    read-only snapshot. So there is nothing to compare between sessions here —
@@ -7073,13 +7073,13 @@ function mountedMemoryPanel(detail) {
   const host = el(
     "div",
     { class: "panel section-gap mounted-memory" },
-    el("div", { class: "hint" }, "读取已挂载记忆…"),
+    el("div", { class: "hint" }, "读取已挂载技能库…"),
   );
   api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/memory`)
     .then((payload) => host.replaceChildren(mountedMemorySection(detail, payload)))
     .catch((error) =>
       host.replaceChildren(
-        el("div", { class: "hint warn" }, `读不到已挂载记忆：${error.message}`),
+        el("div", { class: "hint warn" }, `读不到已挂载技能库：${error.message}`),
       ),
     );
   return host;
@@ -7147,14 +7147,14 @@ function mountedMemorySection(detail, payload) {
     return el(
       "div",
       { class: "hint warn" },
-      `运行记忆快照不可读：${payload.error}`,
+      `技能库快照不可读：${payload.error}`,
     );
   const snapshot = payload.snapshot;
   if (!snapshot)
     return el(
       "div",
       { class: "hint" },
-      `已挂载记忆 · ${payload.mode || "—"} · 快照待会话启动时补建`,
+      `已挂载技能库 · ${payload.mode || "—"} · 快照待会话启动时补建`,
     );
   const sources = snapshot.sources || [];
   const curated = sources.reduce(
@@ -7162,7 +7162,7 @@ function mountedMemorySection(detail, payload) {
     0,
   );
   const summary = [
-    "已挂载记忆",
+    "已挂载技能库",
     snapshot.mode || payload.mode || "—",
     `精选 ${curated}`,
   ].join(" · ");
@@ -7181,7 +7181,7 @@ function mountedMemorySection(detail, payload) {
     ),
     sources.length
       ? mountedEntriesList(detail.experiment_id, sources)
-      : el("div", { class: "empty compact" }, "本实验没有挂载运行记忆"),
+      : el("div", { class: "empty compact" }, "本实验没有挂载技能库"),
   );
   return fold;
 }

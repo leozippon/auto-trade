@@ -80,7 +80,7 @@ def render() -> str:
         "",
         "## 1. 研究会话系统提示词",
         "",
-        "无标题的开场段与五个区块按「开场 → 研究与回测流程 → 读数 → 策略 → 禁止事项 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示只写宿主执行的规则与 Agent 自己查不到的事实，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里；怎样研究由 Agent 自己决定，参考包可以给出可以不采纳的建议。",
+        "无标题的开场段与五个区块按「开场 → 研究与回测流程 → 读数 → 策略 → 禁止事项 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示只写宿主执行的规则与 Agent 自己查不到的事实，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里；怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。",
         "",
         "### 1.1 开场段",
         "",
@@ -158,7 +158,7 @@ def render() -> str:
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
-            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与前沿；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限}\n\n"
+            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限}\n\n"
             f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
             f"{build_exploration_section('[存在时注入]')}\n\n"
@@ -172,7 +172,7 @@ def render() -> str:
         "| `identity` | experiment、run 与会话引用 |",
         "| `source_refs` | 运行 manifest、runtime environment、data summary、skills 索引与信号筛选脚本的受信引用 |",
         "| `visibility_policy` | 会话可见的范围与正式策略的读取根 |",
-        "| `research_geometry` | 研究年、验证期与前沿的日期，决策时点、输入窗口与 span 写法 |",
+        "| `research_geometry` | 研究年、验证期与测试终点的日期，决策时点、输入窗口与 span 写法 |",
         "| `visible_timeline` | 快照窗口、日级时钟与历史研究域可用性 |",
         "| `research_scope` | 研究期、股票池和调用节奏各一句 |",
         "| `experiment` | 本实验至今的验证与测试状态 |",

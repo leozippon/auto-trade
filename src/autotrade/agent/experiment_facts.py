@@ -102,7 +102,7 @@ SEARCH_ROOT_SHELL_NOTE = (
 # never their dates, slots or results.
 HIDDEN_PERIODS_NOTE = (
     "研究年之后是验证期（research_geometry.validation_period）：会话的数据视图止于研究年末且整个会话不变，"
-    "验证期的数据不挂载，只通过每次 `test` 的结果逐步揭开，前沿之后的结果不进入会话；"
+    "验证期的数据不挂载，只通过每次 `test` 的结果逐步揭开，测试终点之后的结果不进入会话；"
     "验证期之后是前推期与 Held-out，由宿主在会话结束后回测，其日期与读数不进入任何会话。"
 )
 

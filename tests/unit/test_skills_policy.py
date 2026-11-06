@@ -41,7 +41,7 @@ class ForwardFigureLeakTest(unittest.TestCase):
         "边界单测 test_b0_exit_due.py 全绿，覆盖 3 个用例",
         "H+1 开盘首卖，阈值 ≥3pp，09:30 之前不下单",
         # Naming the sealed stage without a figure is allowed.
-        "冻结产物会在前推期被连续回放一次，所以滚动重拟合要写进 fit",
+        "定版产物会在前推期被连续回放一次，所以滚动重拟合要写进 fit",
     )
 
     def test_shared_skill_content_rejects_figures_and_allows_prose(self) -> None:
@@ -72,9 +72,9 @@ class ForwardFigureLeakTest(unittest.TestCase):
         methodology prose, not a leak."""
 
         for text in (
-            "- 冻结产物会在前推期被连续回放一次\n- 研究期夏普 1.35，滚动重拟合要写进 fit\n",
+            "- 定版产物会在前推期被连续回放一次\n- 研究期夏普 1.35，滚动重拟合要写进 fit\n",
             "# 前推期\n\n研究期夏普 1.35，全部在研究期内。\n",
-            "| 阶段 | 说明 |\n| --- | --- |\n| 前推期 | 冻结后连续回放一次 |\n| 研究期 | 夏普 1.35 |\n",
+            "| 阶段 | 说明 |\n| --- | --- |\n| 前推期 | 定版后连续回放一次 |\n| 研究期 | 夏普 1.35 |\n",
             "\n".join(self.ORDINARY),
         ):
             self.assertEqual(strict_transferable_content_violation(text), "", text)

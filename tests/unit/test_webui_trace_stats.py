@@ -641,7 +641,7 @@ def test_project_subagent_card_carries_the_effective_turn_budget() -> None:
     meta = APP_JS.read_text(encoding="utf-8").split("function subagentMetaLine(", 1)[1].split(
         "\nfunction ", 1
     )[0]
-    assert "block.rounds_limit" in meta and "上限 ${roundsLimit} 轮" in meta
+    assert "block.rounds_limit" in meta and "上限 ${roundsLimit} 回合" in meta
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:
@@ -1606,9 +1606,9 @@ def test_project_subagent_trace_orders_rounds_tools_and_summary() -> None:
         "summary",
     ]
     first, group, second, marker, steer, compaction, cut_off, summary = projected["blocks"]
-    assert steer["label"] == "父代理指令" and steer["text"] == "第 3 轮前送达（18 字符）。"
+    assert steer["label"] == "父代理指令" and steer["text"] == "第 3 回合前送达（18 字符）。"
     assert compaction["label"] == "上下文压缩"
-    assert "第 3 轮：error，消息 40→40，估算 201000 tokens" in compaction["text"]
+    assert "第 3 回合：error，消息 40→40，估算 201000 tokens" in compaction["text"]
     assert first["round"] == 1 and first["text"] == "先看数据布局"
     assert second["round"] == 2
     assert [row["name"] for row in group["tools"]] == ["read_file", "grep"]
@@ -1880,7 +1880,7 @@ console.log(subagentLastToolLabel(block));
         r"qwen-3\.8-27b-fp8 · 推理 medium · 独立上下文 ⏱ 3:08 · \d\d-\d\d \d\d:\d\d:\d\d",
         lines[0],
     ), lines[0]
-    assert lines[1] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens"
+    assert lines[1] == "4 回合 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens"
     assert lines[2] == "最近工具 shell · 进行中"
 
 
@@ -1952,7 +1952,7 @@ console.log(String(runningSubagentDock(blocks.slice(0, 2), detail, "run_1")));
         r"独立上下文 ⏱ 3:08 · \d\d-\d\d \d\d:\d\d:\d\d",
         lines[2],
     ), lines[2]
-    assert lines[3] == "4 轮 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens · 最近工具 shell · 进行中"
+    assert lines[3] == "4 回合 · 模型 4 次 · 工具 6 次 · Σ 17 k tokens · 最近工具 shell · 进行中"
     # The pinned block is the readout and nothing else — no label beside it.
     assert lines[4] == "1"
     # The card's head row is a button carrying the same action.

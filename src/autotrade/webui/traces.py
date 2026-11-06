@@ -373,7 +373,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "收尾提示",
-                    f"第 {_as_int(event.get('round'))} 轮，上限 "
+                    f"第 {_as_int(event.get('round'))} 回合，上限 "
                     f"{_as_int(event.get('rounds_limit'))}：已要求子代理立即收尾。",
                 )
             )
@@ -384,9 +384,9 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "父代理指令",
-                    f"第 {_as_int(event.get('round'))} 轮前送达（{chars} 字符）。"
+                    f"第 {_as_int(event.get('round'))} 回合前送达（{chars} 字符）。"
                     if event.get("delivery") == "delivered"
-                    else f"已排队（{chars} 字符），子代理下一轮前读取。",
+                    else f"已排队（{chars} 字符），子代理下一回合前读取。",
                 )
             )
         elif kind == TraceEvent.SUBAGENT_CONTEXT_COMPACTION:
@@ -396,7 +396,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "上下文压缩",
-                    f"第 {_as_int(event.get('round'))} 轮："
+                    f"第 {_as_int(event.get('round'))} 回合："
                     f"{compaction.get('status') or 'unknown'}，消息 "
                     f"{_as_int(compaction.get('messages_before'))}→"
                     f"{_as_int(compaction.get('messages_after'))}，估算 "

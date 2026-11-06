@@ -2909,12 +2909,12 @@ textarea.directive.skill-editor {
  min-height: 20rem;
  font-size: 0.86rem;
 }
-/* 已挂载记忆 on the experiment page: creation-time context, one line high, so
+/* 已挂载技能库 on the experiment page: creation-time context, one line high, so
    it frames the live content below without pushing it down. */
 .panel.mounted-memory {
  padding: var(--space-3) var(--space-5);
 }
-/* 已挂载记忆: the snapshot's entries, grouped by source. */
+/* 已挂载技能库: the snapshot's entries, grouped by source. */
 .mounted-entries .file-list {
  margin-top: 0.4rem;
 }

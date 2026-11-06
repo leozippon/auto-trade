@@ -473,7 +473,7 @@ _FIELDS: list[dict[str, object]] = [
         "type": "int",
         "min": 1,
         "required": True,
-        "help": "研究几何的前这么多个研究年对会话可见，用于研究与验证；其余年份是验证年，由会话的每次 test 逐步揭示并形成滚动记录。十年包取 5、6 或 7。至少 1，且须留至少一个验证年；必填。",
+        "help": "研究几何的前这么多个研究年对会话可见，用于研究与验证；其余年份是验证年，由会话的每次 test 逐步揭示并形成验证记录。十年包取 5、6 或 7。至少 1，且须留至少一个验证年；必填。",
     },
     {
         "key": "test_step_months",
@@ -481,7 +481,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "测试步长（月）",
         "type": "int",
         "min": 1,
-        "help": "每次 test 把验证前沿推进的月数：默认 3（一个季度），允许 1；验证年总月数须能被它整除。",
+        "help": "每次 test 把测试终点推进的月数：默认 3（一个季度），允许 1；验证年总月数须能被它整除。",
     },
     {
         "key": "validates_per_step",
@@ -538,7 +538,7 @@ _FIELDS: list[dict[str, object]] = [
     {
         "key": "operating_memory",
         "group": "运行控制",
-        "label": "跨实验运行记忆",
+        "label": "跨实验技能库",
         "type": "choice",
         "choices": list(OPERATING_MEMORY_MODES),
         "choice_labels": {

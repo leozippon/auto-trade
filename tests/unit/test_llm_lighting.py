@@ -445,7 +445,7 @@ def test_responses_tools_send_optional_parameters_nullable(tmp_path: Path):
     returned = {
         "action": "launch",
         "agent": "Explore",
-        "description": "参考包与执行 ABI 合同",
+        "description": "参考工作区与执行 ABI 合同",
         "inherit_context": True,
         "max_turns": 12,
         "resume": None,

@@ -1764,7 +1764,7 @@ class AgentSessionRunner:
             "estimated_tokens": estimated,
             "token_threshold": threshold,
             "message": (
-                f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}。请在当前一轮结果消化完后"
+                f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}。请在当前这一回合的结果消化完后"
                 "调用 compact(summary=...)：把策略现状、已做的决定与被否定的方向（带读数与节点 id）、"
                 "未完成的线索与 trace 里的定位写进摘要；达到阈值仍未压缩时宿主用压缩模型代劳。"
             ),

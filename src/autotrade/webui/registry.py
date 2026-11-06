@@ -476,7 +476,7 @@ def _readout_line(readout: Mapping[str, object]) -> str:
     bound = _number(forward.get("lower_bound"))
     error = _mapping(forward.get("strategy_error"))
     return (
-        f"滚动记录 残差 IR {'—' if ratio is None else f'{ratio:.2f}'}"
+        f"验证记录 残差 IR {'—' if ratio is None else f'{ratio:.2f}'}"
         f" · p {'—' if p_value is None else f'{p_value:.2f}'}"
         f" · 换候选 {record.get('candidate_changes', '—')} 次"
         + (f" · 前推下界 {_percent(bound)}" if not error else f" · 前推 {error.get('slice')} 段策略异常")

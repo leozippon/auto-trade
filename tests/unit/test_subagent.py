@@ -2805,7 +2805,7 @@ def test_a_strict_call_with_null_optionals_launches_and_messages() -> None:
         **unused,
         "action": "launch",
         "agent": "Explore",
-        "description": "参考包与执行 ABI 合同",
+        "description": "参考工作区与执行 ABI 合同",
         "inherit_context": True,
         "max_turns": 12,
         "task": "读 output/README.md，返回执行合同要点。",
@@ -3208,9 +3208,9 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
 
     assert DEFAULT_SUBAGENT_MAX_ROUNDS == 48 and SUBAGENT_GRACE_ROUNDS == 2
     assert SubAgentConfig().max_rounds == 48
-    assert "48 轮" in AGENT_TOOL_DESCRIPTION and "24 轮" not in AGENT_TOOL_DESCRIPTION
+    assert "48 回合" in AGENT_TOOL_DESCRIPTION and "24 回合" not in AGENT_TOOL_DESCRIPTION
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]["description"]
-    assert "48 轮" in max_turns_field and "自动压缩" in max_turns_field
+    assert "48 回合" in max_turns_field and "自动压缩" in max_turns_field
     # Parents learn that a child has their context window, and that several
     # bounded parallel children still beat one long serial child.
     assert "自己模型的完整上下文窗口" in AGENT_TOOL_DESCRIPTION
@@ -3237,7 +3237,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     assert result["rounds"] == 4 and result["summary"] == "final"
     # Round 2 of 4 opens with the wrap-up notice; rounds 1 and 3 do not.
     second = busy.calls[1]["messages"]
-    assert second[-1].role == "user" and "还剩 3 轮模型调用（上限 4）" in str(second[-1].content)
+    assert second[-1].role == "user" and "还剩 3 回合模型调用（上限 4）" in str(second[-1].content)
     assert "还剩" not in str(busy.calls[0]["messages"][-1].content)
     assert "还剩" not in str(busy.calls[2]["messages"][-1].content)
     wrap = [payload for event, payload in events if event == "subagent_wrap_up"]
@@ -3883,7 +3883,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
     assert result["error"] == SUBAGENT_DEGRADED_SUMMARY_ERROR
     summary = str(result["summary"])
     assert summary.startswith(
-        SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source="本轮推理内容")
+        SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source="本回合推理内容")
     )
     assert "建议补数后重跑" in summary
     assert result["rounds"] == 1 and result["llm_calls"] == 2
