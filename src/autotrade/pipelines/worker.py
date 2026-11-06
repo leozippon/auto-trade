@@ -84,12 +84,12 @@ from .interactive import InteractiveExperimentRunner
 from .ledger import (
     FOLD_ERA_RECORD_TYPES,
     ExperimentLedger,
-    FrozenArtifactMutated,
+    RegisteredArtifactMutated,
     RunMarkers,
-    assert_no_frozen_artifact_mutation,
+    assert_no_registered_artifact_mutation,
     experiment_verdict,
-    frozen_record,
     paper_candidate,
+    registered_record,
     research_records,
 )
 from .local_backend import (
@@ -813,7 +813,7 @@ def run_local_interactive_worker(
     poll_seconds: float = 2.0,
 ) -> dict[str, object]:
     """Run the experiment from wherever its ledger ends: the research session, then
-    the forward replay once an artifact froze, then the terminal status."""
+    the forward replay once an artifact registered, then the terminal status."""
 
     ref_store = AgentRefStore(options.experiment_dir)
     hitl = options.experiment_dir / "hitl"
@@ -830,8 +830,8 @@ def run_local_interactive_worker(
             "records); this pipeline does not resume it"
         )
     try:
-        assert_no_frozen_artifact_mutation(records)
-    except FrozenArtifactMutated as exc:
+        assert_no_registered_artifact_mutation(records)
+    except RegisteredArtifactMutated as exc:
         write_json_atomic(
             hitl / "status.json",
             {
@@ -903,8 +903,8 @@ def run_local_interactive_worker(
     payload = _terminal_status(
         ledger, {"completed_at": utc_now_iso()}, developer_mode=developer_label
     )
-    # No book opens here: the operator opens a frozen strategy's Paper book
-    # from the console's ranking view (``paper.books.open_frozen_book``).
+    # No book opens here: the operator opens a registered strategy's Paper book
+    # from the console's ranking view (``paper.books.open_registered_book``).
     write_json_atomic(hitl / "status.json", payload)
     _release_finished_experiment(options, payload)
     return payload
@@ -956,7 +956,7 @@ def _release_finished_experiment(
 def release_finished_sandbox(options: InteractiveWorkerOptions) -> None:
     """Remove the session workspace once this experiment will not resume.
 
-    The ledger and frozen strategy stay in the experiment directory. An
+    The ledger and registered strategy stay in the experiment directory. An
     interrupted attempt keeps the tree: the next start continues in it.
     """
 
@@ -1010,7 +1010,7 @@ def _terminal_status(
     ``paper_candidate`` are re-read from the ledger on every publish."""
 
     records = ledger.read()
-    frozen = frozen_record(records)
+    frozen = registered_record(records)
     return {
         "schema_version": 1,
         "state": ExperimentState.COMPLETED,

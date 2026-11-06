@@ -13,8 +13,8 @@ from typing import Any, Literal, Protocol
 from autotrade.common.ids import EXPERIMENT_ID, is_experiment_id
 from autotrade.environment.artifacts import (
     ArtifactRevision,
-    FrozenArtifact,
     ModificationConstraints,
+    RegisteredArtifact,
 )
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
@@ -221,7 +221,7 @@ class AcceptanceRules:
 
     # The registration's limit over the candidate's span, and the Paper book's
     # kill limits.
-    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the freeze registration and of Paper.")
+    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the final registration and of Paper.")
     cost_stress_multiplier: float = _rule(
         2.0,
         "Forward reading: multiple of the profile's slippage its reported active excess is stressed at.",
@@ -434,14 +434,14 @@ class AcceptanceRules:
                 ),
                 "end": (
                     "the session ends when the test horizon reaches the end of the validation "
-                    "years; the candidate of the last test is the frozen strategy. There is "
+                    "years; the candidate of the last test is the registered strategy. There is "
                     "no action that ends the session earlier. If the time, call or spend "
                     "budget runs out after a test, the host completes the record with the "
                     "last tested candidate; before any test, with the last registrable "
                     "full-span candidate"
                 ),
                 "after": (
-                    "the frozen strategy and its seed replicates are then replayed by the "
+                    "the registered strategy and its seed replicates are then replayed by the "
                     "host over the Forward year and the Held-out months as one book; those "
                     "readings are recorded, gate nothing and reach no session"
                 ),
@@ -462,7 +462,7 @@ class AcceptanceRules:
                     "or one ending in _SEED or _SEED_BASE; e.g. SEED_BASE = 1000 in the "
                     "candidate, 2000 in a replicate), and whose bytes differ from every "
                     "other registered one. The replicates named at the last test are "
-                    "frozen beside the strategy and replayed forward with it. A candidate "
+                    "registered beside the strategy and replayed forward with it. A candidate "
                     "without fit needs none, and one declared deterministic in test (its "
                     "package uses no randomness) owes none"
                 ),
@@ -471,20 +471,20 @@ class AcceptanceRules:
             },
             "forward": {
                 "reported": (
-                    "one continuous replay of the frozen strategy over the twelve months "
+                    "one continuous replay of the registered strategy over the twelve months "
                     "after the research geometry's last year and then Held-out, graded on its "
                     "active series against a random baseline drawn from that replay: the "
                     f"{self.forward_confidence:.0%} block-bootstrap lower bound of active "
-                    "excess over the frozen book and its seed replicates, the active excess "
+                    "excess over the registered book and its seed replicates, the active excess "
                     f"with slippage multiplied by {self.cost_stress_multiplier}, drawdowns, "
                     "turnover and the residual statistic; recorded beside the rolling "
-                    "record, pooled across frozen strategies, deciding nothing"
+                    "record, pooled across registered strategies, deciding nothing"
                 ),
             },
         }
 
     def evaluate(self, summary: dict[str, object]) -> list[str]:
-        """The hard reasons a nomination is refused (``experiment.freeze_registration``):
+        """The hard reasons a nomination is refused (``experiment.check_registration``):
         the ``nomination`` conditions of ``verdict.CONDITIONS``, a non-finite
         metric and a research-period drawdown over ``max_drawdown``, read off
         the nominee's replay summary. Only a summary from a completed
@@ -527,7 +527,7 @@ RETIRED_SWITCHES = frozenset(
 )
 
 # The rules and the create parameter retired on 2026-11-03 with the
-# deflated-Sharpe freeze gate, its trial family and its lineage, and the
+# deflated-Sharpe registration check, its trial family and its lineage, and the
 # forward and Held-out thresholds, when the sealed gate became the verdict's one
 # condition. Every params.json written before then carries them; readers
 # accept exactly these keys beside ``RETIRED_SWITCHES`` and derive nothing
@@ -546,7 +546,7 @@ RETIRED_RULES = frozenset(
     }
 )
 
-# The keys retired with the freeze's ablation on 2026-11-05 and with the
+# The keys retired with the registration's ablation on 2026-11-05 and with the
 # rolling validation on 2026-11-06: the ablation rule, the sealed gate's rule,
 # the research session's replay-year budget and the hard-finalization window.
 # Every params.json and ledger record written before then carries some of
@@ -633,7 +633,7 @@ class RollingExperimentConfig:
     # one session. The host's forward replay is charged to none of them.
     # Host-side random-portfolio null controls the session may request through
     # ``run_null_control`` (``null_control.BASELINE_DRAWS`` replays each); the
-    # frozen node's block is reused at freeze. 0 leaves the tool out.
+    # registered node's block is reused at registration. 0 leaves the tool out.
     max_null_controls: int = DEFAULT_MAX_NULL_CONTROLS
     # Replays one ``validate`` call runs at once (see
     # ``DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY``).
@@ -798,12 +798,12 @@ class SnapshotProvider(Protocol):
 
 
 class ArtifactStore(Protocol):
-    """The artifact store the Pipeline freezes and reloads through
+    """The artifact store the Pipeline registers and reloads through
     (``environment.artifacts.FilesystemArtifactStore``)."""
 
     def revision(self, revision_id: str) -> ArtifactRevision: ...
 
-    def freeze_revision(
+    def register_revision(
         self,
         revision_id: str,
         *,
@@ -813,15 +813,15 @@ class ArtifactStore(Protocol):
         fold_id: str,
         run_id: str,
         step_id: str,
-    ) -> FrozenArtifact: ...
+    ) -> RegisteredArtifact: ...
 
-    def frozen(
+    def registered(
         self,
         artifact_id: str,
         *,
         expected_path: str | Path | None = None,
         experiment_id: str | None = None,
-    ) -> FrozenArtifact: ...
+    ) -> RegisteredArtifact: ...
 
 
 @dataclass(frozen=True)
@@ -1057,7 +1057,7 @@ class SessionResume:
 
 
 # How the research session ended. ``completed`` is a session whose last test
-# reached the end of the validation years (its candidate is the frozen
+# reached the end of the validation years (its candidate is the registered
 # strategy), ``deadline`` one whose budget (the wrap-up grace, the model-call
 # budget or the API spend cap) ran out first (the host completes the record),
 # and ``environment_blocked`` one the host ended because its replays kept
@@ -1196,9 +1196,9 @@ class ResearchSessionResult:
     # Keyword-only from here: independent optional fields, so a new one can
     # never land in an older field's positional slot.
     _: KW_ONLY
-    # The frozen candidate: the Step the last test took, the Steps it
+    # The registered candidate: the Step the last test took, the Steps it
     # registered as its seed replicates and whether it declared its package
-    # deterministic (``experiment.freeze_registration``). None when no test
+    # deterministic (``experiment.check_registration``). None when no test
     # ran (``deadline`` before the first test, or ``environment_blocked``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
@@ -1211,7 +1211,7 @@ class ResearchSessionResult:
     # Trusted host path to this run's collected workspace/skills audit copy.
     skills_source_ref: str = ""
     # Null-control blocks the session already computed, keyed by step id; the
-    # Pipeline reuses the frozen node's block instead of drawing it again.
+    # Pipeline reuses the registered node's block instead of drawing it again.
     null_controls: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     # The session's cumulative spend at its end, and which attempt ended it.
     budget_used: BudgetUsed = field(default_factory=BudgetUsed)
@@ -1248,7 +1248,7 @@ __all__ = [
     "EvaluationRequest",
     "EvaluationResult",
     "ExecutionMode",
-    "FrozenArtifact",
+    "RegisteredArtifact",
     "ReplaySpan",
     "ResearchDeveloper",
     "ResearchSessionRequest",

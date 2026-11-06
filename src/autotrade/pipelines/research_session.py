@@ -1210,7 +1210,7 @@ class LLMResearchDeveloper:
     ) -> tuple[str, str, str | None, tuple[str, ...], bool, str, str]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the frozen candidate (the last test's), its seed replicates, whether
+        the registered candidate (the last test's), its seed replicates, whether
         it was declared deterministic, the reason and the finish reason."""
 
         from autotrade.agent.compact import compaction_summary_message
@@ -1356,7 +1356,7 @@ class LLMResearchDeveloper:
             deterministic=deterministic,
             reason=reason,
             finish_reason=finish_reason,
-            # The nulls the session already drew, for the freeze to reuse.
+            # The nulls the session already drew, for the registration to reuse.
             null_controls=(
                 dict(null_control_tool.blocks)
                 if null_control_tool is not None

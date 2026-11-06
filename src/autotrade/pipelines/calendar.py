@@ -3,7 +3,7 @@
 An experiment researches on whole years that begin on the first of a month. The
 first ``research_years`` of them are the research years a session sees; the
 rest are the validation years, revealed to the session one step at a time
-through its tests (``step_windows``). The frozen artifact is then replayed
+through its tests (``step_windows``). The registered artifact is then replayed
 once, continuously, over the twelve months after research and the Held-out
 period after those, as one book:
 

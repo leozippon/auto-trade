@@ -1,7 +1,7 @@
 """A Paper book's frozen identity: which artifact it trades, in what environment.
 
 A book is created once from an experiment's Paper candidate and never changes
-afterwards. Creation copies the frozen artifact into the book and resolves the
+afterwards. Creation copies the registered artifact into the book and resolves the
 experiment's own parameters with the pipeline's resolver, so the book trades
 the snapshot configuration, Broker profile, schedule and strategy sandbox the
 research replays used, but for the decision clock: every Paper decision runs
@@ -13,7 +13,7 @@ book keeps the history its own days continue. A different capital, artifact or
 environment is a new book in a new state root.
 
 A book's track is recorded as its ``candidate_source``. A ``frozen`` book
-trades the frozen strategy of an experiment with its forward record (the experiment's Paper
+trades the registered strategy of an experiment with its forward record (the experiment's Paper
 candidate), opened by the operator from the console's ranking view; at most
 ``BOOK_CAP`` operator-opened books are open at once. Two tracks from the
 sealed-gate rules stay readable: a ``graduated`` book traded a graduate's
@@ -182,7 +182,7 @@ def create_book(
             ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
         )
         if candidate is None:
-            raise ValueError(f"{experiment.name} has no Paper candidate: no frozen strategy with a forward record")
+            raise ValueError(f"{experiment.name} has no Paper candidate: no registered strategy with a forward record")
         if artifact_id != candidate["artifact_id"]:
             raise ValueError(
                 f"{artifact_id} is not the Paper candidate of {experiment.name}; "
@@ -192,7 +192,7 @@ def create_book(
         require_book_place(root.parent, root.name)
     source = experiment / "artifacts" / "strategy" / "frozen" / artifact_id
     if not (source / "output" / "main.py").is_file():
-        raise FileNotFoundError(f"frozen artifact has no output/main.py: {source}")
+        raise FileNotFoundError(f"registered artifact has no output/main.py: {source}")
 
     params = read_json_object(experiment / "hitl" / "params.json", missing_ok=True)
     if not params:

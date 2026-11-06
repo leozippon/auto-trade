@@ -29,8 +29,8 @@ from autotrade.pipelines.ledger import (
     ExperimentLedger,
     experiment_verdict,
     forward_record,
-    frozen_record,
     paper_candidate,
+    registered_record,
     research_records,
 )
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
@@ -118,7 +118,7 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     records = ExperimentLedger(options.rolling.ledger_path).read()
     assert [row["record_type"] for row in records] == [*(["test_step"] * 4), "research_session", "forward"]
     *tests, research_row, replay = records
-    # The baseline tests nothing: its budget ends and the host freezes its
+    # The baseline tests nothing: its budget ends and the host registers its
     # last Validation and fills the whole record from one replay of it.
     assert (research_row["outcome"], research_row["finish_reason"]) == (
         "deadline", "deterministic_baseline_replay_no_agent_improvement"
@@ -134,7 +134,7 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     ]
     assert {row["candidate"]["step_id"] for row in tests} == {research_row["nominated_step_id"]}
     assert (research_row["test_horizon"], research_row["steps_tested"]) == ("20240630", 4)
-    frozen = frozen_record(records)["frozen"]
+    frozen = registered_record(records)["frozen"]
     assert Path(frozen["output_path"], "main.py").is_file()
 
     # Research and the host's completion never asked for a slot or view after
@@ -170,14 +170,14 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     readout = replay["readout"]
     assert "verdict" not in replay and "sealed" not in replay
     assert (readout["state"], readout["record"]["steps"], readout["record"]["candidate_changes"]) == (
-        "frozen_with_record", 4, 0
+        "registered_with_record", 4, 0
     )
     assert (readout["record"]["start"], readout["record"]["end"]) == ("20230701", "20240630")
     assert 0.0 <= readout["record"]["p_value"] <= 1.0
     assert readout["forward"]["lower_bound"] == forward_slice["lower_bound"]
 
     verdict = experiment_verdict(records)
-    assert verdict == {"status": "frozen_with_record", "reasons": []}
+    assert verdict == {"status": "registered_with_record", "reasons": []}
     assert paper_candidate(records)["artifact_id"] == frozen["artifact_id"]
     assert result["state"] == "completed"
     assert result["verdict"] == verdict
@@ -229,10 +229,10 @@ def test_a_crashed_research_attempt_is_run_again_by_the_next_worker_start(
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert calls == [1, 2]
     assert [row["session_key"] for row in research_records(ledger.read())] == ["research"]
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
 
 
-def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
+def test_a_worker_stopped_after_the_registration_resumes_with_the_forward_replay_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     repo, experiment = make_experiment(tmp_path, session_max_attempts=1)
@@ -249,7 +249,7 @@ def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
     with pytest.raises(OSError):
         run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
-    assert frozen_record(ledger.read()) is not None
+    assert registered_record(ledger.read()) is not None
     assert forward_record(ledger.read()) is None
     # A failed run may resume: its cache stays until the verdict.
     assert (experiment / "pit_views" / "provider.json").is_file()
@@ -257,12 +257,12 @@ def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
     research = experiment_module.RollingExperimentPipeline.run_research_session
 
     def no_more_research(self, **kwargs):
-        raise AssertionError("the research session re-ran after the freeze")
+        raise AssertionError("the research session re-ran after the registration")
 
     monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", no_more_research)
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert state["forward_calls"] == 2
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
     assert research is not no_more_research
     assert not (experiment / "pit_views").exists()
 
@@ -287,7 +287,7 @@ def test_an_experiment_stopped_before_its_verdict_keeps_its_pit_views(
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert result["status"] == "stop"
     rows = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
-    assert frozen_record(rows) is not None and experiment_verdict(rows) is None
+    assert registered_record(rows) is not None and experiment_verdict(rows) is None
     assert (experiment / "pit_views" / "provider.json").is_file()
 
 
@@ -302,7 +302,7 @@ def test_a_cache_that_cannot_be_released_is_recorded_and_the_verdict_stands(
     monkeypatch.setattr(worker, "release_pit_views", stuck)
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert result["state"] == "completed"
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
     assert result["pit_views_release_error"] == "OSError: pit_views still exists after removal"
     assert read_status(experiment / "hitl" / "status.json") == result
     assert (experiment / "pit_views" / "provider.json").is_file()
@@ -335,7 +335,7 @@ def test_a_failed_replay_attempt_is_recorded_and_retried_from_forward_start(
         ("forward", "TimeoutError: strategy inference exceeded 360s")
     ]
     assert forward_record(rows)["status"] == "ok"
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
 
 
 def test_a_forward_replay_that_keeps_failing_fails_the_experiment(
@@ -487,7 +487,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert research_row["frozen"]["source_step_id"] == research_row["nominated_step_id"] == tested
     assert research_row["budget_used"]["test_replays"] == 4
     assert replay["record_type"] == "forward"
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
     system_prompts = [
         message.content or ""
         for call in llm.calls
@@ -690,7 +690,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert record["budget_used"]["test_replays"] == 4
     # The calls of both attempts: the first spent five (two scripted, three failed).
     assert record["budget_used"]["llm_calls"] == 5 + len(second_llm.calls)
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
     # The resumed attempt opened with the interrupted one's summary, then the note.
     opening = second_llm.calls[0]["messages"]
     assert opening[0].role == "system"
@@ -795,7 +795,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     ]
     assert {row["candidate"]["step_id"] for row in completion} == {tested_node}
     assert (record["test_horizon"], record["steps_tested"]) == ("20240630", 4)
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
     # Both attempts opened on the research year's view; the resumed one read
     # the test horizon in its facts.
     research_requests = synthetic_provider.requests[
@@ -819,7 +819,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     """The first attempt loses its model before it validated or compacted
     anything. The resumed attempt has no summary to start from: it opens with
     the note alone (which says so) and continues the call budget, which its
-    one validate exhausts; the host then freezes that registrable Validation
+    one validate exhausts; the host then registers that registrable Validation
     and completes the validation record from one replay of it."""
 
     from autotrade.environment.llm import ProviderResponse
@@ -863,7 +863,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert {row["source"] for row in records[1:5]} == {"host_completion"}
     # Three failed calls of the first attempt, then this attempt's one.
     assert record["budget_used"]["llm_calls"] == 3 + len(second_llm.calls) == 4
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
     opening = second_llm.calls[0]["messages"]
     assert [message.role for message in opening] == ["system", "user"]
     note = opening[1].content
@@ -883,7 +883,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     prompt tokens and 1,000 completion tokens, $0.041. The first attempt
     spends one reply and loses its model; the resumed attempt continues from
     that spend, its next reply reaches the $0.08 cap, and the call after it is
-    never made: the session ends on the spend cap, the host freezes the one
+    never made: the session ends on the spend cap, the host registers the one
     registrable Validation and completes the record, and the ledger record
     carries both attempts' spend."""
 
@@ -948,7 +948,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     assert len(record["steps"]) == 2
     assert record["frozen"]["source_step_id"] == record["steps"][-1]["step_id"]
     assert record["budget_used"]["api_spend_usd"] == 0.082
-    assert result["verdict"]["status"] == "frozen_with_record"
+    assert result["verdict"]["status"] == "registered_with_record"
     events = [
         json.loads(line)
         for line in Path(record["agent_trace_ref"]).read_text(encoding="utf-8").splitlines()
@@ -1158,7 +1158,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert record["frozen"]["source_step_id"] == tested and record["experiment_end"] is None
     assert (record["test_horizon"], record["steps_tested"]) == ("20240630", 4)
     assert record["budget_used"]["test_replays"] == 1
-    assert replay["record_type"] == "forward" and result["verdict"]["status"] == "frozen_with_record"
+    assert replay["record_type"] == "forward" and result["verdict"]["status"] == "registered_with_record"
     # The session's view: the research year's end, the only decision view
     # the research stage prepared, whatever the tests reached.
     research_requests = synthetic_provider.requests[

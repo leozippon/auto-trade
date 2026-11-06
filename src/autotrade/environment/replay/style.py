@@ -567,7 +567,7 @@ def _style_exposures(
         # The largest single SW L1 industry's share of the book, averaged over
         # decision days. The random baseline draws its names without regard
         # to industry, so a single-sector book's sector move scores as
-        # selection; the only frozen artifact that cleared every gate was
+        # selection; the only registered artifact that cleared every gate was
         # 82.5 % banks. ``industries`` stays host-side, so this one scalar is
         # what the compact block carries to the Agent.
         "top_industry_weight": round(max(industry_sums.values()) / days, 3),
@@ -645,7 +645,7 @@ def replay_style_analysis(
             # The graded series: the strategy's daily return minus the
             # random-baseline composite of its own book, read as it is; the
             # sealed gate regresses it on the factor legs. Its drawdown is
-            # reported beside it and judged by neither the freeze registration
+            # reported beside it and judged by neither the final registration
             # (which holds the equity drawdown to max_drawdown) nor the
             # verdict: the Agent reads the series it is graded on.
             "active_excess": rounded("plain_excess"),

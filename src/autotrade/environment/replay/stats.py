@@ -485,7 +485,7 @@ def attach_sub_window_benchmark(
     A replay that carries a random baseline also gets the year's active excess
     (``style.window_plain_excess`` of its active series: the annualised mean
     of the book's daily return minus the random baseline's, no regression), the figure
-    the freeze gate counts positive years on, and the random-baseline composite's own
+    the registration check counts positive years on, and the random-baseline composite's own
     return over the year, compounded like the benchmark's: the year's return,
     its benchmark and its random baseline side by side are the holder's account, the
     index and zero skill on the same skeleton.
@@ -742,7 +742,7 @@ def compounded_path(returns: Iterable[float]) -> list[tuple[float, float]]:
 def compounded_drawdown(returns: Iterable[float]) -> float:
     """Peak-to-trough loss of the equity a daily return series compounds to from 1.
 
-    The one drawdown of a return series: the freeze gate and the verdicts grade
+    The one drawdown of a return series: the registration check and the verdicts grade
     the active series by it, and a formal result reports the same figure as
     ``benchmark.active_max_drawdown``.
     """

@@ -278,7 +278,7 @@ class StepTreeNodeTest(unittest.TestCase):
                 revision_id=revision,
                 metrics={},
             )
-            # A frozen artifact records its source node, so the branch point is
+            # A registered artifact records its source node, so the branch point is
             # a lookup by node identity, and an unknown node is refused.
             node = tree.get_node(node_id)
             self.assertEqual(

@@ -10,7 +10,7 @@ such a trace is refused rather than resumed from.
 The validations an attempt recorded survive in the experiment's step tree,
 whose nodes carry only opaque ids, plus a host-only sidecar per node holding
 the raw revision id, the span, the summary and the result reference the
-Pipeline needs to freeze it, and the control flag and batch id; which bytes a
+Pipeline needs to register it, and the control flag and batch id; which bytes a
 Validation replayed is its revision's, read from the experiment's revision store
 (:func:`revision_fingerprint`). The tests an attempt ran are the ledger's
 ``test_step`` records (``pipelines/validation_record.py``).
@@ -45,7 +45,7 @@ def revision_fingerprint(experiment_dir: str | Path, revision_id: str) -> str:
     """The artifact fingerprint of the bytes one recorded revision holds, as its
     manifest records it: the identity of the strategy a Validation replayed,
     which a seed replicate's registration compares
-    (``experiment.freeze_registration``).
+    (``experiment.check_registration``).
 
     A revision with no manifest is one the host cannot identify, so it raises
     instead of reading the Validation as a strategy of its own.

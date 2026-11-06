@@ -20,7 +20,7 @@ forward and Held-out slice. Nothing is judged: the slices read the
 series as it is -- its annualised mean is its
 plain excess, its annualised standard deviation its tracking error and their
 ratio its IR (``stats.plain_statistics``) -- and its residual reading, which
-:func:`pooled_reading` pools across frozen strategies. The holder's readings
+:func:`pooled_reading` pools across registered strategies. The holder's readings
 are not regressed either: :func:`holder_readings` compounds the book, the benchmark
 and the random baseline as stored. The inputs are the daily series a
 ``style_analysis.json`` sidecar stores, sliced by ``YYYYMMDD`` dates, so the
@@ -34,7 +34,7 @@ slice that cannot be measured (fewer than two days, a slice shorter than one
 bootstrap block) raises ``ValueError``: a reading is never recorded off a
 number that was not measured. The registration conditions
 (:data:`CONDITIONS`, :func:`judge`) are the one place something is judged:
-whether a Step may be tested and frozen at all.
+whether a Step may be tested and registered at all.
 """
 
 from __future__ import annotations
@@ -76,7 +76,7 @@ FORWARD_CONFIDENCE = 0.80
 BOOTSTRAP_BLOCK_DAYS = 20
 BOOTSTRAP_DRAWS = 2_000
 # Minimum detectable annualised plain excess at 80 % power and one-sided
-# 10 % (the frozen block's ``forward_mde``), in standard errors:
+# 10 % (the registered block's ``forward_mde``), in standard errors:
 # Φ⁻¹(0.90) + Φ⁻¹(0.80) = 2.12. The reported F2 is a one-sided 20 % bound, so
 # this is a deliberately conservative planning figure (about 1.26 × the 1.68
 # that bound would give).
@@ -261,14 +261,14 @@ def null_p_value(residual_information_ratio: float, years: float) -> float:
 
 
 def pooled_reading(readings: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """Residual readings of independent frozen strategies pooled into one.
+    """Residual readings of independent registered strategies pooled into one.
 
     Each reading's residual IR is, under the null, normal with standard
     deviation ``1 / √years``, so the pool weighs each by its years: the
     pooled IR is ``Σ years × IR / Σ years``, its z-score the pooled IR ×
     √(Σ years) and its one-sided p-value :func:`null_p_value`. A reading
     that states no IR (``unmeasured``) is left out and counted. One forward
-    year cannot certify a strategy; the pool of every frozen strategy's
+    year cannot certify a strategy; the pool of every registered strategy's
     forward year is what the forward stage reads.
     """
 
@@ -540,7 +540,7 @@ HOLDER_READINGS = tuple(holder_readings({}))
 def seed_replicate_slice(
     analysis: Mapping[str, object], *, start: str, end: str
 ) -> dict[str, object]:
-    """One seed replicate of the frozen book over one slice, unjudged.
+    """One seed replicate of the registered book over one slice, unjudged.
 
     A replicate is the book's strategy on another training seed, replayed
     exactly as the book is. Its slice carries what the book's own slice
@@ -559,7 +559,7 @@ def seed_replicate_slice(
 
 
 def seed_mean(blocks: Sequence[Mapping[str, object]]) -> dict[str, object]:
-    """The mean over the frozen book's slice and its replicates' slices.
+    """The mean over the registered book's slice and its replicates' slices.
 
     Each holder reading (``raw_readings``) and ``plain_excess`` averaged over
     the members, ``None`` where any member lacks it: a seed the replay could
@@ -614,8 +614,8 @@ def forward_lower_bound(
     excess of ``analyses`` together.
 
     The series is each sidecar's daily graded series over the slice, averaged
-    day by day over ``analyses``: the frozen book's sidecar, then one per seed
-    replicate its freeze registered, so a book frozen with none is judged on
+    day by day over ``analyses``: the registered book's sidecar, then one per seed
+    replicate the registration accepted, so a book registered with none is judged on
     its own series. Its annualised mean is the slice's ``plain_excess``, or
     with replicates ``seed_mean.plain_excess``, so the record carries the
     bound alone (:func:`bootstrap_lower_bound`, seeded by ``seed_key``). It is
@@ -630,13 +630,13 @@ def forward_lower_bound(
     graded = [_graded(analysis) for analysis in analyses]
     if any(series != graded[0][1] for _analysis, series in graded[1:]):
         raise ValueError(
-            f"a seed replicate's replay graded another series than the frozen book's over {start}..{end}"
+            f"a seed replicate's replay graded another series than the registered book's over {start}..{end}"
         )
     members = [dict(_strategy_returns(analysis, start, end)) for analysis, _series in graded]
     dates = list(members[0])
     if any(list(member) != dates for member in members[1:]):
         raise ValueError(
-            f"a seed replicate measured other days than the frozen book over {start}..{end}"
+            f"a seed replicate measured other days than the registered book over {start}..{end}"
         )
     daily = np.mean([list(member.values()) for member in members], axis=0)
     return bootstrap_lower_bound(daily, seed_key, confidence=confidence)
@@ -652,7 +652,7 @@ class ConditionStage(StrEnum):
 
 
 class ConditionReason(StrEnum):
-    """Every reason token a freeze registration records: one per condition of
+    """Every reason token a final registration records: one per condition of
     :data:`CONDITIONS`, and the two a registration records when it never read
     a nominee. The values are persisted in ledger records; a ledger judged
     under the sealed-gate rules also carries that gate's retired tokens."""
@@ -713,7 +713,7 @@ def _refused_replicate(measured: Mapping[str, Any]) -> bool:
 
 _CAP = "tracking_error_cap"
 
-# Every condition the registration judges (``experiment.freeze_registration``,
+# Every condition the registration judges (``experiment.check_registration``,
 # read at every test), by stage and, within a stage, in the order its
 # failures are recorded. The one list of the reason tokens a record can
 # carry: each stage reads its failures off it (:func:`judge`), and the
@@ -731,7 +731,7 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_MAX_DRAWDOWN, lambda m, t: _finite(m.get("max_drawdown"))),
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_SHARPE, lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
     Condition(ConditionStage.NOMINATION, ConditionReason.MAX_DRAWDOWN_ABOVE_LIMIT, lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
-    # How the nominee was registered (``experiment.freeze_registration``).
+    # How the nominee was registered (``experiment.check_registration``).
     Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NEEDS_FULL_SPAN_VALIDATION, lambda m, t: m.get("span") == FULL_SPAN),
     Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NOMINEE_IS_CONTROL, lambda m, t: m.get("control") is not True),
     # The tracking mandate over the nominee's span, when the rules set one.
@@ -790,7 +790,7 @@ def bootstrap_lower_bound(series: np.ndarray, seed_key: str, *, confidence: floa
     Moving-block bootstrap: ``BOOTSTRAP_DRAWS`` resamples of whole days in
     blocks of ``BOOTSTRAP_BLOCK_DAYS`` consecutive days, the mean read on
     each, the bound read as the percentile. The generator is seeded from a
-    SHA-256 of ``seed_key`` (the frozen artifact id), so one artifact always
+    SHA-256 of ``seed_key`` (the registered artifact id), so one artifact always
     gets the same bound, and two series over the same days resample the same
     days. The draws run in batches of ``_BOOTSTRAP_BATCH_BYTES``, which does
     not move the bound.
@@ -845,9 +845,9 @@ def forward_slice(
 
     The graded series is read as it is (:func:`graded_statistics`) and
     through the residual-IR significance test (``residual_reading``, what
-    :func:`pooled_reading` pools across frozen strategies). F2 is
+    :func:`pooled_reading` pools across registered strategies). F2 is
     ``lower_bound``, the ``forward_confidence`` lower bound of its plain
-    excess over the book and the seed replicates the freeze registered
+    excess over the book and the seed replicates the registration accepted
     together (:func:`forward_lower_bound`). ``seed_replicates`` are those
     replicates, replayed like the book, each as what names it and its
     replay's sidecar; with any, the slice also carries their own slices and

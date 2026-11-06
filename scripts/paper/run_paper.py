@@ -158,7 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="Create a Paper book from one experiment's Paper candidate.")
     init.add_argument("--experiment", required=True, help="Experiment id under experiments/.")
-    init.add_argument("--artifact", required=True, help="Frozen artifact id: the graduate, or its adjustment.")
+    init.add_argument("--artifact", required=True, help="Registered artifact id: the graduate, or its adjustment.")
     init.add_argument(
         "--initial-cash",
         type=float,

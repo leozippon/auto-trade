@@ -1,7 +1,7 @@
-"""Seed replicates: a strategy that trains a model is frozen with its seeds.
+"""Seed replicates: a strategy that trains a model is registered with its seeds.
 
 The experiment's own pipeline runs end to end -- the real artifact store, ledger,
-freeze registration, sealed reading and verdict -- over scripted Validations
+final registration, sealed reading and verdict -- over scripted Validations
 whose daily active return is set per training seed (``SEED_BASE`` in the
 candidate's ``main.py``) and per stage, so the readings each seed gets are
 known before the pipeline reads them.
@@ -32,7 +32,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment import (
     RollingExperimentPipeline,
-    freeze_registration,
+    check_registration,
 )
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
@@ -236,7 +236,7 @@ def _experiment(
     return pipeline, evaluator
 
 
-def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
+def test_a_model_nominee_registers_with_its_seed_replicate_and_both_replay_forward(tmp_path: Path):
     """The registered replicates are checked, frozen beside the nominee, and
     replayed exactly like it forward; the forward record carries their
     readings beside the nominee's, and a seed mean whose bound is below zero
@@ -298,7 +298,7 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     assert block["seed_mean"]["raw_readings"]["plain_selection"] > 0
     assert block["lower_bound"] < 0 < block["seed_mean"]["plain_excess"]
     assert forward["readout"]["forward"]["lower_bound"] == block["lower_bound"]
-    assert experiment_verdict(pipeline.ledger.read()) == {"status": "frozen_with_record", "reasons": []}
+    assert experiment_verdict(pipeline.ledger.read()) == {"status": "registered_with_record", "reasons": []}
 
 
 def test_seeds_that_agree_forward_are_read_together(tmp_path: Path):
@@ -318,14 +318,14 @@ def _refused(
     """The registration ``test`` reads for ``nominee`` with ``replicates``,
     off the experiment's recorded Validations. The session ends on its budget
     before any test, and a nominee that trains a model owes a replicate no
-    host can name, so the experiment itself freezes nothing."""
+    host can name, so the experiment itself registers nothing."""
 
     pipeline, _evaluator = _experiment(tmp_path, candidates, outcome="deadline")
     record = pipeline.run_research_session()
     assert record["frozen"] is None
     assert record["experiment_end"]["status"] == "no_deliverable"
     rows = record["steps"]
-    return freeze_registration(
+    return check_registration(
         rows[nominee],
         experiment_dir=pipeline.config.experiment_dir,
         acceptance=pipeline.config.acceptance,
@@ -380,7 +380,7 @@ def test_a_replicate_that_loses_does_not_hold_back_the_registration(tmp_path: Pa
 @pytest.mark.parametrize("replicates", [(), (1,)], ids=["alone", "with_a_worse_seed"])
 def test_a_deterministic_model_nominee_owes_no_replicate(tmp_path: Path, replicates):
     """A nominee that trains a model but declares its package deterministic
-    freezes without a replicate. The gate and the frozen block record the
+    registers without a replicate. The gate and the registered block record the
     declaration for the operator's review."""
 
     pipeline, _evaluator = _experiment(
@@ -409,7 +409,7 @@ def test_a_deterministic_nominee_is_held_to_its_replicates_validity(tmp_path: Pa
 
 
 def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):
-    """A nominee that trains no model needs no replicate: it freezes alone,
+    """A nominee that trains no model needs no replicate: it registers alone,
     its gate reads that it had nothing to replicate, and forward its own
     series is read, with its bound."""
 
@@ -451,7 +451,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
     assert raised["source_step_id"] == "research_step_1" and raised["result_ref"] is None
     assert raised["strategy_error"] is True and "generate_orders raised" in raised["error"]
     assert "seed_mean" not in forward["slices"]["forward"]
-    assert forward["readout"]["state"] == "frozen_with_record"
+    assert forward["readout"]["state"] == "registered_with_record"
     assert forward["readout"]["forward"]["lower_bound"] == forward["slices"]["forward"]["lower_bound"]
     assert paper_candidate(pipeline.ledger.read())["artifact_id"] == forward["artifact_id"]
     # The consistency check reads the same readings off the stored replays.
@@ -470,7 +470,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
             RuntimeError,
             r"seed replicate research_step_1 \(.*\) did not complete",
         ),
-        ({"bare_seed": 2000}, ValueError, "graded another series than the frozen book"),
+        ({"bare_seed": 2000}, ValueError, "graded another series than the registered book"),
     ],
     ids=["the_host_fails_its_replay", "its_replay_has_no_random_baseline"],
 )

@@ -252,7 +252,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     assert "验证期只通过 `test` 的结果了解" in stable
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
     # The retired action set and its wording are gone from every surface the
-    # session reads under this contract: no freeze or finishing action, no
+    # session reads under this contract: no registration or finishing action, no
     # "no excess" outcome, no pass/fail verdict, no replay-year budget.
     surfaces = {
         "system_prompt": prompt,

@@ -1,4 +1,4 @@
-"""Verdict statistics: freeze gate, forward verdict, Held-out rule
+"""Verdict statistics: registration check, forward verdict, Held-out rule
 (docs/PIPELINE_DESIGN.md)."""
 
 from __future__ import annotations
@@ -431,13 +431,13 @@ def test_an_unmeasurable_slice_raises_instead_of_judging():
 
 
 def _summary(*, slippage_bps=5.0, turnover=40.0):
-    """The two summary fields the freeze gate's cost stress reads."""
+    """The two summary fields the registration check's cost stress reads."""
 
     return {"turnover": turnover, "cost_sensitivity": {"slippage_bps": slippage_bps}}
 
 
 def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slice():
-    """The forward slice's F5 reading, the freeze gate's and a research row's
+    """The forward slice's F5 reading, the registration check's and a research row's
     report are the same function of the graded series, the turnover and the
     slippage."""
 
@@ -675,7 +675,7 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
     with pytest.raises(ValueError, match="another series"):
         _forward(book, seed_replicates=[replicate({**others[0][1], "panel_daily": []})])
     short = _selection_book(rng, 0.10, days=FORWARD_DAYS[:-1])
-    with pytest.raises(ValueError, match="measured other days than the frozen book"):
+    with pytest.raises(ValueError, match="measured other days than the registered book"):
         _forward(book, seed_replicates=[replicate(short)])
 
     span = FORWARD_DAYS + HELDOUT_DAYS

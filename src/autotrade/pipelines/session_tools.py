@@ -84,7 +84,7 @@ from .config import (
     research_span,
 )
 from .experiment import (
-    freeze_registration,
+    check_registration,
     null_control_seed,
     replay_and_analysis,
     research_step_record,
@@ -213,7 +213,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     object, same modification gate — only the window is short.
 
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
-    node is written and nothing here can be tested or frozen.
+    node is written and nothing here can be tested or registered.
 
     Like every other replay tool it pauses the session's thinking clock. A
     5-day rehearsal is dominated by the same full ``fit`` a Validation runs,
@@ -353,7 +353,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             # means the gate will not be what fails the official one.
             raise ToolError(f"smoke_backtest blocked by modification_check: {check.error}")
         # The rehearsal replays an immutable snapshot outside the Agent's mounts,
-        # not the live tree: it can neither be frozen nor leave anything behind
+        # not the live tree: it can neither be registered nor leave anything behind
         # in the directory (a trusted-mode run imports main.py and would drop
         # __pycache__ into it, which the next modification_check would
         # reject), and the Agent's own writes during the run cannot reach the
@@ -785,7 +785,7 @@ class SessionValidations:
         deterministic: bool = False,
     ) -> dict[str, object]:
         """Whether one Step of this session registers, as the Pipeline reads
-        it (``experiment.freeze_registration``), with ``seed_replicates`` the
+        it (``experiment.check_registration``), with ``seed_replicates`` the
         Steps it would register as its seed replicates and ``deterministic``
         its declaration that the package uses no randomness. Registration
         only, never a score. A node that is not a Step of this session does
@@ -798,7 +798,7 @@ class SessionValidations:
         named = (node_id, *seed_replicates)
         if any(step_id not in rows for step_id in named):
             return {"passed": False, "reasons": [ConditionReason.NOT_A_SESSION_STEP]}
-        return freeze_registration(
+        return check_registration(
             rows[node_id],
             experiment_dir=self.experiment_dir,
             acceptance=self.rules,
@@ -903,7 +903,7 @@ class SessionValidations:
     def commit_revision(
         self, source_output: Path, fingerprint: str, *, label: str
     ) -> ArtifactRevision:
-        """Freeze one approved working tree into an immutable revision.
+        """Register one approved working tree into an immutable revision.
 
         The revision is verified to be the bytes ``modification_check`` just
         approved, so an approval can never be transferred to a tree that was
@@ -1524,7 +1524,7 @@ class ValidateTool(SessionTimeBudgetAware):
                                     "placebo): it replays in the same call like "
                                     "any candidate, but test never takes it, so "
                                     "a real candidate registered as a control "
-                                    "can never be tested or frozen; false for a "
+                                    "can never be tested or registered; false for a "
                                     "candidate."
                                 ),
                             },
@@ -2185,7 +2185,7 @@ TEST_DESCRIPTION = (
     "ratio of the stitched daily active series on the market, size and value legs, the "
     "betas, the one-sided p_value and the threshold for the record's current length. These "
     "are readings, never a pass or a fail. When this call tests the last step, the "
-    "session ends and this candidate is the frozen strategy. The call starts only "
+    "session ends and this candidate is the registered strategy. The call starts only "
     "after every background sub-agent has finished."
 )
 
@@ -2196,7 +2196,7 @@ class TestTool(SessionTimeBudgetAware):
     The session's only way forward and the only way it ends: the test horizon
     advances one step per call, the step's entry is appended to the experiment's
     validation record in the ledger as the call completes, and the call that
-    tests the last step finishes the session with its candidate as the frozen
+    tests the last step finishes the session with its candidate as the registered
     strategy. Nothing here ranks or selects: the agent chooses the candidate,
     the host replays and records.
     """
@@ -2394,7 +2394,7 @@ class TestTool(SessionTimeBudgetAware):
             value.update(
                 outcome="completed",
                 pipeline_outcome=(
-                    f"The validation period is complete: {backtest.named([node_id])[0]} is the frozen "
+                    f"The validation period is complete: {backtest.named([node_id])[0]} is the registered "
                     "strategy; the host replays it over the Forward year and the Held-out months and "
                     "records the readings. The session ends here."
                 ),
@@ -2423,11 +2423,11 @@ NULL_CONTROL_NOTE = (
 class NullControlTool(SessionTimeBudgetAware):
     """Rank one complete Validation against random-name replays of its trades.
 
-    The same null control the Pipeline runs for the frozen node at freeze
+    The same null control the Pipeline runs for the registered node at registration
     (``experiment._null_control``), drawn with the same seed through the same
     backend over the node's own span, so the figure the Agent reads before
     selecting is the figure the ledger records: the block is cached per node
-    and handed to the Pipeline, which reuses it for the frozen node instead of
+    and handed to the Pipeline, which reuses it for the registered node instead of
     drawing again. Each call is host replay the session does not pay for, hence
     the per-session cap.
     """
@@ -2473,7 +2473,7 @@ class NullControlTool(SessionTimeBudgetAware):
             "buy on the same side of the experiment's benchmark_index membership (the "
             "float-cap decile when "
             "index_weight is not mounted): the same null control the Pipeline runs "
-            "for the frozen node at freeze. Returns the null_control block the ledger "
+            "for the registered node at registration. Returns the null_control block the ledger "
             "will carry (observed_excess, excess_percentile — near 0.5 means the names "
             "added nothing the timing and sizing did not — the null's mean and p05/p95, "
             "rejects_mean, dropped_trips_mean). Every formal validation already "
@@ -2483,8 +2483,8 @@ class NullControlTool(SessionTimeBudgetAware):
             "minute of host replay per research year (the session clock pauses like a "
             f"formal backtest) and is capped at {max_calls} per "
             "session (max_null_controls in the budgets fact; every result reports "
-            "null_controls_remaining); a node's block is cached, and the frozen node's "
-            "block is reused at freeze instead of being drawn again. Use it on "
+            "null_controls_remaining); a node's block is cached, and the registered node's "
+            "block is reused at registration instead of being drawn again. Use it on "
             "full-span finalists before a test, not on every candidate. "
             "Refused for a node that is not a complete Validation of this session, "
             "once the cap is spent, and while a background sub-agent that can write "
@@ -2523,8 +2523,8 @@ class NullControlTool(SessionTimeBudgetAware):
         if self.used >= self.max_calls:
             raise ToolError(
                 f"run_null_control budget exhausted: {self.max_calls} per session "
-                "(max_null_controls). The frozen node's null control still runs at "
-                "freeze.",
+                "(max_null_controls). The registered node's null control still runs at "
+                "registration.",
                 error_type="null_control_budget_exhausted",
             )
         runner = getattr(self.backtest.evaluator, "null_control", None)

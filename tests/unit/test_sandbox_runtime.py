@@ -743,13 +743,13 @@ def test_every_container_of_an_experiment_carries_its_label(tmp_path: Path):
     assert "--label" not in unlabelled
 
 
-def test_filesystem_artifact_store_freezes_explicit_revision_identity(tmp_path: Path):
+def test_filesystem_artifact_store_registers_explicit_revision_identity(tmp_path: Path):
     output = tmp_path / "output"
     output.mkdir()
     (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     store = FilesystemArtifactStore(tmp_path / "store")
     revision, _fingerprint = store.create_revision(output, revision_id="revision_001")
-    frozen = store.freeze_revision(
+    frozen = store.register_revision(
         revision.revision_id,
         artifact_id="artifact_001",
         experiment_id="experiment_001",
@@ -764,7 +764,7 @@ def test_filesystem_artifact_store_freezes_explicit_revision_identity(tmp_path: 
     assert metadata["artifact_id"] == "artifact_001"
 
 
-def test_frozen_artifacts_copy_to_writable_fold_workspace_without_mutating_source(tmp_path: Path):
+def test_registered_artifacts_copy_to_writable_fold_workspace_without_mutating_source(tmp_path: Path):
     source = tmp_path / "source"
     models = tmp_path / "source-models"
     source.mkdir()
@@ -775,7 +775,7 @@ def test_frozen_artifacts_copy_to_writable_fold_workspace_without_mutating_sourc
     (models / "weights.bin").write_bytes(b"parent-model")
     store = FilesystemArtifactStore(tmp_path / "store")
     revision, _fingerprint = store.create_revision(source, models_path=models, revision_id="revision_parent")
-    frozen = store.freeze_revision(
+    frozen = store.register_revision(
         revision.revision_id,
         artifact_id="artifact_parent",
         experiment_id="experiment_001",
@@ -840,7 +840,7 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
     (source_models / "weights.bin").write_bytes(b"parent")
     store = FilesystemArtifactStore(tmp_path / "store")
     revision, _fingerprint = store.create_revision(source, models_path=source_models, revision_id="revision_parent")
-    frozen = store.freeze_revision(
+    frozen = store.register_revision(
         revision.revision_id,
         artifact_id="artifact_parent",
         experiment_id="experiment_001",
@@ -1210,7 +1210,7 @@ def _working_artifact(root: Path, body: str = STRATEGY_BODY) -> tuple[Path, Path
 def test_an_evaluation_snapshot_is_immutable_and_keeps_the_bytes_it_fingerprinted(
     tmp_path: Path,
 ):
-    """A formal call replays a snapshot instead of freezing the session, so the
+    """A formal call replays a snapshot instead of registering the session, so the
     snapshot is what makes the result reproducible: it is addressed by the
     content it was taken from, the Agent's later writes cannot reach it, and it
     is mode-locked against the unprivileged container user, which owns the

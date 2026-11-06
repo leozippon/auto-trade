@@ -5,7 +5,7 @@ ledger, the hitl/ control-plane files and the result artifacts the ledger
 names. Unparseable experiments still appear in listings so they can be
 deleted; they carry an error note instead of metrics.
 
-An experiment researches in sessions, freezes at most once and is then replayed once
+An experiment researches in sessions, registers at most once and is then replayed once
 over forward and Held-out (docs/PIPELINE_DESIGN.md). The replay stays sealed by
 construction: the console serves a result only when a ledger record names it,
 and the forward record that names the replay is written together with its
@@ -78,9 +78,9 @@ from autotrade.pipelines.ledger import (
     VerdictStatus,
     experiment_verdict,
     forward_record,
-    frozen_record,
     paper_candidate,
     recorded_path,
+    registered_record,
     research_records,
 )
 from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
@@ -120,7 +120,7 @@ _PRIVATE_PARAMS = {
 }
 # Replay result modes a style sidecar may carry: research and forward replays.
 _RESULT_MODES = frozenset({RESEARCH_PHASE, FORWARD_PHASE})
-# Experiment stages, in order: researching, frozen with the forward replay pending or
+# Experiment stages, in order: researching, registered with the forward replay pending or
 # running (sealed), verdict recorded.
 STAGES = ("research", "forward", "verdict")
 # How an experiment ended, in the order the homepage lists them. The console says an
@@ -132,7 +132,7 @@ STAGES = ("research", "forward", "verdict")
 # An experiment whose session the host ended on the environment (``environment_blocked``)
 # is no research outcome and keeps that word of its own.
 ENDING_STATES = (
-    "frozen_with_record",
+    "registered_with_record",
     "graduated",
     "rejected",
     "no_edge",
@@ -161,7 +161,7 @@ _REGRESSED_FIGURES = frozenset(
 
 
 def _regressed(block: Mapping[str, object]) -> bool:
-    """Whether a slice, freeze gate or frozen block was read before every
+    """Whether a slice, registration check or registered block was read before every
     gate graded the active series as it is: such a block carries the
     regression intercept ``neutralized_excess``."""
 
@@ -359,7 +359,7 @@ def experiment_stage(records: Sequence[Mapping[str, object]]) -> str:
 
     if experiment_verdict(records) is not None:
         return "readout"
-    if frozen_record(records) is not None:
+    if registered_record(records) is not None:
         return "forward"
     return "research"
 
@@ -412,7 +412,7 @@ def experiment_ending(
     the operator withdrew as a refusal whose reason says so with the void's
     first sentence, and an experiment that never reached a replay by how its research
     session ended — the Agent's own ``no_edge``, an exhausted budget, or a
-    nomination the freeze gate refused — and one whose session the host ended
+    nomination the registration check refused — and one whose session the host ended
     on the environment by the host's own reason.
     """
 
@@ -426,8 +426,8 @@ def experiment_ending(
     verdict = experiment_verdict(records)
     if verdict is None:
         return None
-    if verdict["status"] == VerdictStatus.FROZEN_WITH_RECORD:
-        return {"state": "frozen_with_record", "reason": _readout_line(_mapping(_mapping(forward).get("readout")))}
+    if verdict["status"] == VerdictStatus.REGISTERED_WITH_RECORD:
+        return {"state": "registered_with_record", "reason": _readout_line(_mapping(_mapping(forward).get("readout")))}
     if verdict["status"] == VerdictStatus.VOIDED:
         void = _mapping(verdict.get("void"))
         reason = _reason_line(identity.public_text(str(void.get("reason") or "")))
@@ -467,7 +467,7 @@ def experiment_ending(
 
 
 def _readout_line(readout: Mapping[str, object]) -> str:
-    """One line of a frozen strategy's readout: the validation record's residual
+    """One line of a registered strategy's readout: the validation record's residual
     IR, its p-value and candidate changes, then the forward lower bound."""
 
     record = _mapping(readout.get("record"))
@@ -568,7 +568,7 @@ def _verdict_view(
 
 
 def _paper_candidate_view(records: list[dict[str, object]]) -> dict[str, object] | None:
-    """The frozen artifact the experiment's Paper book is opened from."""
+    """The registered artifact the experiment's Paper book is opened from."""
     candidate = paper_candidate(records)
     if candidate is None:
         return None
@@ -599,7 +599,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "created_at": _created_at(directory, params),
                 "skills": {"count": skills.count, "files": skills.files, "bytes": skills.bytes},
                 "stage": experiment_stage(records),
-                "frozen_session": _frozen_session(records),
+                "registered_session": _registered_session(records),
                 "record": _record_view(records, params),
                 "research_result": _research_result(records),
                 "research_outcome": next(
@@ -810,7 +810,7 @@ def _listing(
 def experiment_listing(
     root: Path, kept: str | None = None, *, archived: bool = False
 ) -> dict[str, object]:
-    """The home page's listing: every row in order, the ranking of the frozen
+    """The home page's listing: every row in order, the ranking of the registered
     strategies with a readout,
     ``archived``, how many experiments are archived, and ``kept``, the digest of the
     rows that change only when their files do (every experiment without a live
@@ -840,7 +840,7 @@ def experiment_listing(
 
 
 def ranking(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """The frozen strategies with a readout, ranked by their validation record's
+    """The registered strategies with a readout, ranked by their validation record's
     residual IR (a record the significance test could not read sorts last), each with
     its forward reading and whether a Paper book may be opened from it.
 
@@ -987,23 +987,23 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
     return rows
 
 
-def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
-    """The research session that froze the experiment's artifact, or ``None``.
+def _registered_session(records: Sequence[Mapping[str, object]]) -> str | None:
+    """The research session that registered the experiment's artifact, or ``None``.
 
-    The listing's one fact about the freeze: the experiment card draws the
-    freeze step from it instead of inferring a freeze from the stage and the
+    The listing's one fact about the registration: the experiment card draws the
+    register step from it instead of inferring a registration from the stage and the
     verdict.
     """
 
-    row = frozen_record(records)
+    row = registered_record(records)
     return str(row["session_key"]) if row is not None else None
 
 
 def _research_result(records: Sequence[Mapping[str, object]]) -> str | None:
     """The research-period result the console draws beside the forward replay:
-    the frozen strategy's own validation, once the experiment froze."""
+    the registered strategy's own validation, once the experiment registered."""
 
-    row = frozen_record(records)
+    row = registered_record(records)
     if row is None:
         return None
     return _result_name(_mapping(row.get("frozen")).get("research_result_ref"))
@@ -1142,12 +1142,12 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
     forward months, beside its own forward ``record``; ``None`` before that
     record, or for a record judged under the sealed gate.
 
-    ``validation_window``: every frozen strategy's validation record over the
+    ``validation_window``: every registered strategy's validation record over the
     same validation period -- its residual IR, years, one-sided null p-value
     (``verdict.null_p_value``), steps and candidate changes -- and how many
     there are. No reading is adjusted for the others and no threshold moves with
     their count; the count is what a p-value is weighed against.
-    ``forward_pool``: every frozen strategy's residual reading over the same
+    ``forward_pool``: every registered strategy's residual reading over the same
     forward months, pooled (``verdict.pooled_reading``): one forward year
     cannot certify a strategy. A strategy that raised in its forward replay
     has no reading, and is counted under ``raised`` rather than left out
@@ -1212,7 +1212,7 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
 def _seed_gate_view(
     identity: PublicIdentity, block: object, *, regressed: bool
 ) -> dict[str, object] | None:
-    """The freeze gate's seed-replicate reading (``experiment._seed_replicate_gate``)
+    """The registration check's seed-replicate reading (``experiment._seed_replicate_gate``)
     -- the replicates it read, each one's seed line and IR or the problem that
     refused it, their mean with the nominee and the threshold -- or ``None`` for a
     gate recorded before it read seed replicates. A gate that read the
@@ -1262,7 +1262,7 @@ def _research_session_view(
         "run_wall_seconds": _number(record.get("run_wall_seconds")),
         "trials_to_date": record.get("trials_to_date"),
         "nominated_step_id": record.get("nominated_step_id"),
-        "freeze_gate": (
+        "registration": (
             {
                 "passed": bool(gate.get("passed")),
                 "reasons": _recorded_reasons(gate.get("reasons")),
@@ -1299,7 +1299,7 @@ def _research_session_view(
             if gate
             else None
         ),
-        "froze": bool(record.get("frozen")),
+        "registered": bool(record.get("frozen")),
         "experiment_end": identity.public_record(record["experiment_end"])  # type: ignore[arg-type]
         if isinstance(record.get("experiment_end"), Mapping)
         else None,
@@ -1309,16 +1309,16 @@ def _research_session_view(
     }
 
 
-def _frozen_view(
+def _registered_view(
     directory: Path, identity: PublicIdentity, records: Sequence[Mapping[str, object]]
 ) -> dict[str, object] | None:
-    """The frozen artifact and the research statistics it was frozen on. A
-    block frozen before 2026-10-28 stored them on the retired regressed
+    """The registered artifact and the research statistics it was registered on. A
+    block registered before 2026-10-28 stored them on the retired regressed
     scale: its graded figures are read off the nominee's own sidecar, as for
     a step row (:func:`_graded_rows`), and its ``forward_mde``, built on the
     regressed tracking error, is not shown."""
 
-    row = frozen_record(records)
+    row = registered_record(records)
     if row is None:
         return None
     block = _mapping(row.get("frozen"))
@@ -1349,7 +1349,7 @@ def _frozen_view(
         "fit": bool(fit.get("fit")),
         "refit_period": fit.get("refit_period"),
         "blocks": [dict(item) for item in block.get("blocks") or () if isinstance(item, Mapping)],
-        # Frozen beside replicates: the gate's reading of them, for the seed
+        # Registered beside replicates: the gate's reading of them, for the seed
         # mean beside the nominee's IR and their threshold. Absent on one seed.
         "seed_replicates": (
             _seed_gate_view(
@@ -1409,7 +1409,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             "params": {},
             "control": None,
             "sessions": [],
-            "frozen": None,
+            "registered": None,
             "inbox": {"pending_count": 0, "queued_ids": []},
         }
     identity = PublicIdentity(directory)
@@ -1444,7 +1444,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
             session_key=str(current) if isinstance(current, str) and current else None,
         ),
         "sessions": sessions,
-        "frozen": _frozen_view(directory, identity, records),
+        "registered": _registered_view(directory, identity, records),
         "record": _record_detail(identity, records, params),
         "readouts": _record_readouts(root, forward_record(records)),
         # Two different failures, kept apart: a forward replay attempt that
@@ -1456,14 +1456,14 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     }
 
 
-def frozen_strategy_dir(root: Path, experiment_id: str) -> Path:
-    """The frozen artifact's ``output`` tree, validated inside the experiment."""
+def registered_strategy_dir(root: Path, experiment_id: str) -> Path:
+    """The registered artifact's ``output`` tree, validated inside the experiment."""
 
     directory = resolve_experiment_dir(root, experiment_id)
-    row = frozen_record(read_ledger_records(directory))
+    row = registered_record(read_ledger_records(directory))
     value = _mapping(_mapping(row).get("frozen")).get("output_path")
     if not isinstance(value, str) or not value:
-        raise KeyError("the experiment has no frozen artifact")
+        raise KeyError("the experiment has no registered artifact")
     return recorded_path(directory, value)
 
 

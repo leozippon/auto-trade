@@ -881,7 +881,7 @@ class WebuiBackendTest(unittest.TestCase):
         # The status poll also carries the research budget block (none yet).
         self.assertIn("budget_used", status)
 
-    def test_frozen_strategy_zip_contains_output_tree(self) -> None:
+    def test_registered_strategy_zip_contains_output_tree(self) -> None:
         self.assertEqual(
             self.client.get("/api/experiments/exp_hitl/frozen/strategy.zip").status_code,
             404,
@@ -1822,7 +1822,7 @@ class HitlControlActionTest(unittest.TestCase):
                 forward = self._post(action=action, session_key="forward", directive=directive)
                 self.assertEqual(forward.status_code, 400)
                 self.assertIn("research sessions only", forward.json()["detail"])
-        # Once an artifact froze, no Agent session remains to read a setting.
+        # Once an artifact registered, no Agent session remains to read a setting.
         frozen = build_experiment(self.experiments_root, "exp_frozen", "sealed")
         refused = self._post(
             "exp_frozen", action="set_directive", session_key="research", directive="x"

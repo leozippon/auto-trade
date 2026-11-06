@@ -1,6 +1,6 @@
 """The research console over a research experiment's ledger.
 
-An experiment runs one research session, freezes at most once and is then replayed once
+An experiment runs one research session, registers at most once and is then replayed once
 over forward and Held-out. The console must say where the experiment is from the
 ledger alone, keep every number of the replay sealed until the forward record
 (and with it the verdict) exists, rank the best experiment on that verdict
@@ -66,14 +66,14 @@ def _result_names(root: Path, experiment_id: str, mode: str) -> list[str]:
     )
 
 
-def test_a_researching_experiment_shows_its_plan_and_nothing_frozen(tmp_path: Path) -> None:
+def test_a_researching_experiment_shows_its_plan_and_nothing_registered(tmp_path: Path) -> None:
     build_experiment(tmp_path, "experiment", "research")
     detail = experiment_detail(tmp_path, "experiment")
     assert detail["stage"] == "research"
     assert detail["research_outcome"] is None
     assert detail["verdict"] is None
     assert detail["forward"] is None
-    assert detail["frozen"] is None
+    assert detail["registered"] is None
     assert detail["paper_candidate"] is None
     assert [session["key"] for session in detail["sessions"]] == ["research", "forward"]
     assert [session["kind"] for session in detail["sessions"]] == ["research", "forward"]
@@ -82,17 +82,17 @@ def test_a_researching_experiment_shows_its_plan_and_nothing_frozen(tmp_path: Pa
     assert detail["sessions"][1]["replay"] == REPLAY
 
 
-def test_a_frozen_experiment_lists_its_validations_and_the_registration_it_froze_under(
+def test_a_registered_experiment_lists_its_validations_and_the_registration_it_registered_under(
     tmp_path: Path,
 ) -> None:
     """A recorded session serves its outcome, attempts, budget, the registration
-    the freeze passed (which carries no score) and every Validation it ran;
+    the registration passed (which carries no score) and every Validation it ran;
     research results are development evidence, readable as they land."""
 
     build_experiment(tmp_path, "experiment", "sealed")
     record = experiment_detail(tmp_path, "experiment")["sessions"][0]["record"]
     assert record["outcome"] == "freeze"
-    assert record["froze"] is True
+    assert record["registered"] is True
     assert record["attempts"] == 1
     assert record["budget_used"]["test_replays"] == 8
     assert "best" not in record
@@ -101,12 +101,12 @@ def test_a_frozen_experiment_lists_its_validations_and_the_registration_it_froze
     assert client.get(f"/api/experiments/experiment/results/{name}/equity").status_code == 200
     # The record says whether its trace is on disk; this synthetic experiment has none.
     assert record["trace"] is False
-    assert record["freeze_gate"]["passed"] is True
-    assert record["freeze_gate"]["deflated_sharpe_probability"] is None
+    assert record["registration"]["passed"] is True
+    assert record["registration"]["deflated_sharpe_probability"] is None
     assert {row["span"] for row in record["validations"]} == {"full", "Y3"}
 
 
-def test_a_frozen_experiment_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None:
+def test_a_registered_experiment_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None:
     directory = build_experiment(tmp_path, "experiment", "sealed", alive=True)
     detail = experiment_detail(tmp_path, "experiment")
     assert detail["stage"] == "forward"
@@ -114,7 +114,7 @@ def test_a_frozen_experiment_is_sealed_until_its_verdict_exists(tmp_path: Path) 
     assert detail["verdict"] is None
     assert detail["forward"] is None
     assert detail["paper_candidate"] is None
-    frozen = detail["frozen"]
+    frozen = detail["registered"]
     assert frozen["session_key"] == "research"
     assert frozen["strategy_ref"].startswith("strategy_ref_")
     assert "strategy_research_abc" not in json.dumps(detail)
@@ -154,7 +154,7 @@ def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Pat
 
     directory = build_experiment(tmp_path, "experiment", "graduated")
     client = TestClient(create_app(tmp_path, tmp_path))
-    name = experiment_detail(tmp_path, "experiment")["frozen"]["result"]
+    name = experiment_detail(tmp_path, "experiment")["registered"]["result"]
     present = client.get(f"/api/experiments/experiment/results/{name}/style")
     assert present.status_code == 200
     assert present.json()["available"] is True
@@ -261,7 +261,7 @@ def test_a_research_that_froze_nothing_has_a_verdict_and_no_replay(tmp_path: Pat
         "status": "no_deliverable",
         "reasons": ["no_edge: nothing survived"],
     }
-    assert detail["frozen"] is None
+    assert detail["registered"] is None
     assert detail["forward"] is None
     assert detail["sessions"][0]["record"]["experiment_end"]["status"] == "no_deliverable"
     assert detail["record"] is None
@@ -273,7 +273,7 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
     reason; an experiment that can still run has none at all."""
 
     for experiment_id, stage in (
-        ("frozen_with_record", "frozen_with_record"),
+        ("registered_with_record", "registered_with_record"),
         ("graduated", "graduated"),
         ("rejected", "discarded"),
         ("no_edge", "no_deliverable"),
@@ -303,15 +303,15 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
         f" · 对面板 {raw['plain_selection'] * 100:+.2f}%"
         f" · 主动 IR {forward['information_ratio']:.2f}"
     )
-    # A frozen strategy is named by its readout: the record's significance test and
+    # A registered strategy is named by its readout: the record's significance test and
     # the forward lower bound.
-    readout = rows["frozen_with_record"]["forward"]["readout"]
-    assert endings["frozen_with_record"]["reason"] == (
+    readout = rows["registered_with_record"]["forward"]["readout"]
+    assert endings["registered_with_record"]["reason"] == (
         f"滚动记录 残差 IR {readout['record']['residual_information_ratio']:.2f}"
         f" · p {readout['record']['p_value']:.2f} · 换候选 0 次"
         f" · 前推下界 {readout['forward']['lower_bound'] * 100:+.2f}%"
     )
-    assert rows["frozen_with_record"]["paper_candidate"] is not None
+    assert rows["registered_with_record"]["paper_candidate"] is not None
     # The retired sealed gate's reason token leads a rejected experiment's reasons.
     assert endings["rejected"]["reason"].split(" · ")[0] == "sealed_residual_ir_below_bar"
     assert rows["graduated"]["paper_candidate"] is not None
@@ -434,7 +434,7 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     tmp_path: Path,
 ) -> None:
     """An experiment judged on its training seeds together shows each seed and their
-    mean on the experiment page -- the freeze's seed-mean IR beside the
+    mean on the experiment page -- the registration's seed-mean IR beside the
     nominee's and the threshold, and the forward and Held-out readings per seed --
     and the series F8 judges them on together -- from the fields the console
     serves; an experiment frozen on one seed serves none of them and draws nothing
@@ -444,8 +444,8 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     build_experiment(tmp_path, "single", "graduated")
     seeded = experiment_detail(tmp_path, "seeded")
     single = experiment_detail(tmp_path, "single")
-    gate = seeded["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
-    frozen = seeded["frozen"]["seed_replicates"]
+    gate = seeded["sessions"][0]["record"]["registration"]["seed_replicates"]
+    frozen = seeded["registered"]["seed_replicates"]
     forward = seeded["forward"]["slices"]["forward"]
     # Registration reads the replicates and judges no seed mean against a threshold.
     assert frozen == gate
@@ -460,8 +460,8 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     assert forward["seed_mean"]["members"] == 2
     assert isinstance(forward["lower_bound"], float)
     # One seed: no replicate served, so nothing drawn; F2 reads the book alone.
-    assert single["frozen"]["seed_replicates"] is None
-    alone = single["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
+    assert single["registered"]["seed_replicates"] is None
+    alone = single["sessions"][0]["record"]["registration"]["seed_replicates"]
     assert (alone["replicates"], alone["mean_information_ratio"]) == ([], None)
     assert "seed_mean" not in single["forward"]["slices"]["forward"]
     assert isinstance(single["forward"]["slices"]["forward"]["lower_bound"], float)
@@ -480,7 +480,7 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     assert reads("seedReadingsTable", "replicate") <= replicate
     assert reads("seedReadingsTable", "raw") <= set(forward["seed_mean"]["raw_readings"])
     assert reads("seedReadingsTable", "slice") <= set(forward)
-    for name in ("frozenPanel", "freezeGateChecklist"):
+    for name in ("registeredPanel", "registrationChecklist"):
         assert reads(name, "seeds") <= set(gate), name
         assert reads(name, "entry") <= set(gate["replicates"][0]), name
     assert "if (!shown.length) return null;" in body("seedReadingsTable")
@@ -527,11 +527,11 @@ def test_the_listing_rederives_a_row_only_when_its_files_change(
     assert third["ended"]["ending"] == {"state": "broken", "reason": "RuntimeError: boom"}
 
 
-def test_an_experiment_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
+def test_an_experiment_whose_nomination_the_registration_check_refused_reads_as_rejected(
     tmp_path: Path,
 ) -> None:
     """The gate refusing a nomination ends the experiment without a replay. It is not
-    the Agent's own "no candidate was worth freezing", so it reads as the
+    the Agent's own "no candidate was worth registering", so it reads as the
     refusal it is rather than as 未发现超额."""
 
     directory = build_experiment(tmp_path, "experiment", "research")
@@ -544,7 +544,7 @@ def test_an_experiment_whose_nomination_the_freeze_gate_refused_reads_as_rejecte
             freeze_gate={"passed": False, "reasons": ["freeze_deflated_sharpe_below_threshold"]},
             experiment_end={
                 "status": "no_deliverable",
-                "reason": "freeze refused by the gate (freeze_deflated_sharpe_below_threshold)",
+                "reason": "register refused by the gate (freeze_deflated_sharpe_below_threshold)",
             },
         )
     )
@@ -652,7 +652,7 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
 
 def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_path: Path) -> None:
     """The one curve per experiment starts from the research-period validation of the
-    candidate the tiles name — the frozen artifact's own once the experiment froze —
+    candidate the tiles name — the registered artifact's own once the experiment registered —
     and the replay's step lists the thresholds the verdict will hold it to
     before the record exists, from the experiment's parameters; the record's own
     block carries the same keys afterwards."""
@@ -662,8 +662,8 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     build_experiment(tmp_path, "judged", "graduated")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["research_result"] is None
-    frozen_ref = _records(tmp_path / "frozen")[0]["frozen"]["research_result_ref"]
-    assert rows["frozen"]["research_result"] == Path(str(frozen_ref)).parent.name
+    registered_ref = _records(tmp_path / "frozen")[0]["frozen"]["research_result_ref"]
+    assert rows["frozen"]["research_result"] == Path(str(registered_ref)).parent.name
 
     # The forward step states how the record will be read: the level, the
     # research and validation years, the step length and the threshold over the
@@ -759,7 +759,7 @@ def test_an_ended_experiment_is_read_off_its_ledger_and_never_judged_again(
     root = tmp_path / "experiments"
     for experiment_id, stage in (
         ("frozen", "sealed"),
-        ("recorded", "frozen_with_record"),
+        ("recorded", "registered_with_record"),
         ("graduate", "graduated"),
         ("refused", "discarded"),
         ("no_edge", "no_deliverable"),
@@ -881,7 +881,7 @@ def test_an_archived_experiment_is_listed_only_on_request_and_its_page_still_ope
     shelf = client.get("/api/experiments", params={"archived": 1}).json()
     assert [row["experiment_id"] for row in shelf["experiments"]] == ["shelved"]
     assert shelf["archived"] == 1
-    assert shelf["experiments"][0]["frozen_session"] == "research"
+    assert shelf["experiments"][0]["registered_session"] == "research"
     detail = client.get("/api/experiments/shelved").json()
     assert detail["archived"]["reason"] == "historical" and detail["stage"] == shelf["experiments"][0]["stage"]
     assert client.get("/api/experiments/ended").json()["archived"] is None
@@ -1031,15 +1031,15 @@ def _lower_bound(row: dict[str, object]) -> float:
     return row["forward"]["slices"]["forward"]["lower_bound"]  # type: ignore[index]
 
 
-def test_the_ranking_lists_frozen_strategies_by_their_records_residual_ir(tmp_path: Path) -> None:
-    """Only a frozen strategy with a readout is ranked, by its validation record's
+def test_the_ranking_lists_registered_strategies_by_their_records_residual_ir(tmp_path: Path) -> None:
+    """Only a registered strategy with a readout is ranked, by its validation record's
     residual IR; a record the significance test could not read sorts last; nothing
     judged under the sealed gate and nothing still researching is listed."""
 
     for experiment_id, stage in (
-        ("first", "frozen_with_record"),
-        ("second", "frozen_with_record"),
-        ("unread", "frozen_with_record"),
+        ("first", "registered_with_record"),
+        ("second", "registered_with_record"),
+        ("unread", "registered_with_record"),
         ("graduated", "graduated"),
         ("researching", "research"),
         ("no_edge", "no_deliverable"),
@@ -1143,8 +1143,8 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
         ("function evidenceTiles(", ("IR_TITLE",)),
         ("function evidenceTiles(", ("RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")),
         ("function researchSessionPanel(", ("IR_TITLE", "EXCESS_TITLE")),
-        ("function frozenPanel(", ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
-        ("function freezeGateChecklist(", ("DSR_TITLE",)),
+        ("function registeredPanel(", ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
+        ("function registrationChecklist(", ("DSR_TITLE",)),
     ):
         body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
         for gloss in glosses:
@@ -1192,17 +1192,17 @@ def test_the_three_replay_stage_views_judge_nothing() -> None:
     assert "chip" not in readout and "thresholdChips" not in script
 
 
-def test_the_listing_carries_the_freeze_and_the_record_so_far(tmp_path: Path) -> None:
-    """The experiment card draws its freeze step and its evidence from the
+def test_the_listing_carries_the_registration_and_the_record_so_far(tmp_path: Path) -> None:
+    """The experiment card draws its registration step and its evidence from the
     listing alone, and must read the same numbers the experiment page does."""
 
     build_experiment(tmp_path, "researching", "research")
     build_experiment(tmp_path, "frozen", "sealed")
-    build_experiment(tmp_path, "recorded", "frozen_with_record")
+    build_experiment(tmp_path, "recorded", "registered_with_record")
     build_experiment(tmp_path, "fresh", "created")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
-    assert rows["researching"]["frozen_session"] is None
-    assert rows["frozen"]["frozen_session"] == "research"
+    assert rows["researching"]["registered_session"] is None
+    assert rows["frozen"]["registered_session"] == "research"
     # An experiment without a recorded step has no record to read.
     assert rows["fresh"]["record"] is None and rows["researching"]["record"] is None
     record = rows["recorded"]["record"]
@@ -1243,7 +1243,7 @@ def test_the_create_form_refuses_a_geometry_the_worker_refuses(
     assert not (tmp_path / "experiments/geometry").exists()
 
 
-def test_the_step_tree_names_the_session_and_the_frozen_node(tmp_path: Path) -> None:
+def test_the_step_tree_names_the_session_and_the_registered_node(tmp_path: Path) -> None:
     directory = build_experiment(tmp_path, "experiment", "sealed")
     refs = AgentRefStore(directory)
     frozen = _records(directory)[0]["frozen"]
@@ -1264,7 +1264,7 @@ def test_the_step_tree_names_the_session_and_the_frozen_node(tmp_path: Path) -> 
     ledger.rewrite(records)
     [node] = step_tree_view(directory)["nodes"]
     assert node["session_key"] == "research"
-    assert node["frozen"] is True
+    assert node["registered"] is True
     assert node["session_ref"].startswith("session_ref_")
 
 
@@ -1385,7 +1385,7 @@ def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(
     """An experiment judged before 2026-10-28 stored its step rows, gate, frozen
     block and slices on the regressed scale and, when F8 refused it, a reason
     no condition carries now. No such figure reaches a current label: step
-    rows and the frozen block are read off their own sidecars, as the gate
+    rows and the registered block are read off their own sidecars, as the gate
     reads them; a slice keeps its plain readings, its F8 bound stands in F2's
     place and F8's refusal is F2's."""
 
@@ -1427,13 +1427,13 @@ def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(
         "reason": "forward_plain_excess_lower_bound_not_positive",
     }
     figures = ("plain_excess", "tracking_error", "information_ratio")
-    assert {key: detail["frozen"][key] for key in figures} == {key: current["frozen"][key] for key in figures}
-    assert detail["frozen"]["forward_mde"] is None
-    assert detail["frozen"]["seed_replicates"]["mean_information_ratio"] is None
+    assert {key: detail["registered"][key] for key in figures} == {key: current["registered"][key] for key in figures}
+    assert detail["registered"]["forward_mde"] is None
+    assert detail["registered"]["seed_replicates"]["mean_information_ratio"] is None
     record, recorded = detail["sessions"][0]["record"], current["sessions"][0]["record"]
     assert record["validations"] == recorded["validations"]
-    assert record["freeze_gate"]["information_ratio"] is None
-    assert record["freeze_gate"]["seed_replicates"]["mean_information_ratio"] is None
+    assert record["registration"]["information_ratio"] is None
+    assert record["registration"]["seed_replicates"]["mean_information_ratio"] is None
 
 
 def test_an_experiment_carrying_the_retired_switches_reads_as_one_without_them(tmp_path: Path) -> None:
@@ -1470,13 +1470,13 @@ def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_coun
     """The multiplicity readout: an experiment's readout view lists every frozen
     strategy's validation record over the same validation period, archived experiments
     included, with its one-sided null p-value and how many there are, and
-    pools the forward-year readings of every frozen strategy over the same
+    pools the forward-year readings of every registered strategy over the same
     forward months. Nothing is adjusted: each experiment keeps its own reading."""
 
     from autotrade.pipelines.verdict import pooled_reading
 
-    build_experiment(tmp_path, "good", "frozen_with_record")
-    build_experiment(tmp_path, "other", "frozen_with_record")
+    build_experiment(tmp_path, "good", "registered_with_record")
+    build_experiment(tmp_path, "other", "registered_with_record")
     build_experiment(tmp_path, "legacy", "graduated")
     build_experiment(tmp_path, "early", "research")
     readouts = experiment_detail(tmp_path, "good")["readouts"]
@@ -1502,7 +1502,7 @@ def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_coun
     }
     # A strategy that raised in its forward replay has no reading to pool and
     # is counted, never left out silently.
-    crashed = build_experiment(tmp_path, "crashed", "frozen_with_record")
+    crashed = build_experiment(tmp_path, "crashed", "registered_with_record")
     ledger = crashed / "ledgers/experiment_ledger.jsonl"
     lines = ledger.read_text(encoding="utf-8").splitlines()
     record = json.loads(lines[-1])

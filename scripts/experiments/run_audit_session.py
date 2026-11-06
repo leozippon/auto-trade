@@ -132,7 +132,7 @@ def main() -> int:
         "run_id": record["run_id"],
         "outcome": record["outcome"],
         "validations": len(record.get("steps") or ()),
-        "frozen_strategy_artifact_id": (
+        "registered_strategy_artifact_id": (
             frozen.get("artifact_id") if isinstance(frozen, dict) else None
         ),
         "experiment_dir": str(options.experiment_dir),

@@ -2,8 +2,8 @@
 
 The Agent-visible tree stores the session as an opaque ``session_ref_*`` token.
 The console is the researcher's trusted surface, so it resolves the token back
-to the plan key (``research``) for display, and marks the node the experiment froze
-from the ledger's frozen record.
+to the plan key (``research``) for display, and marks the node the experiment registered
+from the ledger's registered record.
 """
 
 from __future__ import annotations
@@ -12,7 +12,7 @@ from pathlib import Path
 
 from autotrade.environment.identity import LegacyExperimentError
 from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
-from autotrade.pipelines.ledger import frozen_record
+from autotrade.pipelines.ledger import registered_record
 
 from .public_identity import PublicIdentity
 from .registry import read_ledger_records
@@ -51,11 +51,11 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
         identity: PublicIdentity | None = PublicIdentity(experiment_dir)
     except LegacyExperimentError:
         identity = None
-    frozen_step = None
+    registered_step = None
     if identity is not None:
-        frozen = frozen_record(read_ledger_records(experiment_dir))
+        frozen = registered_record(read_ledger_records(experiment_dir))
         if frozen is not None:
-            frozen_step = frozen["frozen"].get("source_step_id")  # type: ignore[union-attr]
+            registered_step = frozen["frozen"].get("source_step_id")  # type: ignore[union-attr]
 
     nodes: list[dict[str, object]] = []
     for node in tree.nodes():
@@ -80,7 +80,7 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
                     sorted(raw_attachments) if isinstance(raw_attachments, dict) else []
                 ),
                 "has_snapshot": _has_snapshot(tree.root, node_id),
-                "frozen": node_id == frozen_step,
+                "registered": node_id == registered_step,
                 "is_current": node_id == tree.current_node_id,
             },
             identity=identity,

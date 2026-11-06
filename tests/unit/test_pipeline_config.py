@@ -143,7 +143,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
         self.assertEqual(rules.evaluate(ok), [])
         # A drawdown breach is a HARD reject, sign-independent: F4/H3 enforce
-        # the same limit forward, so freezing a book that already breached it
+        # the same limit forward, so registering a book that already breached it
         # spends a forward test on a candidate the verdict must reject.
         for drawdown in (0.30, -0.30):
             with self.subTest(drawdown=drawdown):
@@ -348,7 +348,7 @@ class AcceptanceRulesTest(unittest.TestCase):
     def test_one_series_is_stated_and_nothing_gates(self) -> None:
         """Every reading is of the active series: the facts name it once and
         no neutralized figure. The forward bound and the cost stress are
-        stated as readings, over the frozen book and its seed replicates, that
+        stated as readings, over the registered book and its seed replicates, that
         decide nothing; no fact names a gate."""
 
         facts = AcceptanceRules(**REQUIRED_RULES).agent_facts(validation_years=1)
@@ -362,7 +362,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         forward = facts["forward"]
         self.assertEqual(sorted(forward), ["reported"])
         self.assertIn("80% block-bootstrap lower bound", forward["reported"])
-        self.assertIn("frozen book and its seed replicates", forward["reported"])
+        self.assertIn("registered book and its seed replicates", forward["reported"])
         self.assertIn("deciding nothing", forward["reported"])
 
     def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
@@ -595,7 +595,7 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual((old["final_rate_beyond"], new["final_rate_beyond"]), (0.05, 0.0))
 
     def test_the_retired_ablation_rule_loads_inert_and_no_request_may_name_it(self) -> None:
-        """Every experiment created from 2026-11-03 until the freeze's ablation was
+        """Every experiment created from 2026-11-03 until the registration's ablation was
         retired states ``ablation_required`` in its params.json and in the
         acceptance rules its runs recorded. The worker loads it as the same
         experiment without the key, whatever its value; the rules rebuilt from a

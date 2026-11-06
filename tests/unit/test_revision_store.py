@@ -133,7 +133,7 @@ def test_recorded_revisions_survive_the_end_of_session_prune(tmp_path: Path):
         output, models_path=models, revision_id="revision_b", parent_revision_id="revision_a"
     )
     for artifact_id in ("artifact_keep", "artifact_drop"):
-        store.freeze_revision(
+        store.register_revision(
             "revision_b",
             artifact_id=artifact_id,
             experiment_id="experiment_001",
@@ -143,7 +143,7 @@ def test_recorded_revisions_survive_the_end_of_session_prune(tmp_path: Path):
             step_id="step_001",
         )
 
-    store.prune_superseded_frozen(keep_frozen_ids=("artifact_keep",))
+    store.prune_superseded_registered(keep_registered_ids=("artifact_keep",))
 
     assert _revision_ids(store) == ["revision_a", "revision_b"]
     assert store.revision("revision_a").output_path.joinpath("main.py").read_text(
@@ -152,19 +152,19 @@ def test_recorded_revisions_survive_the_end_of_session_prune(tmp_path: Path):
     assert store.revision("revision_b").output_path.joinpath("main.py").read_text(
         encoding="utf-8"
     ) == STRATEGY + "# tuned\n"
-    assert store.frozen("artifact_keep", experiment_id="experiment_001").artifact_id == "artifact_keep"
+    assert store.registered("artifact_keep", experiment_id="experiment_001").artifact_id == "artifact_keep"
     assert not (tmp_path / "store" / "frozen" / "artifact_drop").exists()
 
 
-def test_freezing_a_shared_revision_copies_the_bytes_it_locks(tmp_path: Path):
-    """The frozen artifact outlives the store's sharing: it must be its own
+def test_registering_a_shared_revision_copies_the_bytes_it_locks(tmp_path: Path):
+    """The registered artifact outlives the store's sharing: it must be its own
     copy, or unlocking it for a restore would unlock every revision that shares
     those bytes."""
 
     output, models = _working_artifact(tmp_path / "work")
     store = FilesystemArtifactStore(tmp_path / "store")
     revision, revision_fingerprint = store.create_revision(output, models_path=models, revision_id="revision_a")
-    frozen = store.freeze_revision(
+    frozen = store.register_revision(
         revision.revision_id,
         artifact_id="artifact_001",
         experiment_id="experiment_001",

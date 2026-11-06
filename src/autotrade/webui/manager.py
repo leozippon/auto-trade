@@ -857,7 +857,7 @@ class ExperimentManager:
         session_key: str | None,
     ) -> None:
         """A per-session setting targets a planned research session, and only
-        while research lasts: after the freeze no Agent session remains to read
+        while research lasts: after the registration no Agent session remains to read
         it."""
         if not session_key:
             raise ManagerError(f"{action} requires session_key")

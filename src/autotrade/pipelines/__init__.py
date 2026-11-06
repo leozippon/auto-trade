@@ -7,7 +7,7 @@ keeps ``import autotrade.pipelines`` from pulling the worker's provider
 gateways and sandbox-image machinery into every reader of a ledger.
 """
 
-from autotrade.environment.artifacts import ArtifactRevision, FrozenArtifact
+from autotrade.environment.artifacts import ArtifactRevision, RegisteredArtifact
 
 from .config import (
     EvaluationResult,
@@ -29,7 +29,7 @@ __all__ = [
     "DailyStrategyPipeline",
     "EvaluationResult",
     "ExperimentLedger",
-    "FrozenArtifact",
+    "RegisteredArtifact",
     "ResearchPITSnapshotProvider",
     "RollingExperimentConfig",
     "RollingExperimentPipeline",

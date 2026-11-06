@@ -2,7 +2,7 @@
 """The 2026-11-03 round: the first under the sealed gate, an open pack at a CNY 200k account, gpt-6-astra on the local console.
 
 It asks (logs/research_audit_20261102/round_20261103_design.md): under a gate
-the session cannot compute before it freezes, how does it research, spend and
+the session cannot compute before it registers, how does it research, spend and
 generalize, and what sealed residual reading does it reach?
 `open_200k_10y_astra_local_20261103a` and `…b`, identical but for their ids,
 mount `open_200k_sealed_20261103`, which asks for a strategy that generalizes
@@ -10,13 +10,13 @@ to the sealed years and frames no mechanism. The round's two memory experiments,
 which mounted the memory hypothesis pack, left this file with the memory
 machinery on 2026-11-05; their ids are retired (`_round.RETIRED_IDS`). Every
 experiment was created stating `ablation_required` (false), a rule retired with the
-freeze's ablation on 2026-11-05; the stamped value stays in their
+registration's ablation on 2026-11-05; the stamped value stays in their
 `params.json`, where readers accept and ignore it.
 
 The pack states the direction and the host's sealed-gate paragraph states the
 rule; this file copies neither. Research runs ten August-July years,
 2015-08-01..2025-07-31, of which `sealed_years` 5 are sealed: sessions see
-2015-08..2020-07, and the host replays the frozen node once over
+2015-08..2020-07, and the host replays the registered node once over
 2020-08..2025-07, the window the null calibration measured, at the program's
 one alpha, 0.05 (pinned by `_round.BASE_EXPECTED_DEFAULTS`). The forward
 twelve months end 2026-07-31 and Held-out reaches 2026-10-31, clipped to the

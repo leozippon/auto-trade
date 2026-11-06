@@ -18,7 +18,7 @@ import pytest
 
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines import worker
-from autotrade.pipelines.experiment import _keep_frozen_artifact_ids
+from autotrade.pipelines.experiment import _keep_registered_artifact_ids
 from autotrade.pipelines.ledger import RETIRED_ABLATION_KEY
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
@@ -33,13 +33,13 @@ LEDGER = Path("ledgers") / "experiment_ledger.jsonl"
 
 @pytest.fixture(scope="module")
 def experiment(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """An experiment created now, with a recorded freeze gate, validation record and readout."""
+    """An experiment created now, with a recorded registration check, validation record and readout."""
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(worker, "ResearchPITSnapshotProvider", SyntheticPITProvider)
         repo, experiment = make_experiment(tmp_path_factory.mktemp("judged"), _created_at=utc_now_iso())
         result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
-    assert result["verdict"] == {"status": "frozen_with_record", "reasons": []}
+    assert result["verdict"] == {"status": "registered_with_record", "reasons": []}
     return experiment
 
 
@@ -65,7 +65,7 @@ def _record(records: list[dict], kind: str) -> dict:
 
 def test_every_reading_of_a_current_experiment_reproduces(experiment: Path) -> None:
     judgements = check_experiment(experiment)
-    assert [item.reading for item in judgements] == ["freeze_registration", "forward", "readout"]
+    assert [item.reading for item in judgements] == ["check_registration", "forward", "readout"]
     assert [item.differences for item in judgements] == [[], [], []]
     assert current_experiments(experiment.parent) == [experiment]
     assert main(["--experiments", str(experiment.parent)]) == 0
@@ -86,7 +86,7 @@ def test_a_moved_experiment_is_judged_from_where_it_now_lives(experiment: Path, 
     assert _record(records, "forward")["result_ref"].startswith(str(gone))
     judgements = check_experiment(copy)
     assert [(item.reading, item.differences) for item in judgements] == [
-        ("freeze_registration", []),
+        ("check_registration", []),
         ("forward", []),
         ("readout", []),
     ]
@@ -115,7 +115,7 @@ def test_a_tampered_reading_is_named_and_fails_the_run(experiment: Path, tmp_pat
     copy = _copy(experiment, tmp_path / "experiments", tampered)
     judgements = {item.reading: item.differences for item in check_experiment(copy)}
     assert judgements == {
-        "freeze_registration": ["passed"],
+        "check_registration": ["passed"],
         "forward": ["forward.lower_bound"],
         "readout": ["record.residual_information_ratio"],
     }
@@ -135,7 +135,7 @@ def test_an_experiment_created_under_retired_rules_is_not_judged(experiment: Pat
 def test_an_experiment_frozen_with_the_retired_ablation_is_not_judged_and_keeps_it(experiment: Path, tmp_path: Path) -> None:
     """An experiment frozen while the ablation existed states the sealed gate's
     rules, not ``research_years``, so it is never judged again; the ablation
-    it froze beside its nominee (``ledger.RETIRED_ABLATION_KEY``) stays out
+    it registered beside its nominee (``ledger.RETIRED_ABLATION_KEY``) stays out
     of the prune."""
 
     ablation = {"artifact_id": "strategy_research_0ab1a7e0f00d", "source_step_id": "s", "line": "main.py:7: A -> B"}
@@ -147,4 +147,4 @@ def test_an_experiment_frozen_with_the_retired_ablation_is_not_judged_and_keeps_
     copy = _copy(experiment, root, recorded, research_years=None, sealed_years=1, ablation_required=True)
     assert current_experiments(root) == []
     records = [json.loads(line) for line in (copy / LEDGER).read_text(encoding="utf-8").splitlines()]
-    assert ablation["artifact_id"] in _keep_frozen_artifact_ids(records)
+    assert ablation["artifact_id"] in _keep_registered_artifact_ids(records)

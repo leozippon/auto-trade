@@ -183,7 +183,7 @@ def build_experiment_facts(
         "research_scope": _research_scope(
             manifest=manifest, snapshot_config=snapshot_config
         ),
-        # The experiment's state at session start: nothing frozen yet, and the
+        # The experiment's state at session start: nothing registered yet, and the
         # Validations earlier attempts recorded. ``False`` and zero counts are
         # facts, not absences.
         "experiment": dict(_as_mapping(manifest.get("experiment"))) or None,
@@ -248,7 +248,7 @@ def _research_scope(
         "(research_geometry.validation_period) one test step at a time, seeing it "
         "only through the test results; it ends when the test horizon reaches its end, "
         "and the candidate of the last test is the "
-        "frozen strategy. No other session follows; the host then replays the frozen "
+        "registered strategy. No other session follows; the host then replays the registered "
         "strategy over the periods after the geometry's last year and records the "
         "readings."
         if period
@@ -431,7 +431,7 @@ def _artifact_contract_facts(
     start = dict(_as_mapping(manifest.get("start")))
     start["model_artifacts_empty"] = model_artifacts_empty
     # The registration every test enforces, the validation protocol and the
-    # readings the frozen artifact is reported on later, all derived from the
+    # readings the registered artifact is reported on later, all derived from the
     # run's own rules and the count of validation years the manifest's
     # geometry leaves after the research years. No date after the geometry's
     # last year.

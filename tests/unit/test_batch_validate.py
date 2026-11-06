@@ -9,7 +9,7 @@ immutable revision, same replay-year budget, same selection path through
 These tests cover the refusals that must happen before anything runs, the
 spans a batch may replay on a multi-year research period, the per-candidate
 isolation of a failure, the lineage the tree ends up with, and that a batch
-node can actually be frozen through the gate.
+node can actually be registered through the gate.
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ def _strategy(marker: str) -> str:
     return f"def generate_orders(context):\n    _ = {marker}\n    return []\n"
 
 
-# What a replay's summary says of its costs: the slippage the freeze gate's
+# What a replay's summary says of its costs: the slippage the registration check's
 # cost stress charges again on the replay's turnover.
 COSTED = {"cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}}
 
@@ -287,7 +287,7 @@ class _Evaluator:
 
 
 def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
-    """The daily series the freeze gate reads: 60 days, fifteen in each of the
+    """The daily series the registration check reads: 60 days, fifteen in each of the
     four research years the gate counts, of a return that is ``alpha`` plus
     benchmark and size exposure plus noise, and the random-baseline composite
     every formal replay carries, which the gate subtracts."""
@@ -339,7 +339,7 @@ class _Session:
         max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     ) -> None:
         # Where the worker roots a session, as every session has one: the
-        # freeze gate reads a nominee's strategy from its revision store.
+        # registration check reads a nominee's strategy from its revision store.
         experiment_dir = experiment_dir or root / "experiment"
         self.root = root
         self.trace_events = trace
@@ -531,7 +531,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
 
     def test_a_candidate_with_the_start_logic_is_a_legal_candidate(self) -> None:
         """A session may re-validate its start: on another span, or on the full
-        period to count it toward the freeze gate. Nothing refuses it."""
+        period to count it toward the registration check. Nothing refuses it."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("start", "# the start as it stands\n" + PARENT_SOURCE)
@@ -1354,7 +1354,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 <= set(row["stats"]["sub_windows"][0])
             )
 
-    def test_the_cost_stress_is_read_on_every_row_and_never_refuses_a_freeze(self) -> None:
+    def test_the_cost_stress_is_read_on_every_row_and_never_refuses_a_registration(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), acceptance_rules={"max_drawdown": 0.25})
             # The same edge, traded a hundred thousand times as much: the
@@ -1365,7 +1365,7 @@ class BatchValidateRunTest(unittest.TestCase):
             above = session.validate_one("above", _strategy("2"))
             self.assertLess(below["residual_reading"]["active_excess_at_cost_stress"], 0)
             self.assertGreater(above["residual_reading"]["active_excess_at_cost_stress"], 0)
-            # A reading, not a condition: the node registers and freezes.
+            # A reading, not a condition: the node registers and is registered.
             finished = session.finish.invoke({"outcome": "freeze", "node_id": below["node_id"]})
             self.assertTrue(finished.finish)
 
@@ -1824,7 +1824,7 @@ def _canned_null(calls: list[dict[str, object]]):
 
 
 class NullControlToolTest(unittest.TestCase):
-    """The session's null control is the freeze's null control: the same
+    """The session's null control is the registration's null control: the same
     backend call with the same seed, cached per node and capped per session."""
 
     def test_a_validated_node_is_ranked_once_and_the_block_is_reused(self) -> None:
@@ -1840,7 +1840,7 @@ class NullControlToolTest(unittest.TestCase):
             # The Agent-visible block is the same whitelist the run facts use.
             self.assertNotIn("seed", first["null_control"])
             self.assertEqual((first["null_controls_used"], first["null_controls_remaining"]), (1, 1))
-            # Drawn exactly as the freeze would draw it: whole period, frozen role.
+            # Drawn exactly as the registration would draw it: whole period, frozen role.
             self.assertIsNone(calls[0]["step"])
             self.assertEqual(calls[0]["seed"], null_control_seed("research", "frozen"))
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20210701", "20250630"))
@@ -1889,7 +1889,7 @@ class NullControlToolTest(unittest.TestCase):
                 tool.invoke({"node_id": node})
             self.assertEqual(failed.exception.error_type, "null_control_failed")
             self.assertEqual(failed.exception.details["null_controls_remaining"], 0)
-            # A failure is not a result the freeze may reuse.
+            # A failure is not a result the registration may reuse.
             self.assertNotIn(node, tool.blocks)
 
     def test_a_null_control_that_drew_nothing_costs_no_call(self) -> None:
@@ -1951,7 +1951,7 @@ class NullControlToolTest(unittest.TestCase):
 class RecordedValidationDurabilityTest(unittest.TestCase):
     """Every recorded Validation is made durable at once: the experiment's
     tree carries the node, a host-only sidecar carries what the Pipeline needs
-    to freeze it, so an attempt that dies keeps them for its resumed attempt."""
+    to register it, so an attempt that dies keeps them for its resumed attempt."""
 
     def test_a_recorded_validation_is_published_with_its_host_sidecar(self) -> None:
 

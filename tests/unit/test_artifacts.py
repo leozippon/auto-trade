@@ -18,7 +18,7 @@ from autotrade.environment.artifacts import (
     modification_delta,
     new_revision_id,
     readonly_baseline,
-    restore_frozen_artifact_trees,
+    restore_registered_artifact_trees,
 )
 
 from .fixtures_sandbox import TEMPLATE_DIR
@@ -333,8 +333,8 @@ def generate_orders(context):
                 load_model_artifacts(root)
 
 
-class FrozenRestoreReplaceTest(unittest.TestCase):
-    def test_restore_frozen_artifact_trees_replaces_and_relocks(self):
+class RegisteredRestoreReplaceTest(unittest.TestCase):
+    def test_restore_registered_artifact_trees_replaces_and_relocks(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
             snapshot_output = write_artifact(tmp_path / "snap_out")
@@ -349,7 +349,7 @@ class FrozenRestoreReplaceTest(unittest.TestCase):
             live_models.mkdir()
             (live_models / "old.bin").write_bytes(b"old")
 
-            restore_frozen_artifact_trees(
+            restore_registered_artifact_trees(
                 output_path=live_output,
                 snapshot_output=snapshot_output,
                 models_path=live_models,

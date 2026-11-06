@@ -243,7 +243,7 @@ RUN chmod -R a+rX /opt/autotrade
 RUN useradd --create-home --uid 61000 agent
 
 # Fixed mount points (populated by docker run -v / --mount). /strategy receives
-# the read-only bind of the frozen strategy package (the directory holding
+# the read-only bind of the registered strategy package (the directory holding
 # main.py and its sibling modules); the Agent session binds its decision view
 # at /mnt/snapshot.
 RUN mkdir -p /mnt/snapshot \

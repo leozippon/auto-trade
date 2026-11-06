@@ -241,9 +241,9 @@ def test_step_record(
     }
 
 
-# The state a frozen strategy's readout gives its experiment: a frozen strategy
+# The state a registered strategy's readout gives its experiment: a registered strategy
 # with its validation record and its forward reading (``ledger.VerdictStatus``).
-FROZEN_WITH_RECORD = "frozen_with_record"
+REGISTERED_WITH_RECORD = "registered_with_record"
 
 
 def readout(
@@ -259,7 +259,7 @@ def readout(
     ``record`` is the validation record read as one series
     (:func:`record_significance`: residual IR, one-sided p-value, threshold, years)
     with its span and how often the candidate changed
-    (:func:`candidate_changes`). ``forward`` is the frozen strategy's reading
+    (:func:`candidate_changes`). ``forward`` is the registered strategy's reading
     over the Forward year, the slice ``verdict.forward_slice`` read: its
     lower bound and residual reading; a book that raised in its own code
     during the replay has ``strategy_error`` there instead (the slice it
@@ -269,7 +269,7 @@ def readout(
 
     tests = test_step_records(records)
     block: dict[str, object] = {
-        "state": FROZEN_WITH_RECORD,
+        "state": REGISTERED_WITH_RECORD,
         "record": {
             **record_significance([row["entry"] for row in tests], alpha=alpha),  # type: ignore[misc]
             "start": str(tests[0]["window"]["start"]) if tests else None,  # type: ignore[index]
@@ -322,7 +322,7 @@ def candidate_changes(records: Sequence[Mapping[str, object]]) -> int:
 
 __all__ = [
     "DAILY_COLUMNS",
-    "FROZEN_WITH_RECORD",
+    "REGISTERED_WITH_RECORD",
     "SOURCE_HOST_COMPLETION",
     "SOURCE_TEST",
     "ValidationSteps",

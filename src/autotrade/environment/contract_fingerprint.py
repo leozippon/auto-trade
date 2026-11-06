@@ -16,7 +16,7 @@ two contracts, and they drift apart for different reasons:
   is the text that states those same rules to the Agent. It matters only where
   an Agent reads it, so it is checked once, where a research session mounts its
   copy as ``output/README.md``, against that copy; a strategy container never
-  reads it, and a Paper book replays a strategy frozen long before.
+  reads it, and a Paper book replays a strategy registered long before.
 
 Splitting them is what lets a README-only rebuild of the base image reach new
 experiments only: an experiment already running keeps the README it was seeded with and the

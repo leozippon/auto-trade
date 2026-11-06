@@ -33,7 +33,7 @@ const OUTCOME_LABELS = {
 // 裁决 view. A graduation withdrawn afterwards is a failure, `rejected`, and
 // only its reason says it had graduated.
 const ENDING_LABELS = {
-  frozen_with_record: "已冻结，有记录",
+  registered_with_record: "已定版，有记录",
   graduated: "验收通过",
   rejected: "未通过",
   no_edge: "未发现超额",
@@ -61,7 +61,7 @@ const VERDICT_REASON_LABELS = {
   kill_upper_bound_below_zero: "主动超额的终止上界低于 0",
   confirm_lower_bound_above_zero: "主动超额的确认下界高于 0",
 };
-// The conditions of the freeze gate and of the forward and Held-out verdict
+// The conditions of the registration check and of the forward and Held-out verdict
 // (pipelines/verdict.py), keyed by the token the pipeline records when one
 // fails, worded as the criterion so a checklist reads them with a pass or fail
 // mark. A token not listed renders as written. A criterion whose name states a
@@ -103,7 +103,7 @@ const SERIES_LABELS = { active: "主动（策略 − 随机对照组合）", abs
 const ACTIVE_TITLE = "策略日收益减去随机对照组合合成收益后的序列；对照组合由宿主按该策略自己的成交骨架随机换名回放得到";
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
-// A gloss states no threshold: the freeze gate's own limits are carried by the
+// A gloss states no threshold: the registration check's own limits are carried by the
 // gate record, and the checklist draws both the measured value and the limit
 // from there.
 const DSR_TITLE = "去膨胀夏普概率（DSR）：按本实验试验数折减后，研究期 IR 仍高于 SR* 的概率";
@@ -118,7 +118,7 @@ const P_VALUE_TITLE = "零技能原假设下读到至少这么高的残差 IR �
 // The holder's money, which no active figure is: the account's own return
 // after every cost minus the benchmark index's price return over the same days.
 const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
-// The cost-stress reading the freeze gate and F5 judge (verdict.py
+// The cost-stress reading the registration check and F5 judge (verdict.py
 // `excess_at_cost_stress`), at the experiment's multiplier.
 const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；研究期每次验证与前推裁决读的是同一个数";
 const BASELINE_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
@@ -308,7 +308,7 @@ function refreshCharts() {
   new ResizeObserver(sync).observe(bar);
 })();
 
-/* Pipeline step keys (research, frozen, forward, heldout, verdict) travel in
+/* Pipeline step keys (research, registered, forward, heldout, readout) travel in
    the hash as they are. */
 function stepKeyToUrl(key) {
   return encodeURIComponent(String(key));
@@ -323,7 +323,7 @@ function stepKeyFromUrl(segment) {
    map is the console's vocabulary only. */
 const STEP_LABELS = {
   research: "研究",
-  frozen: "定版",
+  registered: "定版",
   forward: "前推回测",
   heldout: "Held-out",
   readout: "读出",
@@ -1712,7 +1712,7 @@ function selectStep(key) {
 
 /* ---------------- the experiment's pipeline, as one list of steps ----------------
 
-   The research session, the freeze, the one continuous forward/Held-out
+   The research session, the registration, the one continuous forward/Held-out
    replay and the verdict, in the order the pipeline runs them. The listing
    summary and the experiment detail both carry the fields read here, so the
    experiment card's miniature stepper and the experiment page's process list
@@ -1723,23 +1723,23 @@ const STEP_STATUS_LABELS = {
   running: "运行中",
   paused: "已暂停",
   skipped: "未运行",
-  // The freeze has not been decided yet; the replay waits on that decision.
+  // The registration has not been decided yet; the replay waits on that decision.
   awaiting_nomination: "待定",
-  awaiting_freeze: "待定版",
-  frozen: "已定版",
-  not_frozen: "未定版",
+  awaiting_registration: "待定版",
+  registered: "已定版",
+  not_registered: "未定版",
   unrecorded: "待记录",
   replayed: "已回放",
   not_replayed: "不回放",
   undecided: "待判定",
 };
 
-/* How an ending draws the 读出 node: a frozen strategy with its record is
+/* How an ending draws the 读出 node: a registered strategy with its record is
    the step done; only a sealed-gate refusal of old is a failure of the step
    itself; an ending nothing judged is a terminus, and a broken worker wears
    its cross on the step that broke. */
 const ENDING_STEP_STATES = {
-  frozen_with_record: "done",
+  registered_with_record: "done",
   graduated: "done",
   rejected: "failed",
   no_edge: "ended",
@@ -1748,8 +1748,8 @@ const ENDING_STEP_STATES = {
   broken: "ended",
 };
 
-/* The research step: its recorded outcome once the session ended — a freeze
-   is the step done, anything else ended the experiment — else where the worker is,
+/* The research step: its recorded outcome once the session ended — a
+   registration is the step done, anything else ended the experiment — else where the worker is,
    else how a session that ran stopped before it recorded anything. */
 function researchStep(item) {
   const status = item.status || {};
@@ -1759,7 +1759,7 @@ function researchStep(item) {
       ...step,
       // The session did its work even when it delivered nothing, so an experiment it
       // ended is a terminus here rather than a failed step.
-      state: item.frozen_session ? "done" : "ended",
+      state: item.registered_session ? "done" : "ended",
       status: OUTCOME_LABELS[item.research_outcome] || item.research_outcome,
     };
   // The worker broke before the session could record an outcome at all: this
@@ -1776,20 +1776,21 @@ function researchStep(item) {
   return { ...step, state: "pending", status: STEP_STATUS_LABELS.pending };
 }
 
-/* The freeze, the continuous replay and the readout. `frozen_session` is the
-   listing's own fact, so neither page infers a freeze from stage and verdict. */
+/* The registration, the continuous replay and the readout. `registered_session`
+   is the listing's own fact, so neither page infers a registration from stage
+   and verdict. */
 function pipelineTailSteps(item) {
   const status = item.status || {};
   const researchOver = item.stage !== "research";
-  const frozen = item.frozen_session;
-  const freeze = frozen
-    ? { state: "done", status: STEP_STATUS_LABELS.frozen }
+  const registered = item.registered_session;
+  const registration = registered
+    ? { state: "done", status: STEP_STATUS_LABELS.registered }
     : researchOver
-      ? { state: "skipped", status: STEP_STATUS_LABELS.not_frozen }
+      ? { state: "skipped", status: STEP_STATUS_LABELS.not_registered }
       : { state: "pending", status: STEP_STATUS_LABELS.awaiting_nomination };
   const replay = item.forward
     ? { state: "done", status: STEP_STATUS_LABELS.replayed }
-    : frozen
+    : registered
       ? {
           state:
             item.worker_alive && status.session_key === "forward"
@@ -1799,7 +1800,7 @@ function pipelineTailSteps(item) {
         }
       : researchOver
         ? { state: "skipped", status: STEP_STATUS_LABELS.not_replayed }
-        : { state: "pending", status: STEP_STATUS_LABELS.awaiting_freeze };
+        : { state: "pending", status: STEP_STATUS_LABELS.awaiting_registration };
   // The last step is the experiment's ending, whatever ended it: the readout for
   // an experiment that got that far, the way research ended for one that did not.
   const decided = item.ending
@@ -1809,7 +1810,7 @@ function pipelineTailSteps(item) {
       }
     : { state: "pending", status: STEP_STATUS_LABELS.undecided };
   return [
-    { key: "frozen", label: STEP_LABELS.frozen, ...freeze },
+    { key: "registered", label: STEP_LABELS.registered, ...registration },
     { key: "forward", label: STEP_LABELS.forward, ...replay },
     { key: "heldout", label: STEP_LABELS.heldout, ...replay },
     { key: "readout", label: STEP_LABELS.readout, ...decided },
@@ -2090,7 +2091,7 @@ function evidenceTiles(item) {
   return tiles.length ? statTilesRow(tiles) : null;
 }
 
-/* The ranking view: every frozen strategy with a readout, ranked by its
+/* The ranking view: every registered strategy with a readout, ranked by its
    validation record's residual IR (`registry.ranking`), with its p-value, steps,
    candidate changes and forward reading, and the Paper handoff beside each --
    the book it has, or a button that opens one within the cap, which the
@@ -2837,7 +2838,7 @@ async function renderDetailPage(experimentId, selectedKey) {
   }, 4000);
 }
 
-/* The experiment page's process list: the research session, then the freeze,
+/* The experiment page's process list: the research session, then the registration,
    the continuous replay and the readout, each carrying what it left behind —
    a figure, a date span or a live stage. `filled` says whether the step has a
    right-pane detail yet. */
@@ -2851,7 +2852,7 @@ function processRows(detail) {
   const replay =
     ((detail.sessions || []).find((entry) => entry.kind === "forward") || {})
       .replay || {};
-  const frozen = detail.frozen;
+  const registered = detail.registered;
   const note = {
     research: rolling
       ? el(
@@ -2862,15 +2863,15 @@ function processRows(detail) {
       : record
         ? `验证 ${record.validations.length} 次 · 尚无 test`
         : null,
-    frozen: frozen ? `${fmtPct(frozen.plain_excess)} · IR ${fmtSharpe(frozen.information_ratio)}` : null,
+    registered: registered ? `${fmtPct(registered.plain_excess)} · IR ${fmtSharpe(registered.information_ratio)}` : null,
     forward: replaySpanBar(replay, "forward", { mini: true, pending: !detail.forward }),
     heldout: replaySpanBar(replay, "heldout", { mini: true, pending: !detail.forward }),
     readout: null,
   };
   const filled = {
     research: Boolean(record) || live,
-    frozen: Boolean(frozen),
-    forward: Boolean(detail.frozen || detail.forward),
+    registered: Boolean(registered),
+    forward: Boolean(detail.registered || detail.forward),
     heldout: Boolean(detail.forward),
     readout: Boolean((detail.verdict || {}).status),
   };
@@ -3027,11 +3028,11 @@ function holderLine(label, slice) {
   );
 }
 
-/* The frozen book beside its seed replicates and their mean, over the named
+/* The registered book beside its seed replicates and their mean, over the named
    slices (verdict.py `seed_replicate_slice` and `seed_mean`): one row per
    seed, one figure per cell — the account against the benchmark and against
    its random baseline, each compounded. Null for a record without replicates, so
-   an experiment frozen on one seed shows nothing in its place. */
+   an experiment registered on one seed shows nothing in its place. */
 const SLICE_NAMES = { forward: "前推", heldout: "Held-out " };
 
 function seedReadingsTable(slices, names) {
@@ -3144,7 +3145,7 @@ function stageHead(key, detail) {
   return panelHead(STEP_LABELS[key], el("span", { class: "badge kind" }, step.status));
 }
 
-/* Every frozen strategy's validation record over this experiment's validation window,
+/* Every registered strategy's validation record over this experiment's validation window,
    with its one-sided null p-value, its steps and candidate changes, and how
    many there are: what a single reading is weighed against. Nothing is
    adjusted and no threshold moves. */
@@ -3177,7 +3178,7 @@ function validationWindowBlock(readouts) {
   );
 }
 
-/* The forward-year residual readings of every frozen strategy replayed over
+/* The forward-year residual readings of every registered strategy replayed over
    this experiment's forward months, pooled: reported, never judged. */
 function forwardPoolBlock(readouts) {
   const p = (readouts || {}).forward_pool;
@@ -3348,7 +3349,7 @@ function legacyVerdictLine(verdict) {
 // The one trading environment with a backend (docs/DEPLOYMENT_DOCUMENTATION.md).
 const PAPER_ENV = "paper";
 
-/* The Paper handoff: the experiment's book once one exists, else, for a frozen
+/* The Paper handoff: the experiment's book once one exists, else, for a registered
    strategy with its forward record, a button that opens one within the cap
    the server enforces. Nothing opens a book by itself. */
 function paperHandoff(detail) {
@@ -3402,13 +3403,13 @@ function paperHandoff(detail) {
   return host;
 }
 
-/* The frozen artifact and the research statistics it was frozen on. An
-   artifact frozen with seed replicates also shows the seed-mean IR beside
+/* The registered artifact and the research statistics it was registered on. An
+   artifact registered with seed replicates also shows the seed-mean IR beside
    its own IR and the threshold both were held to, and one row per seed. */
-function frozenPanel(detail) {
-  const frozen = detail.frozen;
-  if (!frozen) return null;
-  const seeds = frozen.seed_replicates || {};
+function registeredPanel(detail) {
+  const registered = detail.registered;
+  if (!registered) return null;
+  const seeds = registered.seed_replicates || {};
   const panel = el(
     "div",
     { class: "panel section-gap" },
@@ -3428,13 +3429,13 @@ function frozenPanel(detail) {
       presentTiles([
         {
           label: "研究期主动超额（年化）",
-          value: frozen.plain_excess,
+          value: registered.plain_excess,
           fmt: fmtPct,
           signed: true,
           title: EXCESS_TITLE,
         },
-        { label: "主动跟踪误差", value: frozen.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
-        { label: "IR", value: frozen.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
+        { label: "主动跟踪误差", value: registered.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
+        { label: "IR", value: registered.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
         {
           label: "种子均值 IR",
           value: seeds.mean_information_ratio,
@@ -3450,45 +3451,45 @@ function frozenPanel(detail) {
         },
         {
           label: "DSR",
-          value: frozen.deflated_sharpe_probability,
+          value: registered.deflated_sharpe_probability,
           fmt: fmtSharpe,
           // The same gloss the other DSR tiles carry, then what this
           // nomination's probability was deflated against.
           title: [
             DSR_TITLE,
-            frozen.trials === null || frozen.trials === undefined ? null : `试验 ${frozen.trials} 个`,
-            frozen.sharpe_star === null || frozen.sharpe_star === undefined
+            registered.trials === null || registered.trials === undefined ? null : `试验 ${registered.trials} 个`,
+            registered.sharpe_star === null || registered.sharpe_star === undefined
               ? null
-              : `SR* ${fmtSharpe(frozen.sharpe_star)}`,
+              : `SR* ${fmtSharpe(registered.sharpe_star)}`,
           ]
             .filter(Boolean)
             .join(" · "),
         },
         {
           label: "前推可检出超额",
-          value: frozen.forward_mde,
+          value: registered.forward_mde,
           fmt: fmtPct,
           title: "前推检验以 80% 功效能检出的最小年化主动超额",
         },
       ]),
     ),
     chipsRow([
-      frozen.full_span_validations === null || frozen.full_span_validations === undefined
+      registered.full_span_validations === null || registered.full_span_validations === undefined
         ? null
-        : chip(`全区间验证 ${frozen.full_span_validations}`),
-      frozen.null_percentile === null || frozen.null_percentile === undefined
+        : chip(`全区间验证 ${registered.full_span_validations}`),
+      registered.null_percentile === null || registered.null_percentile === undefined
         ? null
-        : chip(`null 分位 ${fmtSharpe(frozen.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
-      chip(frozen.fit ? ["fit", frozen.refit_period ? `重训 ${frozen.refit_period}` : null].filter(Boolean).join(" · ") : "无 fit"),
-      frozen.source_step_id
-        ? chip(`节点 ${String(frozen.source_step_id).split("__").pop()}`, frozen.source_step_id)
+        : chip(`null 分位 ${fmtSharpe(registered.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
+      chip(registered.fit ? ["fit", registered.refit_period ? `重训 ${registered.refit_period}` : null].filter(Boolean).join(" · ") : "无 fit"),
+      registered.source_step_id
+        ? chip(`节点 ${String(registered.source_step_id).split("__").pop()}`, registered.source_step_id)
         : null,
     ]),
     seeds.replicates
       ? dataTable(
           [{ label: "种子" }, { label: "种子行" }, { label: "研究期 IR", num: true, title: IR_TITLE }],
           [
-            [{ value: "定版产物", title: frozen.source_step_id || null }, "—", { value: fmtSharpe(frozen.information_ratio), cls: signCls(frozen.information_ratio) }],
+            [{ value: "定版产物", title: registered.source_step_id || null }, "—", { value: fmtSharpe(registered.information_ratio), cls: signCls(registered.information_ratio) }],
             ...seeds.replicates.map((entry) => [
               { value: String(entry.step_id).split("__").pop(), title: entry.step_id },
               entry.seed_line,
@@ -3498,8 +3499,8 @@ function frozenPanel(detail) {
           { fit: true, box: "section-gap" },
         )
       : null,
-    subWindowSection("研究期分年度表现", frozen.blocks),
-    frozen.result ? styleCard(detail.experiment_id, frozen.result) : null,
+    subWindowSection("研究期分年度表现", registered.blocks),
+    registered.result ? styleCard(detail.experiment_id, registered.result) : null,
   );
   return panel;
 }
@@ -3816,7 +3817,7 @@ function stepPlaceholder(detail, key, title) {
 }
 
 /* The right pane of the process grid: whichever step the reader selected. The
-   research session has its own panel, the freeze opens the frozen artifact,
+   research session has its own panel, the registration opens the registered artifact,
    and 前推回测, Held-out and 读出 each open their own stage view. */
 function sessionDetailPanel(detail, selectedKey) {
   // Flex column with a uniform card gap: whichever cards are present, the
@@ -3829,8 +3830,8 @@ function sessionDetailPanel(detail, selectedKey) {
     panel.append(stepPlaceholder(detail, selectedKey, sessionLabel(selectedKey)));
     return panel;
   }
-  if (selectedKey === "frozen") {
-    panel.append(frozenPanel(detail) || stepPlaceholder(detail, "frozen", "定版产物"));
+  if (selectedKey === "registered") {
+    panel.append(registeredPanel(detail) || stepPlaceholder(detail, "frozen", "定版产物"));
     return panel;
   }
   if (selectedKey === "forward") {
@@ -3987,7 +3988,7 @@ function recordPanel(detail) {
   );
 }
 
-/* The freeze gate as the pipeline judged the nomination: a failed
+/* The registration check as the pipeline judged the nomination: a failed
    precondition only when it failed, and the conditions the record's own
    thresholds state. A registration (since the sealed gate, 2026-11-03)
    states only its drawdown limit and mandate; a deflated-Sharpe gate before
@@ -3996,7 +3997,7 @@ function recordPanel(detail) {
    invalid replicate is a precondition, each invalid one's problem in the
    row's hover, and an earlier gate's seed-mean IR against the nominee's IR
    threshold is a row whenever it read one. */
-function freezeGateChecklist(gate) {
+function registrationChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
   const row = criteriaRow(gate, failed, t);
@@ -4082,7 +4083,7 @@ function freezeGateChecklist(gate) {
    nominated, the budget it spent, every Validation it ran, and its Trace. */
 function researchSessionPanel(detail, session) {
   const record = session.record;
-  const gate = record.freeze_gate;
+  const gate = record.registration;
   const attempts = Number(record.attempts) || 0;
   const budget = budgetBars(record.budget_used, detail.budget);
   const panel = el(
@@ -4093,7 +4094,7 @@ function researchSessionPanel(detail, session) {
       el(
         "span",
         {
-          class: `badge ${record.froze ? "state-completed" : "state-stopped"}`,
+          class: `badge ${record.registered ? "state-completed" : "state-stopped"}`,
           title: record.finish_reason || null,
         },
         OUTCOME_LABELS[record.outcome] || record.outcome,
@@ -4107,7 +4108,7 @@ function researchSessionPanel(detail, session) {
           "div",
           { class: "section-gap" },
           el("h4", { class: "subsection-title" }, "定版登记"),
-          freezeGateChecklist(gate),
+          registrationChecklist(gate),
         )
       : null,
     budget
@@ -5830,7 +5831,7 @@ function stepTreeRow(
     badges.push(
       el("span", { class: "badge state-running_session" }, "当前位置"),
     );
-  if (node.frozen)
+  if (node.registered)
     badges.push(el("span", { class: "badge state-completed" }, "已定版"));
   if (failed) badges.push(el("span", { class: "badge state-failed" }, "失败"));
   const actions = el("span", { class: "step-actions" });
@@ -5937,7 +5938,7 @@ function showStepTip(detail, node, row) {
     ),
     line("最大回撤", fmtPct(m.max_drawdown)),
     line("记录于", fmtTs(node.created_at)),
-    node.frozen ? line("定版", "本节点是定版产物") : null,
+    node.registered ? line("定版", "本节点是定版产物") : null,
     node.status === "failed" ? line("失败原因", node.error || "—") : null,
     node.has_snapshot ? null : line("快照", "无（失败尝试不留产物）"),
   );
@@ -5980,7 +5981,7 @@ function openStepNodeModal(detail, payload, node) {
       ),
       kvRow("最大回撤", fmtPct(m.max_drawdown)),
       kvRow("记录时间", fmtTs(node.created_at)),
-      node.frozen ? kvRow("定版", "本节点是定版产物") : null,
+      node.registered ? kvRow("定版", "本节点是定版产物") : null,
       node.status === "failed" ? kvRow("失败原因", node.error || "—") : null,
       kvRow("附件", (node.attachments || []).join("、") || "—"),
       kvRow("revision", el("code", {}, String(node.strategy_ref || "—"))),

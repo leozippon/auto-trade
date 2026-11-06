@@ -8,7 +8,7 @@ sidecars and revisions, the replays' results -- so each reading of an experiment
 created under the current rules is judged again by this code, CPU only, and
 compared with the ledger key for key:
 
-- a research session's freeze registration (``experiment.freeze_registration``),
+- a research session's final registration (``experiment.check_registration``),
 - a forward record's slices, where its forward replay completed
   (``experiment.judged_replay``), and its readout off the ledger's rolling
   record and that forward slice (``validation_record.readout``).
@@ -46,7 +46,7 @@ REPO_ROOT = add_repo_src(__file__)
 from autotrade.common.records import read_json_object
 from autotrade.pipelines.config import AcceptanceRules, acceptance_for
 from autotrade.pipelines.experiment import (
-    freeze_registration,
+    check_registration,
     judged_replay,
     replay_and_analysis,
 )
@@ -161,9 +161,9 @@ def check_experiment(experiment: Path) -> list[Judgement]:
             nominee = steps[str(record["nominated_step_id"])]
             seeds = record["freeze_gate"].get("seed_replicates") or {}
             judge(
-                "freeze_registration",
+                "check_registration",
                 record["freeze_gate"],
-                freeze_registration(
+                check_registration(
                     nominee,
                     experiment_dir=experiment,
                     acceptance=rules,

@@ -690,7 +690,7 @@ def test_readme_seed_idiom_passes_the_static_check_and_is_what_a_replicate_chang
     """The README tells a strategy to write its seed as one line under one of
     these names and to draw from ``default_rng([SEED_BASE, day])``. That idiom
     clears the check that refuses unseeded draws, and a copy differing only in
-    the seed's value is a seed replicate by the freeze gate's own reading."""
+    the seed's value is a seed replicate by the registration check's own reading."""
 
     readme = (TEMPLATE / "README.md").read_text(encoding="utf-8")
     assert "`SEED`, `SEED_BASE`, or a name ending in `_SEED` or `_SEED_BASE`" in readme

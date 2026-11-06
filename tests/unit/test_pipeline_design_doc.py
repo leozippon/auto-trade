@@ -1,6 +1,6 @@
 """The condition table of docs/PIPELINE_DESIGN.md is ``verdict.CONDITIONS``.
 
-The design document states every condition the freeze gate and the
+The design document states every condition the registration check and the
 graduation verdict judge in one table. This keeps that table the code's: the
 same rows in the same order, each with its stage, its graduation code, the
 rule that turns it on and the reason a failure records. ``docs/`` is local and

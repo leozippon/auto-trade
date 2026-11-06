@@ -42,7 +42,7 @@ from autotrade.paper.books import (
     delete_book,
     follows_real_fills,
     list_books,
-    open_frozen_book,
+    open_registered_book,
     run_books,
     run_order,
     validate_book_id,
@@ -158,23 +158,23 @@ def _book_files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def test_a_frozen_strategy_opens_its_book_once_and_an_experiment_without_one_opens_none(tmp_path: Path):
+def test_a_registered_strategy_opens_its_book_once_and_an_experiment_without_one_opens_none(tmp_path: Path):
     experiments = tmp_path / "elsewhere"  # any experiments root, not only <repo>/experiments
-    experiment = build_experiment(experiments, "exp", "frozen_with_record")
+    experiment = build_experiment(experiments, "exp", "registered_with_record")
     root = paper_root(tmp_path)
-    assert open_frozen_book(tmp_path, experiment) == "exp"
+    assert open_registered_book(tmp_path, experiment) == "exp"
     record = json.loads((root / "exp" / "book.json").read_text(encoding="utf-8"))
     assert (record["experiment_id"], record["artifact_id"], record["note"]) == (
         "exp", "strategy_research_abc", "frozen"
     )
     assert record["candidate_source"] == "frozen"
     opened = _book_files(root / "exp")
-    assert open_frozen_book(tmp_path, experiment) == "exp"  # an open book is left as it is
+    assert open_registered_book(tmp_path, experiment) == "exp"  # an open book is left as it is
     assert _book_files(root / "exp") == opened
 
     loser = build_experiment(experiments, "loser", "discarded")
-    with pytest.raises(ValueError, match="no frozen strategy with a forward record"):
-        open_frozen_book(tmp_path, loser)
+    with pytest.raises(ValueError, match="no registered strategy with a forward record"):
+        open_registered_book(tmp_path, loser)
     assert list_books(root) == ["exp"] and not (root / "loser").exists()
 
 
@@ -185,7 +185,7 @@ def test_deleting_a_book_removes_its_read_only_tree_and_frees_its_id(tmp_path: P
 
     experiment = build_experiment(tmp_path / "experiments", "exp", "graduated")
     engine_book(tmp_path, book="other")
-    open_frozen_book(tmp_path, experiment)
+    open_registered_book(tmp_path, experiment)
     root = paper_root(tmp_path)
     output = root / "exp" / STRATEGY_COPY_NAME / "output"
     (output / "lib").mkdir()
@@ -201,7 +201,7 @@ def test_deleting_a_book_removes_its_read_only_tree_and_frees_its_id(tmp_path: P
     delete_book(root, "exp")
     assert sorted(entry.name for entry in root.iterdir()) == ["other"]  # nothing left behind
     assert stat.S_IMODE(shared.stat().st_mode) == 0o444 and shared.read_bytes() == b"release"
-    assert open_frozen_book(tmp_path, experiment) == "exp"
+    assert open_registered_book(tmp_path, experiment) == "exp"
     with pytest.raises(KeyError):
         delete_book(root, "missing")
     with pytest.raises(ValueError):
@@ -327,8 +327,8 @@ def test_the_book_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp_path:
     with pytest.raises(ValueError, match=f"the cap is {BOOK_CAP}"):
         _incubate(tmp_path, "late")
     with pytest.raises(ValueError, match=f"the cap is {BOOK_CAP}"):
-        open_frozen_book(tmp_path, build_experiment(tmp_path / "experiments", "late_frozen", "frozen_with_record"))
-    assert not (root / "late").exists() and not (root / "late_frozen").exists()
+        open_registered_book(tmp_path, build_experiment(tmp_path / "experiments", "late_registered", "registered_with_record"))
+    assert not (root / "late").exists() and not (root / "late_registered").exists()
     require_book_place(root, "fz0")  # an open book is never a second book of its own experiment
     _kill(root / "fz0")
     assert book_status(root / "fz0") == "killed"
@@ -377,11 +377,11 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
 
     first, audited = f"{YEAR - 6}01", f"{YEAR - 3}0101"
     _pit_lake(tmp_path, first_month=first, audited_from=audited)
-    assert open_frozen_book(tmp_path, _fundamentals_experiment(tmp_path, "short", 24)) == "short"
+    assert open_registered_book(tmp_path, _fundamentals_experiment(tmp_path, "short", 24)) == "short"
 
     experiment = _fundamentals_experiment(tmp_path, "long", 108)
     with pytest.raises(ValueError, match="cannot open") as refused:
-        open_frozen_book(tmp_path, experiment)
+        open_registered_book(tmp_path, experiment)
     message = str(refused.value)
     assert f"loads PIT fundamental events from {first}, but their audit" in message
     assert f"starts at {audited}" in message
@@ -400,14 +400,14 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
 
     # The nightly run the refusal configures audits from that month: the book opens.
     write_fundamental_status(tmp_path / FUNDAMENTALS_STATUS, scope_start_date=f"{first}01")
-    assert open_frozen_book(tmp_path, experiment) == "long"
+    assert open_registered_book(tmp_path, experiment) == "long"
 
 
 def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
     # An audit that covers nothing and no exchange calendar: either one read
     # would refuse the book.
     _pit_lake(tmp_path, first_month="201501", audited_from="20990101", calendar=False)
-    assert open_frozen_book(tmp_path, build_experiment(tmp_path / "experiments", "exp", "graduated")) == "exp"
+    assert open_registered_book(tmp_path, build_experiment(tmp_path / "experiments", "exp", "graduated")) == "exp"
 
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):

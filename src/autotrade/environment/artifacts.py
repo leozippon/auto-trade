@@ -153,8 +153,8 @@ class ArtifactRevision:
 
 
 @dataclass(frozen=True)
-class FrozenArtifact:
-    """A revision frozen as the experiment's deliverable, with the Step it came from."""
+class RegisteredArtifact:
+    """A revision registered as the experiment's deliverable, with the Step it came from."""
 
     artifact_id: str
     path: Path
@@ -170,9 +170,9 @@ def new_revision_id(prefix: str = "artifact") -> str:
 
 
 class FilesystemArtifactStore:
-    """Revision/Freeze backend for ``pipelines.config.ArtifactStore``.
+    """Revision/Registration backend for ``pipelines.config.ArtifactStore``.
 
-    Revisions and frozen artifacts are immutable directories addressed by
+    Revisions and registered artifacts are immutable directories addressed by
     explicit IDs. A revision's files are hard links into the store's
     content-addressed ``objects/`` directory, so the whole retained history
     costs the distinct bytes it invented, not one copy per Validation.
@@ -181,10 +181,10 @@ class FilesystemArtifactStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.revisions_root = self.root / "revisions"
-        self.frozen_root = self.root / "frozen"
+        self.registered_root = self.root / "frozen"
         self.objects_root = self.root / OBJECTS_DIR
         self.revisions_root.mkdir(parents=True, exist_ok=True)
-        self.frozen_root.mkdir(parents=True, exist_ok=True)
+        self.registered_root.mkdir(parents=True, exist_ok=True)
         self.objects_root.mkdir(parents=True, exist_ok=True)
 
     def create_revision(
@@ -277,7 +277,7 @@ class FilesystemArtifactStore:
             )
         return entries
 
-    def freeze_revision(
+    def register_revision(
         self,
         revision_id: str,
         *,
@@ -287,11 +287,11 @@ class FilesystemArtifactStore:
         fold_id: str,
         run_id: str,
         step_id: str,
-    ) -> FrozenArtifact:
+    ) -> RegisteredArtifact:
         revision = self.revision(revision_id)
-        directory = self._id_path(self.frozen_root, artifact_id)
+        directory = self._id_path(self.registered_root, artifact_id)
         if directory.exists():
-            raise FileExistsError(f"frozen artifact already exists: {artifact_id}")
+            raise FileExistsError(f"registered artifact already exists: {artifact_id}")
         copy_artifact(revision.output_path, directory / "output")
         copy_model_artifacts(revision.models_path, directory / "models")
         metadata = {
@@ -303,63 +303,63 @@ class FilesystemArtifactStore:
             json.dumps(metadata, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
         )
         chmod_tree(directory, file_mode=0o444, dir_mode=0o555)
-        return FrozenArtifact(
+        return RegisteredArtifact(
             artifact_id=artifact_id, path=directory / "output", model_path=directory / "models",
             source_run_id=run_id, source_fold_id=fold_id, source_step_id=step_id,
             revision_id=revision_id,
         )
 
-    def prune_superseded_frozen(self, *, keep_frozen_ids: tuple[str, ...] = ()) -> None:
-        """Discard frozen artifacts no ledger record still references.
+    def prune_superseded_registered(self, *, keep_registered_ids: tuple[str, ...] = ()) -> None:
+        """Discard registered artifacts no ledger record still references.
 
         Revisions are deliberately not pruned here: every revision a Validation
         recorded is the experiment's artifact history, and content addressing is what
         makes keeping all of it affordable.
         """
 
-        keep = set(keep_frozen_ids)
-        for directory in list(self.frozen_root.iterdir()):
+        keep = set(keep_registered_ids)
+        for directory in list(self.registered_root.iterdir()):
             if directory.name not in keep:
                 self._discard_directory(directory)
 
-    def frozen(
+    def registered(
         self,
         artifact_id: str,
         *,
         expected_path: str | Path | None = None,
         experiment_id: str | None = None,
-    ) -> FrozenArtifact:
-        """Load a frozen artifact after validating identity and immutability."""
+    ) -> RegisteredArtifact:
+        """Load a registered artifact after validating identity and immutability."""
 
-        directory = self._id_path(self.frozen_root, artifact_id)
+        directory = self._id_path(self.registered_root, artifact_id)
         if not directory.is_dir():
-            raise KeyError(f"unknown frozen artifact: {artifact_id}")
+            raise KeyError(f"unknown registered artifact: {artifact_id}")
         resolved = directory.resolve(strict=True)
-        if not resolved.is_relative_to(self.frozen_root.resolve()):
-            raise ArtifactError(f"frozen artifact escaped the configured store: {artifact_id}")
+        if not resolved.is_relative_to(self.registered_root.resolve()):
+            raise ArtifactError(f"registered artifact escaped the configured store: {artifact_id}")
         output = resolved / "output"
         models = resolved / "models"
         manifest_path = resolved / "revision.json"
         if not output.is_dir() or not manifest_path.is_file():
-            raise ArtifactError(f"incomplete frozen artifact: {artifact_id}")
+            raise ArtifactError(f"incomplete registered artifact: {artifact_id}")
         if expected_path is not None and Path(expected_path).resolve(strict=True) != output:
-            raise ArtifactError(f"frozen artifact path mismatch: {artifact_id}")
+            raise ArtifactError(f"registered artifact path mismatch: {artifact_id}")
         try:
             manifest = read_json_object(manifest_path)
         except (OSError, ValueError) as exc:
-            raise ArtifactError(f"invalid frozen artifact manifest: {artifact_id}") from exc
+            raise ArtifactError(f"invalid registered artifact manifest: {artifact_id}") from exc
         if manifest.get("artifact_id") != artifact_id:
-            raise ArtifactError(f"frozen artifact manifest identity mismatch: {artifact_id}")
+            raise ArtifactError(f"registered artifact manifest identity mismatch: {artifact_id}")
         if experiment_id is not None and manifest.get("experiment_id") != experiment_id:
-            raise ArtifactError(f"frozen artifact belongs to another experiment: {artifact_id}")
+            raise ArtifactError(f"registered artifact belongs to another experiment: {artifact_id}")
         for name in ("revision_id", "epoch_id", "fold_id", "run_id", "source_step_id"):
             if not isinstance(manifest.get(name), str) or not str(manifest[name]).strip():
-                raise ArtifactError(f"frozen artifact manifest is missing {name}: {artifact_id}")
+                raise ArtifactError(f"registered artifact manifest is missing {name}: {artifact_id}")
         load_strategy_artifact(output, revision_id=artifact_id)
         if models.exists():
             load_model_artifacts(models, revision_id=artifact_id)
         _assert_readonly_tree(resolved)
-        return FrozenArtifact(
+        return RegisteredArtifact(
             artifact_id=artifact_id,
             path=output,
             model_path=models if models.is_dir() else None,
@@ -405,7 +405,7 @@ def reject_forbidden_code_references(paths: Iterable[Path]) -> None:
     """Reject formal strategy code that names a stage or host-only mount path.
 
     ``modification_check`` runs this before any formal replay, and loading the
-    frozen artifact for the forward replay runs it again. A path that only ever
+    registered artifact for the forward replay runs it again. A path that only ever
     appears as a string constant is therefore refused while the Agent can still
     fix it, instead of failing the forward replay's startup.
     """
@@ -432,7 +432,7 @@ def copy_artifact(source_root: str | Path, dest_root: str | Path) -> None:
     """Copy one strategy artifact directory, replacing any existing copy.
 
     Runtime caches next to the source (including the output template) are
-    skipped; official load/freeze still reject them if they remain in dest.
+    skipped; official load/register still reject them if they remain in dest.
     """
     source_root = Path(source_root)
     _copy_revision(
@@ -534,7 +534,7 @@ def copy_artifact_snapshot(
     )
 
 
-def restore_frozen_artifact_trees(
+def restore_registered_artifact_trees(
     *,
     output_path: str | Path,
     snapshot_output: str | Path,
@@ -552,10 +552,10 @@ def restore_frozen_artifact_trees(
     )
     _atomic_replace_copied(Path(snapshot_output), live_output, copy_artifact)
     _atomic_replace_copied(Path(snapshot_models), live_models, copy_model_artifacts)
-    frozen_root = live_output.parent
-    if (frozen_root / "revision.json").is_file():
-        chmod_tree(frozen_root, file_mode=0o444, dir_mode=0o555)
-        _assert_readonly_tree(frozen_root)
+    registered_root = live_output.parent
+    if (registered_root / "revision.json").is_file():
+        chmod_tree(registered_root, file_mode=0o444, dir_mode=0o555)
+        _assert_readonly_tree(registered_root)
         return
     chmod_tree(live_output, file_mode=0o444, dir_mode=0o555)
     _assert_readonly_tree(live_output)
@@ -567,7 +567,7 @@ def restore_frozen_artifact_trees(
 def readonly_copy_hint(target: str) -> str:
     """Retry hint for a work-copy path stuck at a snapshot's read-only mode.
 
-    Step-node snapshots and frozen artifacts are locked 0o444/0o555, and a
+    Step-node snapshots and registered artifacts are locked 0o444/0o555, and a
     ``cp -r`` out of them reproduces those bits in the work copy. Such a copy
     is made inside the sandbox and belongs to the container user, so the host
     cannot chmod it back (:func:`chmod_tree` skips the EPERM paths): only the
@@ -580,7 +580,7 @@ def readonly_copy_hint(target: str) -> str:
 
     return (
         f'run shell argv ["chmod", "-R", "a+w", "{target}"] and retry: a tree copied '
-        "from steps/ or a frozen artifact keeps that snapshot's read-only mode, and "
+        "from steps/ or a registered artifact keeps that snapshot's read-only mode, and "
         "the copy belongs to the sandbox user, so u+w alone does not give the typed "
         "writers access"
     )
@@ -721,7 +721,7 @@ def modification_delta(
     was seeded with (see the function of that name) instead of to ``parent_root``,
     which is the live template for an initial artifact and therefore not a fixed
     baseline. Omit it only where the parent tree is itself immutable, such as
-    comparing a frozen artifact with its own snapshot.
+    comparing a registered artifact with its own snapshot.
     """
     parent_root = Path(parent_root)
     work_root = Path(work_root)
@@ -1078,9 +1078,9 @@ def _files_equal(left: Path, right: Path, *, chunk_size: int = 1024 * 1024) -> b
 def _assert_readonly_tree(root: Path) -> None:
     for path in (root, *root.rglob("*")):
         if path.is_symlink():
-            raise ArtifactError(f"frozen artifact must not contain symlinks: {path.relative_to(root)}")
+            raise ArtifactError(f"registered artifact must not contain symlinks: {path.relative_to(root)}")
         if path.stat().st_mode & 0o222:
-            raise ArtifactError(f"frozen artifact is writable: {path.relative_to(root) or '.'}")
+            raise ArtifactError(f"registered artifact is writable: {path.relative_to(root) or '.'}")
 
 
 def _assert_working_tree_permissions(root: Path) -> None:

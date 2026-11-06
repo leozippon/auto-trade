@@ -214,7 +214,7 @@ def test_the_last_test_finishes_the_session_with_its_candidate() -> None:
             result = harness.test.invoke({"candidate": node})
             assert result.finish is (step == 4), step
         assert result.value["outcome"] == "completed" and result.value["candidate"]["node_id"] == b
-        assert "frozen strategy" in result.value["pipeline_outcome"]
+        assert "registered strategy" in result.value["pipeline_outcome"]
         records = harness.records()
         assert [row["candidate"]["step_id"] for row in records] == [a, a, b, b]
         assert candidate_changes(harness.backtest.ledger.read()) == 1

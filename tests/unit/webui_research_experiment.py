@@ -5,7 +5,7 @@ plane, the ledger and the result artifacts it names. ``build_experiment`` writes
 for one experiment at a chosen stage — researching, frozen with the forward replay
 running, or with its readout — from synthetic daily series, and computes
 every recorded statistic with the pipeline's own functions
-(``freeze_registration``, ``validation_record.step_entry``, ``forward_slice``,
+(``check_registration``, ``validation_record.step_entry``, ``forward_slice``,
 ``heldout_slice``, ``validation_record.readout``), so a projection test reads
 the same numbers a real experiment would carry. The ``graduated`` and ``discarded``
 stages write the records of an experiment judged under the retired sealed gate, in
@@ -29,7 +29,7 @@ from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
-from autotrade.pipelines.experiment import freeze_registration
+from autotrade.pipelines.experiment import check_registration
 from autotrade.pipelines.hitl_state import (
     ControlState,
     build_session_plan,
@@ -52,7 +52,7 @@ STAGES = (
     "created",
     "research",
     "sealed",
-    "frozen_with_record",
+    "registered_with_record",
     "graduated",
     "discarded",
     "no_deliverable",
@@ -196,7 +196,7 @@ def _step(experiment_dir: Path, session: str, index: int, *, edge: float, seed: 
     ref = write_result(experiment_dir, "valid", start="20240701", days=120, edge=edge, seed=seed)
     revision, fingerprint = f"revision_{session}_{index}", f"fingerprint_{session}_{index}"
     # The manifest the artifact store writes for the revision; a host sidecar
-    # names only the revision, and its bytes are read off this. The freeze
+    # names only the revision, and its bytes are read off this. The registration
     # gate reads a nominee's strategy from beside it.
     write_json_atomic(
         experiment_dir / REVISIONS_DIR / revision / REVISION_MANIFEST_FILE,
@@ -263,11 +263,11 @@ def build_experiment(
 ) -> Path:
     """Write one experiment at ``stage`` (one of :data:`STAGES`) under ``root``.
 
-    ``seeded`` makes its nominee one that trains a model and froze with one
-    seed replicate and, past the freeze, was replayed with it and judged on
+    ``seeded`` makes its nominee one that trains a model and registered with one
+    seed replicate and, past the registration, was replayed with it and judged on
     the two together, in the shapes ``pipelines.experiment`` records
     (tests/unit/test_seed_replicates.py): the gate's ``seed_replicates``
-    block, the frozen block's, each slice's ``seed_replicates`` and
+    block, the registered block's, each slice's ``seed_replicates`` and
     ``seed_mean``, and the record's own rows.
     """
 
@@ -295,14 +295,14 @@ def build_experiment(
     # The one research session is in flight while the experiment researches: it has
     # no ledger record until it ends.
     current = "research"
-    if stage in ("sealed", "frozen_with_record", "graduated", "discarded"):
+    if stage in ("sealed", "registered_with_record", "graduated", "discarded"):
         steps = [
             _step(directory, "research", 0, edge=0.0005, seed=1),
             _step(directory, "research", 1, edge=0.002, seed=3),
             _step(directory, "research", 2, edge=0.001, seed=4, span="Y3"),
         ]
         nominee = steps[1]
-        gate = freeze_registration(nominee, experiment_dir=directory, acceptance=RULES)
+        gate = check_registration(nominee, experiment_dir=directory, acceptance=RULES)
         statistics = nominee["graded"]
         # The seed replicate: the full-span step other than the nominee.
         replicate = steps[0]
@@ -368,7 +368,7 @@ def build_experiment(
                 experiment_id,
                 **(
                     {"outcome": "completed", "finish_reason": "validation_period_complete"}
-                    if stage == "frozen_with_record"
+                    if stage == "registered_with_record"
                     else {"outcome": "freeze"}
                 ),
                 steps=steps,
@@ -399,7 +399,7 @@ def build_experiment(
                 reason=None,
                 experiment_end={
                     "status": "no_deliverable",
-                    "reason": "research budget exhausted without a freeze (llm_call_budget_exhausted)",
+                    "reason": "research budget exhausted without a registration (llm_call_budget_exhausted)",
                 },
             )
         )
@@ -439,9 +439,9 @@ def build_experiment(
         # The replay is running: its result directory is already on disk, and
         # no ledger record names it.
         write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=0.002, seed=9)
-    if stage == "frozen_with_record":
+    if stage == "registered_with_record":
         # The validation record: every step of the validation period, read off
-        # one replay of the frozen strategy, as the host's completion writes it.
+        # one replay of the registered strategy, as the host's completion writes it.
         validation = GEOMETRY.split_research(RULES.research_years)[1]
         plan = validation_record.ValidationSteps.of(validation, RULES.test_step_months)
         record_ref = write_result(
@@ -477,8 +477,8 @@ def build_experiment(
             # The session record is already in the ledger: the steps follow it.
             records.append(step_record)
             ledger.append(step_record)
-    if stage in ("frozen_with_record", "graduated", "discarded"):
-        edge = 0.002 if stage in ("frozen_with_record", "graduated") else -0.002
+    if stage in ("registered_with_record", "graduated", "discarded"):
+        edge = 0.002 if stage in ("registered_with_record", "graduated") else -0.002
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)
         replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
@@ -524,11 +524,11 @@ def build_experiment(
             mean_gross=0.9,
             seed_replicates=replicates,
         )
-        if stage == "frozen_with_record":
+        if stage == "registered_with_record":
             judged = {"readout": validation_record.readout(records, alpha=RULES.alpha, forward=forward)}
         else:
             # The retired sealed gate's reading and verdict, as that code wrote
-            # them: the frozen book over the sealed years against its threshold.
+            # them: the registered book over the sealed years against its threshold.
             sealed_ref = write_result(directory, "valid", start=SEALED[0], days=250, edge=2 * edge, seed=11)
             _with_baselines(sealed_ref, 0.9, series="benchmark_daily")
             sealed_analysis = _analysis(sealed_ref)
@@ -576,7 +576,7 @@ def build_experiment(
         )
         current = ""
     status: dict[str, object] = {"schema_version": 1, "pid": 999_999_999, "state": "stopped"}
-    if stage in ("frozen_with_record", "graduated", "discarded", "no_deliverable", "deadline", "environment_blocked"):
+    if stage in ("registered_with_record", "graduated", "discarded", "no_deliverable", "deadline", "environment_blocked"):
         status["state"] = "completed"
     elif stage == "broken":
         status["state"] = "failed"

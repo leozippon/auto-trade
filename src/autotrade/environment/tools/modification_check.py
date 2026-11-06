@@ -76,7 +76,7 @@ class ModificationCheckTool:
         # rewritten contract file is restored from there instead of blocking
         # every replay behind bytes the Agent is not allowed to produce. A
         # candidate directory gets no seed -- it is the Agent's own layout of
-        # the artifact it asks to freeze, validate supplies the file
+        # the artifact it asks to register, validate supplies the file
         # where it is absent, and a candidate carrying different bytes must
         # still be refused rather than corrected.
         self.readonly_seed = Path(readonly_seed) if readonly_seed is not None else None
@@ -115,7 +115,7 @@ class ModificationCheckTool:
             raise ToolError(str(exc)) from exc
         _reject_flat_asof_reads(files, self.output_dir)
         _reject_unseeded_randomness(files, self.output_dir)
-        # The same scan the artifact store runs when a frozen artifact is
+        # The same scan the artifact store runs when a registered artifact is
         # reloaded as a later session's start: run it here so a hardcoded stage
         # path is reported to the Agent before any formal replay.
         try:

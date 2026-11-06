@@ -5,7 +5,7 @@ plan order with durable pause/stop, session-boundary restart, per-session
 directives and ledger-based resume. This is the only orchestration entry point;
 there is no unattended batch driver. The append-only ledger is the source of
 truth: a session with a durable record is complete, the research session is
-due until research is over, and the forward replay runs only after a freeze.
+due until research is over, and the forward replay runs only after a registration.
 Integrity-flagged rows are not successes: resume refuses them.
 
 All control state lives under ``experiments/<id>/hitl/`` as single-writer JSON
@@ -50,10 +50,10 @@ from .hitl_state import (
 )
 from .ledger import (
     ExperimentLedger,
-    FrozenArtifactMutated,
-    assert_no_frozen_artifact_mutation,
-    frozen_record,
+    RegisteredArtifactMutated,
+    assert_no_registered_artifact_mutation,
     is_durable_success_record,
+    registered_record,
     research_over,
 )
 
@@ -107,7 +107,7 @@ class InteractiveExperimentRunner:
             total_sessions=len(self.sessions),
         )
         try:
-            assert_no_frozen_artifact_mutation(self.ledger.read())
+            assert_no_registered_artifact_mutation(self.ledger.read())
             for session in self.sessions:
                 if session.session_key in completed or not self._due(session):
                     continue
@@ -154,13 +154,13 @@ class InteractiveExperimentRunner:
 
     def _due(self, session: PlannedSession) -> bool:
         """The research session runs until research is over; the forward replay
-        runs once an artifact froze."""
+        runs once an artifact registered."""
 
         records = self.ledger.read()
         if session.kind == "research":
             return not research_over(records)
         if session.kind == "forward":
-            return frozen_record(records) is not None
+            return registered_record(records) is not None
         raise ValueError(f"unknown session kind: {session.kind}")
 
     def _execute_with_retries(
@@ -171,7 +171,7 @@ class InteractiveExperimentRunner:
             self._begin_session(session)
             try:
                 self.execute_session(session, context)
-            except (ExperimentStopped, AgentSessionBudgetExhausted, FrozenArtifactMutated):
+            except (ExperimentStopped, AgentSessionBudgetExhausted, RegisteredArtifactMutated):
                 raise
             except Exception as exc:  # noqa: BLE001 - session failure is kept and retried or re-raised after the last attempt
                 last_error = exc
