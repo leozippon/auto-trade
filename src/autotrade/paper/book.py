@@ -77,6 +77,10 @@ TRACKS = ("frozen", "graduated", "incubating")
 # Operator-opened books (frozen, and the retired incubating track) open at
 # once; a killed book does not count.
 BOOK_CAP = 4
+# The capital, in CNY, a new book starts with unless its creator names another,
+# whatever the arm's own initial_cash (the owner's decision of 2026-11-06); a
+# book keeps the capital it was created with.
+PAPER_INITIAL_CASH = 200_000.0
 # The Paper verdict's rules, pinned into every new book. A statistical check
 # runs only every CHECKPOINT_DAYS settled Paper sessions (half a year): kill
 # when the KILL_CONFIDENCE upper bound of the plain active mean is below zero
@@ -128,7 +132,7 @@ def create_book(
     track: str,
     source_record: Mapping[str, object] | None = None,
     permitted_boards: Sequence[str] | None = None,
-    initial_cash: float | None = None,
+    initial_cash: float = PAPER_INITIAL_CASH,
     note: str = "",
 ) -> Book:
     """Create the book at ``state_root`` (``<Paper state root>/<book id>``).
@@ -142,7 +146,8 @@ def create_book(
     in the forward record's shape (``result_ref`` inside the experiment
     directory and ``replay.heldout_start``), and buys on the
     ``permitted_boards`` that replay ran on; both are given exactly for that
-    track. A frozen or incubating book is refused while ``BOOK_CAP`` other
+    track. Every book starts with ``initial_cash``, not the arm's own. A
+    frozen or incubating book is refused while ``BOOK_CAP`` other
     operator-opened books beside it are not killed. Every track is refused, before anything
     is written, when the arm reads fundamentals and the PIT fundamental
     events audit does not cover the book's first decision view
@@ -182,8 +187,7 @@ def create_book(
     params = read_json_object(experiment / "hitl" / "params.json", missing_ok=True)
     if not params:
         raise ValueError(f"missing experiment params: {experiment / 'hitl' / 'params.json'}")
-    if initial_cash is not None:
-        params = {**params, "initial_cash": initial_cash}
+    params = {**params, "initial_cash": initial_cash}
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo_root, preflight=True)
     if options.data_backend != "pit":
         raise ValueError("Paper books trade on the PIT research release only")
@@ -488,6 +492,7 @@ _SCHEMA_2_LIMIT_KEYS = frozenset(
 __all__ = [
     "BOOK_CAP",
     "BOOK_NAME",
+    "PAPER_INITIAL_CASH",
     "SOURCE_HISTORY_NAME",
     "TRACKS",
     "VERDICT_LOG_NAME",

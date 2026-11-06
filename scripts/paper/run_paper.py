@@ -56,6 +56,7 @@ from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.paper.book import (
+    PAPER_INITIAL_CASH,
     SOURCE_HISTORY_NAME,
     VERDICT_LOG_NAME,
     Book,
@@ -157,7 +158,12 @@ def build_parser() -> argparse.ArgumentParser:
     init = commands.add_parser("init", help="Create a Paper book from one experiment's Paper candidate.")
     init.add_argument("--experiment", required=True, help="Experiment id under experiments/.")
     init.add_argument("--artifact", required=True, help="Frozen artifact id: the graduate, or its adjustment.")
-    init.add_argument("--initial-cash", type=float, help="Book capital in CNY; default: the experiment's initial_cash.")
+    init.add_argument(
+        "--initial-cash",
+        type=float,
+        default=PAPER_INITIAL_CASH,
+        help=f"Book capital in CNY; default {PAPER_INITIAL_CASH:,.0f}, whatever the experiment's initial_cash.",
+    )
     init.add_argument("--note", default="", help="One-line status shown at the top of every order sheet.")
     init.add_argument("--book", help="Book id; default: the experiment id.")
     init.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)

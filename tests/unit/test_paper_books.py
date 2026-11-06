@@ -28,6 +28,7 @@ from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_CAP,
     BOOK_NAME,
+    PAPER_INITIAL_CASH,
     STRATEGY_COPY_NAME,
     VERDICT_LOG_NAME,
     Book,
@@ -283,17 +284,20 @@ def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path)
 
 def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path: Path):
     """The fixture arm carries no board stamp: a graduated book pins those its
-    initial cash qualifies for, an incubating one the boards its incubation
-    replayed on, and that one pinned field is what its Broker enforces and
-    what its zero-skill panel draws from."""
+    initial cash qualifies for -- CNY 200,000 unless its creator names other
+    capital, whatever the arm's own -- an incubating one the boards its
+    incubation replayed on, and that one pinned field is what its Broker
+    enforces and what its zero-skill panel draws from."""
 
-    assert load_book(_graduated_book(tmp_path).root).profile.permitted_boards == ("main", "gem", "star", "bj")
+    default = load_book(_graduated_book(tmp_path).root).profile
+    assert (default.initial_cash, default.permitted_boards) == (PAPER_INITIAL_CASH, ("main", "gem"))
+    assert PAPER_INITIAL_CASH == 200_000
     arm = tmp_path / "experiments" / "exp"
-    small = create_book(
-        paper_root(tmp_path) / "small", experiment_dir=arm, artifact_id="strategy_research_abc",
-        repo_root=tmp_path, track="graduated", initial_cash=100_000,
+    large = create_book(
+        paper_root(tmp_path) / "large", experiment_dir=arm, artifact_id="strategy_research_abc",
+        repo_root=tmp_path, track="graduated", initial_cash=1_000_000,
     )
-    assert read_json_object(small.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem"]
+    assert read_json_object(large.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem", "star", "bj"]
 
     book = load_book(_incubate(tmp_path, "inc", boards=("main",)).root)
     assert book.profile.permitted_boards == ("main",)
