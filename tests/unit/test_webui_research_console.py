@@ -957,6 +957,8 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     assert "fraction && Number.isFinite(done)" in body("activityNode")
     budget = re.sub(r"\s+", " ", body("budgetBars"))
     assert "mini ? row.spent" in budget and "mini ? `${row.label}已用 ${row.spent}`" in budget
+    # The card leaves the random baselines to the experiment page.
+    assert '!(mini && key === "null_controls")' in budget
     assert "activityNode(fresh.status)" in body("controlPanel")
     # The card's evidence is the validation record and the forward reading, never
     # a research-period figure.

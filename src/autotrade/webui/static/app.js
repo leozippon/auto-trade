@@ -1336,7 +1336,8 @@ function ratioBar(ratio, { cls = "", tone = true } = {}) {
 }
 
 // The research budgets, keyed as the trace's budget_used block and the
-// listing's budget totals carry them.
+// listing's budget totals carry them. The home card leaves out the random
+// baselines (null_controls); the experiment page shows every row.
 const BUDGET_ROWS = [
   ["inference_seconds", "时间", fmtDuration],
   ["llm_calls", "模型调用", String],
@@ -1346,16 +1347,17 @@ const BUDGET_ROWS = [
 ];
 
 /* The research budget as one block per limit — its name and used percentage on
-   one line, its bar across the block underneath — so six budgets read as six
-   figures instead of one run-on line. `mini` is the home card's block: it says
-   what was spent, never against its limit, and leaves the share used to the
-   bar alone. A budget the experiment has a limit for but never metered (an experiment from
-   before that figure was recorded) keeps its block with a dash and an empty
-   bar, so the grid stays six figures wherever it appears. Null while nothing
-   was spent or no limit is known. */
+   one line, its bar across the block underneath — so the budgets read as
+   separate figures instead of one run-on line. `mini` is the home card's block:
+   it leaves out the random baselines, says what was spent, never against its
+   limit, and leaves the share used to the bar alone. A budget the experiment
+   has a limit for but never metered keeps its block with a dash and an empty
+   bar, so the grid keeps its shape. Null while nothing was spent or no limit
+   is known. */
 function budgetBars(used, total, { mini = false } = {}) {
   if (!used || !total) return null;
-  const rows = BUDGET_ROWS.map(([key, label, fmt]) => {
+  const shown = BUDGET_ROWS.filter(([key]) => !(mini && key === "null_controls"));
+  const rows = shown.map(([key, label, fmt]) => {
     const limit = Number(total[key]);
     const spent = Number(used[key]);
     if (!(limit > 0)) return null;
