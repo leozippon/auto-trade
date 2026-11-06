@@ -1,6 +1,6 @@
-"""The research arm end to end through the real worker and the real PIT replay.
+"""The research experiment end to end through the real worker and the real PIT replay.
 
-Only the snapshot provider is synthetic (``tests/unit/synthetic_arm.py``): the
+Only the snapshot provider is synthetic (``tests/unit/synthetic_experiment.py``): the
 params loader, the interactive runner, the pipeline, the deterministic
 developer, the span replay, the Broker, the readout and the terminal status
 are the production code.
@@ -34,12 +34,12 @@ from autotrade.pipelines.ledger import (
     research_records,
 )
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
-from tests.unit.synthetic_arm import (
+from tests.unit.synthetic_experiment import (
     GEOMETRY,
     RELEASE_END,
     SyntheticPITProvider,
     decision_anchor,
-    make_arm,
+    make_experiment,
 )
 from tests.unit.test_research_session_prompt import retired_vocabulary
 
@@ -87,10 +87,10 @@ class _PeakRss:
         return self.peak - self.start
 
 
-def test_an_arm_runs_research_completes_the_record_and_replays_forward_and_heldout_in_one_span(
+def test_an_experiment_runs_research_completes_the_record_and_replays_forward_and_heldout_in_one_span(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
-    repo, experiment = make_arm(tmp_path)
+    repo, experiment = make_experiment(tmp_path)
     options = load_worker_options(experiment, repo_root=repo)
     measured: dict[str, float] = {}
     real_research, real_forward = (
@@ -210,7 +210,7 @@ def test_an_arm_runs_research_completes_the_record_and_replays_forward_and_heldo
 def test_a_crashed_research_attempt_is_run_again_by_the_next_worker_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    repo, experiment = make_arm(tmp_path, session_max_attempts=1)
+    repo, experiment = make_experiment(tmp_path, session_max_attempts=1)
     real = experiment_module.RollingExperimentPipeline.run_research_session
     calls: list[int] = []
 
@@ -235,7 +235,7 @@ def test_a_crashed_research_attempt_is_run_again_by_the_next_worker_start(
 def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    repo, experiment = make_arm(tmp_path, session_max_attempts=1)
+    repo, experiment = make_experiment(tmp_path, session_max_attempts=1)
     real_forward = experiment_module.RollingExperimentPipeline.run_forward
     state = {"forward_calls": 0}
 
@@ -267,12 +267,12 @@ def test_a_worker_stopped_after_the_freeze_resumes_with_the_forward_replay_only(
     assert not (experiment / "pit_views").exists()
 
 
-def test_an_arm_stopped_before_its_verdict_keeps_its_pit_views(
+def test_an_experiment_stopped_before_its_verdict_keeps_its_pit_views(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     from autotrade.pipelines.hitl_state import read_control, write_control
 
-    repo, experiment = make_arm(tmp_path)
+    repo, experiment = make_experiment(tmp_path)
     control_path = experiment / "hitl" / "control.json"
     real = experiment_module.RollingExperimentPipeline.run_research_session
 
@@ -294,7 +294,7 @@ def test_an_arm_stopped_before_its_verdict_keeps_its_pit_views(
 def test_a_cache_that_cannot_be_released_is_recorded_and_the_verdict_stands(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    repo, experiment = make_arm(tmp_path)
+    repo, experiment = make_experiment(tmp_path)
 
     def stuck(_experiment_dir: Path) -> None:
         raise OSError("pit_views still exists after removal")
@@ -311,7 +311,7 @@ def test_a_cache_that_cannot_be_released_is_recorded_and_the_verdict_stands(
 def test_a_failed_replay_attempt_is_recorded_and_retried_from_forward_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    repo, experiment = make_arm(tmp_path, session_max_attempts=3)
+    repo, experiment = make_experiment(tmp_path, session_max_attempts=3)
     options = load_worker_options(experiment, repo_root=repo)
     from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
 
@@ -341,7 +341,7 @@ def test_a_failed_replay_attempt_is_recorded_and_retried_from_forward_start(
 def test_a_forward_replay_that_keeps_failing_fails_the_experiment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    repo, experiment = make_arm(tmp_path, session_max_attempts=2)
+    repo, experiment = make_experiment(tmp_path, session_max_attempts=2)
     from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
 
     real_evaluate = PITDailyEvaluationBackend.evaluate
@@ -363,10 +363,10 @@ def test_a_forward_replay_that_keeps_failing_fails_the_experiment(
     assert read_status(experiment / "hitl" / "status.json")["state"] == "failed"
 
 
-def test_an_arm_whose_budget_ends_without_a_registrable_candidate_runs_no_replay(
+def test_an_experiment_whose_budget_ends_without_a_registrable_candidate_runs_no_replay(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
-    repo, experiment = make_arm(tmp_path)
+    repo, experiment = make_experiment(tmp_path)
     from autotrade.pipelines import local_backend
 
     real_call = local_backend.DeterministicBaselineDeveloper.__call__
@@ -396,12 +396,12 @@ def test_an_arm_whose_budget_ends_without_a_registrable_candidate_runs_no_replay
 def test_a_fold_era_ledger_is_refused(tmp_path: Path):
     from autotrade.environment.identity import AgentRefStore
 
-    repo, experiment = make_arm(tmp_path)
+    repo, experiment = make_experiment(tmp_path)
     AgentRefStore(experiment)
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
     archived = {
         "record_type": "fold",
-        "experiment_id": "arm",
+        "experiment_id": "experiment",
         "epoch_id": "epoch_001",
         "fold_id": "fold_2024",
         "run_id": "run_old",
@@ -414,7 +414,7 @@ def test_a_fold_era_ledger_is_refused(tmp_path: Path):
 
 
 def test_the_worker_refuses_a_release_that_does_not_reach_heldout(tmp_path: Path):
-    repo, experiment = make_arm(tmp_path, heldout_end="20251231", forward_end="20250630")
+    repo, experiment = make_experiment(tmp_path, heldout_end="20251231", forward_end="20250630")
     params_path = experiment / "hitl" / "params.json"
     params = json.loads(params_path.read_text(encoding="utf-8"))
     params.update({"research_end": "20250630", "forward_end": "20260630", "heldout_end": "20260930"})
@@ -452,8 +452,8 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     )
     from tests.unit.test_operating_memory import _finished_experiment
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm")
-    # The assertions below read the session tree. A finished arm otherwise deletes it.
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm")
+    # The assertions below read the session tree. A finished experiment otherwise deletes it.
     monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
     _finished_experiment(repo / "experiments", "adopted")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
@@ -501,7 +501,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     received = _facts(system_prompts[0])
     previewed = _facts(str(build_prompt_preview(experiment, "research", "", repo_root=repo)["prompt"]))
     assert set(previewed) == set(received)
-    for block in ("budgets", "research_scope", "visibility_policy", "broker_replay", "arm"):
+    for block in ("budgets", "research_scope", "visibility_policy", "broker_replay", "experiment"):
         assert set(previewed[block]) == set(received[block]), block
     assert previewed["research_scope"] == received["research_scope"]
     assert previewed["research_geometry"] == received["research_geometry"]
@@ -635,7 +635,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
         _NoShellRunner,
     )
 
-    repo, experiment = make_arm(
+    repo, experiment = make_experiment(
         tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=40
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
@@ -704,11 +704,11 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert "回测年" not in note
     assert "上面是中断前最近一次压缩的摘要" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
-    assert facts["arm"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
+    assert facts["experiment"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
     assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 0
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 5
     # One session root, two transcripts, and both attempts' revisions kept as
-    # the arm's artifact history: the resumed attempt's revision descends from
+    # the experiment's artifact history: the resumed attempt's revision descends from
     # the one the node it continued out of was validated as.
     assert sorted(path.name for path in (experiment / "artifacts" / "transcripts").glob("run_ref_*.txt")) != [transcripts[0].name]
     store = FilesystemArtifactStore(experiment / "artifacts" / "strategy")
@@ -744,7 +744,7 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
         _NoShellRunner,
     )
 
-    repo, experiment = make_arm(
+    repo, experiment = make_experiment(
         tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=6
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
@@ -808,7 +808,7 @@ def test_an_interrupted_session_resumes_from_its_frontier_and_record(
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     geometry = facts["research_geometry"]
     assert (geometry["frontier"], geometry["steps_tested"], geometry["steps"]) == ("20230930", 1, 4)
-    assert facts["arm"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
+    assert facts["experiment"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
     assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 1
     assert "第 2 次尝试" in opening[1].content
 
@@ -829,7 +829,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
         _NoShellRunner,
     )
 
-    repo, experiment = make_arm(
+    repo, experiment = make_experiment(
         tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=4
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
@@ -858,7 +858,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert (record["attempts"], record["outcome"], record["finish_reason"]) == (
         2, "deadline", "llm_call_budget_exhausted"
     )
-    assert record["arm_end"] is None and len(record["steps"]) == 1
+    assert record["experiment_end"] is None and len(record["steps"]) == 1
     assert record["frozen"]["source_step_id"] == record["steps"][0]["step_id"]
     assert {row["source"] for row in records[1:5]} == {"host_completion"}
     # Three failed calls of the first attempt, then this attempt's one.
@@ -871,7 +871,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert "中断前没有压缩摘要" in note and "模型调用 3/4" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 3
-    assert facts["arm"]["validations_to_date"] == 0
+    assert facts["experiment"]["validations_to_date"] == 0
     assert not (options.work_root / options.experiment_id).exists()
 
 
@@ -904,7 +904,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
         "completion_tokens": 1_000,
         "prompt_tokens_details": {"cached_tokens": 5_000},
     }
-    repo, experiment = make_arm(
+    repo, experiment = make_experiment(
         tmp_path,
         developer_mode="llm",
         session_max_attempts=1,
@@ -944,7 +944,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
         "deadline",
         "api_spend_exhausted",
     )
-    assert record["arm_end"] is None
+    assert record["experiment_end"] is None
     assert len(record["steps"]) == 2
     assert record["frozen"]["source_step_id"] == record["steps"][-1]["step_id"]
     assert record["budget_used"]["api_spend_usd"] == 0.082
@@ -969,20 +969,20 @@ def test_release_finished_sandbox_removes_only_that_experiment(tmp_path: Path) -
     from autotrade.pipelines.worker import release_finished_sandbox
 
     work = tmp_path / "sandboxes"
-    own = work / "arm_a" / "research"
+    own = work / "experiment_a" / "research"
     own.mkdir(parents=True)
     locked = own / "snapshot"
     locked.mkdir(mode=0o555)
     (own / "note.txt").write_text("x", encoding="utf-8")
-    sibling = work / "arm_b"
+    sibling = work / "experiment_b"
     sibling.mkdir()
     (sibling / "keep.txt").write_text("keep", encoding="utf-8")
 
-    release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id="arm_a"))
-    assert not (work / "arm_a").exists()
+    release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id="experiment_a"))
+    assert not (work / "experiment_a").exists()
     assert (sibling / "keep.txt").read_text(encoding="utf-8") == "keep"
 
-    release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id="arm_a"))
+    release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id="experiment_a"))
     release_finished_sandbox(SimpleNamespace(work_root=work, experiment_id=""))
     assert work.is_dir() and (sibling / "keep.txt").is_file()
 
@@ -994,7 +994,7 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     from autotrade.pipelines.research_session import _remove_mounted_tree
     from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", session_max_attempts=1)
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm", session_max_attempts=1)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     with pytest.raises(RuntimeError, match="language model unavailable"):
@@ -1032,7 +1032,7 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
         _NoShellRunner,
     )
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=1)
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=1)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     session_root = tmp_path / "unused"
 
@@ -1126,7 +1126,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
             },
         )
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm", max_llm_calls=5)
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm", max_llm_calls=5)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     llm = _NominatingLLM(
@@ -1155,7 +1155,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     tested = record["steps"][1]["step_id"]
     assert {row["candidate"]["step_id"] for row in tests} == {tested}
     assert (record["outcome"], record["finish_reason"]) == ("deadline", "llm_call_budget_exhausted")
-    assert record["frozen"]["source_step_id"] == tested and record["arm_end"] is None
+    assert record["frozen"]["source_step_id"] == tested and record["experiment_end"] is None
     assert (record["frontier"], record["steps_tested"]) == ("20240630", 4)
     assert record["budget_used"]["test_replays"] == 1
     assert replay["record_type"] == "forward" and result["verdict"]["status"] == "frozen_with_record"
@@ -1209,7 +1209,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert facts["research_geometry"]["validation_period"] == "20230701..20240630"
     assert facts["research_geometry"]["input_window"] == "20210701..20230630"
     assert (facts["research_geometry"]["frontier"], facts["research_geometry"]["steps_tested"]) == ("20230630", 0)
-    assert facts["arm"] == {"validations_to_date": 0, "full_span_validations_to_date": 0}
+    assert facts["experiment"] == {"validations_to_date": 0, "full_span_validations_to_date": 0}
     instrument = facts["artifact_contract"]["acceptance_rules"]["instrument"]
     assert (instrument["alpha"], instrument["bar_over_validation_period"]) == (0.05, 1.645)
     # The facts state the frontier, so the prompt carries the run section
@@ -1222,14 +1222,14 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
         assert later not in read
 
 
-def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
+def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider, capsys
 ):
     """Round 20261015 through the real worker: every replay of the research
     year fails in the host's as-of merge. The full span fails on the
     environment twice; the second ends the attempt without another model
     call. The block ends the attempt, not the research: the next worker
-    attempt resumes, and only the third such attempt ends the arm
+    attempt resumes, and only the third such attempt ends the experiment
     ``environment_blocked`` -- not ``no_deliverable`` -- with the host's
     reason in its ledger record, its terminal status, the worker log and the
     console's attention line. No replay follows."""
@@ -1273,7 +1273,7 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
             )
         )
 
-    repo, experiment = make_arm(tmp_path, developer_mode="llm")
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     never = ProviderResponse(tool_calls=(ToolCall("test", "test", {"candidate": "working_copy"}),))
@@ -1297,14 +1297,14 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
         "environment_blocked",
         None,
     )
-    assert record["arm_end"] == {"status": "environment_blocked", "reason": reason}
+    assert record["experiment_end"] == {"status": "environment_blocked", "reason": reason}
     assert record["steps"] == []
     # The failed batches were refunded: no replay-year was spent.
     assert record["budget_used"]["test_replays"] == 0
     verdict = {"status": "environment_blocked", "reasons": [reason]}
     assert result["verdict"] == verdict
     assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict
-    assert f"arm environment_blocked: {reason}" in capsys.readouterr().err
+    assert f"experiment environment_blocked: {reason}" in capsys.readouterr().err
     assert all(item[0] != "heldout" for item in synthetic_provider.requests)
     row = summarize_experiment(experiment)
     assert row["ending"] == {"state": "environment_blocked", "reason": reason}
@@ -1315,7 +1315,7 @@ def test_a_span_the_host_cannot_replay_ends_the_arm_environment_blocked(
 def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The arm's pinned image was built from the template README its session
+    """The experiment's pinned image was built from the template README its session
     was seeded with, and a maintainer then edits the template in the checkout.
     The session's next attempt resumes on the copy it was seeded with and
     starts. A session seeded after the edit is refused before its Agent reads
@@ -1355,8 +1355,8 @@ def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     template = Path(contract_fingerprint.__file__).resolve().parents[3] / "configs" / "agent_output_template"
 
-    def arm(root: Path):
-        repo, experiment = make_arm(
+    def experiment(root: Path):
+        repo, experiment = make_experiment(
             root, developer_mode="llm", strategy_path="configs/agent_output_template/main.py"
         )
         shutil.copytree(template, repo / "configs" / "agent_output_template")
@@ -1370,7 +1370,7 @@ def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
         )
         return repo, build.pipeline
 
-    repo, running = arm(tmp_path / "running")
+    repo, running = experiment(tmp_path / "running")
     with pytest.raises(SandboxStarting):
         running.run_research_session()
     readme = repo / AGENT_CONTRACT_PATHS[0]
@@ -1380,7 +1380,7 @@ def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
     with pytest.raises(SandboxStarting):
         running.run_research_session()
 
-    later, fresh = arm(tmp_path / "later")
+    later, fresh = experiment(tmp_path / "later")
     shutil.copyfile(readme, later / AGENT_CONTRACT_PATHS[0])
     with pytest.raises(SandboxImageContractMismatch, match=AGENT_CONTRACT_PATHS[0]):
         fresh.run_research_session()

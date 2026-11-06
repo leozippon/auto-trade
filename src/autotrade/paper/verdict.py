@@ -20,7 +20,7 @@ sessions, each on the days through it and each once: kill when the
 ``kill_confidence`` upper bound of the mean is below zero, confirm when its
 ``confirm_confidence`` lower bound is above it (the moving-block bootstrap,
 ``pipelines/verdict.bootstrap_lower_bound``, seeded by the artifact id). A
-drawdown past the arm's pinned ``max_drawdown`` (account) or
+drawdown past the experiment's pinned ``max_drawdown`` (account) or
 ``active_max_drawdown`` (active series) kills on any day. ``verdict.json``
 holds the latest reading. The rules are the ones the book pinned at creation.
 """

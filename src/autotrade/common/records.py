@@ -108,7 +108,7 @@ def write_json_atomic(
 # this host keeps its files under, then at least one more segment of ordinary
 # path characters. Redacting every ``/`` at a token boundary instead rewrote the
 # transcript the Agent reads its own work back from: 464 substitutions in one
-# audited arm, nearly all of them division, backquoted names, ``2>/dev/null``
+# audited experiment, nearly all of them division, backquoted names, ``2>/dev/null``
 # and ``<domain>/part_0000.parquet``.
 HOST_PATH_MARKER = "[host_path]"
 

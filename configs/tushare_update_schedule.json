@@ -414,7 +414,7 @@
       "skip_if_already_ok": false
     },
     "manual_history_backfill_macro": {
-      "description": "Manual (not scheduled): lower the research-history floor to 20140701 for the benchmark and Shenwan series eight-year rule-score arms read (index_daily, index_dailybasic, sw_daily) and land their missing history. Run with --start-date 20140701 --end-date <the last trade date before the lake's current floor>; covered partitions skip. Follow with cn_nightly_full_audit --force-run.",
+      "description": "Manual (not scheduled): lower the research-history floor to 20140701 for the benchmark and Shenwan series eight-year rule-score experiments read (index_daily, index_dailybasic, sw_daily) and land their missing history. Run with --start-date 20140701 --end-date <the last trade date before the lake's current floor>; covered partitions skip. Follow with cn_nightly_full_audit --force-run.",
       "operation": "download_tier",
       "tier": "macro",
       "end_date_offset_days": 0,

@@ -3,7 +3,7 @@
 #
 # data/llm_conversations is the redacted request/response audit log of every
 # provider, one JSONL file per process and UTC day, and it grows with every
-# arm. No code reads it, so once a week every file older than 14 days is
+# experiment. No code reads it, so once a week every file older than 14 days is
 # compressed in place to <file>.jsonl.zst (zstd keeps the original until the
 # compressed copy is complete; `zstd -dc` reads it back). The writer opens a
 # file only to append one record, under the day the request started, so a file

@@ -1,18 +1,18 @@
 """What the rounds send alike, stated once.
 
-A round file is its arms and their directives. The values several rounds share
+A round file is its experiments and their directives. The values several rounds share
 -- the geometry and dataset selection a seed was prebuilt for, the acceptance
 rules and the round-level parameters -- live here, and a round imports them from
 here and from `_round`, never from another round file, so a round can close
 without its values moving.
 
-Arms have been created under every value below. A round that needs another
+Experiments have been created under every value below. A round that needs another
 value adds a new name rather than editing one in place. The one exception is a
 key the console retires: it leaves every profile, so that a round built from
 one is accepted (the deflated-Sharpe bars and the replay-year budget left on
 2026-11-06; git history keeps what the closed rounds sent). No profile states
 `research_years`: how many of a geometry's years a session researches on is
-each arm's choice, which every round states for its arms.
+each experiment's choice, which every round states for its experiments.
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ CSI1000 = "000852.SH"
 
 # The research geometry and dataset selection the eight-year seeds were planned
 # over (round 20260927, logs/notes/round_20260927/E8_eight_year_build.md); part
-# of a seed's contract, so no arm may change one of them alone.
+# of a seed's contract, so no experiment may change one of them alone.
 EIGHT_YEAR: dict[str, object] = {
     "research_start": "20170701",
     "research_end": "20250630",
@@ -59,7 +59,7 @@ FUND_EIGHT_YEAR_100K: dict[str, object] = {
 
 # The eight-year geometry with both the fundamentals domain (the default ten
 # datasets) and the vendor's announcement titles (round 20261014): the first
-# selection to mount statements and titles on one arm. Its seed is prebuilt
+# selection to mount statements and titles on one experiment. Its seed is prebuilt
 # from a research release whose fundamentals and titles both reach back to
 # 2016-01 and whose Broker corporate actions carry the bonus-share column the
 # dividend tax reads.

@@ -33,7 +33,7 @@ from .fixtures_sandbox import PassingModificationCheck
 VALID_MAIN = "def generate_orders(context):\n    return []\n"
 # A real host path: the redaction recognises the roots the host keeps its files
 # under, and a pytest temp directory is not one of them.
-HOST_RESULT_PATH = f"{Path(__file__).resolve().parents[2]}/experiments/arm/private/result.json"
+HOST_RESULT_PATH = f"{Path(__file__).resolve().parents[2]}/experiments/experiment/private/result.json"
 
 
 def _artifact(root: Path, *, extra_lines: int = 0) -> Path:

@@ -2,12 +2,12 @@
 
 The host keeps Hugging Face model directories under ``data/pretrained/`` beside
 a ``MANIFEST.sha256`` that lists every file as ``<sha256>  <model>/<file>``
-(``sha256sum -c`` verifies it). An arm pins the digest of that manifest file
+(``sha256sum -c`` verifies it). An experiment pins the digest of that manifest file
 when it is created (the experiment parameter ``pretrained_manifest_sha256``,
 stamped by the console), and every container that mounts the store -- each
 strategy container, research and Paper alike, and the Agent's session
 container -- first compares the store's manifest with the pin and refuses to
-start on a missing store or a different one. An arm or a Paper book without
+start on a missing store or a different one. An experiment or a Paper book without
 the pin mounts nothing.
 
 This is pin-and-compare only: hashing the weights themselves is the one-off
@@ -28,7 +28,7 @@ _DIGEST = re.compile(r"^[0-9a-f]{64}$")
 
 
 class PretrainedStoreError(RuntimeError):
-    """The pretrained store an arm pinned is absent or is a different store."""
+    """The pretrained store an experiment pinned is absent or is a different store."""
 
 
 def pretrained_pin(value: object) -> str:
@@ -44,7 +44,7 @@ def pretrained_pin(value: object) -> str:
 
 
 def manifest_digest(store: Path | None = None) -> str:
-    """The SHA-256 of the store's ``MANIFEST.sha256``, the value an arm pins."""
+    """The SHA-256 of the store's ``MANIFEST.sha256``, the value an experiment pins."""
 
     root = PRETRAINED_STORE if store is None else Path(store)
     try:
@@ -65,9 +65,9 @@ def require_pretrained_store(pin: str, store: Path | None = None) -> Path:
     digest = manifest_digest(root)
     if digest != pin:
         raise PretrainedStoreError(
-            f"the pretrained store at {root} is not the one this arm or book pinned "
+            f"the pretrained store at {root} is not the one this experiment or book pinned "
             f"(manifest {digest}, pinned {pin}): restore the pinned store; a new store "
-            "reaches only arms created after it"
+            "reaches only experiments created after it"
         )
     return root
 

@@ -7,7 +7,7 @@ parameters live in the sibling ``models/`` directory so binary state is
 validated and frozen separately from strategy code.
 
 Every revision a Validation recorded is kept for the life of the experiment, so
-the store is the arm's artifact history rather than a working set. Keeping it
+the store is the experiment's artifact history rather than a working set. Keeping it
 is affordable because it is content-addressed: one object per distinct file
 (SHA-256 of its bytes), and each revision a hard-linked tree plus a manifest
 naming its parent, so a candidate that changed one file costs one file.
@@ -154,7 +154,7 @@ class ArtifactRevision:
 
 @dataclass(frozen=True)
 class FrozenArtifact:
-    """A revision frozen as the arm's deliverable, with the Step it came from."""
+    """A revision frozen as the experiment's deliverable, with the Step it came from."""
 
     artifact_id: str
     path: Path
@@ -313,7 +313,7 @@ class FilesystemArtifactStore:
         """Discard frozen artifacts no ledger record still references.
 
         Revisions are deliberately not pruned here: every revision a Validation
-        recorded is the arm's artifact history, and content addressing is what
+        recorded is the experiment's artifact history, and content addressing is what
         makes keeping all of it affordable.
         """
 

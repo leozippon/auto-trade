@@ -817,7 +817,7 @@ def _experiment_identity(params: dict[str, object]) -> dict[str, object]:
     return _snapshot_config({**WEB_CREATE_DEFAULTS, **params}).to_record()
 
 
-# The 2026-09-14 derivatives arm: eight macro series and one events series on
+# The 2026-09-14 derivatives experiment: eight macro series and one events series on
 # top of the default scope. Spelled out because the selection REPLACES the
 # domain default rather than adding to it.
 EXTRA_MACRO = (
@@ -1042,10 +1042,10 @@ def test_a_seed_whose_prebuild_did_not_finish_is_refused(
     )
 
 
-def test_a_seed_without_the_bonus_split_is_refused_for_a_taxed_arm(tmp_path: Path) -> None:
-    """A taxed arm's Broker refuses the first replay day of a slot whose ex-date
+def test_a_seed_without_the_bonus_split_is_refused_for_a_taxed_experiment(tmp_path: Path) -> None:
+    """A taxed experiment's Broker refuses the first replay day of a slot whose ex-date
     table predates ``bonus_per_share``; a seed of such slots is refused when
-    the arm is created, not at its first Validation."""
+    the experiment is created, not at its first Validation."""
 
     from autotrade.pipelines.pit_views_seed import assert_seed_carries_bonus_split
 
@@ -1157,7 +1157,7 @@ def test_the_timing_contract_names_only_what_the_selection_mounts() -> None:
 
 def test_annotations_never_change_a_cache_binding(tmp_path: Path) -> None:
     """Caches bound before provider records carried vintages and the timing
-    contract stay bound: running arms keep their views."""
+    contract stay bound: running experiments keep their views."""
 
     from autotrade.pipelines.pit_views_seed import contract_identity
 

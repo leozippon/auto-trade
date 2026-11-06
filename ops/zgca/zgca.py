@@ -13,9 +13,9 @@ and the research release that seed was built from (without the text and
 minute datasets its configuration does not read), prunes code the tree no
 longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
 on the instance's GPU driver), and last copies the pretrained-model store every
-new arm pins and mounts to the instance's own disk, or refuses when it does
-not fit there; push carries ended arms of this host to the instance; a run
-starts the console (restarting it onto the deployed checkout when no arm
+new experiment pins and mounts to the instance's own disk, or refuses when it does
+not fit there; push carries ended experiments of this host to the instance; a run
+starts the console (restarting it onto the deployed checkout when no experiment
 runs) and a round launcher in tmux with AUTOTRADE_GPU_NAME set,
 and repeats a `--fill` launcher every ten minutes in a session of its own
 until its round has nothing pending; status and sync read and copy back.
@@ -25,8 +25,8 @@ the default). Beyond that fill loop nothing here schedules, caches an
 endpoint, keeps a secret in the repository or changes how the executor
 isolates a strategy container. See ops/zgca/README.md.
 
-usage: zgca.py [--instance <id>] up | deploy <seed dir> | push <arm id>... |
-       run <round file> [launcher args...] | status | sync <arm id> | down
+usage: zgca.py [--instance <id>] up | deploy <seed dir> | push <experiment id>... |
+       run <round file> [launcher args...] | status | sync <experiment id> | down
 """
 
 from __future__ import annotations
@@ -93,7 +93,7 @@ CUDA_COMPAT_URL = "https://developer.download.nvidia.com/compute/cuda/repos/debi
 CUDA_COMPAT_NAME = "cuda-compat-13-0_580.196.07-1_amd64.deb"
 CUDA_COMPAT_SHA256 = "d2d3262512046b23215ff197fe79a6ca0d44299ed0e665275ac05bb28b79e4e3"
 # The pretrained-model store (environment.pretrained): the console stamps its
-# manifest digest into every arm it creates and every container compares it.
+# manifest digest into every experiment it creates and every container compares it.
 PRETRAINED = "data/pretrained"
 PRETRAINED_MANIFEST = "MANIFEST.sha256"
 TRACKED_LIST_NAME = "tracked.txt"
@@ -162,7 +162,7 @@ def release_exclusions(provider: dict[str, object]) -> list[str]:
     nothing reads unless the snapshot configuration names them; every other
     dataset ships, since the release's readers also open some no configuration
     names (the SSE calendar, the listing and industry tables). The seed's
-    ``provider.json`` records its configuration; an arm whose configuration
+    ``provider.json`` records its configuration; an experiment whose configuration
     needs a dataset left behind is refused when it pins the release.
     """
 
@@ -216,8 +216,8 @@ class Workflow:
                 f"{REMOTE_ROOT_ENV}={self.remote_root!r} is not a directory directly below /personal_fast_storage"
             )
         # An instance's sandbox image, tmux sessions and console port serve one
-        # root: another root there could rebuild the image the live arms run on
-        # (its guard sees only its own root's arms) or launch through the live
+        # root: another root there could rebuild the image the live experiments run on
+        # (its guard sees only its own root's experiments) or launch through the live
         # console, so the default instance keeps the live tree's.
         if self.remote_root != REMOTE_ROOT and self.instance == INSTANCE_ID:
             raise WorkflowError(
@@ -362,7 +362,7 @@ class Workflow:
         pretrained = self.repo_root / PRETRAINED
         if not (pretrained / PRETRAINED_MANIFEST).is_file():
             raise WorkflowError(
-                f"{PRETRAINED}/{PRETRAINED_MANIFEST} is missing: the instance's arms pin and mount that store"
+                f"{PRETRAINED}/{PRETRAINED_MANIFEST} is missing: the instance's experiments pin and mount that store"
             )
         listed = subprocess.run(
             ["git", "ls-files", "-z"], cwd=self.repo_root, stdin=subprocess.DEVNULL, capture_output=True, check=False,
@@ -409,36 +409,36 @@ class Workflow:
                 f"({store_bytes / GIB:.1f} GiB in all, {present / GIB:.1f} GiB already in {store}) plus "
                 f"{LOCAL_DISK_RESERVE / GIB:.0f} GiB kept free for image rebuilds and container scratch, and "
                 f"{LOCAL_DISK} has {free / GIB:.1f} GiB free. Code, seed, release and image are deployed; the store "
-                "is not, so no arm can be created or started there until it has room and deploy runs again"
+                "is not, so no experiment can be created or started there until it has room and deploy runs again"
             )
         say(f"deploy: {PRETRAINED} to {store}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{store}/")
         self.dev("report")
         say("deploy: done")
 
-    def push(self, arms: Sequence[str]) -> None:
-        """Copy ended arms of this host to the instance."""
-        # The console's own notion of a running arm; its module needs the project's environment (numpy).
+    def push(self, experiment_ids: Sequence[str]) -> None:
+        """Copy ended experiments of this host to the instance."""
+        # The console's own notion of a running experiment; its module needs the project's environment (numpy).
         _with_project_src()
-        from autotrade.pipelines.hitl_state import running_arms
+        from autotrade.pipelines.hitl_state import running_experiments
 
         experiments = self.repo_root / "experiments"
-        for arm in arms:
-            if not SAFE_ID.fullmatch(arm):
-                raise WorkflowError(f"not an experiment id: {arm!r}")
+        for experiment_id in experiment_ids:
+            if not SAFE_ID.fullmatch(experiment_id):
+                raise WorkflowError(f"not an experiment id: {experiment_id!r}")
             try:
-                created_under = json.loads((experiments / arm / "hitl" / "params.json").read_text(encoding="utf-8")).get("experiments_root")
+                created_under = json.loads((experiments / experiment_id / "hitl" / "params.json").read_text(encoding="utf-8")).get("experiments_root")
             except (OSError, ValueError) as exc:
-                raise WorkflowError(f"experiments/{arm} is not a readable arm of this host ({exc})") from exc
+                raise WorkflowError(f"experiments/{experiment_id} is not a readable experiment of this host ({exc})") from exc
             if created_under == f"{self.remote_root}/experiments":
-                raise WorkflowError(f"experiments/{arm} is a copy of an arm of the instance; its original is there")
-        running = sorted(set(arms) & set(running_arms(experiments)))
+                raise WorkflowError(f"experiments/{experiment_id} is a copy of an experiment of the instance; its original is there")
+        running = sorted(set(experiment_ids) & set(running_experiments(experiments)))
         if running:
             raise WorkflowError(f"{', '.join(running)} still running here: a copy cannot be verified while it changes")
         self.require_running()
-        for arm in arms:
-            say(f"push: experiments/{arm} (without pit_views)")
-            self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"{experiments / arm}/", f"dev:{self.remote_root}/experiments/{arm}/")
+        for experiment_id in experiment_ids:
+            say(f"push: experiments/{experiment_id} (without pit_views)")
+            self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"{experiments / experiment_id}/", f"dev:{self.remote_root}/experiments/{experiment_id}/")
 
     def run(self, round_file: str, args: Sequence[str]) -> None:
         tracked = subprocess.run(
@@ -457,25 +457,25 @@ class Workflow:
             self.dev("report")
             self.remote("status")
 
-    def sync(self, arm: str) -> None:
-        if not SAFE_ID.fullmatch(arm):
-            raise WorkflowError(f"not an experiment id: {arm!r}")
-        local = self.repo_root / "experiments" / arm
+    def sync(self, experiment_id: str) -> None:
+        if not SAFE_ID.fullmatch(experiment_id):
+            raise WorkflowError(f"not an experiment id: {experiment_id!r}")
+        local = self.repo_root / "experiments" / experiment_id
         if local.exists():
             try:
                 created_under = json.loads((local / "hitl" / "params.json").read_text(encoding="utf-8")).get("experiments_root")
             except (OSError, ValueError) as exc:
-                raise WorkflowError(f"experiments/{arm} exists here and its hitl/params.json cannot say where it was created ({exc}); refusing to overwrite it") from exc
+                raise WorkflowError(f"experiments/{experiment_id} exists here and its hitl/params.json cannot say where it was created ({exc}); refusing to overwrite it") from exc
             if created_under != f"{self.remote_root}/experiments":
-                raise WorkflowError(f"experiments/{arm} is an arm of this host (created under {created_under}), not a copy from the instance; refusing to overwrite it")
+                raise WorkflowError(f"experiments/{experiment_id} is an experiment of this host (created under {created_under}), not a copy from the instance; refusing to overwrite it")
         self.require_running()
-        self.remote("arm-state", arm)
+        self.remote("experiment-state", experiment_id)
         local.parent.mkdir(parents=True, exist_ok=True)
-        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{self.remote_root}/experiments/{arm}/", f"{local}/")
+        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{self.remote_root}/experiments/{experiment_id}/", f"{local}/")
         logs = self.repo_root / "logs" / "workers"
         logs.mkdir(parents=True, exist_ok=True)
-        self.dev("copy", *PRESERVE, f"dev:{self.remote_root}/logs/workers/{arm}.log", f"{logs / arm}.log")
-        say(f"synced experiments/{arm} (without pit_views) and logs/workers/{arm}.log")
+        self.dev("copy", *PRESERVE, f"dev:{self.remote_root}/logs/workers/{experiment_id}.log", f"{logs / experiment_id}.log")
+        say(f"synced experiments/{experiment_id} (without pit_views) and logs/workers/{experiment_id}.log")
 
     def down(self) -> None:
         self.lifecycle("stop")
@@ -496,14 +496,14 @@ def main(
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
     deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
     deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
-    push = commands.add_parser("push", help="copy ended arms of this host to the instance")
-    push.add_argument("arms", nargs="+", metavar="arm", help="experiment id")
-    run = commands.add_parser("run", help="start the console, or restart it when no arm runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
+    push = commands.add_parser("push", help="copy ended experiments of this host to the instance")
+    push.add_argument("experiment_ids", nargs="+", metavar="experiment_id", help="experiment id")
+    run = commands.add_parser("run", help="start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
-    run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, arm ids)")
-    commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, console, arms, image, round log")
-    sync = commands.add_parser("sync", help="copy an arm's records and worker log back here")
-    sync.add_argument("arm", help="experiment id")
+    run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, experiment ids)")
+    commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, console, experiments, image, round log")
+    sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here")
+    sync.add_argument("experiment_id", help="experiment id")
     commands.add_parser("down", help="instance stop: wait for STOPPED")
     options = parser.parse_args(argv)
     try:
@@ -518,13 +518,13 @@ def main(
         elif options.command == "deploy":
             workflow.deploy(options.seed)
         elif options.command == "push":
-            workflow.push(options.arms)
+            workflow.push(options.experiment_ids)
         elif options.command == "run":
             workflow.run(options.round_file, options.args)
         elif options.command == "status":
             workflow.status()
         elif options.command == "sync":
-            workflow.sync(options.arm)
+            workflow.sync(options.experiment_id)
         else:
             workflow.down()
     except WorkflowError as exc:

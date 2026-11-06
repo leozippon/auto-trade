@@ -52,7 +52,6 @@ from autotrade.environment.sandbox_images import prepare_experiment_sandbox_imag
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.tools.base import CommandRunner
 
-from .arm_params import ArmParams, read_param, read_param_or_default, session_models
 from .calendar import (
     GEOMETRY_PARAMETERS,
     ResearchGeometry,
@@ -65,10 +64,16 @@ from .config import (
     acceptance_for,
 )
 from .experiment import RollingExperimentPipeline
+from .experiment_params import (
+    ExperimentParams,
+    read_param,
+    read_param_or_default,
+    session_models,
+)
 from .hitl_state import (
     SCHEDULE_NAME,
     WEB_INTERNAL_PARAMS,
-    ArmState,
+    ExperimentState,
     PlannedSession,
     build_session_plan,
     planned_sessions,
@@ -129,10 +134,10 @@ class LLMWorkerSettings:
     # The session parent conversation's compaction budget; ``compaction_for``
     # derives the other conversation roles' from the same knobs.
     compaction: ContextCompactionConfig
-    # The arm's ``compact_token_threshold``; None = each role's bound
+    # The experiment's ``compact_token_threshold``; None = each role's bound
     # (``compaction_for``).
     compact_token_threshold: int | None = None
-    # The arm's ``llm_key``: which relay credential every role starts on.
+    # The experiment's ``llm_key``: which relay credential every role starts on.
     llm_key: str = "primary"
 
     def model_for(self, role: str) -> str:
@@ -205,7 +210,7 @@ class LLMWorkerSettings:
         COMPACTION_SAFETY_MARGIN_TOKENS`` for the role's own model, so prompt
         plus output never exceeds the window, and the same bound for the
         compaction model, which must read the whole conversation. The
-        threshold is that bound unless the arm's ``compact_token_threshold``
+        threshold is that bound unless the experiment's ``compact_token_threshold``
         names a lower one; a higher one is refused, as is a window with no
         room for the output budget at all. The value reaches the run facts
         (parents) and the compaction events (children).
@@ -327,13 +332,13 @@ def resolve_worker_options(
     # so its absence is not a property of the request.
     repo_file = _repo_path if preflight else _repo_file
     # Every key a parameter, every value of its declared type
-    # (``arm_params.ArmParams``). The checks below read the file through
+    # (``experiment_params.ExperimentParams``). The checks below read the file through
     # ``read_param``: a key it leaves out takes the parameter's one declared
     # default (for a pipeline knob ``RollingExperimentConfig``'s), never a
     # literal of the worker's own that could silently reconfigure every
     # experiment whose params.json predates the key; a value it states, null
     # included, is checked as stated.
-    ArmParams.from_record(params)
+    ExperimentParams.from_record(params)
     if params.get("_creation_surface") == "webui":
         altered = [
             key
@@ -391,7 +396,7 @@ def resolve_worker_options(
         else (None, None)
     )
     snapshot_config = _snapshot_config(params)
-    # The arm's benchmark: refused here if it is not an index the lake carries,
+    # The experiment's benchmark: refused here if it is not an index the lake carries,
     # and checked against the pinned release's partitions below.
     benchmark_index = str(read_param(params, "benchmark_index"))
     benchmark_index_label(benchmark_index)
@@ -428,13 +433,13 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, None)
     )
-    # Every arm's account pays the dividend tax, which reads each replay
+    # Every experiment's account pays the dividend tax, which reads each replay
     # slot's bonus shares.
     if pit_views_seed is not None and pit_views_seed.is_dir():
         assert_seed_carries_bonus_split(pit_views_seed)
     # A named seed must have been built under this code's refresh nodes and
-    # stamps. Checked when an arm is created, never at a worker start: a
-    # running arm keeps the views it was created on.
+    # stamps. Checked when an experiment is created, never at a worker start: a
+    # running experiment keeps the views it was created on.
     if preflight and seed_generation is not None:
         assert_seed_timing_contract(pit_views_seed, snapshot_config)
     geometry = ResearchGeometry(**{name: read_param(params, name) for name in GEOMETRY_PARAMETERS})
@@ -475,7 +480,7 @@ def resolve_worker_options(
             )
             release_raw_dir = release.raw_dir
             trading_days = load_sse_trading_days(release.raw_dir)
-        # The benchmark the arm will be graded against has to exist in the
+        # The benchmark the experiment will be graded against has to exist in the
         # release it pins, from before the research period on, and a create
         # request is the last place that can say so: by replay end the missing
         # series is only an unmeasured verdict.
@@ -547,7 +552,7 @@ def resolve_worker_options(
             commission_bps=_nonnegative_float(read_param(params, "commission_bps"), "commission_bps"),
             slippage_bps=_nonnegative_float(read_param(params, "slippage_bps"), "slippage_bps"),
             dividend_tax=True,
-            # Stamped at creation; an arm without the key buys on every board.
+            # Stamped at creation; an experiment without the key buys on every board.
             permitted_boards=stamped_permitted_boards(params),
             max_total_holdings=_optional_positive_int(
                 read_param(params, "max_total_holdings"), "max_total_holdings"
@@ -584,8 +589,8 @@ def resolve_worker_options(
 
 
 def strategy_boundary(rolling: RollingExperimentConfig) -> dict[str, Any]:
-    """The arm's strategy-container boundary as ``strategy_sandbox_from_spec``
-    takes it: the one mapping every builder of an arm's strategy sandbox (the
+    """The experiment's strategy-container boundary as ``strategy_sandbox_from_spec``
+    takes it: the one mapping every builder of an experiment's strategy sandbox (the
     pipeline, a Paper book, the console's prompt preview) passes on."""
 
     return {
@@ -607,10 +612,10 @@ def strategy_sandbox_from_spec(
 ) -> SandboxConfig:
     """The strategy container's boundary, derived from the Agent session's spec.
 
-    The wall clocks, CPU quota and memory ceiling are the arm's own
+    The wall clocks, CPU quota and memory ceiling are the experiment's own
     (``RollingExperimentConfig.strategy_*``); one left as None keeps the
     executor's default (``SandboxConfig``, ``SandboxSpec``), which is also the
-    arm default. The process guard, ``/dev/shm`` and the user are the
+    experiment default. The process guard, ``/dev/shm`` and the user are the
     container defaults and ``/tmp`` is ``STRATEGY_TMPFS_SIZE``, whatever the
     session container was given.
 
@@ -627,7 +632,7 @@ def strategy_sandbox_from_spec(
     still on ``GpuMode.AUTO`` leaves the container none, and it refuses to
     start.
 
-    The arm's pretrained-store pin travels the same way, so every strategy
+    The experiment's pretrained-store pin travels the same way, so every strategy
     container mounts the store the session container does.
     """
 
@@ -807,7 +812,7 @@ def run_local_interactive_worker(
     command_runner_factory: Callable[[Path], CommandRunner] | None = None,
     poll_seconds: float = 2.0,
 ) -> dict[str, object]:
-    """Run the arm from wherever its ledger ends: the research session, then
+    """Run the experiment from wherever its ledger ends: the research session, then
     the forward replay once an artifact froze, then the terminal status."""
 
     ref_store = AgentRefStore(options.experiment_dir)
@@ -831,7 +836,7 @@ def run_local_interactive_worker(
             hitl / "status.json",
             {
                 "schema_version": 1,
-                "state": ArmState.FAILED,
+                "state": ExperimentState.FAILED,
                 "pid": os.getpid(),
                 "error": f"{type(exc).__name__}: {exc}",
             },
@@ -843,12 +848,12 @@ def run_local_interactive_worker(
     # become their ledger evidence here, before any new session begins.
     RunMarkers(options.experiment_dir).recover(ledger)
     if experiment_verdict(ledger.read()) is not None:
-        # A finished arm is terminal: its verdict is durable, so a resume
+        # A finished experiment is terminal: its verdict is durable, so a resume
         # republishes the completion status instead of re-running anything,
         # before any snapshot, sandbox or gateway preparation.
         payload = _terminal_status(ledger, read_status(hitl / "status.json"))
         write_json_atomic(hitl / "status.json", payload)
-        _release_finished_arm(options, payload)
+        _release_finished_experiment(options, payload)
         return payload
     if (
         command_runner_factory is None
@@ -901,7 +906,7 @@ def run_local_interactive_worker(
     # No book opens here: the operator opens a frozen strategy's Paper book
     # from the console's ranking view (``paper.books.open_frozen_book``).
     write_json_atomic(hitl / "status.json", payload)
-    _release_finished_arm(options, payload)
+    _release_finished_experiment(options, payload)
     return payload
 
 
@@ -930,14 +935,14 @@ def _write_session_plan(
     return planned_sessions()
 
 
-def _release_finished_arm(
+def _release_finished_experiment(
     options: InteractiveWorkerOptions, payload: dict[str, object]
 ) -> None:
-    """Drop the derived trees of an arm that will not resume, once its
+    """Drop the derived trees of an experiment that will not resume, once its
     terminal status is written: the session workspace and the PIT view cache.
 
-    Best-effort: a cache that stays is named in the status, and the arm's
-    outcome stands. A stopped or failed arm never gets here and keeps both.
+    Best-effort: a cache that stays is named in the status, and the experiment's
+    outcome stands. A stopped or failed experiment never gets here and keeps both.
     """
 
     release_finished_sandbox(options)
@@ -949,7 +954,7 @@ def _release_finished_arm(
 
 
 def release_finished_sandbox(options: InteractiveWorkerOptions) -> None:
-    """Remove the session workspace once this arm will not resume.
+    """Remove the session workspace once this experiment will not resume.
 
     The ledger and frozen strategy stay in the experiment directory. An
     interrupted attempt keeps the tree: the next start continues in it.
@@ -963,11 +968,11 @@ def release_finished_sandbox(options: InteractiveWorkerOptions) -> None:
 
 
 def pit_views_tree(experiment_dir: Path) -> Path | None:
-    """The arm's PIT view cache, ``<experiment>/pit_views``, or None without one.
+    """The experiment's PIT view cache, ``<experiment>/pit_views``, or None without one.
 
     The fixed name, not the ``pit_cache_root`` parameter, which may name the
     experiment directory itself. Raises ValueError when ``pit_views`` is not a
-    plain directory: deleting through a link could reach a tree the arm does
+    plain directory: deleting through a link could reach a tree the experiment does
     not own.
     """
 
@@ -978,13 +983,13 @@ def pit_views_tree(experiment_dir: Path) -> Path | None:
 
 
 def release_pit_views(experiment_dir: Path) -> None:
-    """Delete a finished arm's PIT view cache; the worker's terminal step and
+    """Delete a finished experiment's PIT view cache; the worker's terminal step and
     ``scripts/experiments/prune_pit_views.py`` share it.
 
-    Its only reader is this arm's snapshot provider, which a worker with a
+    Its only reader is this experiment's snapshot provider, which a worker with a
     verdict never builds, and a missing tree is rebuilt on demand. Directory
     modes are unlocked and file modes left alone: the views are hard links into
-    the seed and into every other arm seeded from it. Raises OSError when the
+    the seed and into every other experiment seeded from it. Raises OSError when the
     tree remains.
     """
 
@@ -999,7 +1004,7 @@ def _terminal_status(
     *,
     developer_mode: str | None = None,
 ) -> dict[str, object]:
-    """Durable completion status. The arm's evidence stays in the append-only
+    """Durable completion status. The experiment's evidence stays in the append-only
     ledger; status.json only records that the run reached its end, so a resume
     republishes it without re-running or re-recording anything. ``verdict`` and
     ``paper_candidate`` are re-read from the ledger on every publish."""
@@ -1008,7 +1013,7 @@ def _terminal_status(
     frozen = frozen_record(records)
     return {
         "schema_version": 1,
-        "state": ArmState.COMPLETED,
+        "state": ExperimentState.COMPLETED,
         "pid": os.getpid(),
         "completed_at": source.get("completed_at") or utc_now_iso(),
         "developer_mode": developer_mode or source.get("developer_mode"),
@@ -1253,8 +1258,8 @@ def _llm_settings(
     settings.compaction_for("subagent")
     settings = replace(settings, compaction=settings.compaction_for("main"))
     gpu_count = _gpu_count(read_param(params, "gpu_count"))
-    # One boundary with the strategy container: the arm's strategy CPUs and
-    # memory, unless the internal agent_sandbox_* knobs name others; an arm that
+    # One boundary with the strategy container: the experiment's strategy CPUs and
+    # memory, unless the internal agent_sandbox_* knobs name others; an experiment that
     # names neither keeps the shared default.
     cpus_key = "agent_sandbox_cpus" if "agent_sandbox_cpus" in params else "strategy_cpus"
     memory_key = "agent_sandbox_memory" if "agent_sandbox_memory" in params else "strategy_memory"
@@ -1266,7 +1271,7 @@ def _llm_settings(
         tmpfs_size=_memory_limit(read_param(params, "agent_sandbox_tmpfs"), "agent_sandbox_tmpfs"),
         gpu=None if gpu_count == 0 else GpuMode.AUTO,
         gpu_count=gpu_count,
-        # The store the arm pinned at creation; an arm created before the store
+        # The store the experiment pinned at creation; an experiment created before the store
         # has none and its containers mount nothing.
         pretrained_manifest_sha256=pretrained_pin(read_param(params, "pretrained_manifest_sha256")),
     )
@@ -1289,7 +1294,7 @@ def _pit_views_seed(
     The default seed is an optimisation over cold-building: it carries the
     default dataset selection, and an experiment that asks for anything else
     simply finds no matching contract and builds its own views. A seed named
-    explicitly is a decision — the only way an arm whose selection differs from
+    explicitly is a decision — the only way an experiment whose selection differs from
     the default gets prebuilt views at all — so it is checked here, at create
     time: the tree must exist and must already carry exactly this snapshot
     configuration. Silently cold-building instead would cost hours and look

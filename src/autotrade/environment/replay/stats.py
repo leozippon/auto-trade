@@ -388,7 +388,7 @@ def sub_window_stats(
     """Per year of the replay window, the same metrics as the whole.
 
     ``year_windows`` is the ``(start, end)`` calendar bounds (``YYYYMMDD``) of
-    the years the replay was requested over, in order: the arm's research years
+    the years the replay was requested over, in order: the experiment's research years
     (``ResearchGeometry.research_years``), carried on the evaluation request so
     the rows divide the replay by the years it really has instead of assuming
     they begin in July. A row is labelled by its months

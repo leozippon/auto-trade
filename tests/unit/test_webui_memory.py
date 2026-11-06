@@ -73,7 +73,7 @@ def _library(repo_root: Path) -> Path:
 
 
 def _experiment(experiments_root: Path, name: str) -> Path:
-    """One research arm: its ledger's session record and its console state."""
+    """One research experiment: its ledger's session record and its console state."""
 
     directory = experiments_root / name
     # Before any ledger or artifact exists: the store refuses to initialize
@@ -218,7 +218,7 @@ def _snapshot(
 
 
 def _retired_tier_snapshot(repo_root: Path, experiments: Path, experiment_id: str) -> None:
-    """The snapshot an arm created before 2026-11-05 froze: the curated
+    """The snapshot an experiment created before 2026-11-05 froze: the curated
     library beside one graduated experiment's skills, under the retired mode."""
 
     directory = experiments / experiment_id
@@ -268,10 +268,10 @@ def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> N
     assert RUN_ID not in json.dumps(payload, ensure_ascii=False)
 
 
-def test_an_arm_of_the_retired_graduated_tier_lists_what_it_still_mounts(
+def test_an_experiment_of_the_retired_graduated_tier_lists_what_it_still_mounts(
     tmp_path: Path,
 ) -> None:
-    """Every arm created before the graduated tier's retirement names its mode
+    """Every experiment created before the graduated tier's retirement names its mode
     and may hold graduated entries in its snapshot: the block opens, reads the
     mode as the curated library it is, keeps the snapshot's own record of the
     mode, and lists only the curated entries its sessions mount."""

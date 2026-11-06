@@ -56,7 +56,7 @@ MAX_SKIPPED_LISTED = 20
 # directory; the overflow is counted, not named.
 MAX_HINT_ENTRIES = 20
 VCS_DIRS = (".git", ".hg", ".svn", ".bzr", ".jj", ".sl")
-# The session's own transcript, every attempt of the arm: an Agent-readable
+# The session's own transcript, every attempt of the experiment: an Agent-readable
 # text rendering of the Agent trace, one file per attempt named by the run's
 # opaque ref (``<run_ref>.txt``, ``<run_ref>.partN.txt`` once it is long).
 TRACE_ROOT = "trace"

@@ -1,4 +1,4 @@
-"""The strategy revision store as the arm's artifact history.
+"""The strategy revision store as the experiment's artifact history.
 
 Every revision a Validation recorded is kept, so the conditions that must hold
 are retention, cheap storage (one copy of each distinct file), a lineage that
@@ -121,7 +121,7 @@ def test_a_revision_manifest_records_its_parent_and_every_file_digest(tmp_path: 
 
 
 def test_recorded_revisions_survive_the_end_of_session_prune(tmp_path: Path):
-    """The arm's history is what the session leaves behind, so recording the
+    """The experiment's history is what the session leaves behind, so recording the
     session must not take the validated artifacts with it. Only frozen
     artifacts no ledger record still references are pruned."""
 
@@ -205,9 +205,9 @@ def test_discarding_a_revision_leaves_the_bytes_it_shared_read_only(tmp_path: Pa
 
 
 def test_a_revision_written_before_the_object_store_stays_readable(tmp_path: Path):
-    """The arms that were running when the store changed left plain copied
+    """The experiments that were running when the store changed left plain copied
     revision directories behind. They have no manifest and therefore no
-    recorded lineage, but they are still the arm's history: listed with the
+    recorded lineage, but they are still the experiment's history: listed with the
     rest and holding their own bytes."""
 
     output, models = _working_artifact(tmp_path / "work")

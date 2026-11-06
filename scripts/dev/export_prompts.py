@@ -175,7 +175,7 @@ def render() -> str:
         "| `research_geometry` | 研究年、验证期与前沿的日期，决策时点、输入窗口与 span 写法 |",
         "| `visible_timeline` | 快照窗口、日级时钟与历史研究域可用性 |",
         "| `research_scope` | 研究期、股票池和调用节奏各一句 |",
-        "| `arm` | 本实验至今的验证与测试状态 |",
+        "| `experiment` | 本实验至今的验证与测试状态 |",
         "| `budgets` | 推理时间、模型调用、API 花费、随机对照与 `validate` 次数，策略容器超时与资源，压缩预算 |",
         "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量与登记条件 |",
         "| `broker_replay` | 资金、费用、手数、T+1、调度（`schedule`）与精确执行价格来源 |",

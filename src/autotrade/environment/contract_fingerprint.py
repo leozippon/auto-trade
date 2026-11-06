@@ -19,7 +19,7 @@ two contracts, and they drift apart for different reasons:
   reads it, and a Paper book replays a strategy frozen long before.
 
 Splitting them is what lets a README-only rebuild of the base image reach new
-arms only: an arm already running keeps the README it was seeded with and the
+experiments only: an experiment already running keeps the README it was seeded with and the
 image pinned to it, while any drift of the runtime modules is still refused
 everywhere.
 

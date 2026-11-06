@@ -1,12 +1,12 @@
-"""Every open round and the reference packs its arms mount, read through the one launcher.
+"""Every open round and the reference packs its experiments mount, read through the one launcher.
 
-The round files are data -- arms, seed, dataset selection, directives -- and
+The round files are data -- experiments, seed, dataset selection, directives -- and
 `scripts/experiments/_round.py` is the behaviour, so these checks are written
 once and parametrised over whatever open round files exist. A new round file or
-arm is covered the moment it is added; with none, the steady state between
+experiment is covered the moment it is added; with none, the steady state between
 rounds, those checks collect nothing and are reported skipped, while the
 launcher's own behaviour is still tested on synthetic rounds. A closed round is
-the record of arms that were created and is only imported: it must refuse to
+the record of experiments that were created and is only imported: it must refuse to
 run, and its ids stay used, in RETIRED_IDS once its file has left the tree.
 """
 
@@ -95,14 +95,14 @@ ROUND_IDS = sorted(
     for name, rnd in ROUNDS.items()
     if not rnd.closed and not OBSOLETE_KEYS & set(rnd.common_overrides)
 )
-ARMS = [(name, arm) for name in ROUND_IDS for arm in ROUNDS[name].arms]
-# The packs the open rounds' arms mount: every research attempt copies its
+EXPERIMENTS = [(name, experiment) for name in ROUND_IDS for experiment in ROUNDS[name].experiments]
+# The packs the open rounds' experiments mount: every research attempt copies its
 # pack from the repository, so these are the packs a session can still read.
 PACKS = sorted(
     {
         REPO_ROOT / str(reference)
-        for name, arm in ARMS
-        if (reference := ROUNDS[name].request_params(arm)["workspace_reference"])
+        for name, experiment in EXPERIMENTS
+        if (reference := ROUNDS[name].request_params(experiment)["workspace_reference"])
     }
 )
 
@@ -111,8 +111,8 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     """A repository root holding a finished seed for every tree ``rnd`` names.
 
     Each tree is prebuilt for the selection of the first request naming it --
-    the round's shared part first, then its arms -- so an arm that names its
-    own tree gets one for its own selection, while an arm that names the
+    the round's shared part first, then its experiments -- so an experiment that names its
+    own tree gets one for its own selection, while an experiment that names the
     round's tree with another selection is still refused. The contract is what
     the prebuild writes to ``provider.json``, over the one published release
     they all name, which reaches every geometry in the round's Held-out and
@@ -120,7 +120,7 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     tree needs nothing else for the create-time pre-flight to accept it. Its
     trading days are the fixture's default ones plus the business days right
     after each geometry's forward period, so a round grading Held-out on its own
-    dates finds the least it needs. Every arm's reference pack exists, as the
+    dates finds the least it needs. Every experiment's reference pack exists, as the
     repository holds them, and its starter's smoke passes (the replay needs the
     host's sandbox; the smoke step is tested on its own below). Returns the
     round's tree.
@@ -130,7 +130,7 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     monkeypatch.setattr(_round, "smoke", lambda merged: "")
     configs = {}
     days = set(HELDOUT_REACHING_DAYS)
-    for experiment_id in (PROBE_ID, *rnd.arms):
+    for experiment_id in (PROBE_ID, *rnd.experiments):
         params = rnd.request_params(experiment_id)
         configs.setdefault(str(params["pit_views_seed"]), _snapshot_config(params))
         days.update(
@@ -141,7 +141,7 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
             )
         )
         if params["workspace_reference"]:
-            # Arms that are independent seeds of one search share a pack.
+            # Experiments that are independent seeds of one search share a pack.
             (tmp_path / str(params["workspace_reference"])).mkdir(parents=True, exist_ok=True)
     release = publish_release(
         tmp_path,
@@ -165,16 +165,16 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
-def test_every_arm_runs_its_unnamed_roles_on_the_pinned_defaults(round_name: str) -> None:
-    """A role an arm does not name runs on the console default, which
+def test_every_experiment_runs_its_unnamed_roles_on_the_pinned_defaults(round_name: str) -> None:
+    """A role an experiment does not name runs on the console default, which
     BASE_EXPECTED_DEFAULTS pins against drift, so another model is always an
-    arm's explicit declaration in its round file.
+    experiment's explicit declaration in its round file.
     """
     rnd = ROUNDS[round_name]
     rnd.check_console_defaults()
-    for experiment_id in (PROBE_ID, *rnd.arms):
+    for experiment_id in (PROBE_ID, *rnd.experiments):
         params = rnd.request_params(experiment_id)
-        declared = rnd.arms.get(experiment_id, {})
+        declared = rnd.experiments.get(experiment_id, {})
         for role in MODEL_ROLES:
             if role not in declared:
                 assert params[role] == BASE_EXPECTED_DEFAULTS[role], (experiment_id, role)
@@ -194,12 +194,12 @@ def test_a_round_dry_runs_against_its_seed_contract(
 ) -> None:
     """What `--dry-run` reports on a finished seed for this round's selection:
     the shared parameters pass the console's own pre-flight, geometry included,
-    and every arm passes after them."""
+    and every experiment passes after them."""
     rnd = ROUNDS[round_name]
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     assert rnd.main(["launcher", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert "release synthetic, which every arm pins" in out[0]
+    assert "release synthetic, which every experiment pins" in out[0]
     report = json.loads(out[1])
     assert report["research_end"] == rnd.request_params(PROBE_ID)["research_end"]
     assert report["pit_views_seed"] == rnd.pit_views_seed
@@ -220,7 +220,7 @@ def test_the_dry_run_refuses_a_seed_built_for_another_selection(
 def test_the_dry_run_refuses_a_seed_whose_release_is_not_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Every arm pins the release its seed was built from, so a release this
+    """Every experiment pins the release its seed was built from, so a release this
     repository does not hold is refused before anything is POSTed."""
     rnd = _sealed_round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
@@ -270,9 +270,9 @@ def test_an_eight_year_round_dry_runs_on_the_backfilled_release(
 ) -> None:
     """Every benchmark but STAR 50 has history before 2017-07 in the backfilled
     lake -- CSI 1000's constituents from their first section in 2014-10 -- so
-    an eight-year arm on any of them passes the create pre-flight."""
+    an eight-year experiment on any of them passes the create pre-flight."""
     rnd = _sealed_round(
-        arms={
+        experiments={
             f"eight_year_{code[:6]}": {"benchmark_index": code}
             for code in BENCHMARK_INDEXES
             if code != STAR_50
@@ -290,13 +290,13 @@ def test_an_eight_year_round_refuses_star_50_and_fundamentals(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """STAR 50's history starts at its 2019-12-31 base date, inside the research
-    period, so its arm is refused naming how far back each table goes. An arm
+    period, so its experiment is refused naming how far back each table goes. An experiment
     adding fundamentals is refused here by the eight-year seed's contract; the
     missing fundamental history itself (no PIT partition before the first
     decision view) is refused only when that view is built, which no dry-run
     reaches."""
     rnd = _sealed_round(
-        arms={
+        experiments={
             "eight_year_star50": {"benchmark_index": STAR_50},
             "eight_year_fundamentals": {"benchmark_index": "000905.SH", "include_fundamentals": True},
         },
@@ -318,30 +318,30 @@ def test_an_eight_year_round_refuses_star_50_and_fundamentals(
     assert err[-1] == "refused: eight_year_star50, eight_year_fundamentals"
 
 
-def test_an_arm_mounts_the_pack_named_after_it_unless_it_names_another(
+def test_an_experiment_mounts_the_pack_named_after_it_unless_it_names_another(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An arm may leave out its pack when the pack is configs/workspace_refs/<id>.
+    """An experiment may leave out its pack when the pack is configs/workspace_refs/<id>.
 
-    Every checked-in arm that names exactly that path sends the same create
-    request byte for byte without it; an arm or a round that names another
+    Every checked-in experiment that names exactly that path sends the same create
+    request byte for byte without it; an experiment or a round that names another
     pack, or "" for none, keeps it; and a default pack that is not there is
     refused like a named one."""
     rnd = _sealed_round(
-        arms={
+        experiments={
             "conventional": {},
             "elsewhere": {"workspace_reference": "configs/workspace_refs/shared"},
             "packless": {"workspace_reference": ""},
         },
         pit_views_seed="data/seed_probe",
     )
-    assert {arm: rnd.request_params(arm)["workspace_reference"] for arm in rnd.arms} == {
+    assert {experiment: rnd.request_params(experiment)["workspace_reference"] for experiment in rnd.experiments} == {
         "conventional": "configs/workspace_refs/conventional",
         "elsewhere": "configs/workspace_refs/shared",
         "packless": "",
     }
     assert rnd.request_params(PROBE_ID)["workspace_reference"] == WEB_CREATE_DEFAULTS["workspace_reference"]
-    shared = _sealed_round(arms={"seed_a": {}}, overrides={"workspace_reference": "configs/workspace_refs/shared"})
+    shared = _sealed_round(experiments={"seed_a": {}}, overrides={"workspace_reference": "configs/workspace_refs/shared"})
     assert shared.request_params("seed_a")["workspace_reference"] == "configs/workspace_refs/shared"
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     (tmp_path / "configs/workspace_refs/conventional").rmdir()
@@ -351,13 +351,13 @@ def test_an_arm_mounts_the_pack_named_after_it_unless_it_names_another(
     assert err.splitlines()[-1] == "refused: conventional"
 
 
-def test_a_round_without_arms_is_never_posted() -> None:
-    with pytest.raises(SystemExit, match="no arms to create"):
+def test_a_round_without_experiments_is_never_posted() -> None:
+    with pytest.raises(SystemExit, match="no experiments to create"):
         _sealed_round().main(["launcher", "0"])
 
 
 def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every arm of a closed round was created, and archiving an arm deletes
+    """Every experiment of a closed round was created, and archiving an experiment deletes
     its directory, so a mode that reads the queue would create it again. The
     round refuses before it reads the console or the seed."""
 
@@ -366,7 +366,7 @@ def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> N
 
     monkeypatch.setattr(_round, "health", unreachable)
     monkeypatch.setattr(_round, "post", unreachable)
-    rnd = _sealed_round(arms={"done": {}}, closed=True)
+    rnd = _sealed_round(experiments={"done": {}}, closed=True)
     for flags in ([], ["done"], ["--dry-run"], ["--fill"], ["--fill", "--dry-run"]):
         with pytest.raises(SystemExit, match="this round is closed"):
             rnd.main(["launcher", "0", *flags])
@@ -386,7 +386,7 @@ def test_an_open_round_imports_no_other_round() -> None:
 
 
 def test_a_drifted_console_default_stops_the_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A round's queued arms are created days after its first ones, with the
+    """A round's queued experiments are created days after its first ones, with the
     defaults the console then has. A default the round relies on that moved
     stops a round that has not decided it for itself."""
     _sealed_round().check_console_defaults()
@@ -400,8 +400,8 @@ def test_a_drifted_console_default_stops_the_launcher(monkeypatch: pytest.Monkey
 
 def test_a_round_leaves_the_boards_to_the_capital_unless_it_names_them(monkeypatch: pytest.MonkeyPatch) -> None:
     """A round's request leaves the boards null, so the console stamps the ones
-    the arm's capital qualifies for; a console that stamped others by default
-    would move the round's queued arms, and stops it."""
+    the experiment's capital qualifies for; a console that stamped others by default
+    would move the round's queued experiments, and stops it."""
     rnd = _sealed_round()
     assert rnd.request_params(PROBE_ID)["permitted_boards"] is None
     assert _sealed_round(overrides={"permitted_boards": ["main"]}).request_params(PROBE_ID)["permitted_boards"] == ["main"]
@@ -411,11 +411,11 @@ def test_a_round_leaves_the_boards_to_the_capital_unless_it_names_them(monkeypat
     _sealed_round(overrides={"permitted_boards": ["main"]}).check_console_defaults()
 
 
-# --fill reads the arm list as a queue against the live console, so these are
+# --fill reads the experiment list as a queue against the live console, so these are
 # the only tests here that fake it: the health record it reads and the create
 # request it sends.
-FILL_ARMS = ("fill_first", "fill_second", "fill_third")
-# Both session roles on the local model: the arm counts against the local limit.
+FILL_EXPERIMENTS = ("fill_first", "fill_second", "fill_third")
+# Both session roles on the local model: the experiment counts against the local limit.
 LOCAL_ROLES = {"model": LOCAL_QWEN_MODEL, "subagent_model": LOCAL_QWEN_MODEL}
 # The one line a timer run logs: its local time with offset, then the counts.
 SUMMARY = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2} fill launcher: (.*)$")
@@ -429,19 +429,19 @@ def _fill_round(
     hosted: int = 0,
     created: tuple[str, ...] = (),
     accepted: bool = True,
-    arms: dict[str, dict[str, object]] | None = None,
+    experiments: dict[str, dict[str, object]] | None = None,
 ) -> tuple[Round, list[str]]:
-    """A three-arm round on a finished seed, with the console's two calls faked.
+    """A three-experiment round on a finished seed, with the console's two calls faked.
 
-    ``local`` and ``hosted`` are how many arms of each kind the console is
-    running against its two limits (it has no free GPU), ``created`` the arms
-    whose experiment directory already exists, ``arms`` what each arm decides
+    ``local`` and ``hosted`` are how many experiments of each kind the console is
+    running against its two limits (it has no free GPU), ``created`` the experiments
+    whose experiment directory already exists, ``experiments`` what each experiment decides
     for itself (by default each names the local model for both session
-    roles, so it is a local arm; one that names no ``gpu_count`` runs on CPU
+    roles, so it is a local experiment; one that names no ``gpu_count`` runs on CPU
     like the round). The returned list records, in
     order, the ids a create request was actually sent for.
     """
-    rnd = _sealed_round(arms=arms or {arm: dict(LOCAL_ROLES) for arm in FILL_ARMS}, pit_views_seed="data/seed_probe")
+    rnd = _sealed_round(experiments=experiments or {experiment: dict(LOCAL_ROLES) for experiment in FILL_EXPERIMENTS}, pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     for experiment_id in created:
         (tmp_path / "experiments" / experiment_id).mkdir(parents=True)
@@ -477,10 +477,10 @@ def _summary(out: str) -> str:
     return match.group(1)
 
 
-def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
+def test_a_fill_creates_pending_experiments_in_queue_order_up_to_the_free_slots(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """One free slot, one arm already created: the next pending arm takes it and
+    """One free slot, one experiment already created: the next pending experiment takes it and
     the one behind it waits, and the run logs one line saying so."""
     rnd, posted = _fill_round(
         tmp_path, monkeypatch, local=2, hosted=MAX_RUNNING_EXPERIMENTS - 3, created=("fill_first",)
@@ -522,7 +522,7 @@ def test_a_fill_creates_pending_arms_in_queue_order_up_to_the_free_slots(
         (
             0,
             0,
-            FILL_ARMS,
+            FILL_EXPERIMENTS,
             (
                 "3 skipped (created already), 0 created, 0 refused, 0 pending "
                 "(0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
@@ -548,19 +548,19 @@ def test_a_fill_with_nothing_to_do_is_the_steady_state(
     assert _summary(capsys.readouterr().out).endswith(counts)
 
 
-# Both session roles hosted: the arm does not count against the local limit.
+# Both session roles hosted: the experiment does not count against the local limit.
 HOSTED_ROLES = {"model": MIMO_FLASH_MODEL, "subagent_model": MIMO_FLASH_MODEL}
 
 
-def test_a_fill_holds_a_local_arm_at_the_local_limit_and_creates_the_hosted_one_behind_it(
+def test_a_fill_holds_a_local_experiment_at_the_local_limit_and_creates_the_hosted_one_behind_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The local arms at the head and the tail of the queue stay pending, the
-    hosted arm between them takes a free slot, and holding is the steady
+    """The local experiments at the head and the tail of the queue stay pending, the
+    hosted experiment between them takes a free slot, and holding is the steady
     state, not a refusal."""
-    arms = {arm: dict(LOCAL_ROLES) for arm in FILL_ARMS}
-    arms["fill_second"] = dict(HOSTED_ROLES)
-    rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, arms=arms)
+    experiments = {experiment: dict(LOCAL_ROLES) for experiment in FILL_EXPERIMENTS}
+    experiments["fill_second"] = dict(HOSTED_ROLES)
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, experiments=experiments)
     assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "fill_first: pending, waits for a local-model slot" in out
@@ -578,15 +578,15 @@ def test_a_fill_holds_a_local_arm_at_the_local_limit_and_creates_the_hosted_one_
     )
 
 
-def test_a_fill_holds_a_gpu_arm_while_no_card_is_free_and_creates_the_cpu_arm_behind_it(
+def test_a_fill_holds_a_gpu_experiment_while_no_card_is_free_and_creates_the_cpu_experiment_behind_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """With every card in use or held, the GPU arms stay pending and the CPU
-    arm between them is created; one free card takes the first GPU arm only,
-    since the console hands a card to one arm at a time."""
-    arms = {arm: {"gpu_count": 1} for arm in FILL_ARMS}
-    arms["fill_second"] = {}
-    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, arms=arms)
+    """With every card in use or held, the GPU experiments stay pending and the CPU
+    experiment between them is created; one free card takes the first GPU experiment only,
+    since the console hands a card to one experiment at a time."""
+    experiments = {experiment: {"gpu_count": 1} for experiment in FILL_EXPERIMENTS}
+    experiments["fill_second"] = {}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, experiments=experiments)
     assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "fill_first: pending, waits for a free GPU" in out
@@ -611,15 +611,15 @@ def test_a_fill_holds_a_gpu_arm_while_no_card_is_free_and_creates_the_cpu_arm_be
     )
 
 
-def test_a_fill_past_a_held_local_arm_still_stops_at_any_refusal(
+def test_a_fill_past_a_held_local_experiment_still_stops_at_any_refusal(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Only the local limit holds an arm back; the pre-flight refusing the
-    hosted arm behind it stops the run as before, with nothing sent after it."""
-    arms = {arm: dict(HOSTED_ROLES) for arm in FILL_ARMS}
-    arms["fill_first"] = dict(LOCAL_ROLES)
-    arms["fill_second"] = {**HOSTED_ROLES, "research_end": "20250331"}
-    rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, arms=arms)
+    """Only the local limit holds an experiment back; the pre-flight refusing the
+    hosted experiment behind it stops the run as before, with nothing sent after it."""
+    experiments = {experiment: dict(HOSTED_ROLES) for experiment in FILL_EXPERIMENTS}
+    experiments["fill_first"] = dict(LOCAL_ROLES)
+    experiments["fill_second"] = {**HOSTED_ROLES, "research_end": "20250331"}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, experiments=experiments)
     assert rnd.main(["launcher", "0", "--fill"]) == 1
     assert posted == []
     captured = capsys.readouterr()
@@ -644,14 +644,14 @@ def test_a_fill_reports_a_creation_the_console_refused(
     assert "not created: fill_first, fill_second" in captured.err
 
 
-def test_a_fill_stops_at_an_arm_the_preflight_refuses(
+def test_a_fill_stops_at_an_experiment_the_preflight_refuses(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Nothing is sent for the refused arm or after it, the reason and the
+    """Nothing is sent for the refused experiment or after it, the reason and the
     summary still reach the log, and the run exits non-zero."""
-    arms = {arm: {} for arm in FILL_ARMS}
-    arms["fill_second"] = {"research_end": "20250331"}
-    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, arms=arms)
+    experiments = {experiment: {} for experiment in FILL_EXPERIMENTS}
+    experiments["fill_second"] = {"research_end": "20250331"}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, experiments=experiments)
     assert rnd.main(["launcher", "0", "--fill"]) == 1
     assert posted == ["fill_first"]
     captured = capsys.readouterr()
@@ -679,15 +679,15 @@ def test_a_fill_dry_run_plans_without_creating(
     )
 
 
-def test_a_fill_holds_an_arm_whose_seed_is_not_built_yet_and_creates_it_once_it_is(
+def test_a_fill_holds_an_experiment_whose_seed_is_not_built_yet_and_creates_it_once_it_is(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """A seed with no contract yet, or with its prebuild still running, holds
-    its arm pending -- not refused -- while the arms behind it go ahead; the
+    its experiment pending -- not refused -- while the experiments behind it go ahead; the
     next run after the prebuild reports status ok creates it."""
-    arms = {arm: {} for arm in FILL_ARMS}
-    arms["fill_first"] = {"pit_views_seed": "data/seed_later"}
-    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, arms=arms)
+    experiments = {experiment: {} for experiment in FILL_EXPERIMENTS}
+    experiments["fill_first"] = {"pit_views_seed": "data/seed_later"}
+    rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, experiments=experiments)
     seed = tmp_path / "data" / "seed_later"
     shutil.move(seed / "provider.json", tmp_path / "provider.later")
     assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
@@ -709,15 +709,15 @@ def test_a_fill_holds_an_arm_whose_seed_is_not_built_yet_and_creates_it_once_it_
     (seed / UNFINISHED_BUILD_MARKER).unlink()
     posted.clear()
     assert rnd.main(["launcher", "0", "--fill"]) == 0
-    assert posted == list(FILL_ARMS) and "1 by an unfinished seed" not in capsys.readouterr().out
+    assert posted == list(FILL_EXPERIMENTS) and "1 by an unfinished seed" not in capsys.readouterr().out
 
 
-def test_a_failed_smoke_refuses_the_arm_with_its_reason(
+def test_a_failed_smoke_refuses_the_experiment_with_its_reason(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The starter's replay is part of creating an arm: a failure stops the
-    run before anything is sent for that arm, with the replay's own text, and
-    a dry-run reads every arm before it reports the refusal."""
+    """The starter's replay is part of creating an experiment: a failure stops the
+    run before anything is sent for that experiment, with the replay's own text, and
+    a dry-run reads every experiment before it reports the refusal."""
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0)
     reason = "Y3, 3 days from 20190701: RuntimeError: daily Validation failed: ArrowTypeError"
     monkeypatch.setattr(_round, "smoke", lambda merged: reason if merged["experiment_id"] == "fill_second" else "")
@@ -735,12 +735,12 @@ def test_the_smoke_is_recorded_once_per_seed_and_starter(tmp_path: Path, monkeyp
     """A pass is not replayed again; a failure keeps refusing, with its record
     named, until the record is deleted; new starter bytes are a new smoke."""
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
-    starter = tmp_path / "packs" / "arm" / "starter"
+    starter = tmp_path / "packs" / "experiment" / "starter"
     starter.mkdir(parents=True)
     (starter / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
     (tmp_path / "data" / "seed").mkdir(parents=True)
     (tmp_path / "data" / "seed" / "provider.json").write_text("{}", encoding="utf-8")
-    merged = {"experiment_id": "arm", "workspace_reference": "packs/arm", "pit_views_seed": "data/seed"}
+    merged = {"experiment_id": "experiment", "workspace_reference": "packs/experiment", "pit_views_seed": "data/seed"}
     runs: list[str] = []
     outcome = {"failure": ""}
 
@@ -750,9 +750,9 @@ def test_the_smoke_is_recorded_once_per_seed_and_starter(tmp_path: Path, monkeyp
 
     monkeypatch.setattr(_round, "_smoke_replays", replays)
     assert _round.smoke(merged) == "" and _round.smoke(merged) == ""
-    assert runs == ["packs/arm/starter"]
+    assert runs == ["packs/experiment/starter"]
     record = json.loads(next((tmp_path / "logs" / "research" / "smoke").glob("*.json")).read_text(encoding="utf-8"))
-    assert record["passed"] is True and record["experiment_id"] == "arm"
+    assert record["passed"] is True and record["experiment_id"] == "experiment"
 
     (starter / "main.py").write_text("def generate_orders(context):\n    return [] \n", encoding="utf-8")
     outcome["failure"] = "full, the full span 20170703..20250630: ValueError: boom"
@@ -773,7 +773,7 @@ def test_a_pack_without_a_starter_smokes_the_template_and_a_broken_one_is_refuse
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A question-only pack, or no pack, starts its session's output/ from the
-    arm's strategy template, so that is what the smoke replays; a starter/
+    experiment's strategy template, so that is what the smoke replays; a starter/
     directory without main.py is refused before anything replays, because the
     session would silently start from the template instead."""
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
@@ -802,19 +802,19 @@ def test_a_pack_without_a_starter_smokes_the_template_and_a_broken_one_is_refuse
 def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """A GPU arm's spec names no device ("auto"), and a strategy container
+    """A GPU experiment's spec names no device ("auto"), and a strategy container
     given none refuses to start, so the smoke takes free cards and pins them on
     every strategy container. It takes them under the console's own admission
     margin (``AUTOTRADE_GPU_MIN_FREE_GIB``), so a shared card the console would
-    start the arm on is not refused for being busy. With too few admissible the
-    arm is refused for this run only: nothing is recorded, and the next run
+    start the experiment on is not refused for being busy. With too few admissible the
+    experiment is refused for this run only: nothing is recorded, and the next run
     smokes it again."""
     monkeypatch.setenv("AUTOTRADE_GPU_MIN_FREE_GIB", "20")
     monkeypatch.setattr(_round, "REPO_ROOT", tmp_path)
-    starter = tmp_path / "packs" / "arm" / "starter"
+    starter = tmp_path / "packs" / "experiment" / "starter"
     starter.mkdir(parents=True)
     (starter / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
-    merged = {"experiment_id": "arm", "workspace_reference": "packs/arm", "pit_views_seed": "", "gpu_count": 1}
+    merged = {"experiment_id": "experiment", "workspace_reference": "packs/experiment", "pit_views_seed": "", "gpu_count": 1}
     requested = SandboxSpec(gpu="auto", gpu_count=1)
     with pytest.raises(GpuUnavailableError):
         strategy_sandbox_from_spec(requested, fit_timeout_seconds=1).spec.devices()
@@ -876,16 +876,16 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
 def test_a_fill_never_takes_an_experiment_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Naming an arm would be silently ignored: the queue decides the selection."""
+    """Naming an experiment would be silently ignored: the queue decides the selection."""
     rnd, _ = _fill_round(tmp_path, monkeypatch, local=0)
     with pytest.raises(SystemExit, match="reads the queue itself"):
         rnd.main(["launcher", "0", "--fill", "fill_first"])
 
 
-def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
+def test_an_experiment_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     """A round states the account and nothing about the gates: the request
     carries the optional drawdown and mandate limits as null, and a null cap
-    is no mandate at any account size. An arm that wants one names the cap,
+    is no mandate at any account size. An experiment that wants one names the cap,
     which fills a blank beta band; drawdowns stay 0.45 / 0.30 unless named."""
 
     optional = (
@@ -897,7 +897,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     )
     assert all(key in WEB_CREATE_DEFAULTS and key not in BASE_OVERRIDES for key in optional)
     rnd = _sealed_round(
-        arms={
+        experiments={
             "large": {"initial_cash": 1_000_000},
             "small": {"initial_cash": 100_000},
             "tracked": {
@@ -912,7 +912,7 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
         return acceptance_for(rnd.request_params(experiment_id)).to_record()
 
     assert [rnd.request_params("large")[key] for key in optional] == [None] * len(optional)
-    # The account decides nothing: two arms an order of magnitude apart, both
+    # The account decides nothing: two experiments an order of magnitude apart, both
     # silent about the mandate, are judged by exactly the same rules.
     assert rules("large") == rules("small") == acceptance_for(
         {"alpha": WEB_CREATE_DEFAULTS["alpha"], "research_years": 1}
@@ -926,9 +926,9 @@ def test_an_arm_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
     assert (tracked["max_drawdown"], tracked["active_max_drawdown"]) == (0.4, 0.30)
 
 
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> None:
-    """A directive is copied into every research session of the arm and must
+@pytest.mark.parametrize(("round_name", "experiment_id"), EXPERIMENTS)
+def test_every_experiment_directive_is_usable(round_name: str, experiment_id: str) -> None:
+    """A directive is copied into every research session of the experiment and must
     hold no calendar year: data windows that must be excluded are named by
     their cause and defined in the reference pack, and no forward or Held-out
     date may reach the Agent through it."""
@@ -937,14 +937,14 @@ def test_every_arm_directive_is_usable(round_name: str, experiment_id: str) -> N
     assert not CALENDAR_YEAR.search(directive), (experiment_id, CALENDAR_YEAR.findall(directive))
 
 
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_an_arm_requests_a_gpu_exactly_when_its_starter_needs_cuda(
+@pytest.mark.parametrize(("round_name", "experiment_id"), EXPERIMENTS)
+def test_an_experiment_requests_a_gpu_exactly_when_its_starter_needs_cuda(
     round_name: str, experiment_id: str
 ) -> None:
-    """A starter with no CPU path fails every replay of an arm created without
+    """A starter with no CPU path fails every replay of an experiment created without
     a card, and a card requested for a starter that never touches CUDA is taken
     from the shared pool for nothing. A pack without a starter is exempt: its
-    arm's card is for the code the Agent will write."""
+    experiment's card is for the code the Agent will write."""
     params = ROUNDS[round_name].request_params(experiment_id)
     starter = REPO_ROOT / str(params.get("workspace_reference") or "") / "starter"
     if not params.get("workspace_reference") or not starter.is_dir():
@@ -955,31 +955,31 @@ def test_an_arm_requests_a_gpu_exactly_when_its_starter_needs_cuda(
     assert (int(params["gpu_count"]) >= 1) is needs_cuda, (experiment_id, params["gpu_count"])
 
 
-def test_an_arm_may_run_its_own_account_and_an_arm_that_states_none_inherits() -> None:
-    """The account is a per-arm parameter, not only a per-round one.
+def test_an_experiment_may_run_its_own_account_and_an_experiment_that_states_none_inherits() -> None:
+    """The account is a per-experiment parameter, not only a per-round one.
 
-    Arms that mount one pack may differ in the account they research on,
+    Experiments that mount one pack may differ in the account they research on,
     because at CNY 100k a constituent book is cost-feasible to about 30 names
     and at CNY 1M to 50. That only works while `initial_cash` stays an open
-    create parameter the arm entry may override: a closed or unknown key would
-    be refused before anything is sent, and an ignored one would run both arms
+    create parameter the experiment entry may override: a closed or unknown key would
+    be refused before anything is sent, and an ignored one would run both experiments
     on the same account while the round file claimed otherwise.
     """
     assert "initial_cash" in WEB_CREATE_DEFAULTS
     assert "initial_cash" not in WEB_CLOSED_PARAMS
     rnd = _sealed_round(
-        arms={"states_it": {"initial_cash": 250_000}, "states_none": {}},
+        experiments={"states_it": {"initial_cash": 250_000}, "states_none": {}},
         overrides={"initial_cash": 100_000},
     )
     assert rnd.request_params("states_it")["initial_cash"] == 250_000
     assert rnd.request_params("states_none")["initial_cash"] == 100_000
 
 
-@pytest.mark.parametrize(("round_name", "experiment_id"), ARMS)
-def test_every_arm_mounts_a_checked_in_reference_pack(
+@pytest.mark.parametrize(("round_name", "experiment_id"), EXPERIMENTS)
+def test_every_experiment_mounts_a_checked_in_reference_pack(
     round_name: str, experiment_id: str
 ) -> None:
-    """An arm that names a pack must name one this repository holds.
+    """An experiment that names a pack must name one this repository holds.
 
     The create-time pre-flight resolves `workspace_reference` against the
     repository root, but the dry-run test above points that root at a synthetic
@@ -994,7 +994,7 @@ def test_every_arm_mounts_a_checked_in_reference_pack(
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)
 def test_the_selection_matches_the_prebuilt_seed(round_name: str) -> None:
-    """The round and the real tree its arms hardlink from agree, byte for byte.
+    """The round and the real tree its experiments hardlink from agree, byte for byte.
 
     The pre-flight refuses a mismatch on its own; comparing the whole snapshot
     configuration here says which half drifted when it does. The tree is
@@ -1020,11 +1020,11 @@ def test_no_round_reuses_an_experiment_id() -> None:
     """
     seen: dict[str, str] = {}
     for round_name in sorted(ROUNDS):
-        for experiment_id in ROUNDS[round_name].arms:
+        for experiment_id in ROUNDS[round_name].experiments:
             assert experiment_id not in seen, (experiment_id, seen.get(experiment_id), round_name)
             seen[experiment_id] = round_name
     with pytest.raises(ValueError, match="already used and archived"):
-        _sealed_round(arms={min(RETIRED_IDS): {}})
+        _sealed_round(experiments={min(RETIRED_IDS): {}})
     archived = archived_ids()
     if not archived:
         pytest.skip("logs/archive/ is not present, so archived ids cannot be cross-checked")
@@ -1065,7 +1065,7 @@ ALLOWED_IMPORT_MARKERS = (
 
 @pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
 def test_no_reference_pack_restates_the_import_allowlist(pack: Path) -> None:
-    """A pack states the arm's deltas and defers the contract to output/README.md."""
+    """A pack states the experiment's deltas and defers the contract to output/README.md."""
     for path in sorted(pack.glob("*.md")):
         for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             named = [marker for marker in ALLOWED_IMPORT_MARKERS if marker in line]
@@ -1073,7 +1073,7 @@ def test_no_reference_pack_restates_the_import_allowlist(pack: Path) -> None:
 
 
 # Forward and Held-out results never enter a session (agent-design §1.2), yet in
-# round 20260926 other arms' forward readings reached refs/ through the packs'
+# round 20260926 other experiments' forward readings reached refs/ through the packs'
 # closed-direction and prior tables: the tables whose header row names a
 # closure (关闭) or the register (登记册). Those tables cite the register row
 # and research-period readings only.

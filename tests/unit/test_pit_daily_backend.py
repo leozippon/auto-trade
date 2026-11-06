@@ -656,9 +656,9 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert without_clock(bare) == without_clock(record)
 
     # The panel is seeded by the replayed span alone, never by the revision
-    # or the arm: the same book resubmitted as a new revision meets the
+    # or the experiment: the same book resubmitted as a new revision meets the
     # identical panel, so a resubmission cannot re-roll it, and so does the
-    # same book replayed by another arm's backend, so paired arms read one
+    # same book replayed by another experiment's backend, so paired experiments read one
     # number for one book.
     def panel_of(result) -> dict:
         return json.loads(
@@ -675,20 +675,20 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     )
     assert resubmitted["panel"]["seed"] == style["panel"]["seed"]
     assert resubmitted["panel_daily"] == style["panel_daily"]
-    other_arm = panel_of(
+    other_experiment = panel_of(
         PITDailyEvaluationBackend(
-            tmp_path / "other_arm" / "results",
+            tmp_path / "other_experiment" / "results",
             execution_mode="trusted",
             benchmark_index=DEFAULT_BENCHMARK_INDEX,
         ).evaluate(
             dataclasses.replace(
-                request, revision=ArtifactRevision("revision_other_arm", revision)
+                request, revision=ArtifactRevision("revision_other_experiment", revision)
             )
         )
     )
-    assert other_arm["panel"] == style["panel"]
-    assert other_arm["panel_daily"] == style["panel_daily"]
-    assert other_arm["panel_draw_sd"] == style["panel_draw_sd"]
+    assert other_experiment["panel"] == style["panel"]
+    assert other_experiment["panel_daily"] == style["panel_daily"]
+    assert other_experiment["panel_draw_sd"] == style["panel_draw_sd"]
 
     # Drawing the panel is the host's work: a failure there is never a
     # measurement of the candidate, even when it comes through the engine
@@ -732,7 +732,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     with pytest.raises(NullControlSetupError, match="replay slots are unknown"):
         restarted.null_control(result.result_ref, **null_control_call)
 
-    # An arm that charges the dividend tax replays on its own profile, and the
+    # An experiment that charges the dividend tax replays on its own profile, and the
     # panel it is graded against trades under the same one. This slot's table
     # predates the bonus-share column, so the taxed replay is refused until the
     # slot is rebuilt rather than treating every share leg as tax-free.
@@ -936,7 +936,7 @@ def test_research_pit_provider_names_a_cache_format_mismatch(tmp_path: Path) -> 
     contract.write_text(json.dumps(current), encoding="utf-8")
     assert reopen().cache_root == provider.cache_root
     # The release path is where the release was when the cache was bound (an
-    # arm synced from another host): recorded, not a binding.
+    # experiment synced from another host): recorded, not a binding.
     contract.write_text(
         json.dumps({**current, "release_raw_dir": "/elsewhere/data/research_releases/g/raw"}),
         encoding="utf-8",
@@ -2366,8 +2366,8 @@ def test_a_span_refuses_a_slot_whose_anchor_has_no_decision_universe(tmp_path: P
 
 
 def test_the_panel_a_book_meets_depends_only_on_what_is_replayed(tmp_path: Path) -> None:
-    """Two arms that validate the same bytes on the same span read one active
-    IR: the panel is seeded by the replayed span alone, so each arm's backend
+    """Two experiments that validate the same bytes on the same span read one active
+    IR: the panel is seeded by the replayed span alone, so each experiment's backend
     draws the identical panel for the identical book, while the same book on
     another span draws from another seed."""
 
@@ -2382,17 +2382,17 @@ def test_the_panel_a_book_meets_depends_only_on_what_is_replayed(tmp_path: Path)
             (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
         )
 
-    first_arm = sidecar(tmp_path / "first_arm" / "results", slots["a"], slots["b"])
-    second_arm = sidecar(tmp_path / "second_arm" / "results", slots["a"], slots["b"])
-    assert first_arm["strategy_daily"] == second_arm["strategy_daily"]
-    assert first_arm["panel"]["round_trips"] > 0
-    assert first_arm["panel"] == second_arm["panel"]
-    assert first_arm["panel_daily"] == second_arm["panel_daily"]
-    assert first_arm["panel_draw_sd"] == second_arm["panel_draw_sd"]
-    assert first_arm["panel"]["seed"] == panel_seed("20240101", "20240105")
-    shorter = sidecar(tmp_path / "first_arm" / "results_a", slots["a"])
+    first_experiment = sidecar(tmp_path / "first_experiment" / "results", slots["a"], slots["b"])
+    second_experiment = sidecar(tmp_path / "second_experiment" / "results", slots["a"], slots["b"])
+    assert first_experiment["strategy_daily"] == second_experiment["strategy_daily"]
+    assert first_experiment["panel"]["round_trips"] > 0
+    assert first_experiment["panel"] == second_experiment["panel"]
+    assert first_experiment["panel_daily"] == second_experiment["panel_daily"]
+    assert first_experiment["panel_draw_sd"] == second_experiment["panel_draw_sd"]
+    assert first_experiment["panel"]["seed"] == panel_seed("20240101", "20240105")
+    shorter = sidecar(tmp_path / "first_experiment" / "results_a", slots["a"])
     assert shorter["panel"]["seed"] == panel_seed("20240101", "20240103")
-    assert shorter["panel"]["seed"] != first_arm["panel"]["seed"]
+    assert shorter["panel"]["seed"] != first_experiment["panel"]["seed"]
 
 
 def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> None:
@@ -2507,12 +2507,12 @@ def _mount_second_index(
     chmod_tree(snapshot, file_mode=0o444, dir_mode=0o555)
 
 
-def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Path) -> None:
+def test_an_experiment_replays_grades_and_records_its_own_benchmark_index(tmp_path: Path) -> None:
     """``benchmark_index`` keys the benchmark series, the panel and the record.
 
-    The same slots, the same revision, two arms: the CSI 500 arm regresses on
+    The same slots, the same revision, two experiments: the CSI 500 experiment regresses on
     the 000905.SH series and draws its zero-skill replacements from 000905.SH
-    membership. The default arm is measured against CSI 300, and while the
+    membership. The default experiment is measured against CSI 300, and while the
     mounted ``index_weight`` holds no CSI 300 cross-section its panel refuses
     by name instead of falling back to the float-cap decile; once one is there
     it draws from CSI 300 membership. Both results carry the index they were
@@ -2562,12 +2562,12 @@ def test_an_arm_replays_grades_and_records_its_own_benchmark_index(tmp_path: Pat
     graded, plain = analysis_of(csi500), analysis_of(default)
     assert graded["benchmark"] == {"ts_code": "000905.SH", "label": "中证500"}
     assert plain["benchmark"] == {"ts_code": "000300.SH", "label": "沪深300"}
-    # The benchmark leg is the arm's own series, not the other index's.
+    # The benchmark leg is the experiment's own series, not the other index's.
     assert {value for _day, value in graded["benchmark_daily"]} == {-0.0125}
     assert {value for _day, value in plain["benchmark_daily"]} == {0.005}
     assert "中证500" in graded["factor_regression"]["method"]
     assert "沪深300" in plain["factor_regression"]["method"]
-    # The panel draws replacements from each arm's own membership.
+    # The panel draws replacements from each experiment's own membership.
     assert graded["panel"]["matched"] == "index_membership+affordability"
     assert plain["panel"]["matched"] == "index_membership+affordability"
     # The result record itself names the benchmark beside its figures.
@@ -2584,7 +2584,7 @@ def test_an_unknown_benchmark_index_never_reaches_a_replay(tmp_path: Path) -> No
 
 
 def test_no_grading_path_takes_a_default_benchmark_index() -> None:
-    """A caller that forgets the arm's index fails at the call instead of
+    """A caller that forgets the experiment's index fails at the call instead of
     grading, labelling or briefing the Agent against the default index."""
 
     import inspect

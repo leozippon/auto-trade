@@ -13,7 +13,7 @@ book keeps the history its own days continue. A different capital, artifact or
 environment is a new book in a new state root.
 
 A book's track is recorded as its ``candidate_source``. A ``frozen`` book
-trades the frozen strategy of an arm with its forward record (the arm's Paper
+trades the frozen strategy of an experiment with its forward record (the experiment's Paper
 candidate), opened by the operator from the console's ranking view; at most
 ``BOOK_CAP`` operator-opened books are open at once. Two tracks from the
 sealed-gate rules stay readable: a ``graduated`` book traded a graduate's
@@ -22,7 +22,7 @@ source history is the replay the incubation recorded. Either way creation
 pins the rules its Paper verdict is read by
 (``paper/verdict.py``), so a later change cannot move a book already trading,
 and the boards its account may buy on, in its Broker profile: the boards its
-incubation replayed on, else the arm's stamp, else those the book's initial
+incubation replayed on, else the experiment's stamp, else those the book's initial
 cash qualifies for. The book's Broker and its verdict's zero-skill panel both
 read that one field.
 """
@@ -79,7 +79,7 @@ TRACKS = ("frozen", "graduated", "incubating")
 # once; a killed book does not count.
 BOOK_CAP = 4
 # The capital, in CNY, a new book starts with unless its creator names another,
-# whatever the arm's own initial_cash (the owner's decision of 2026-11-06); a
+# whatever the experiment's own initial_cash (the owner's decision of 2026-11-06); a
 # book keeps the capital it was created with.
 PAPER_INITIAL_CASH = 200_000.0
 # When every book's order sheet is due, Beijing time: five minutes before the
@@ -88,7 +88,7 @@ PAPER_INITIAL_CASH = 200_000.0
 # the container-start clock plus PAPER_DECISION_TIMEOUT_SECONDS before it.
 PAPER_SHEET_DUE = time(9, 10)
 # The wall clock of one decision call in every Paper run -- the day's decision
-# and the replay of each earlier one -- in place of the arm's
+# and the replay of each earlier one -- in place of the experiment's
 # strategy_inference_timeout_seconds, which is sized for research replays.
 PAPER_DECISION_TIMEOUT_SECONDS = 1800.0
 # The Paper verdict's rules, pinned into every new book. A statistical check
@@ -148,18 +148,18 @@ def create_book(
     """Create the book at ``state_root`` (``<Paper state root>/<book id>``).
 
     A ``frozen`` book (and a ``graduated`` one, under the sealed-gate rules)
-    trades the arm's Paper candidate and copies the replay its forward record
-    names; it buys on the arm's stamped boards, or on those its initial cash
-    qualifies for when the arm has none. An
+    trades the experiment's Paper candidate and copies the replay its forward record
+    names; it buys on the experiment's stamped boards, or on those its initial cash
+    qualifies for when the experiment has none. An
     ``incubating`` book trades the artifact the caller incubated -- the
     caller has checked it may -- copies the replay ``source_record`` names,
     in the forward record's shape (``result_ref`` inside the experiment
     directory and ``replay.heldout_start``), and buys on the
     ``permitted_boards`` that replay ran on; both are given exactly for that
-    track. Every book starts with ``initial_cash``, not the arm's own. A
+    track. Every book starts with ``initial_cash``, not the experiment's own. A
     frozen or incubating book is refused while ``BOOK_CAP`` other
     operator-opened books beside it are not killed. Every track is refused, before anything
-    is written, when the arm reads fundamentals and the PIT fundamental
+    is written, when the experiment reads fundamentals and the PIT fundamental
     events audit does not cover the book's first decision view
     (``pit.require_audited_fundamentals``).
     """
@@ -240,7 +240,7 @@ def create_book(
         "strategy_path": str((copy / "output" / "main.py").relative_to(root)),
         "models_dir": str(models.relative_to(root)) if models is not None else None,
         "schedule": options.rolling.schedule.to_record(),
-        # The index the source arm was graded against, so the book's own page
+        # The index the source experiment was graded against, so the book's own page
         # continues the copied out-of-sample curve against the same benchmark
         # instead of splicing two different indexes into one line.
         "benchmark_index": options.rolling.benchmark_index,
@@ -257,7 +257,7 @@ def create_book(
             "checkpoint_days": CHECKPOINT_DAYS,
             "kill_confidence": KILL_CONFIDENCE,
             "confirm_confidence": CONFIRM_CONFIDENCE,
-            # The arm's own drawdown limits, which its verdict and gate used.
+            # The experiment's own drawdown limits, which its verdict and gate used.
             "max_drawdown": options.rolling.acceptance.max_drawdown,
             "active_max_drawdown": options.rolling.acceptance.active_max_drawdown,
             "panel_seed": null_control_seed(artifact_id, "paper"),
@@ -319,12 +319,12 @@ def copy_source_history(
 ) -> Path:
     """The book's copy of its source experiment's out-of-sample curve.
 
-    The forward record names the one replay carrying the arm's forward and
-    Held-out slices — the curve the console draws for that verdict — so an arm
+    The forward record names the one replay carrying the experiment's forward and
+    Held-out slices — the curve the console draws for that verdict — so an experiment
     without one has no history to copy and says so. An incubated book passes
     the replay its incubation recorded as ``record``, in the same shape. The
-    recorded path is read under the arm's current directory
-    (``ledger.recorded_path``), so an arm moved since its replay copies too.
+    recorded path is read under the experiment's current directory
+    (``ledger.recorded_path``), so an experiment moved since its replay copies too.
     """
 
     experiment = Path(experiment_dir).resolve(strict=True)
@@ -375,7 +375,7 @@ def load_book(state_root: str | Path) -> Book:
         models_dir=root / str(record["models_dir"]) if record.get("models_dir") else None,
         schedule=StrategySchedule(**record["schedule"]),
         profile=BrokerProfile.from_record(record["profile"]),
-        # A book created before 2026-11-06 still records its arm's decision
+        # A book created before 2026-11-06 still records its experiment's decision
         # clock; it is replaced, never read: every Paper decision runs under
         # PAPER_DECISION_TIMEOUT_SECONDS.
         sandbox=SandboxConfig.from_record(
@@ -475,7 +475,7 @@ def _schema_2_upgraded(record: dict[str, object]) -> dict[str, object]:
     )
     config = SandboxConfig(
         spec=spec,
-        # The arm's copied decision clock is not read (PAPER_DECISION_TIMEOUT_SECONDS).
+        # The experiment's copied decision clock is not read (PAPER_DECISION_TIMEOUT_SECONDS).
         timeout_seconds=PAPER_DECISION_TIMEOUT_SECONDS,
         fit_timeout_seconds=limits["fit_timeout_seconds"],
         startup_timeout_seconds=limits["startup_timeout_seconds"],

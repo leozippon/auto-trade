@@ -11,7 +11,7 @@ The validations an attempt recorded survive in the experiment's step tree,
 whose nodes carry only opaque ids, plus a host-only sidecar per node holding
 the raw revision id, the span, the summary and the result reference the
 Pipeline needs to freeze it, and the control flag and batch id; which bytes a
-Validation replayed is its revision's, read from the arm's revision store
+Validation replayed is its revision's, read from the experiment's revision store
 (:func:`revision_fingerprint`). The tests an attempt ran are the ledger's
 ``test_step`` records (``pipelines/rolling_record.py``).
 """
@@ -36,7 +36,7 @@ from .ledger import Stage, recorded_path
 
 # Host-only, beside the run markers: never mounted and never Agent-visible.
 STEP_SIDECAR_DIR = ".host/steps"
-# The revisions of the arm's artifact store, which the worker roots at
+# The revisions of the experiment's artifact store, which the worker roots at
 # ``artifacts/strategy`` of the experiment directory.
 REVISIONS_DIR = Path("artifacts") / "strategy" / "revisions"
 
@@ -84,15 +84,15 @@ def record_step_sidecar(experiment_dir: str | Path, step: StepResult) -> Path:
 
 
 def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
-    """The complete Validations the arm's research session recorded so far,
+    """The complete Validations the experiment's research session recorded so far,
     in tree order, rebuilt from the published tree and the sidecars.
 
     A complete node without its sidecar is a validation the host cannot
     account for, so it fails the attempt instead of silently dropping it.
     A sidecar's result reference is
-    read where the arm is now (``ledger.recorded_path``), so an arm moved
+    read where the experiment is now (``ledger.recorded_path``), so an experiment moved
     since its interrupted attempt resumes in place; one that names nothing
-    inside the arm raises ``FileNotFoundError``.
+    inside the experiment raises ``FileNotFoundError``.
     """
 
     directory = Path(experiment_dir)
@@ -126,7 +126,7 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
 
 
 def _recorded_nodes(experiment_dir: Path) -> list[Mapping[str, object]]:
-    """The complete research Validations of the arm's published step tree."""
+    """The complete research Validations of the experiment's published step tree."""
 
     tree_root = experiment_dir / "steps"
     if not (tree_root / "tree.json").is_file():
@@ -149,7 +149,7 @@ def resume_state(
     summary is the checkpoint, and the last event's time is where it stopped.
 
     A trace that reached ``TRACE_MAX_BYTES`` stopped at its marker while the
-    attempt kept spending, so seeding from it would let the arm run past its
+    attempt kept spending, so seeding from it would let the experiment run past its
     own budget; that is refused here instead.
     """
 

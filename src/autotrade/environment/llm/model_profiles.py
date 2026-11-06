@@ -156,7 +156,7 @@ def _qwen_reasoning_effort(value: str | None) -> str:
     }.get(value or "", "xhigh")
 
 
-# An arm's ``llm_key``: which relay credential its calls start on
+# An experiment's ``llm_key``: which relay credential its calls start on
 # (``lighting.LLM_KEY_ENVS``). Every other provider has one key, so only
 # ``primary`` applies to it.
 LLM_KEYS = tuple(_lighting.LLM_KEY_ENVS)

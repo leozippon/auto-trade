@@ -1,6 +1,6 @@
 """The research calendar: SSE trading days and the research geometry.
 
-An arm researches on whole years that begin on the first of a month. The
+An experiment researches on whole years that begin on the first of a month. The
 first ``research_years`` of them are the research years a session sees; the
 rest are the validation years, revealed to the session one step at a time
 through its tests (``step_windows``). The frozen artifact is then replayed
@@ -135,7 +135,7 @@ def step_windows(start: str, end: str, months: int) -> tuple[tuple[str, str], ..
 
 
 # The research store holds no daily bars before DAILY_HISTORY_START, and none
-# of the index and Shenwan macro series backfilled for the eight-year arms
+# of the index and Shenwan macro series backfilled for the eight-year experiments
 # before MACRO_HISTORY_START. A requested input window is clipped to the daily
 # floor; ``history_floors`` names both. Other macro tables are not listed:
 # each starts at its own download floor. These mirror the lake's download
@@ -196,7 +196,7 @@ class Slot:
 
 @dataclass(frozen=True)
 class ResearchGeometry:
-    """Research, forward and Held-out dates of one arm, as ``YYYYMMDD``.
+    """Research, forward and Held-out dates of one experiment, as ``YYYYMMDD``.
 
     Refused unless research runs from the first of a month to the day before
     that same month at least one year later (whole years, so every block is

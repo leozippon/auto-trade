@@ -46,13 +46,13 @@ OPERATING_MEMORY_SNAPSHOT_SCHEMA = 1
 OPERATING_MEMORY_MODES = ("none", "curated")
 DEFAULT_OPERATING_MEMORY = "curated"
 # The graduated tier -- the skills of every graduated experiment, mounted
-# beside the curated library -- was retired on 2026-11-05. Every arm created
+# beside the curated library -- was retired on 2026-11-05. Every experiment created
 # before then names this mode, and a snapshot frozen before then may hold
-# entries of this origin. Such an arm reads as ``curated``
+# entries of this origin. Such an experiment reads as ``curated``
 # (:func:`resolve_operating_memory`); such an entry stays in the record and is
-# never mounted (:func:`snapshot_memory_sources`), which changes no arm on
+# never mounted (:func:`snapshot_memory_sources`), which changes no experiment on
 # disk then, whose mount refused every one of them on its Held-out end; and a
-# new arm cannot name the mode (:func:`create_operating_memory_snapshot`).
+# new experiment cannot name the mode (:func:`create_operating_memory_snapshot`).
 RETIRED_OPERATING_MEMORY_MODE = "curated+graduated"
 RETIRED_MEMORY_ORIGIN = "graduated"
 SKILL_FILENAME = "SKILL.md"
@@ -413,9 +413,9 @@ def operating_memory_entries(library: str | Path) -> tuple[str, ...]:
 
 
 def resolve_operating_memory(value: object) -> str:
-    """An arm's mode: ``none`` or ``curated``, the default.
+    """An experiment's mode: ``none`` or ``curated``, the default.
 
-    An arm created before 2026-11-05 names ``RETIRED_OPERATING_MEMORY_MODE``
+    An experiment created before 2026-11-05 names ``RETIRED_OPERATING_MEMORY_MODE``
     and reads as ``curated``: its frozen snapshot decides what its sessions
     mount, and the graduated entries the snapshot holds are never mounted.
     """

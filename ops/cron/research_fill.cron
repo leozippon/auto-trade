@@ -1,23 +1,23 @@
-# ADM-Cube research arm fill: keep the console's running slots occupied.
+# ADM-Cube research experiment fill: keep the console's running slots occupied.
 # Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block research
 #
-# The round files below, in order, are the arm queue. Each file's `--fill`
+# The round files below, in order, are the experiment queue. Each file's `--fill`
 # asks /api/health how many of the console's slots and GPUs are free, skips
-# the arms whose experiment directory already exists and creates the next
+# the experiments whose directory already exists and creates the next
 # pending ones in file order, through the same validation the operator gets
-# from `--dry-run`; a local arm the local-model limit holds, or a GPU arm too
-# few free cards hold, stays pending and the arms behind it go ahead. The next
-# file reads the slots afresh, so it takes what the earlier ones left. An arm
+# from `--dry-run`; a local experiment the local-model limit holds, or a GPU experiment too
+# few free cards hold, stays pending and the experiments behind it go ahead. The next
+# file reads the slots afresh, so it takes what the earlier ones left. An experiment
 # whose PIT view seed is still being prebuilt stays pending too, and is created
-# by the first run after the prebuild reports status ok. Before an arm is
+# by the first run after the prebuild reports status ok. Before an experiment is
 # created its starter is replayed on its seed (`_round.smoke`, recorded under
 # logs/research/smoke/), so the run that creates it can take tens of minutes;
 # `flock -n` keeps the later runs out meanwhile. Nothing
 # pending or nothing free is the steady state and exits 0; a refused creation
 # in any file makes the run exit non-zero with its reason in the log, and the
-# files after it still fill. The operator tops the queue up by appending arms
-# and their reference packs to a file, or a file to ROUNDS; a round whose arms
-# have all been created, or whose remaining arms are withdrawn, is marked closed
+# files after it still fill. The operator tops the queue up by appending experiments
+# and their reference packs to a file, or a file to ROUNDS; a round whose experiments
+# have all been created, or whose remaining experiments are withdrawn, is marked closed
 # and leaves ROUNDS in the same change.
 
 SHELL=/bin/bash
@@ -30,7 +30,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 ROUNDS=
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
-# long, and research arms end at no particular hour. One run takes seconds per
+# long, and research experiments end at no particular hour. One run takes seconds per
 # file unless it creates, and `flock -n` skips a run while an earlier one is
 # still creating, so two fills can never take the same slot.
 */10 * * * * cd $REPO_ROOT && mkdir -p logs/research .runtime/research && flock -n .runtime/research/cron.lock bash -c 'status=0; for round in $ROUNDS; do $QUANT_PYTHON $round 38888 --fill || status=1; done; exit $status' >> logs/research/cron.log 2>&1

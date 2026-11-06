@@ -1,8 +1,8 @@
-"""The required acceptance rules a test arm states.
+"""The required acceptance rules a test experiment states.
 
 ``config.AcceptanceRules`` gives its required rules
 (``config.REQUIRED_ACCEPTANCE_KEYS``) no default, so every test that builds
-rules, an arm's configuration or a session request names them; this is the
+rules, an experiment's configuration or a session request names them; this is the
 one place their test values live.
 """
 

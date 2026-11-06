@@ -6,7 +6,7 @@ New experiments hardlink those views into ``experiments/<id>/pit_views/`` only
 when ``provider.json`` matches the contract this experiment would write.
 
 Which tree an experiment reads is its ``pit_views_seed`` parameter: the default
-one carries the default dataset selection, and an arm that selects other
+one carries the default dataset selection, and an experiment that selects other
 datasets points at a tree prebuilt for exactly its own selection
 (``scripts/data/prebuild_pit_views_seed.py``). An experiment that names a tree
 pins the research release that tree was built from rather than the newest one,
@@ -64,7 +64,7 @@ UNFINISHED_BUILD_MARKER = "prebuild_unfinished.json"
 # are validation replays, and the forward replay reads F and H as held-out data.
 RESEARCH_PHASE = "valid"
 FORWARD_PHASE = "heldout"
-# The research_years an arm may choose on a seed: the seed carries a warm as-of
+# The research_years an experiment may choose on a seed: the seed carries a warm as-of
 # start at each validation start. A choice the geometry cannot take (it must
 # leave at least one validation year) is planned for nothing.
 DEFAULT_RESEARCH_YEARS_CHOICES = (5, 6, 7)
@@ -338,11 +338,11 @@ def assert_seed_snapshot_config(
 def assert_seed_carries_bonus_split(seed: Path) -> None:
     """Refuse a seed whose replay slots cannot tell bonus shares from conversions.
 
-    Every arm charges the dividend tax, which reads ``bonus_per_share`` from
+    Every experiment charges the dividend tax, which reads ``bonus_per_share`` from
     every slot's ex-date table, and its Broker refuses the first day of a
     replay without it. A seed built before the column existed would therefore fail
-    the arm's first Validation mid-session; read from the tables' schemas,
-    it is refused when the arm is created instead.
+    the experiment's first Validation mid-session; read from the tables' schemas,
+    it is refused when the experiment is created instead.
     """
 
     stale = [

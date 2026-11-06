@@ -51,8 +51,8 @@ from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     PARAMS_NAME,
     STATUS_NAME,
-    ArmState,
-    arm_is_archived,
+    ExperimentState,
+    experiment_is_archived,
     read_status,
     status_pid_alive,
 )
@@ -203,14 +203,14 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
             continue
         try:
             status = read_status(hitl / STATUS_NAME)
-            state = str(status.get("state") or ArmState.CREATED)
+            state = str(status.get("state") or ExperimentState.CREATED)
         except (OSError, TypeError, ValueError):
-            status, state = {}, ArmState.UNREADABLE
-        # An arm has ended once completed (the console neither runs nor
+            status, state = {}, ExperimentState.UNREADABLE
+        # An experiment has ended once completed (the console neither runs nor
         # resumes it) or archived while no worker still runs it; any other
-        # arm, one whose state is unknown or unreadable included, keeps its
+        # experiment, one whose state is unknown or unreadable included, keeps its
         # release.
-        if state == ArmState.COMPLETED or (arm_is_archived(directory) and not status_pid_alive(status)):
+        if state == ExperimentState.COMPLETED or (experiment_is_archived(directory) and not status_pid_alive(status)):
             continue
         reason = f"experiment {directory.name} ({state})"
         keep(pinned_generation(directory), reason)

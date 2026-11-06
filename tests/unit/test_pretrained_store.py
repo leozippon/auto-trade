@@ -1,4 +1,4 @@
-"""The pretrained-model store: pinned at arm creation, compared at every container start.
+"""The pretrained-model store: pinned at experiment creation, compared at every container start.
 
 Every test runs against the fixture store ``tests/conftest.py`` points
 ``environment.pretrained.PRETRAINED_STORE`` at; none touches the host weights.
@@ -51,7 +51,7 @@ from tests.unit.acceptance_fixture import CREATE_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.paper_book_fixture import paper_root
 from tests.unit.test_paper_books import schema_2_record
-from tests.unit.webui_research_arm import build_arm
+from tests.unit.webui_research_experiment import build_experiment
 
 OTHER_PIN = "0" * 64
 
@@ -68,7 +68,7 @@ def _strategy(directory: Path) -> Path:
 def test_the_pin_is_the_manifest_digest_and_only_that_store_passes(tmp_path: Path) -> None:
     pin = manifest_digest()
     assert require_pretrained_store(pin) == pretrained.PRETRAINED_STORE.resolve()
-    with pytest.raises(PretrainedStoreError, match="not the one this arm or book pinned"):
+    with pytest.raises(PretrainedStoreError, match="not the one this experiment or book pinned"):
         require_pretrained_store(OTHER_PIN)
     # A store whose manifest lists one more file is another store.
     other = tmp_path / "other"
@@ -105,7 +105,7 @@ def test_a_pinned_strategy_container_mounts_the_store_read_only(tmp_path: Path) 
     mount = f"type=bind,src={store},dst={CONTAINER_PRETRAINED_DIR},readonly"
     assert mount in pinned.docker_command()
     assert pinned.context_pretrained_dir == CONTAINER_PRETRAINED_DIR == "/strategy-data/pretrained"
-    # An arm or book from before the store: exactly the boundary it had.
+    # An experiment or book from before the store: exactly the boundary it had.
     assert not any(CONTAINER_PRETRAINED_DIR in item for item in unpinned.docker_command())
     assert unpinned.context_pretrained_dir == ""
     context = StrategyContext(
@@ -224,12 +224,12 @@ def test_the_console_pins_the_store_and_a_request_cannot(
 
 
 def test_the_pin_reaches_the_session_and_every_strategy_container(tmp_path: Path) -> None:
-    arm = build_arm(tmp_path / "experiments", "exp", "created")
-    params = json.loads((arm / "hitl/params.json").read_text(encoding="utf-8"))
+    experiment = build_experiment(tmp_path / "experiments", "exp", "created")
+    params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
 
     def spec(**extra: object) -> SandboxSpec:
         options = resolve_worker_options(
-            {**params, **extra}, experiment_dir=arm, repo_root=tmp_path, preflight=True
+            {**params, **extra}, experiment_dir=experiment, repo_root=tmp_path, preflight=True
         )
         assert options.agent_sandbox is not None
         return options.agent_sandbox
@@ -243,14 +243,14 @@ def test_the_pin_reaches_the_session_and_every_strategy_container(tmp_path: Path
         spec(pretrained_manifest_sha256="latest")
 
 
-def test_a_book_keeps_its_arms_pin_and_an_older_book_mounts_nothing(tmp_path: Path) -> None:
-    arm = build_arm(tmp_path / "experiments", "exp", "graduated")
-    path = arm / "hitl/params.json"
+def test_a_book_keeps_its_experiments_pin_and_an_older_book_mounts_nothing(tmp_path: Path) -> None:
+    experiment = build_experiment(tmp_path / "experiments", "exp", "graduated")
+    path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({**params, "pretrained_manifest_sha256": manifest_digest()}), encoding="utf-8")
     book = create_book(
         paper_root(tmp_path) / "exp",
-        experiment_dir=arm,
+        experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
         track="graduated",

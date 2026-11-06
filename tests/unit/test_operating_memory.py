@@ -5,7 +5,7 @@ researcher wrote or copied in by hand, so it must satisfy the same format
 contract ``write_skill`` enforces, and the session that reads it may not
 rewrite it. An experiment freezes the library once, at creation. The graduated
 tier that mounted other experiments' skills beside it was retired on
-2026-11-05; what the arms created before then recorded of it is read, never
+2026-11-05; what the experiments created before then recorded of it is read, never
 mounted.
 """
 
@@ -166,7 +166,7 @@ def test_the_mode_parameter_defaults_to_the_curated_library() -> None:
     assert resolve_operating_memory("") == DEFAULT_OPERATING_MEMORY
     assert resolve_operating_memory(" curated ") == "curated"
     assert resolve_operating_memory("none") == "none"
-    # The mode every arm created before the graduated tier's retirement names
+    # The mode every experiment created before the graduated tier's retirement names
     # reads as the curated library it still mounts.
     assert resolve_operating_memory(RETIRED_OPERATING_MEMORY_MODE) == "curated"
     for bad in ("graduated", "all", "curated+failed", 3):
@@ -200,7 +200,7 @@ def test_a_voided_graduate_is_no_graduate_to_paper(tmp_path: Path) -> None:
     assert verdict["void"]["recorded_at"]
     assert ledger.read("forward") == forward
     assert paper_candidate(records) is None
-    # One void per arm, and only a recorded graduation can be voided.
+    # One void per experiment, and only a recorded graduation can be voided.
     with pytest.raises(ValueError, match="already voided"):
         ledger.append(void)
     rejected = _finished_experiment(experiments, "rejected", graduated=False)
@@ -254,7 +254,7 @@ def test_the_curated_library_mounts_read_only(tmp_path: Path) -> None:
 
 
 def _retired_tier_snapshot(experiment: Path, repo: Path) -> None:
-    """The snapshot an arm created before 2026-11-05 froze: the curated
+    """The snapshot an experiment created before 2026-11-05 froze: the curated
     library beside one graduated experiment's skills, each graduated entry
     with its source's Held-out end, under the retired mode."""
 
@@ -281,7 +281,7 @@ def _retired_tier_snapshot(experiment: Path, repo: Path) -> None:
 def test_a_snapshot_of_the_retired_graduated_tier_mounts_its_curated_entries_only(
     tmp_path: Path,
 ) -> None:
-    """Every arm created before the graduated tier's retirement froze a
+    """Every experiment created before the graduated tier's retirement froze a
     snapshot that may name graduated entries. They are part of its record and
     are never mounted -- the mount refused each of them on its Held-out end
     then -- while an entry of any other unknown origin is refused."""
@@ -330,8 +330,8 @@ def test_snapshotting_and_mounting_each_refuse_an_unusable_request(
     experiment.mkdir()
     with pytest.raises(ValueError, match="operating_memory must be one of"):
         create_operating_memory_snapshot(experiment, mode="graduated", repo_root=REPO_ROOT)
-    # An arm created before the retirement reads the retired mode as curated;
-    # a new arm cannot be created under it.
+    # An experiment created before the retirement reads the retired mode as curated;
+    # a new experiment cannot be created under it.
     with pytest.raises(ValueError, match="graduated tier, retired on 2026-11-05"):
         create_operating_memory_snapshot(
             experiment, mode=RETIRED_OPERATING_MEMORY_MODE, repo_root=REPO_ROOT
@@ -434,7 +434,7 @@ def test_the_run_config_carries_the_mode(tmp_path: Path) -> None:
         == "none"
     )
 
-    # An arm created before the graduated tier's retirement loads, and runs
+    # An experiment created before the graduated tier's retirement loads, and runs
     # on the curated library its snapshot holds.
     params["operating_memory"] = RETIRED_OPERATING_MEMORY_MODE
     params_path.write_text(json.dumps(params), encoding="utf-8")
@@ -568,7 +568,7 @@ def test_a_snapshot_with_an_unknown_schema_is_refused(tmp_path: Path) -> None:
 
 
 def _void(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    """The void entry point on the arm ``withdrawn`` under ``tmp_path``, with
+    """The void entry point on the experiment ``withdrawn`` under ``tmp_path``, with
     the Paper state root there too."""
 
     return subprocess.run(
@@ -595,7 +595,7 @@ def _void(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
 
 def test_the_operator_voids_a_graduation_by_one_appended_record(tmp_path: Path) -> None:
     """The entry point checks before it writes: a dry run appends nothing, a
-    void needs evidence that exists, and the arm is voided exactly once."""
+    void needs evidence that exists, and the experiment is voided exactly once."""
 
     experiments = tmp_path / "experiments"
     experiments.mkdir()
@@ -613,17 +613,17 @@ def test_the_operator_voids_a_graduation_by_one_appended_record(tmp_path: Path) 
     assert applied.returncode == 0, applied.stderr
     written = json.loads(applied.stdout)
     assert written["record_type"] == "verdict_void" and written["evidence_ref"] == "src"
-    assert written["paper_books_deleted"] == []  # the arm had no book
+    assert written["paper_books_deleted"] == []  # the experiment had no book
     assert experiment_verdict(ledger.read())["status"] == "voided"
     again = _void(tmp_path, "--evidence", "src")
     assert again.returncode == 2 and "already voided" in again.stderr
 
 
-def test_a_void_deletes_the_arms_paper_books_first_and_a_real_fill_book_only_when_told(
+def test_a_void_deletes_the_experiments_paper_books_first_and_a_real_fill_book_only_when_told(
     tmp_path: Path,
 ) -> None:
     """A failed strategy does not stay in Paper. The void deletes every book
-    trading the arm, whatever its id, and appends last. A book that follows
+    trading the experiment, whatever its id, and appends last. A book that follows
     real fills holds the owner's record of what he traded: it is refused, with
     nothing changed, unless the operator says to delete it. A book a Paper run
     is writing stops the void before the append, so the graduation stands and

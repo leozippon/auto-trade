@@ -158,11 +158,11 @@ class Tool(Protocol):
 
 
 # How long one Agent-written justification may be: a candidate's pre-registered
-# hypothesis, the reason a session ends an arm. Both are asked for the same
+# hypothesis, the reason a session ends an experiment. Both are asked for the same
 # thing -- the claim, the readings behind it and what stays untested -- so both
 # are bounded here rather than drifting apart. A 500-character bound was
 # measured twice against what that statement needs: sessions dropped the
-# falsification clause from a hypothesis, and 3 of 14 audited arms had their
+# falsification clause from a hypothesis, and 3 of 14 audited experiments had their
 # first ``no_edge`` refused for a reason of 519-554 characters.
 AGENT_JUSTIFICATION_MAX_CHARS = 1_000
 

@@ -1,7 +1,7 @@
-"""The research console over a research arm's ledger.
+"""The research console over a research experiment's ledger.
 
-An arm runs one research session, freezes at most once and is then replayed once
-over forward and Held-out. The console must say where the arm is from the
+An experiment runs one research session, freezes at most once and is then replayed once
+over forward and Held-out. The console must say where the experiment is from the
 ledger alone, keep every number of the replay sealed until the forward record
 (and with it the verdict) exists, rank the best experiment on that verdict
 only, and refuse a create whose geometry the worker would refuse.
@@ -46,12 +46,12 @@ from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
 from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.test_webui_inject_message import _const_block, _fn
-from tests.unit.webui_research_arm import (
+from tests.unit.webui_research_experiment import (
     ENVIRONMENT_BLOCKED_REASON,
     REPLAY,
     _session_record,
     _step,
-    build_arm,
+    build_experiment,
 )
 
 
@@ -66,9 +66,9 @@ def _result_names(root: Path, experiment_id: str, mode: str) -> list[str]:
     )
 
 
-def test_a_researching_arm_shows_its_plan_and_nothing_frozen(tmp_path: Path) -> None:
-    build_arm(tmp_path, "arm", "research")
-    detail = experiment_detail(tmp_path, "arm")
+def test_a_researching_experiment_shows_its_plan_and_nothing_frozen(tmp_path: Path) -> None:
+    build_experiment(tmp_path, "experiment", "research")
+    detail = experiment_detail(tmp_path, "experiment")
     assert detail["stage"] == "research"
     assert detail["research_outcome"] is None
     assert detail["verdict"] is None
@@ -82,33 +82,33 @@ def test_a_researching_arm_shows_its_plan_and_nothing_frozen(tmp_path: Path) -> 
     assert detail["sessions"][1]["replay"] == REPLAY
 
 
-def test_a_frozen_arm_lists_its_validations_and_the_registration_it_froze_under(
+def test_a_frozen_experiment_lists_its_validations_and_the_registration_it_froze_under(
     tmp_path: Path,
 ) -> None:
     """A recorded session serves its outcome, attempts, budget, the registration
     the freeze passed (which carries no score) and every Validation it ran;
     research results are development evidence, readable as they land."""
 
-    build_arm(tmp_path, "arm", "sealed")
-    record = experiment_detail(tmp_path, "arm")["sessions"][0]["record"]
+    build_experiment(tmp_path, "experiment", "sealed")
+    record = experiment_detail(tmp_path, "experiment")["sessions"][0]["record"]
     assert record["outcome"] == "freeze"
     assert record["froze"] is True
     assert record["attempts"] == 1
     assert record["budget_used"]["test_replays"] == 8
     assert "best" not in record
     client = TestClient(create_app(tmp_path, tmp_path))
-    name = Path(str(_records(tmp_path / "arm")[0]["steps"][0]["validation_result_ref"])).parent.name
-    assert client.get(f"/api/experiments/arm/results/{name}/equity").status_code == 200
-    # The record says whether its trace is on disk; this synthetic arm has none.
+    name = Path(str(_records(tmp_path / "experiment")[0]["steps"][0]["validation_result_ref"])).parent.name
+    assert client.get(f"/api/experiments/experiment/results/{name}/equity").status_code == 200
+    # The record says whether its trace is on disk; this synthetic experiment has none.
     assert record["trace"] is False
     assert record["freeze_gate"]["passed"] is True
     assert record["freeze_gate"]["deflated_sharpe_probability"] is None
     assert {row["span"] for row in record["validations"]} == {"full", "Y3"}
 
 
-def test_a_frozen_arm_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None:
-    directory = build_arm(tmp_path, "arm", "sealed", alive=True)
-    detail = experiment_detail(tmp_path, "arm")
+def test_a_frozen_experiment_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None:
+    directory = build_experiment(tmp_path, "experiment", "sealed", alive=True)
+    detail = experiment_detail(tmp_path, "experiment")
     assert detail["stage"] == "forward"
     assert detail["status"]["session_key"] == "forward"
     assert detail["verdict"] is None
@@ -124,11 +124,11 @@ def test_a_frozen_arm_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None
     assert frozen["blocks"][0]["label"] == "202407-202506"
     # The running replay's result directory is on disk, and nothing serves it:
     # it answers exactly like a result that does not exist.
-    [running] = _result_names(tmp_path, "arm", "heldout")
+    [running] = _result_names(tmp_path, "experiment", "heldout")
     client = TestClient(create_app(tmp_path, tmp_path))
     for route in ("equity", "style", "orders", "orders.csv"):
-        sealed = client.get(f"/api/experiments/arm/results/{running}/{route}")
-        absent = client.get(f"/api/experiments/arm/results/heldout_absent/{route}")
+        sealed = client.get(f"/api/experiments/experiment/results/{running}/{route}")
+        absent = client.get(f"/api/experiments/experiment/results/heldout_absent/{route}")
         assert sealed.status_code == absent.status_code == 404, route
         assert sealed.json()["detail"].replace(running, "") == absent.json()[
             "detail"
@@ -136,13 +136,13 @@ def test_a_frozen_arm_is_sealed_until_its_verdict_exists(tmp_path: Path) -> None
     # The listing and status carry the stage only.
     for payload in (
         client.get("/api/experiments").text,
-        client.get("/api/experiments/arm").text,
-        client.get("/api/experiments/arm/status").text,
+        client.get("/api/experiments/experiment").text,
+        client.get("/api/experiments/experiment/status").text,
     ):
         assert running not in payload
         assert "lower_bound" not in payload
     # The frozen research result stays readable.
-    assert client.get(f"/api/experiments/arm/results/{frozen['result']}/style").status_code == 200
+    assert client.get(f"/api/experiments/experiment/results/{frozen['result']}/style").status_code == 200
     assert (directory / "artifacts/results" / running).is_dir()
 
 
@@ -152,10 +152,10 @@ def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Pat
     older schema -- and the console has to tell it from "no such result". The
     two must differ in the payload, never only in the wording of an error."""
 
-    directory = build_arm(tmp_path, "arm", "graduated")
+    directory = build_experiment(tmp_path, "experiment", "graduated")
     client = TestClient(create_app(tmp_path, tmp_path))
-    name = experiment_detail(tmp_path, "arm")["frozen"]["result"]
-    present = client.get(f"/api/experiments/arm/results/{name}/style")
+    name = experiment_detail(tmp_path, "experiment")["frozen"]["result"]
+    present = client.get(f"/api/experiments/experiment/results/{name}/style")
     assert present.status_code == 200
     assert present.json()["available"] is True
 
@@ -163,71 +163,71 @@ def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Pat
     # regressed blocks, holds the same series and is served alike.
     sidecar = directory / "artifacts/results" / name / "style_analysis.json"
     sidecar.write_text(json.dumps({**json.loads(sidecar.read_text(encoding="utf-8")), "schema_version": 1}), encoding="utf-8")
-    assert client.get(f"/api/experiments/arm/results/{name}/style").json()["available"] is True
+    assert client.get(f"/api/experiments/experiment/results/{name}/style").json()["available"] is True
     sidecar.unlink()
-    absent = client.get(f"/api/experiments/arm/results/{name}/style")
+    absent = client.get(f"/api/experiments/experiment/results/{name}/style")
     assert absent.status_code == 200
     assert absent.json() == {"available": False, "reason": "no_style_artifact"}
 
     sidecar.write_text(json.dumps({"schema_version": 0, "mode": "valid"}), encoding="utf-8")
-    stale = client.get(f"/api/experiments/arm/results/{name}/style")
+    stale = client.get(f"/api/experiments/experiment/results/{name}/style")
     assert stale.status_code == 200
     assert stale.json() == {"available": False, "reason": "no_style_artifact"}
 
     # A sidecar that is there but cannot be parsed is a load failure, and says
     # so rather than reading as a result that never had one.
     sidecar.write_text('{"schema_version": ', encoding="utf-8")
-    corrupt = client.get(f"/api/experiments/arm/results/{name}/style")
+    corrupt = client.get(f"/api/experiments/experiment/results/{name}/style")
     assert corrupt.status_code == 200
     assert corrupt.json() == {"available": False, "reason": "unreadable"}
 
-    unknown = client.get("/api/experiments/arm/results/valid_absent/style")
+    unknown = client.get("/api/experiments/experiment/results/valid_absent/style")
     assert unknown.status_code == 404
     assert unknown.json()["detail"] == "unknown result: valid_absent"
 
 
-def test_a_moved_arm_serves_its_recorded_paths_from_where_it_now_lives(
+def test_a_moved_experiment_serves_its_recorded_paths_from_where_it_now_lives(
     tmp_path: Path,
 ) -> None:
-    """Records name files by the host path they were written at. An arm moved
+    """Records name files by the host path they were written at. An experiment moved
     to another checkout or host serves them from its new directory, and a
     recorded file that is not there fails by name, not as an unknown result."""
 
     old_root = tmp_path / "old/experiments"
-    build_arm(old_root, "arm", "graduated")
+    build_experiment(old_root, "experiment", "graduated")
     new_root = tmp_path / "new/experiments"
     new_root.parent.mkdir()
     old_root.rename(new_root)
-    assert str(old_root / "arm") in json.dumps(_records(new_root / "arm"))
+    assert str(old_root / "experiment") in json.dumps(_records(new_root / "experiment"))
     client = TestClient(create_app(tmp_path / "new", new_root))
-    name = experiment_detail(new_root, "arm")["forward"]["result"]
+    name = experiment_detail(new_root, "experiment")["forward"]["result"]
     for route in ("equity", "style", "orders", "orders.csv"):
-        response = client.get(f"/api/experiments/arm/results/{name}/{route}")
+        response = client.get(f"/api/experiments/experiment/results/{name}/{route}")
         assert response.status_code == 200, route
-    assert client.get("/api/experiments/arm/frozen/strategy.zip").status_code == 200
+    assert client.get("/api/experiments/experiment/frozen/strategy.zip").status_code == 200
 
-    (new_root / "arm/artifacts/results" / name / "result.json").unlink()
-    missing = client.get(f"/api/experiments/arm/results/{name}/equity")
+    (new_root / "experiment/artifacts/results" / name / "result.json").unlink()
+    missing = client.get(f"/api/experiments/experiment/results/{name}/equity")
     assert missing.status_code == 404
     assert missing.json()["detail"] == (
-        f"arm: artifacts/results/{name}/result.json is recorded but not on disk"
+        f"experiment: artifacts/results/{name}/result.json is recorded but not on disk"
     )
     with pytest.raises(FileNotFoundError, match="outside the experiment"):
-        recorded_path(new_root / "arm", tmp_path / "elsewhere/arm/result.json")
+        recorded_path(new_root / "experiment", tmp_path / "elsewhere/experiment/result.json")
 
 
 @pytest.mark.parametrize("status", ["graduated", "discarded"])
 def test_a_sealed_gate_record_still_opens_its_forward_replay(tmp_path: Path, status: str) -> None:
-    """An arm judged under the retired sealed gate keeps its verdict and its
+    """An experiment judged under the retired sealed gate keeps its verdict and its
     replay readable: the record is shown as written, and no readout is read
     off it."""
 
-    build_arm(tmp_path, "arm", status)
-    detail = experiment_detail(tmp_path, "arm")
+    build_experiment(tmp_path, "experiment", status)
+    detail = experiment_detail(tmp_path, "experiment")
     assert detail["stage"] == "readout"
     assert detail["forward"]["readout"] is None and detail["readouts"] is None
     assert detail["verdict"]["status"] == status
-    record = _records(tmp_path / "arm")[-1]
+    record = _records(tmp_path / "experiment")[-1]
     assert detail["verdict"]["reasons"] == record["verdict"]["reasons"]
     forward = detail["forward"]
     assert forward["replay"] == REPLAY
@@ -237,12 +237,12 @@ def test_a_sealed_gate_record_still_opens_its_forward_replay(tmp_path: Path, sta
     assert forward["null_percentile"] == 0.77
     assert "result_ref" not in json.dumps(detail)
     client = TestClient(create_app(tmp_path, tmp_path))
-    equity = client.get(f"/api/experiments/arm/results/{forward['result']}/equity").json()
+    equity = client.get(f"/api/experiments/experiment/results/{forward['result']}/equity").json()
     [strategy] = equity["series"]
     assert strategy["dates"][0] == REPLAY["start"]
     assert equity["benchmark"]["dates"] == strategy["dates"]
     assert equity["exposure"]["strategy"]["long"][0] == pytest.approx(0.9)
-    orders = client.get(f"/api/experiments/arm/results/{forward['result']}/orders").json()
+    orders = client.get(f"/api/experiments/experiment/results/{forward['result']}/orders").json()
     assert orders["row_count"] == 2
     if status == "graduated":
         assert detail["verdict"]["reasons"] == []
@@ -254,8 +254,8 @@ def test_a_sealed_gate_record_still_opens_its_forward_replay(tmp_path: Path, sta
 
 
 def test_a_research_that_froze_nothing_has_a_verdict_and_no_replay(tmp_path: Path) -> None:
-    build_arm(tmp_path, "arm", "no_deliverable")
-    detail = experiment_detail(tmp_path, "arm")
+    build_experiment(tmp_path, "experiment", "no_deliverable")
+    detail = experiment_detail(tmp_path, "experiment")
     assert detail["stage"] == "readout"
     assert detail["verdict"] == {
         "status": "no_deliverable",
@@ -263,14 +263,14 @@ def test_a_research_that_froze_nothing_has_a_verdict_and_no_replay(tmp_path: Pat
     }
     assert detail["frozen"] is None
     assert detail["forward"] is None
-    assert detail["sessions"][0]["record"]["arm_end"]["status"] == "no_deliverable"
+    assert detail["sessions"][0]["record"]["experiment_end"]["status"] == "no_deliverable"
     assert detail["record"] is None
 
 
-def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Path) -> None:
-    """The console shows an arm's ending in one vocabulary, so the projection
+def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_path: Path) -> None:
+    """The console shows an experiment's ending in one vocabulary, so the projection
     must classify every ending the pipeline can produce and give each its own
-    reason; an arm that can still run has none at all."""
+    reason; an experiment that can still run has none at all."""
 
     for experiment_id, stage in (
         ("frozen_with_record", "frozen_with_record"),
@@ -282,7 +282,7 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         ("broken", "broken"),
         ("running", "research"),
     ):
-        build_arm(tmp_path, experiment_id, stage)
+        build_experiment(tmp_path, experiment_id, stage)
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["running"]["ending"] is None
     endings = {name: rows[name]["ending"] for name in ENDING_STATES}
@@ -312,7 +312,7 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
         f" · 前推下界 {readout['forward']['lower_bound'] * 100:+.2f}%"
     )
     assert rows["frozen_with_record"]["paper_candidate"] is not None
-    # The retired sealed gate's reason token leads a rejected arm's reasons.
+    # The retired sealed gate's reason token leads a rejected experiment's reasons.
     assert endings["rejected"]["reason"].split(" · ")[0] == "sealed_residual_ir_below_bar"
     assert rows["graduated"]["paper_candidate"] is not None
     assert endings["no_edge"]["reason"] == "没有候选值得冻结"
@@ -328,16 +328,16 @@ def test_every_way_an_arm_can_end_reads_as_one_ending_with_a_reason(tmp_path: Pa
     assert experiment_detail(tmp_path, "no_edge")["ending"] == endings["no_edge"]
 
 
-def test_the_home_list_flags_a_blocked_arm_and_an_unresolved_issue(tmp_path: Path) -> None:
-    """Two things put an attention line on an arm's card and nothing else
+def test_the_home_list_flags_a_blocked_experiment_and_an_unresolved_issue(tmp_path: Path) -> None:
+    """Two things put an attention line on an experiment's card and nothing else
     does: the host ending its session on the environment, and an issue report
-    its session filed that nobody has resolved while the arm can still run.
+    its session filed that nobody has resolved while the experiment can still run.
     Resolving the report clears the line even on a row the listing keeps
-    without re-reading, and an arm that ended no longer carries its reports."""
+    without re-reading, and an experiment that ended no longer carries its reports."""
 
-    build_arm(tmp_path, "blocked", "environment_blocked")
-    stopped = build_arm(tmp_path, "stopped", "research")
-    ended = build_arm(tmp_path, "ended", "no_deliverable")
+    build_experiment(tmp_path, "blocked", "environment_blocked")
+    stopped = build_experiment(tmp_path, "stopped", "research")
+    ended = build_experiment(tmp_path, "ended", "no_deliverable")
 
     def attention() -> dict[str, object]:
         rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
@@ -385,7 +385,7 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
         ("withdrawn", "graduated", "2026-09-12"),
         ("no_edge", "no_deliverable", "2026-09-13"),
     ):
-        directory = build_arm(tmp_path, experiment_id, stage)
+        directory = build_experiment(tmp_path, experiment_id, stage)
         params = json.loads((directory / "hitl/params.json").read_text(encoding="utf-8"))
         write_json_atomic(directory / "hitl/params.json", {**params, "_created_at": f"{created}T00:00:00+00:00"})
     reason = "复跑计入股息税后研究期主动 IR 为 −1.80。毕业靠的是冻结种子的一次抽签。"
@@ -397,8 +397,8 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
             evidence_ref="logs/notes/live_readiness_20261004/dividend_tax_rerun",
         )
     )
-    arms = {"graduated", "refused", "withdrawn", "no_edge"}
-    rows = [row for row in experiment_listing(tmp_path)["experiments"] if row["experiment_id"] in arms]
+    experiments = {"graduated", "refused", "withdrawn", "no_edge"}
+    rows = [row for row in experiment_listing(tmp_path)["experiments"] if row["experiment_id"] in experiments]
     withdrawn = next(row for row in rows if row["experiment_id"] == "withdrawn")
     # One ending word with the refusals; the reason says it had graduated and
     # why it no longer has, in the void's first sentence.
@@ -410,7 +410,7 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
     # endings nobody decided whatever its date.
     assert [row["experiment_id"] for row in rows] == ["graduated", "withdrawn", "refused", "no_edge"]
     # Nothing judged under the sealed gate is ranked: the ranking lists frozen
-    # strategies with a readout, and these arms have none.
+    # strategies with a readout, and these experiments have none.
     assert ranking(rows) == []
     # The replay's own record stays, and the 裁决 view has the void in full.
     assert withdrawn["forward"]["slices"]["forward"]["raw_readings"]["raw_excess"] is not None
@@ -433,15 +433,15 @@ def test_a_withdrawn_graduation_reads_as_a_failure_everywhere(tmp_path: Path) ->
 def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwise(
     tmp_path: Path,
 ) -> None:
-    """An arm judged on its training seeds together shows each seed and their
+    """An experiment judged on its training seeds together shows each seed and their
     mean on the experiment page -- the freeze's seed-mean IR beside the
     nominee's and the bar, and the forward and Held-out readings per seed --
     and the series F8 judges them on together -- from the fields the console
-    serves; an arm frozen on one seed serves none of them and draws nothing
+    serves; an experiment frozen on one seed serves none of them and draws nothing
     in their place."""
 
-    build_arm(tmp_path, "seeded", "graduated", seeded=True)
-    build_arm(tmp_path, "single", "graduated")
+    build_experiment(tmp_path, "seeded", "graduated", seeded=True)
+    build_experiment(tmp_path, "single", "graduated")
     seeded = experiment_detail(tmp_path, "seeded")
     single = experiment_detail(tmp_path, "single")
     gate = seeded["sessions"][0]["record"]["freeze_gate"]["seed_replicates"]
@@ -494,14 +494,14 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
 def test_the_listing_rederives_a_row_only_when_its_files_change(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The home page polls the listing every 5 s over every arm ever created:
-    an ended arm with no live worker is re-read only when its status, ledger,
-    params or identity map changes, while an arm with a live worker is re-read
+    """The home page polls the listing every 5 s over every experiment ever created:
+    an ended experiment with no live worker is re-read only when its status, ledger,
+    params or identity map changes, while an experiment with a live worker is re-read
     on every poll."""
 
     root = tmp_path / "experiments"
-    ended = build_arm(root, "ended", "no_deliverable")
-    build_arm(root, "running", "research", alive=True)
+    ended = build_experiment(root, "ended", "no_deliverable")
+    build_experiment(root, "running", "research", alive=True)
     derived: list[str] = []
     summarize = registry.summarize_experiment
 
@@ -516,7 +516,7 @@ def test_the_listing_rederives_a_row_only_when_its_files_change(
     second = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
     assert derived == ["running"]
     assert second["ended"] == first["ended"]
-    # The status changing under the arm reaches the very next poll.
+    # The status changing under the experiment reaches the very next poll.
     write_json_atomic(
         ended / "hitl/status.json",
         {"schema_version": 1, "pid": 999_999_999, "state": "failed", "error": "RuntimeError: boom"},
@@ -527,22 +527,22 @@ def test_the_listing_rederives_a_row_only_when_its_files_change(
     assert third["ended"]["ending"] == {"state": "broken", "reason": "RuntimeError: boom"}
 
 
-def test_an_arm_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
+def test_an_experiment_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
     tmp_path: Path,
 ) -> None:
-    """The gate refusing a nomination ends the arm without a replay. It is not
+    """The gate refusing a nomination ends the experiment without a replay. It is not
     the Agent's own "no candidate was worth freezing", so it reads as the
     refusal it is rather than as 未发现超额."""
 
-    directory = build_arm(tmp_path, "arm", "research")
+    directory = build_experiment(tmp_path, "experiment", "research")
     ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
         _session_record(
-            "arm",
+            "experiment",
             outcome="freeze",
             steps=[],
             trials_to_date=1,
             freeze_gate={"passed": False, "reasons": ["freeze_deflated_sharpe_below_threshold"]},
-            arm_end={
+            experiment_end={
                 "status": "no_deliverable",
                 "reason": "freeze refused by the gate (freeze_deflated_sharpe_below_threshold)",
             },
@@ -555,13 +555,13 @@ def test_an_arm_whose_nomination_the_freeze_gate_refused_reads_as_rejected(
 
 
 def test_the_listing_carries_the_budget_and_the_research_outcome(tmp_path: Path) -> None:
-    """The budget bars read the arm's ceilings (worker defaults under the
+    """The budget bars read the experiment's ceilings (worker defaults under the
     params) and what the session spent: the ledger's block once recorded,
     else the last block of the live session's trace, else nothing."""
 
-    live = build_arm(tmp_path, "live", "research", alive=True)
-    build_arm(tmp_path, "idle", "research")
-    build_arm(tmp_path, "judged", "graduated")
+    live = build_experiment(tmp_path, "live", "research", alive=True)
+    build_experiment(tmp_path, "idle", "research")
+    build_experiment(tmp_path, "judged", "graduated")
     params = json.loads((live / "hitl/params.json").read_text(encoding="utf-8"))
     (live / "hitl/params.json").write_text(json.dumps({**params, "max_research_minutes": 60}), encoding="utf-8")
     traces = live / "artifacts/traces"
@@ -605,7 +605,7 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
     research step says how it stopped and replays that trace instead of
     reading as a step yet to run."""
 
-    directory = build_arm(tmp_path, "cut", "research")
+    directory = build_experiment(tmp_path, "cut", "research")
     block = {"inference_seconds": 1316.2, "llm_calls": 180, "test_replays": 0, "null_controls": 0, "api_spend_usd": 1.8}
     write_json_atomic(
         directory / "hitl/status.json",
@@ -630,7 +630,7 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
     assert detail["sessions"][0] == {"key": "research", "kind": "research"}
     client = TestClient(create_app(tmp_path.parent, tmp_path))
     assert client.get("/api/experiments/cut/status").json()["budget_used"] == block
-    # The same arm with no trace on disk has spent nothing the console can read.
+    # The same experiment with no trace on disk has spent nothing the console can read.
     (trace_dir / "run_research_cut.jsonl").unlink()
     assert experiment_detail(tmp_path, "cut")["budget_used"] is None
 
@@ -651,15 +651,15 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
 
 
 def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_path: Path) -> None:
-    """The one curve per arm starts from the research-period validation of the
-    candidate the tiles name — the frozen artifact's own once the arm froze —
+    """The one curve per experiment starts from the research-period validation of the
+    candidate the tiles name — the frozen artifact's own once the experiment froze —
     and the replay's step lists the thresholds the verdict will hold it to
-    before the record exists, from the arm's parameters; the record's own
+    before the record exists, from the experiment's parameters; the record's own
     block carries the same keys afterwards."""
 
-    build_arm(tmp_path, "researching", "research")
-    build_arm(tmp_path, "frozen", "sealed")
-    build_arm(tmp_path, "judged", "graduated")
+    build_experiment(tmp_path, "researching", "research")
+    build_experiment(tmp_path, "frozen", "sealed")
+    build_experiment(tmp_path, "judged", "graduated")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["research_result"] is None
     frozen_ref = _records(tmp_path / "frozen")[0]["frozen"]["research_result_ref"]
@@ -678,7 +678,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     }
     recorded = experiment_detail(tmp_path, "judged")["forward"]["verdict"]["thresholds"]
     assert recorded["alpha"] == preview["alpha"]
-    # An arm created before the sealed gate can run no forward stage: none.
+    # An experiment created before the sealed gate can run no forward stage: none.
     path = tmp_path / "researching/hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({key: params[key] for key in params if key not in REQUIRED_RULES}), encoding="utf-8")
@@ -711,7 +711,7 @@ def test_a_running_sessions_validations_are_served_off_their_sidecars(tmp_path: 
     research-period figure is served as evidence, and the record stays empty
     until the ledger holds a step."""
 
-    directory = build_arm(tmp_path, "arm", "research", alive=True)
+    directory = build_experiment(tmp_path, "experiment", "research", alive=True)
     steps = [
         _step(directory, "research", 0, edge=0.0005, seed=1),
         _step(directory, "research", 1, edge=0.002, seed=3),
@@ -724,9 +724,9 @@ def test_a_running_sessions_validations_are_served_off_their_sidecars(tmp_path: 
     client = TestClient(create_app(tmp_path, tmp_path))
     for row in steps:
         name = Path(str(row["validation_result_ref"])).parent.name
-        assert client.get(f"/api/experiments/arm/results/{name}/equity").status_code == 200
+        assert client.get(f"/api/experiments/experiment/results/{name}/equity").status_code == 200
     # A result no record or sidecar names is absent.
-    assert client.get("/api/experiments/arm/results/heldout_nope/equity").status_code == 404
+    assert client.get("/api/experiments/experiment/results/heldout_nope/equity").status_code == 404
 
 
 def test_a_recorded_node_is_read_once_across_listings(tmp_path: Path) -> None:
@@ -734,7 +734,7 @@ def test_a_recorded_node_is_read_once_across_listings(tmp_path: Path) -> None:
     read on the first listing and never again, so a poll re-reads nothing
     until another node is recorded."""
 
-    directory = build_arm(tmp_path, "arm", "research", alive=True)
+    directory = build_experiment(tmp_path, "experiment", "research", alive=True)
     first = _step(directory, "research", 0, edge=0.002, seed=3)
     _sidecar(directory, first)
     [before] = registry._live_steps(directory)
@@ -747,11 +747,11 @@ def test_a_recorded_node_is_read_once_across_listings(tmp_path: Path) -> None:
     assert [row["step_id"] for row in registry._live_steps(directory)] == [first["step_id"], second["step_id"]]
 
 
-def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
+def test_an_ended_experiment_is_read_off_its_ledger_and_never_judged_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A recorded research session and a forward record are what an ended arm
-    shows: a cold console lists every such arm and opens its page without
+    """A recorded research session and a forward record are what an ended experiment
+    shows: a cold console lists every such experiment and opens its page without
     reading any replay's series again, and the numbers it serves are the
     ledger's own -- a sealed-gate record's slices and verdict key for key, and
     a readout as the forward record states it."""
@@ -764,7 +764,7 @@ def test_an_ended_arm_is_read_off_its_ledger_and_never_judged_again(
         ("refused", "discarded"),
         ("no_edge", "no_deliverable"),
     ):
-        build_arm(root, experiment_id, stage)
+        build_experiment(root, experiment_id, stage)
     for directory in root.iterdir():
         for result in (directory / "artifacts/results").glob("*/style_analysis.json"):
             result.unlink()
@@ -817,13 +817,13 @@ def test_a_page_poll_keeps_one_request_in_flight() -> None:
 
 def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Path) -> None:
     """The home page polls the listing every few seconds, and nearly all of it
-    is ended arms that change only when their files do. A poll that hands back
+    is ended experiments that change only when their files do. A poll that hands back
     the digest of those rows gets the live rows and the order of every id; any
     change to a kept row sends every row again."""
 
     root = tmp_path / "experiments"
-    ended = build_arm(root, "ended", "no_deliverable")
-    build_arm(root, "running", "research", alive=True)
+    ended = build_experiment(root, "ended", "no_deliverable")
+    build_experiment(root, "running", "research", alive=True)
     client = TestClient(create_app(tmp_path, root))
     full = client.get("/api/experiments").json()
     order = [row["experiment_id"] for row in full["experiments"]]
@@ -854,17 +854,17 @@ def _shelve(directory: Path) -> Path:
     return marker
 
 
-def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
+def test_an_archived_experiment_is_listed_only_on_request_and_its_page_still_opens(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A cold console lists the arms not archived without summarizing an
+    """A cold console lists the experiments not archived without summarizing an
     archived one at all, and counts the archived ones; asked for them, it
-    lists those alone. The archived arm's page opens as before and says it is
+    lists those alone. The archived experiment's page opens as before and says it is
     archived."""
 
     root = tmp_path / "experiments"
-    build_arm(root, "ended", "no_deliverable")
-    _shelve(build_arm(root, "shelved", "sealed"))
+    build_experiment(root, "ended", "no_deliverable")
+    _shelve(build_experiment(root, "shelved", "sealed"))
     summarized: list[str] = []
     summarize = registry.summarize_experiment
 
@@ -888,10 +888,10 @@ def test_an_archived_arm_is_listed_only_on_request_and_its_page_still_opens(
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
-def test_the_console_offers_no_start_for_an_archived_arm() -> None:
-    """The manager never starts an archived arm, so its experiment page offers
+def test_the_console_offers_no_start_for_an_archived_experiment() -> None:
+    """The manager never starts an archived experiment, so its experiment page offers
     neither 重启 nor 恢复运行 and its card on the archived page no 恢复运行,
-    while the same arm not archived still gets them. The page and the cards
+    while the same experiment not archived still gets them. The page and the cards
     are rendered by the console's own functions on a minimal DOM."""
 
     script = (
@@ -902,7 +902,7 @@ def test_the_console_offers_no_start_for_an_archived_arm() -> None:
     context = (
         "experimentName",
         "experimentBadges",
-        "armBadge",
+        "experimentBadge",
         "fmtTs",
         "attentionLine",
         "pipelineStepper",
@@ -932,7 +932,7 @@ const buttons = (node) => node.nodeType !== 1 ? [] : node.tag === "button"
   : node.children.flatMap(buttons);
 const archived = { archived_at: "2026-10-24T00:00:00+00:00", reason: "not resumed" };
 const dead = {
-  experiment_id: "arm", kind: "hitl", state: "interrupted", worker_alive: false,
+  experiment_id: "experiment", kind: "hitl", state: "interrupted", worker_alive: false,
   control: { request: null },
 };
 const live = { ...dead, state: "running_session", worker_alive: true };
@@ -959,14 +959,14 @@ console.log(JSON.stringify({
     }
 
 
-def test_archiving_or_restoring_any_arm_changes_the_kept_digest(tmp_path: Path) -> None:
+def test_archiving_or_restoring_any_experiment_changes_the_kept_digest(tmp_path: Path) -> None:
     """A poll holding the digest is told of an archive or a restore by a new
-    digest and every row, even when the arm's own row is derived afresh on
+    digest and every row, even when the experiment's own row is derived afresh on
     every poll and so is in no kept set."""
 
     root = tmp_path / "experiments"
-    build_arm(root, "ended", "no_deliverable")
-    running = build_arm(root, "running", "research", alive=True)
+    build_experiment(root, "ended", "no_deliverable")
+    running = build_experiment(root, "running", "research", alive=True)
     client = TestClient(create_app(tmp_path, root))
     full = client.get("/api/experiments").json()
     marker = _shelve(running)
@@ -982,10 +982,10 @@ def test_archiving_or_restoring_any_arm_changes_the_kept_digest(tmp_path: Path) 
 
 def test_a_card_curve_is_served_on_a_sample_of_its_days(tmp_path: Path) -> None:
     root = tmp_path / "experiments"
-    build_arm(root, "arm", "graduated")
+    build_experiment(root, "experiment", "graduated")
     client = TestClient(create_app(tmp_path, root))
     name = client.get("/api/experiments").json()["experiments"][0]["research_result"]
-    url = f"/api/experiments/arm/results/{name}/equity"
+    url = f"/api/experiments/experiment/results/{name}/equity"
     full = client.get(url).json()["series"][0]
     thin = client.get(url, params={"points": 20}).json()
     line = thin["series"][0]
@@ -999,17 +999,17 @@ def test_a_card_curve_is_served_on_a_sample_of_its_days(tmp_path: Path) -> None:
     assert client.get(url, params={"points": 1}).status_code == 422
 
 
-def test_an_arm_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
-    build_arm(tmp_path, "arm", "created")
-    row = summarize_experiment(tmp_path / "arm")
+def test_an_experiment_with_no_plan_yet_lists_as_created(tmp_path: Path) -> None:
+    build_experiment(tmp_path, "experiment", "created")
+    row = summarize_experiment(tmp_path / "experiment")
     assert row["state"] == "created"
     assert row["stage"] == "research"
     assert row["research_outcome"] is None
-    assert experiment_detail(tmp_path, "arm")["sessions"] == []
+    assert experiment_detail(tmp_path, "experiment")["sessions"] == []
 
 
 def test_a_fold_era_plan_is_listed_as_unreadable(tmp_path: Path) -> None:
-    directory = build_arm(tmp_path, "legacy", "research")
+    directory = build_experiment(tmp_path, "legacy", "research")
     (directory / "hitl/schedule.json").write_text(
         json.dumps(
             {
@@ -1021,7 +1021,7 @@ def test_a_fold_era_plan_is_listed_as_unreadable(tmp_path: Path) -> None:
         ),
         encoding="utf-8",
     )
-    build_arm(tmp_path, "current", "research")
+    build_experiment(tmp_path, "current", "research")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["legacy"]["state"] == "unreadable"
     assert rows["current"]["stage"] == "research"
@@ -1044,7 +1044,7 @@ def test_the_ranking_lists_frozen_strategies_by_their_records_residual_ir(tmp_pa
         ("researching", "research"),
         ("no_edge", "no_deliverable"),
     ):
-        build_arm(tmp_path, experiment_id, stage)
+        build_experiment(tmp_path, experiment_id, stage)
 
     def restate(name: str, **record: object) -> None:
         ledger = tmp_path / name / "ledgers/experiment_ledger.jsonl"
@@ -1067,13 +1067,13 @@ def test_the_ranking_lists_frozen_strategies_by_their_records_residual_ir(tmp_pa
     assert listed["ranking"] == ranked
 
 
-def test_an_arm_without_a_readout_is_not_ranked(tmp_path: Path) -> None:
-    """Ranking running arms by how far they had got would crown one of a field
+def test_an_experiment_without_a_readout_is_not_ranked(tmp_path: Path) -> None:
+    """Ranking running experiments by how far they had got would crown one of a field
     that has produced no out-of-sample reading at all: with no readout the
     ranking is empty, and the homepage draws no ranking panel."""
 
-    build_arm(tmp_path, "early", "research", alive=True)
-    build_arm(tmp_path, "frozen", "sealed", alive=True)
+    build_experiment(tmp_path, "early", "research", alive=True)
+    build_experiment(tmp_path, "frozen", "sealed", alive=True)
     rows = experiment_listing(tmp_path)["experiments"]
     assert ranking(rows) == []
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
@@ -1153,7 +1153,7 @@ def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
 
 
 def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
-    """The homepage grid stays scannable: a card says how the arm ended in one
+    """The homepage grid stays scannable: a card says how the experiment ended in one
     badge and keeps the reason in that badge's tooltip. The sentence itself is
     drawn only on the experiment page — its header and the 裁决 view."""
 
@@ -1162,7 +1162,7 @@ def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
     ).read_text(encoding="utf-8")
     card = script.split("function experimentCard(", 1)[1].split("\nfunction ", 1)[0]
     badge = script.split("function endingBadge(", 1)[1].split("\nfunction ", 1)[0]
-    assert "armBadge(item)" in card
+    assert "experimentBadge(item)" in card
     assert "endingReason" not in card
     assert "title: ending.reason || null" in badge
     # The definition and its two call sites, and no third page.
@@ -1172,7 +1172,7 @@ def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
 def test_the_three_replay_stage_views_judge_nothing() -> None:
     """前推回测, Held-out and 读出 judge nothing of their own: the two slice
     views say their readings are reported, never judged, and the readout view
-    draws the record's instrument, the forward reading and every arm's record
+    draws the record's instrument, the forward reading and every experiment's record
     over the same validation window; nothing of the sealed gate remains."""
 
     script = (
@@ -1196,14 +1196,14 @@ def test_the_listing_carries_the_freeze_and_the_record_so_far(tmp_path: Path) ->
     """The experiment card draws its freeze step and its evidence from the
     listing alone, and must read the same numbers the experiment page does."""
 
-    build_arm(tmp_path, "researching", "research")
-    build_arm(tmp_path, "frozen", "sealed")
-    build_arm(tmp_path, "recorded", "frozen_with_record")
-    build_arm(tmp_path, "fresh", "created")
+    build_experiment(tmp_path, "researching", "research")
+    build_experiment(tmp_path, "frozen", "sealed")
+    build_experiment(tmp_path, "recorded", "frozen_with_record")
+    build_experiment(tmp_path, "fresh", "created")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["frozen_session"] is None
     assert rows["frozen"]["frozen_session"] == "research"
-    # An arm without a recorded step has no record to read.
+    # An experiment without a recorded step has no record to read.
     assert rows["fresh"]["record"] is None and rows["researching"]["record"] is None
     record = rows["recorded"]["record"]
     detail = experiment_detail(tmp_path, "recorded")["record"]
@@ -1244,7 +1244,7 @@ def test_the_create_form_refuses_a_geometry_the_worker_refuses(
 
 
 def test_the_step_tree_names_the_session_and_the_frozen_node(tmp_path: Path) -> None:
-    directory = build_arm(tmp_path, "arm", "sealed")
+    directory = build_experiment(tmp_path, "experiment", "sealed")
     refs = AgentRefStore(directory)
     frozen = _records(directory)[0]["frozen"]
     output = Path(frozen["output_path"])
@@ -1274,8 +1274,8 @@ def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
     (``forward``), not under the provider phase its replay reads (``heldout``):
     filtering on the latter counted none, ever."""
 
-    directory = build_arm(tmp_path, "arm", "graduated")
-    assert experiment_detail(tmp_path, "arm")["replay_attempts"] == {
+    directory = build_experiment(tmp_path, "experiment", "graduated")
+    assert experiment_detail(tmp_path, "experiment")["replay_attempts"] == {
         "failed": 0,
         "last_error": None,
     }
@@ -1284,7 +1284,7 @@ def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
         # The attempt keys ``RollingExperimentPipeline`` writes on its failure path.
         ledger.append(
             {
-                "experiment_id": "arm",
+                "experiment_id": "experiment",
                 "epoch_id": stage,
                 "fold_id": stage,
                 "run_id": f"run_{stage}_failed",
@@ -1294,7 +1294,7 @@ def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
                 "error": f"OSError: {stage} host lost",
             }
         )
-    assert experiment_detail(tmp_path, "arm")["replay_attempts"] == {
+    assert experiment_detail(tmp_path, "experiment")["replay_attempts"] == {
         "failed": 1,
         "last_error": "OSError: forward host lost",
     }
@@ -1303,12 +1303,12 @@ def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
 def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path: Path) -> None:
     """A research Validation that fails is no attempt failure: it leaves its
     dead-end node in the step tree and no ledger row, so the replay's attempt
-    counter read 0 for an arm whose four Validations had failed. The detail
+    counter read 0 for an experiment whose four Validations had failed. The detail
     counts them on their own -- how many, how many the environment failed and
     refunded, and the last reason -- and leaves the replay counter alone."""
 
-    directory = build_arm(tmp_path, "arm", "graduated")
-    assert experiment_detail(tmp_path, "arm")["research_validation_failures"] == {
+    directory = build_experiment(tmp_path, "experiment", "graduated")
+    assert experiment_detail(tmp_path, "experiment")["research_validation_failures"] == {
         "failed": 0,
         "environment": 0,
         "last_error": None,
@@ -1328,7 +1328,7 @@ def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path:
             error=error,
             metadata={"batch_id": "batch_a", "candidate": name, "cause": cause},
         )
-    detail = experiment_detail(tmp_path, "arm")
+    detail = experiment_detail(tmp_path, "experiment")
     assert detail["research_validation_failures"] == {
         "failed": 2,
         "environment": 1,
@@ -1341,8 +1341,8 @@ def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path:
 
 
 def test_each_validation_shows_its_raw_excess_beside_its_active_figures(tmp_path: Path) -> None:
-    build_arm(tmp_path, "arm", "graduated")
-    detail = experiment_detail(tmp_path, "arm")
+    build_experiment(tmp_path, "experiment", "graduated")
+    detail = experiment_detail(tmp_path, "experiment")
     record = next(entry for entry in detail["sessions"] if entry["kind"] == "research")["record"]
     assert {"excess_return", "plain_excess", "excess_at_cost_stress"} <= set(record["validations"][0])
 
@@ -1355,7 +1355,7 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
 
     from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
 
-    directory = build_arm(tmp_path, "arm", "graduated")
+    directory = build_experiment(tmp_path, "experiment", "graduated")
     ledger_path = directory / "ledgers/experiment_ledger.jsonl"
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     record = records[-1]
@@ -1365,7 +1365,7 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
     ledger_path.write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records), encoding="utf-8"
     )
-    detail = experiment_detail(tmp_path, "arm")
+    detail = experiment_detail(tmp_path, "experiment")
     assert detail["forward"]["slices"] == record["slices"]
     ending = summarize_experiment(directory)["ending"]["reason"]
     information_ratio = record["slices"]["forward"]["information_ratio"]
@@ -1374,7 +1374,7 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
         (Path(str(record["result_ref"])).parent / STYLE_ARTIFACT_NAME).read_text(encoding="utf-8")
     )
     client = TestClient(create_app(tmp_path, tmp_path))
-    equity = client.get(f"/api/experiments/arm/results/{detail['forward']['result']}/equity").json()
+    equity = client.get(f"/api/experiments/experiment/results/{detail['forward']['result']}/equity").json()
     assert equity["panel"]["dates"] == equity["series"][0]["dates"]
     assert equity["panel"]["final"] == pytest.approx(
         float(np.prod([1.0 + value for _day, value in sidecar["panel_daily"]]) - 1.0), abs=1e-6
@@ -1382,15 +1382,15 @@ def test_a_forward_record_without_the_holders_readings_shows_none(tmp_path: Path
 
 
 def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(tmp_path: Path) -> None:
-    """An arm judged before 2026-10-28 stored its step rows, gate, frozen
+    """An experiment judged before 2026-10-28 stored its step rows, gate, frozen
     block and slices on the regressed scale and, when F8 refused it, a reason
     no condition carries now. No such figure reaches a current label: step
     rows and the frozen block are read off their own sidecars, as the gate
     reads them; a slice keeps its plain readings, its F8 bound stands in F2's
     place and F8's refusal is F2's."""
 
-    directory = build_arm(tmp_path, "arm", "graduated", seeded=True)
-    current = experiment_detail(tmp_path, "arm")
+    directory = build_experiment(tmp_path, "experiment", "graduated", seeded=True)
+    current = experiment_detail(tmp_path, "experiment")
     ledger_path = directory / "ledgers/experiment_ledger.jsonl"
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     research = next(row for row in records if row["record_type"] == "research_session")
@@ -1415,7 +1415,7 @@ def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in records), encoding="utf-8"
     )
 
-    detail = experiment_detail(tmp_path, "arm")
+    detail = experiment_detail(tmp_path, "experiment")
     shown = detail["forward"]["slices"]["forward"]
     assert shown["lower_bound"] == -0.05 and shown["plain_excess"] == block["plain_excess"]
     assert not {"neutralized_excess", "information_ratio", "excess_at_cost_stress", "plain_excess_lower_bound"} & set(shown)
@@ -1436,12 +1436,12 @@ def test_a_record_read_on_the_retired_regressed_scale_shows_no_regressed_figure(
     assert record["freeze_gate"]["seed_replicates"]["mean_information_ratio"] is None
 
 
-def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path: Path) -> None:
+def test_an_experiment_carrying_the_retired_switches_reads_as_one_without_them(tmp_path: Path) -> None:
     """The console accepts the switches every older params.json carries, and
-    the ablation rule of every arm created from 2026-11-03 until its
+    the ablation rule of every experiment created from 2026-11-03 until its
     retirement, and reads nothing from them: the replay plan, the listing row
-    and the page are those of the same arm without them. A key no reader
-    knows still makes the arm unreadable."""
+    and the page are those of the same experiment without them. A key no reader
+    knows still makes the experiment unreadable."""
 
     def plan(experiment_id: str) -> dict[str, object]:
         return experiment_detail(tmp_path, experiment_id)["sessions"][1]["thresholds"]
@@ -1451,9 +1451,9 @@ def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path
         params = json.loads(path.read_text(encoding="utf-8"))
         path.write_text(json.dumps({**params, **extra}), encoding="utf-8")
 
-    build_arm(tmp_path, "current", "research")
+    build_experiment(tmp_path, "current", "research")
     written(
-        build_arm(tmp_path, "legacy", "research"),
+        build_experiment(tmp_path, "legacy", "research"),
         {**dict.fromkeys(RETIRED_SWITCHES, False), "ablation_required": True},
     )
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
@@ -1461,34 +1461,34 @@ def test_an_arm_carrying_the_retired_switches_reads_as_one_without_them(tmp_path
     assert plan("legacy") == plan("current")
     assert not (RETIRED_SWITCHES | OBSOLETE_KEYS) & set(plan("legacy"))
 
-    written(build_arm(tmp_path, "unknown", "research"), {"require_heldout_magic": True})
+    written(build_experiment(tmp_path, "unknown", "research"), {"require_heldout_magic": True})
     unknown = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}["unknown"]
     assert unknown["state"] == "unreadable"
 
 
 def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_count(tmp_path: Path) -> None:
-    """The multiplicity readout: an arm's readout view lists every frozen
-    strategy's rolling record over the same validation period, archived arms
+    """The multiplicity readout: an experiment's readout view lists every frozen
+    strategy's rolling record over the same validation period, archived experiments
     included, with its one-sided null p-value and how many there are, and
     pools the forward-year readings of every frozen strategy over the same
-    forward months. Nothing is adjusted: each arm keeps its own reading."""
+    forward months. Nothing is adjusted: each experiment keeps its own reading."""
 
     from autotrade.pipelines.verdict import pooled_reading
 
-    build_arm(tmp_path, "good", "frozen_with_record")
-    build_arm(tmp_path, "other", "frozen_with_record")
-    build_arm(tmp_path, "legacy", "graduated")
-    build_arm(tmp_path, "early", "research")
+    build_experiment(tmp_path, "good", "frozen_with_record")
+    build_experiment(tmp_path, "other", "frozen_with_record")
+    build_experiment(tmp_path, "legacy", "graduated")
+    build_experiment(tmp_path, "early", "research")
     readouts = experiment_detail(tmp_path, "good")["readouts"]
     window = readouts["validation_window"]
-    assert window["count"] == 2 and readouts["unreadable_arms"] == 0
-    by_arm = {row["experiment_id"]: row for row in window["readings"]}
-    assert set(by_arm) == {"good", "other"}
+    assert window["count"] == 2 and readouts["unreadable_experiments"] == 0
+    by_experiment = {row["experiment_id"]: row for row in window["readings"]}
+    assert set(by_experiment) == {"good", "other"}
     for name in ("good", "other"):
         block = _records(tmp_path / name)[-1]["readout"]["record"]
         assert (window["start"], window["end"]) == (block["start"], block["end"])
-        assert by_arm[name]["p_value"] == block["p_value"]
-        assert (by_arm[name]["steps"], by_arm[name]["candidate_changes"]) == (block["steps"], block["candidate_changes"])
+        assert by_experiment[name]["p_value"] == block["p_value"]
+        assert (by_experiment[name]["steps"], by_experiment[name]["candidate_changes"]) == (block["steps"], block["candidate_changes"])
     # Most significant first.
     assert [row["p_value"] for row in window["readings"]] == sorted(row["p_value"] for row in window["readings"])
     pooled = pooled_reading(
@@ -1502,7 +1502,7 @@ def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_coun
     }
     # A strategy that raised in its forward replay has no reading to pool and
     # is counted, never left out silently.
-    crashed = build_arm(tmp_path, "crashed", "frozen_with_record")
+    crashed = build_experiment(tmp_path, "crashed", "frozen_with_record")
     ledger = crashed / "ledgers/experiment_ledger.jsonl"
     lines = ledger.read_text(encoding="utf-8").splitlines()
     record = json.loads(lines[-1])
@@ -1515,7 +1515,7 @@ def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_coun
     ledger.write_text("\n".join([*lines[:-1], json.dumps(record)]) + "\n", encoding="utf-8")
     pool = experiment_detail(tmp_path, "good")["readouts"]["forward_pool"]
     assert (pool["count"], pool["raised"]) == (2, 1)
-    # An arm without a forward record, or one judged under the sealed gate, has no readout.
+    # An experiment without a forward record, or one judged under the sealed gate, has no readout.
     assert experiment_detail(tmp_path, "early")["readouts"] is None
     assert experiment_detail(tmp_path, "legacy")["readouts"] is None
 

@@ -1,5 +1,5 @@
 """The run facts a session is told: the research period and the session's
-place in the arm, universe policy and strategy call cadence — one sentence
+place in the experiment, universe policy and strategy call cadence — one sentence
 each, with every date after research end absent — plus the budgets and
 decision-input windows the same object publishes."""
 
@@ -199,7 +199,7 @@ def test_the_session_is_told_which_index_it_is_measured_against() -> None:
     assert facts["benchmark_index"] == "000905.SH"
     assert "中证500" in facts["regression_method"]
     # A manifest written before the parameter existed reads as the default,
-    # which is the index those arms actually ran on.
+    # which is the index those experiments actually ran on.
     assert _facts()["benchmark_index"] == "000300.SH"
     assert "沪深300" in _facts()["regression_method"]
 
@@ -255,7 +255,7 @@ def test_a_zero_row_domain_file_is_reported_as_unavailable() -> None:
 
 def test_a_cpu_only_experiment_still_states_its_strategy_gpu_count() -> None:
     """0 is the answer "every formal replay runs on CPU", not a missing fact:
-    dropping it would leave the session unable to tell a CPU-only arm from an
+    dropping it would leave the session unable to tell a CPU-only experiment from an
     older manifest that never published the field."""
 
     budgets = _facts(
@@ -269,7 +269,7 @@ def test_a_cpu_only_experiment_still_states_its_strategy_gpu_count() -> None:
 
 
 # The strategy container's boundary as the run manifest carries it: the
-# evaluator's own strategy SandboxConfig, which is the arm's (``strategy_cpus``,
+# evaluator's own strategy SandboxConfig, which is the experiment's (``strategy_cpus``,
 # ``strategy_memory``), here at the executor's defaults.
 CONTAINER = {"strategy_cpus": 8.0, "strategy_memory_bytes": 32 * 1024**3}
 
@@ -277,11 +277,11 @@ CONTAINER = {"strategy_cpus": 8.0, "strategy_memory_bytes": 32 * 1024**3}
 def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -> None:
     """A session sizing its own thread pools must not have to guess.
 
-    The formal strategy container is started with the arm's CPU quota and has
+    The formal strategy container is started with the experiment's CPU quota and has
     its OMP/MKL/OPENBLAS/NUMEXPR variables set from it; one session guessed half
     of it and lost two backtest slots to fit timeouts. The quota and how many
     replays a batch runs at once both come from the run manifest, which carries
-    the evaluator's own limits and the arm's own width, so neither fact can
+    the evaluator's own limits and the experiment's own width, so neither fact can
     drift from what the containers get; a manifest without the quota states
     none rather than a guessed default.
     """
@@ -302,10 +302,10 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
 def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
     """The ceiling a fit is measured against, published in the replay's unit.
 
-    An arm extrapolated a 7.34 GiB fit, compared it against a ceiling it had
+    An experiment extrapolated a 7.34 GiB fit, compared it against a ceiling it had
     guessed, concluded the replay was swapping and spent hours on it. The
     strategy container carries the same limit as the session Sandbox, and the
-    fact states the arm's ceiling in the unit a replay reports its measured
+    fact states the experiment's ceiling in the unit a replay reports its measured
     peak in, so the comparison needs no extrapolation at all.
     """
 
@@ -316,8 +316,8 @@ def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
     assert "smoke_backtest_probe_note" not in budgets
 
 
-def test_the_container_note_renders_from_the_arms_limits() -> None:
-    """The container passage's numbers are the arm's own limits as the run
+def test_the_container_note_renders_from_the_experiments_limits() -> None:
+    """The container passage's numbers are the experiment's own limits as the run
     manifest carries them, not retyped prose: other limits change the prompt
     the session reads, thread variables included."""
 
@@ -334,7 +334,7 @@ def test_the_container_note_renders_from_the_arms_limits() -> None:
 def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:
     """Root names are a tool convention, not paths.
 
-    Two arms read ``steps`` as a shell path, failed, and concluded the Step
+    Two experiments read ``steps`` as a shell path, failed, and concluded the Step
     tree was invisible to ``shell``; it is mounted, under /mnt/artifacts. The
     fact states where each root really is, and that ``trace`` is the one with
     no path in the container.

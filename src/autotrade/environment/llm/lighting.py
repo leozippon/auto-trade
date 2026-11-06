@@ -3,11 +3,11 @@
 The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
 function tools on Chat Completions — and its Anthropic ids, gemini-4-argon and
 DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
-and an alternate one: an arm's ``llm_key`` chooses which its calls start on,
+and an alternate one: an experiment's ``llm_key`` chooses which its calls start on,
 and the other is the fallback. The Anthropic ids' requests also mark a
 prompt-cache breakpoint, which the relay forwards to the upstream Messages
 API. The Claude ids and gemini-4-argon are sent no reasoning level, so an
-arm's ``reasoning_effort`` does not reach them: the Claude ids accept none,
+experiment's ``reasoning_effort`` does not reach them: the Claude ids accept none,
 and gemini-4-argon thinks at Google's default and keeps the provider's
 default temperature as well.
 """
@@ -43,7 +43,7 @@ if TYPE_CHECKING:  # annotation-only: model_profiles imports this module
 
 API_KEY_ENV = "LIGHTING_API_KEY"
 API_KEY_ALT_ENV = "LIGHTING_API_KEY_ALT"
-# An arm's ``llm_key`` (a choice, never a variable name): the credential its
+# An experiment's ``llm_key`` (a choice, never a variable name): the credential its
 # relay calls start on. The other one is the fallback.
 LLM_KEY_ENVS = {"primary": API_KEY_ENV, "alternate": API_KEY_ALT_ENV}
 BASE_URL_ENV = "LIGHTING_BASE_URL"
@@ -489,7 +489,7 @@ def _responses_tool(tool: Mapping[str, object]) -> dict[str, object]:
     parameter: each one is sent nullable, and the tool registry reads null as
     absent. Before this, a parameter with no neutral value got a placeholder
     -- ``resume="unused"`` or ``"/"`` on all 469 sub-agent launches of round
-    20261014b's two gpt-6.1-sol arms, each refused as an unknown task_id.
+    20261014b's two gpt-6.1-sol experiments, each refused as an unknown task_id.
     """
 
     function = tool.get("function")

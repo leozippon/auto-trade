@@ -96,7 +96,7 @@ class LocalDailyEvaluationBackend:
     ) -> None:
         if execution_mode not in {"sandbox", "trusted"}:
             raise ValueError("execution_mode must be sandbox or trusted")
-        # The arm's benchmark, which the style sidecar records; a plain daily
+        # The experiment's benchmark, which the style sidecar records; a plain daily
         # file carries no index series, so nothing is regressed against it.
         self.benchmark_index = benchmark_index
         self.daily_path = Path(daily_path).resolve(strict=True)
@@ -214,7 +214,7 @@ class LocalDailyEvaluationBackend:
 class DeterministicBaselineDeveloper:
     """Replay the template unchanged on the research span and nominate it.
 
-    Nothing is modified and nothing is judged: the arm's one session validates
+    Nothing is modified and nothing is judged: the experiment's one session validates
     the template twice on the full span (the freeze gate counts full-span
     validations, the nominee included, and needs two) and nominates the
     second replay for the gate.

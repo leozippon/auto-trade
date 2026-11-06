@@ -1,8 +1,8 @@
-"""The PIT-view prune: which arms it may touch, what it counts, what it deletes.
+"""The PIT-view prune: which experiments it may touch, what it counts, what it deletes.
 
-Real trees in a temporary repository: arms written by ``build_arm`` exactly as
+Real trees in a temporary repository: experiments written by ``build_experiment`` exactly as
 the pipeline leaves them at each stage, and a ``pit_views/`` that shares one
-file with a seed by hard link, as a seeded arm does.
+file with a seed by hard link, as a seeded experiment does.
 """
 
 from __future__ import annotations
@@ -16,13 +16,13 @@ import pytest
 from autotrade.common.records import write_json_atomic
 from autotrade.pipelines.hitl_state import ARCHIVED_NAME
 from scripts.experiments import prune_pit_views as prune_tool
-from tests.unit.webui_research_arm import build_arm
+from tests.unit.webui_research_experiment import build_experiment
 
 PAYLOAD = b"x" * 65536
 
 
 def _views(directory: Path, seed: Path) -> dict[str, Path]:
-    """A pit_views tree: a seed view linked in, a read-only view of the arm's
+    """A pit_views tree: a seed view linked in, a read-only view of the experiment's
     own whose file the slot store shares inside the tree, and a stash shard."""
 
     views = directory / "pit_views"
@@ -50,16 +50,16 @@ def repo(tmp_path: Path) -> Path:
     seed.write_bytes(PAYLOAD)
     experiments = tmp_path / "experiments"
     for experiment_id, stage, alive in (
-        ("arm_graduated", "graduated", False),
-        ("arm_no_edge", "no_deliverable", False),
+        ("experiment_graduated", "graduated", False),
+        ("experiment_no_edge", "no_deliverable", False),
         # Frozen, forward replay not yet recorded: the worker will still read
         # its F and H slots.
-        ("arm_sealed", "sealed", False),
-        ("arm_live", "research", True),
-        ("arm_broken", "broken", False),
+        ("experiment_sealed", "sealed", False),
+        ("experiment_live", "research", True),
+        ("experiment_broken", "broken", False),
     ):
-        _views(build_arm(experiments, experiment_id, stage, alive=alive), seed)
-    sandbox = tmp_path / ".runtime" / "sandboxes" / "arm_no_edge" / "research"
+        _views(build_experiment(experiments, experiment_id, stage, alive=alive), seed)
+    sandbox = tmp_path / ".runtime" / "sandboxes" / "experiment_no_edge" / "research"
     sandbox.mkdir(parents=True)
     (sandbox / "notes.txt").write_text("scratch", encoding="utf-8")
     return tmp_path
@@ -70,29 +70,29 @@ def _blocks(*paths: Path) -> int:
 
 
 def test_only_inodes_wholly_inside_the_tree_count(repo: Path) -> None:
-    """The seed's view frees nothing; the arm's own view counts once however
+    """The seed's view frees nothing; the experiment's own view counts once however
     many of its links the tree holds; every directory counts."""
 
-    tree = _views(build_arm(repo / "experiments", "arm_count", "graduated"), repo / "data/seed/daily.parquet")
+    tree = _views(build_experiment(repo / "experiments", "experiment_count", "graduated"), repo / "data/seed/daily.parquet")
     directories = [Path(root) for root, _dirs, _files in os.walk(tree["views"])]
     expected = _blocks(*directories, tree["own"], tree["shard"])
     assert tree["shared"].stat().st_nlink > 1  # the seed holds a link outside
     assert prune_tool.freed_bytes(tree["views"]) == expected
 
 
-def test_a_dry_run_selects_finished_arms_and_changes_nothing(
+def test_a_dry_run_selects_finished_experiments_and_changes_nothing(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     before = sorted(str(path) for path in repo.rglob("*"))
     assert prune_tool.prune(repo, apply=False) == 0
     out = capsys.readouterr().out
     lines = {line.split(":", 1)[0]: line for line in out.splitlines()}
-    assert "would free" in lines["arm_graduated"]
-    assert "sandbox" in lines["arm_no_edge"]
-    assert "without a verdict" in lines["arm_sealed"]
-    assert "live worker" in lines["arm_live"]
-    assert "'failed' is not terminal" in lines["arm_broken"]
-    assert "total: 2 finished arms" in lines["total"]
+    assert "would free" in lines["experiment_graduated"]
+    assert "sandbox" in lines["experiment_no_edge"]
+    assert "without a verdict" in lines["experiment_sealed"]
+    assert "live worker" in lines["experiment_live"]
+    assert "'failed' is not terminal" in lines["experiment_broken"]
+    assert "total: 2 finished experiments" in lines["total"]
     assert "3 kept, 0 refused" in lines["total"]
     assert "dry run" in lines["total"]
     assert sorted(str(path) for path in repo.rglob("*")) == before
@@ -104,87 +104,87 @@ def test_apply_deletes_the_caches_and_nothing_durable(
     experiments = repo / "experiments"
     durable = {
         path: path.read_bytes()
-        for arm in ("arm_graduated", "arm_no_edge")
+        for experiment in ("experiment_graduated", "experiment_no_edge")
         for name in ("ledgers", "hitl", "artifacts", "steps", ".host")
-        for path in (experiments / arm / name).rglob("*")
+        for path in (experiments / experiment / name).rglob("*")
         if path.is_file()
     }
     assert durable
     assert prune_tool.prune(repo, apply=True) == 0
     assert "freed" in capsys.readouterr().out
-    for arm in ("arm_graduated", "arm_no_edge"):
-        assert not (experiments / arm / "pit_views").exists()
-    assert not (repo / ".runtime" / "sandboxes" / "arm_no_edge").exists()
+    for experiment in ("experiment_graduated", "experiment_no_edge"):
+        assert not (experiments / experiment / "pit_views").exists()
+    assert not (repo / ".runtime" / "sandboxes" / "experiment_no_edge").exists()
     assert (repo / ".runtime" / "sandboxes").is_dir()
     assert {path: path.read_bytes() for path in durable} == durable
-    for arm in ("arm_sealed", "arm_live", "arm_broken"):
-        assert (experiments / arm / "pit_views" / "asof_stash").is_dir()
+    for experiment in ("experiment_sealed", "experiment_live", "experiment_broken"):
+        assert (experiments / experiment / "pit_views" / "asof_stash").is_dir()
     seed = repo / "data" / "seed" / "daily.parquet"
     assert seed.read_bytes() == PAYLOAD
-    assert seed.stat().st_nlink == 4  # the three kept arms' links remain
+    assert seed.stat().st_nlink == 4  # the three kept experiments' links remain
     # Idempotent: a second pass finds nothing left to free.
     assert prune_tool.prune(repo, apply=True) == 0
-    assert "total: 0 finished arms" in capsys.readouterr().out
+    assert "total: 0 finished experiments" in capsys.readouterr().out
 
 
-def test_an_archived_arm_is_finished_for_good_unless_its_worker_lives(
+def test_an_archived_experiment_is_finished_for_good_unless_its_worker_lives(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Archiving is the operator's final word: an arm interrupted mid-research
+    """Archiving is the operator's final word: an experiment interrupted mid-research
     (its status still says running, its worker is gone) never gets a verdict,
     and a failed one is not resumed, so archived, both lose their caches. A
-    live worker keeps its views even on an archived arm."""
+    live worker keeps its views even on an archived experiment."""
 
     experiments = repo / "experiments"
     write_json_atomic(
-        experiments / "arm_sealed" / "hitl" / "status.json",
+        experiments / "experiment_sealed" / "hitl" / "status.json",
         {"schema_version": 1, "pid": 999_999_999, "state": "running_session"},
     )
-    for arm in ("arm_sealed", "arm_broken", "arm_live"):
+    for experiment in ("experiment_sealed", "experiment_broken", "experiment_live"):
         write_json_atomic(
-            experiments / arm / "hitl" / ARCHIVED_NAME,
+            experiments / experiment / "hitl" / ARCHIVED_NAME,
             {"archived_at": "2026-10-24T00:00:00+00:00", "reason": "not resumed"},
         )
     assert prune_tool.prune(repo, apply=True) == 0
     lines = {line.split(":", 1)[0]: line for line in capsys.readouterr().out.splitlines()}
-    for arm in ("arm_sealed", "arm_broken"):
-        assert "freed" in lines[arm]
-        assert not (experiments / arm / "pit_views").exists()
-        assert (experiments / arm / "hitl" / ARCHIVED_NAME).is_file()
-    assert "live worker" in lines["arm_live"]
-    assert (experiments / "arm_live" / "pit_views" / "asof_stash").is_dir()
-    assert "total: 4 finished arms" in lines["total"]
+    for experiment in ("experiment_sealed", "experiment_broken"):
+        assert "freed" in lines[experiment]
+        assert not (experiments / experiment / "pit_views").exists()
+        assert (experiments / experiment / "hitl" / ARCHIVED_NAME).is_file()
+    assert "live worker" in lines["experiment_live"]
+    assert (experiments / "experiment_live" / "pit_views" / "asof_stash").is_dir()
+    assert "total: 4 finished experiments" in lines["total"]
     assert "1 kept, 0 refused" in lines["total"]
 
 
-def test_an_arm_whose_state_cannot_be_read_is_refused(
+def test_an_experiment_whose_state_cannot_be_read_is_refused(
     repo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Unprovable is unsafe: a corrupt ledger or status keeps the views and
-    the run exits non-zero, while the provable arms are still pruned."""
+    the run exits non-zero, while the provable experiments are still pruned."""
 
     experiments = repo / "experiments"
-    ledger = experiments / "arm_graduated" / "ledgers" / "experiment_ledger.jsonl"
+    ledger = experiments / "experiment_graduated" / "ledgers" / "experiment_ledger.jsonl"
     ledger.write_text(ledger.read_text(encoding="utf-8") + "{not json\n", encoding="utf-8")
-    (experiments / "arm_no_edge" / "hitl" / "status.json").write_text(
+    (experiments / "experiment_no_edge" / "hitl" / "status.json").write_text(
         json.dumps({"schema_version": 99, "state": "completed"}), encoding="utf-8"
     )
     assert prune_tool.prune(repo, apply=True) == 1
     err = capsys.readouterr().err
-    assert "arm_graduated: refused" in err
-    assert "arm_no_edge: refused" in err
-    assert (experiments / "arm_graduated" / "pit_views").is_dir()
-    assert (experiments / "arm_no_edge" / "pit_views").is_dir()
-    assert (repo / ".runtime" / "sandboxes" / "arm_no_edge").is_dir()
+    assert "experiment_graduated: refused" in err
+    assert "experiment_no_edge: refused" in err
+    assert (experiments / "experiment_graduated" / "pit_views").is_dir()
+    assert (experiments / "experiment_no_edge" / "pit_views").is_dir()
+    assert (repo / ".runtime" / "sandboxes" / "experiment_no_edge").is_dir()
 
 
 def test_a_symlinked_view_tree_is_refused(repo: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Deleting through a link could reach a tree the arm does not own."""
+    """Deleting through a link could reach a tree the experiment does not own."""
 
-    arm = repo / "experiments" / "arm_graduated"
+    experiment = repo / "experiments" / "experiment_graduated"
     elsewhere = repo / "elsewhere"
-    (arm / "pit_views").rename(elsewhere)
-    (arm / "pit_views").symlink_to(elsewhere, target_is_directory=True)
+    (experiment / "pit_views").rename(elsewhere)
+    (experiment / "pit_views").symlink_to(elsewhere, target_is_directory=True)
     assert prune_tool.prune(repo, apply=True) == 1
-    assert "arm_graduated: refused" in capsys.readouterr().err
+    assert "experiment_graduated: refused" in capsys.readouterr().err
     assert (elsewhere / "asof_stash").is_dir()

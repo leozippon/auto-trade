@@ -448,7 +448,7 @@ main {
  color: var(--muted);
  font-weight: 500;
 }
-/* How an arm ended: a graduate reads as the one good outcome, a refusal (a
+/* How an experiment ended: a graduate reads as the one good outcome, a refusal (a
    withdrawn graduation among them) and a broken worker as failures, and the
    two endings nobody decided stay quiet. */
 .badge.ending-graduated {
@@ -465,7 +465,7 @@ main {
  background: var(--chip-bg);
  color: var(--muted);
 }
-/* An arm the host ended on the environment is no research outcome: it wears
+/* An experiment the host ended on the environment is no research outcome: it wears
    the warning colour, as does the card's attention line. */
 .badge.ending-environment_blocked {
  background: var(--warn-soft);
@@ -508,7 +508,7 @@ main {
  grid-template-columns: repeat(auto-fill, minmax(min(27rem, 100%), 1fr));
  gap: var(--space-4);
 }
-/* One vertical rhythm for every card, research arm and Paper book alike: the
+/* One vertical rhythm for every card, research experiment and Paper book alike: the
    flex gap is the only spacing between groups (title row, stepper, activity,
    budget bar, tiles, chart), so a group that carries its own margin would read
    as a different card. Inside a group the scale steps down one. */
@@ -798,7 +798,7 @@ details.fold.fill-extra .form-grid {
 
 /* The pipeline stepper. One node per step; the dot's drawing is the state —
    a tick when done, a cross when failed, a filled grey dot when the step
-   ended the arm without failing, a dash when skipped, a pulse while running,
+   ended the experiment without failing, a dash when skipped, a pulse while running,
    a hollow ring while pending — and a rail joins the nodes. The miniature
    runs across a card, the full one down the process panel. */
 .stepper {
@@ -839,7 +839,7 @@ details.fold.fill-extra .form-grid {
 .failed > .stepper-dot::after {
  content: "✕";
 }
-/* A step that ended the arm without failing at its own job: the research that
+/* A step that ended the experiment without failing at its own job: the research that
    delivered nothing, and the 裁决 no replay decided. Filled, so it reads as a
    terminus, grey, so it is not read as a failure. */
 .ended > .stepper-dot {
@@ -1064,7 +1064,7 @@ details.fold.fill-extra .form-grid {
 .budget-pct.bad {
  color: var(--bad);
 }
-/* A budget the arm never metered: the figure is absent, not zero. */
+/* A budget the experiment never metered: the figure is absent, not zero. */
 .budget-pct.muted {
  color: var(--muted);
 }
@@ -2412,7 +2412,7 @@ textarea.directive:focus {
  background-color: var(--panel);
  box-shadow: 0 0 0 3px var(--accent-soft);
 }
-/* A limit that has a default of its own, overridden for this arm. */
+/* A limit that has a default of its own, overridden for this experiment. */
 .field input.overridden {
  border-color: var(--accent);
 }
@@ -3093,7 +3093,7 @@ details.issue-evidence > summary:hover {
  font-size: 0.94rem;
  font-weight: 600;
 }
-/* The home list's way to the archived arms: present, never prominent. */
+/* The home list's way to the archived experiments: present, never prominent. */
 .archived-link {
  font-size: 0.875rem;
  color: var(--muted);
@@ -3451,7 +3451,7 @@ details.issue-evidence > summary:hover {
  }
 }
 /* Too narrow for five names under five dots: the stepper keeps the dots, which
-   carry the shape of the pipeline, and only the step the arm is on is named. */
+   carry the shape of the pipeline, and only the step the experiment is on is named. */
 @media (max-width: 360px) {
  .stepper.mini .stepper-label {
   display: none;

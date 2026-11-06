@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check that a hosted model's prompt cache works today, before an arm uses it.
+"""Check that a hosted model's prompt cache works today, before an experiment uses it.
 
 Sends one production-shaped request (system prompt, user task, a tool call
 and its ~3,000-token result, so a Claude id carries its cache marker on the

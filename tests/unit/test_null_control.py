@@ -330,7 +330,7 @@ def test_the_panel_draws_only_on_the_boards_the_account_may_buy():
 def test_the_draws_are_pinned_to_the_seed_the_draw_and_the_trip():
     """Pinned literals: a replacement is seeded from a blake2b digest of the
     panel seed, the draw's index and the round trip, never from Python's
-    per-process ``hash``, so every process -- a rerun, a paired arm, a later
+    per-process ``hash``, so every process -- a rerun, a paired experiment, a later
     audit -- draws exactly these names."""
 
     assert _board_draws(None, 6, 7) == [
@@ -577,11 +577,11 @@ def test_membership_matches_a_name_to_its_own_side_of_the_benchmark():
 
 
 def test_a_mounted_membership_that_misses_the_span_fails_before_any_draw():
-    """An arm that mounts ``index_weight`` is graded on membership in every
+    """An experiment that mounts ``index_weight`` is graded on membership in every
     span. Where its release holds no section before the span's entries -- an
-    eight-year arm on a release whose constituents start in 2020 -- the panel
+    eight-year experiment on a release whose constituents start in 2020 -- the panel
     must fail by name, never quietly draw the float-cap decile for this span
-    while the arm's other spans draw membership."""
+    while the experiment's other spans draw membership."""
     arguments = (
         _observed_result(),
         _frame(),

@@ -1,6 +1,6 @@
 """Stub the host's GPU roster.
 
-The console admits and claims a GPU arm's devices against the live host
+The console admits and claims a GPU experiment's devices against the live host
 (``hitl_state.select_gpus`` reads ``autotrade.environment.gpu.list_gpus``
 through ``gpus_with_free_memory``), so a create request that passes parameter validation
 depends on what is free on this machine. Tests that create an experiment for

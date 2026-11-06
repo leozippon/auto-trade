@@ -135,7 +135,7 @@ def remove_sandbox_tree(path: Path) -> bool:
 SCREENING_TOOL_SOURCE = Path(__file__).resolve().parent / "screening" / "screen.py"
 SCREENING_TOOL_MOUNT = "/mnt/tools/screen.py"
 # Where the Agent session sees the pretrained-model store (``environment.pretrained``)
-# when its arm pins one; a strategy sees the same store as ``context.pretrained_dir``.
+# when its experiment pins one; a strategy sees the same store as ``context.pretrained_dir``.
 PRETRAINED_SESSION_MOUNT = "/mnt/pretrained"
 
 RUNTIME_ENV_SCHEMA_VERSION = 2
@@ -170,7 +170,7 @@ def container_thread_env(cpus: float) -> dict[str, str]:
 
 class GpuMode(StrEnum):
     """A GPU request that names no device yet: whoever starts the container
-    pins them first (an arm's worker the cards the console claimed,
+    pins them first (an experiment's worker the cards the console claimed,
     ``pipelines.worker.load_worker_options``; anything else
     ``pipelines.hitl_state.select_gpus``), and a container still on it
     refuses to start."""
@@ -182,7 +182,7 @@ class GpuMode(StrEnum):
 # the single-threaded NumPy era (64 MB), which rules out multi-process training
 # inside ``fit`` altogether -- any spill or intermediate parquet fails on a
 # 64 MB ``/tmp``. The session container keeps its own, smaller default
-# (``SandboxSpec.tmpfs_size``) unless the arm's ``agent_sandbox_tmpfs`` names
+# (``SandboxSpec.tmpfs_size``) unless the experiment's ``agent_sandbox_tmpfs`` names
 # another.
 STRATEGY_TMPFS_SIZE = "2g"
 
@@ -207,12 +207,12 @@ class SandboxSpec:
     # container as much swap again, and the container then pages instead of
     # failing. With swap pinned there is no headroom above the cap at all, so
     # the cap has to be sized for what a ``fit`` actually needs rather than for
-    # what today's arms happen to use. Measured over the replays on record:
-    # rule-based arms peak at 3.8 GiB (48% of the former 8 GiB cap), but the
-    # two fit-bearing ML arms (``alpha158_lgbm``, ``gru_ranker``) peaked
+    # what today's experiments happen to use. Measured over the replays on record:
+    # rule-based experiments peak at 3.8 GiB (48% of the former 8 GiB cap), but the
+    # two fit-bearing ML experiments (``alpha158_lgbm``, ``gru_ranker``) peaked
     # 6.70-7.60 GiB, i.e. 85-95% of it -- a model only slightly larger would be
     # an OOM kill rather than a slow replay, so the cap went to 16 GiB. An
-    # in-process vLLM engine then took it to 32 GiB: a retrieval arm's
+    # in-process vLLM engine then took it to 32 GiB: a retrieval experiment's
     # full-span leg peaked at 14.1 GiB of the 16 (cgroup reading, page cache
     # included) and its in-context path adds about 2.5 GiB. The cap is a
     # ceiling, not a reservation: with one session plus three concurrent
@@ -247,7 +247,7 @@ class SandboxSpec:
     gpu_count: int = 1
     gpu_name_filter: str | None = field(default_factory=host_gpu_name)
     docker_executable: str = "docker"
-    # The pretrained store the arm pinned (``environment.pretrained``): set,
+    # The pretrained store the experiment pinned (``environment.pretrained``): set,
     # the container mounts it read-only after comparing its manifest; empty,
     # it mounts nothing.
     pretrained_manifest_sha256: str = ""
@@ -322,7 +322,7 @@ class SandboxSpec:
         if self.gpu == GpuMode.AUTO:
             raise GpuUnavailableError(
                 f"this container asks for {self.gpu_count} GPU(s) and was given no "
-                "device: an arm's worker attaches the cards the console claimed for it, "
+                "device: an experiment's worker attaches the cards the console claimed for it, "
                 "and anything else takes its cards from pipelines.hitl_state.select_gpus"
             )
         return list(self.gpu)
@@ -378,7 +378,7 @@ class SandboxConfig:
     # bills container scheduling or host-side request materialization to the
     # strategy. Both are runaway guards rather than budgets: the inference
     # cap is sized like the fit cap, at roughly 6x the heaviest measured call
-    # on record (a rebalance day of a cross-sectional LightGBM arm, median
+    # on record (a rebalance day of a cross-sectional LightGBM experiment, median
     # 60.7 s over 49 such days), so a genuine runaway still dies while host
     # contention does not decide a verdict.
     timeout_seconds: float = 360.0
@@ -411,7 +411,7 @@ class SandboxConfig:
     def on_devices(self, devices: tuple[int, ...] | None) -> SandboxConfig:
         """This boundary with its containers attaching exactly ``devices``.
 
-        A leg of a concurrent batch replays on one card of the arm's claim
+        A leg of a concurrent batch replays on one card of the experiment's claim
         (``pipelines.session_tools.leg_cards``); None keeps every device the
         spec pins, which is what a replay running alone attaches.
         """
@@ -559,7 +559,7 @@ class DockerSandbox:
         self.session_id = new_id("sandbox_session")
         self.image_runtime: dict[str, object] = {}
         self.gpu_indices: list[int] = []
-        # The verified store directory, resolved at start when the arm pins one.
+        # The verified store directory, resolved at start when the experiment pins one.
         self.pretrained_dir: Path | None = None
         self._started = False
 

@@ -7,9 +7,9 @@ contract template. Every vendored repository carries its licence and only
 text. The round's directive starts with the README's direction paragraph word
 for word and adds the call to explore and the pointer to the closed families;
 nothing before the README's facts names a model, and neither does the
-directive. Both arms send the eight-year fundamentals-plus-titles selection on
+directive. Both experiments send the eight-year fundamentals-plus-titles selection on
 one A100 at xhigh, with their own main model, the relay's alternate key, four
-replays per batch, three times every per-arm budget and a strategy container of
+replays per batch, three times every per-experiment budget and a strategy container of
 twice the default CPUs and memory. The README ends with guidance the session
 may ignore. No file the pack's authors wrote cites a reading after the research
 period; the vendored papers and code are other people's text, left as
@@ -29,7 +29,12 @@ from scripts.experiments._profiles import (
     FUND_TITLE_PIT_VIEWS_SEED,
 )
 from scripts.experiments._round import PROBE_ID, Round
-from scripts.experiments.create_round_20261028 import ARMS, DIRECTIVE, PACK, ROUND
+from scripts.experiments.create_round_20261028 import (
+    DIRECTIVE,
+    EXPERIMENTS,
+    PACK,
+    ROUND,
+)
 from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -82,7 +87,7 @@ def test_the_directive_starts_with_the_packs_direction_and_names_no_model() -> N
         assert word not in DIRECTIVE, word
 
 
-# The per-arm budgets the owner's 2026-10-27 directive tripled for this round;
+# The per-experiment budgets the owner's 2026-10-27 directive tripled for this round;
 # the replay-year budget, tripled to 288 too, was retired since and has no
 # console value left to triple.
 TRIPLED = (
@@ -95,9 +100,9 @@ TRIPLED = (
 )
 
 
-def test_both_arms_send_the_selection_on_one_card_and_their_own_choices() -> None:
+def test_both_experiments_send_the_selection_on_one_card_and_their_own_choices() -> None:
     """Their own model, this pack, the alternate key, four legs per batch,
-    three times every per-arm budget and a container of 16 CPUs and 64 GiB;
+    three times every per-experiment budget and a container of 16 CPUs and 64 GiB;
     nothing else differs from the eight-year fundamentals-plus-titles selection
     on one A100 at xhigh with the console's defaults."""
     base = Round(
@@ -123,11 +128,11 @@ def test_both_arms_send_the_selection_on_one_card_and_their_own_choices() -> Non
         "ttt_100k_8y_sol_zgca_20261028": "gpt-6.1-sol",
         "ttt_100k_8y_argon_zgca_20261028": "gemini-4-argon",
     }
-    assert list(ARMS) == list(models)
-    for arm, model in models.items():
-        assert ROUND.request_params(arm) == {
+    assert list(EXPERIMENTS) == list(models)
+    for experiment, model in models.items():
+        assert ROUND.request_params(experiment) == {
             **base,
-            "experiment_id": arm,
+            "experiment_id": experiment,
             "model": model,
             "subagent_model": "DeepSeek-V4.1-Flash",
             "compact_model": "DeepSeek-V4.1-Flash",
@@ -143,11 +148,11 @@ def test_both_arms_send_the_selection_on_one_card_and_their_own_choices() -> Non
         }
 
 
-def test_round_20261028b_is_the_argon_arm_again_under_another_id() -> None:
+def test_round_20261028b_is_the_argon_experiment_again_under_another_id() -> None:
     """The relaunch after the relay's outage sends exactly what the failed
-    argon arm sent, but for its id."""
+    argon experiment sent, but for its id."""
     original = "ttt_100k_8y_argon_zgca_20261028"
-    (again,) = create_round_20261028b.ARMS
+    (again,) = create_round_20261028b.EXPERIMENTS
     assert again == f"{original}b"
     assert create_round_20261028b.DIRECTIVE == DIRECTIVE
     assert {**create_round_20261028b.ROUND.request_params(again), "experiment_id": original} == (

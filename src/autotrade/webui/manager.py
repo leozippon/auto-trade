@@ -33,20 +33,24 @@ from autotrade.pipelines.agent_inbox import (
     InboxError,
     enqueue_inbox_message,
 )
-from autotrade.pipelines.arm_params import console_request, read_param, session_models
 from autotrade.pipelines.config import acceptance_for
+from autotrade.pipelines.experiment_params import (
+    console_request,
+    read_param,
+    session_models,
+)
 from autotrade.pipelines.hitl_state import (
     LIVE_RUN_STATES,
     WEB_CREATE_DEFAULTS,
-    ArmState,
     ControlState,
-    arm_is_archived,
+    ExperimentState,
     control_lock,
+    experiment_is_archived,
     free_gpus,
     gpu_claims,
     proc_start_ticks,
     read_control,
-    running_arms,
+    running_experiments,
     select_gpus,
     status_pid_alive,
     write_control,
@@ -58,30 +62,30 @@ from autotrade.pipelines.skills import create_operating_memory_snapshot
 from .public_identity import PublicIdentity
 from .registry import experiment_state, read_ledger_records, worker_log_ref
 
-# Running-arm limits, one rule for create and resume: a start is refused when
-# MAX_RUNNING_EXPERIMENTS arms already run, or when the arm is a local one
-# (uses_local_model) and MAX_RUNNING_LOCAL_EXPERIMENTS local arms already run.
+# Running-experiment limits, one rule for create and resume: a start is refused when
+# MAX_RUNNING_EXPERIMENTS experiments already run, or when the experiment is a local one
+# (uses_local_model) and MAX_RUNNING_LOCAL_EXPERIMENTS local experiments already run.
 # Runner memory does not bind (a runner holds 1-3 GiB since evaluation slots
-# stream instead of decoding whole, and an arm's replays run in containers
+# stream instead of decoding whole, and an experiment's replays run in containers
 # under their own memory cap). The local limit protects the shared local model
 # service: its aggregate generation throughput levels off at about 8 concurrent
 # requests (~150 tok/s), while four parent conversations with their sub-agent
 # fan-out (at most 4 concurrent each) run 3-5 requests at a time (p50/p90) and
-# use about half of that. An arm whose main session and sub-agents are hosted
+# use about half of that. An experiment whose main session and sub-agents are hosted
 # leaves that service almost idle, so only the total limit, which protects the
 # host's page cache and IO, applies to it. Measured rationale:
-# docs/DEPLOYMENT_DOCUMENTATION.md. GPUs are not a count: a GPU arm starts only
-# on cards no running arm holds that keep the console's admission margin free
+# docs/DEPLOYMENT_DOCUMENTATION.md. GPUs are not a count: a GPU experiment starts only
+# on cards no running experiment holds that keep the console's admission margin free
 # (``AUTOTRADE_GPU_MIN_FREE_GIB``), and keeps them while its worker lives
 # (hitl_state.select_gpus).
 MAX_RUNNING_EXPERIMENTS = 8
 MAX_RUNNING_LOCAL_EXPERIMENTS = 4
-# What one new arm writes of its own before its first validation: the PIT views
+# What one new experiment writes of its own before its first validation: the PIT views
 # and as-of stash its seed does not carry, measured at 0.5-2.5 GiB of unique
-# bytes per arm. A create is refused unless the experiments filesystem keeps the
-# Agent tools' free-space floor after that, so an arm never builds its views
+# bytes per experiment. A create is refused unless the experiments filesystem keeps the
+# Agent tools' free-space floor after that, so an experiment never builds its views
 # only to have its shell and validate calls refused below the floor.
-ARM_DISK_MARGIN_BYTES = 3 * 1024**3
+EXPERIMENT_DISK_MARGIN_BYTES = 3 * 1024**3
 # SIGTERM graces before the worker's process group is SIGKILLed. Terminate is
 # an explicit stop, so it stays short; restart has to outwait the in-flight
 # work a worker cannot interrupt (a model call runs minutes) before forcing it.
@@ -89,11 +93,11 @@ _TERMINATE_GRACE_SECONDS = 10.0
 _RESTART_GRACE_SECONDS = 30.0
 _SIGKILL_EXIT_SECONDS = 5.0
 _TERMINAL_RESUMABLE_STATES = (
-    ArmState.STOPPED,
-    ArmState.FAILED,
-    ArmState.INTERRUPTED,
-    ArmState.TERMINATED,
-    ArmState.CREATED,
+    ExperimentState.STOPPED,
+    ExperimentState.FAILED,
+    ExperimentState.INTERRUPTED,
+    ExperimentState.TERMINATED,
+    ExperimentState.CREATED,
 )
 _ACTIONS = {
     "pause",
@@ -278,17 +282,17 @@ def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
 
 
 def uses_local_model(params: Mapping[str, object]) -> bool:
-    """Whether an arm counts against MAX_RUNNING_LOCAL_EXPERIMENTS: its main
+    """Whether an experiment counts against MAX_RUNNING_LOCAL_EXPERIMENTS: its main
     session or its sub-agents run on the local model, as the worker resolves
-    the roles (``arm_params.session_models``)."""
+    the roles (``experiment_params.session_models``)."""
 
     main, subagent, _compact = session_models(params)
     return LOCAL_QWEN_MODEL in (main, subagent)
 
 
 def gpu_request(params: Mapping[str, object]) -> int:
-    """The GPUs an arm's worker attaches: its stated ``gpu_count``, else the
-    declared default (``arm_params.read_param``), so an unreadable params.json
+    """The GPUs an experiment's worker attaches: its stated ``gpu_count``, else the
+    declared default (``experiment_params.read_param``), so an unreadable params.json
     counts as the default request."""
 
     return int(read_param(params, "gpu_count") or 0)  # type: ignore[call-overload]
@@ -333,7 +337,7 @@ class ExperimentManager:
         # resume and set_directive.
         self._experiment_locks: dict[str, threading.RLock] = {}
         self._locks_guard = threading.Lock()
-        # The one genuinely console-wide invariant left: the running-arm
+        # The one genuinely console-wide invariant left: the running-experiment
         # limits. A holder keeps it from the running-slot count through the
         # spawn that consumes the slot, so two callers can never claim the same
         # one: create_experiment holds it across its pre-flight and the
@@ -380,11 +384,11 @@ class ExperimentManager:
             self._require_free_space()
             merged["_creation_surface"] = "webui"
             self._preflight(merged, directory)
-            # The pretrained store every container of this arm will mount,
+            # The pretrained store every container of this experiment will mount,
             # pinned by its manifest's digest before anything is written: each
             # container start compares the store with this pin, so a store
-            # replaced later reaches only arms created after it, and a host
-            # without one creates no arm whose contract promises it.
+            # replaced later reaches only experiments created after it, and a host
+            # without one creates no experiment whose contract promises it.
             try:
                 merged["pretrained_manifest_sha256"] = pretrained.manifest_digest()
             except pretrained.PretrainedStoreError as exc:
@@ -406,9 +410,9 @@ class ExperimentManager:
                 self._discard_half_created(directory)
                 raise
             # The acceptance rules are resolved once, here, and stamped in
-            # like every other default this table merges: an arm's gates then
+            # like every other default this table merges: an experiment's gates then
             # live in its own params.json, and a later change to the defaults
-            # or to the beta band that travels with a cap cannot move an arm
+            # or to the beta band that travels with a cap cannot move an experiment
             # that has already been created.
             merged.update(acceptance_for(merged).to_record())
             # So are the boards the account may buy on, from the capital the
@@ -419,7 +423,7 @@ class ExperimentManager:
             write_json_atomic(hitl / "params.json", merged)
             write_control(hitl / "control.json", ControlState())
             write_json_atomic(
-                hitl / "status.json", {"schema_version": 1, "state": ArmState.CREATED}
+                hitl / "status.json", {"schema_version": 1, "state": ExperimentState.CREATED}
             )
             spawn = (
                 self.start_worker(experiment_id)
@@ -466,12 +470,12 @@ class ExperimentManager:
         self._claimable_gpus(sandbox.gpu_count)
 
     def gpu_slots(self) -> dict[str, object]:
-        """The cards a GPU arm starting now would take, and what running arms hold.
+        """The cards a GPU experiment starting now would take, and what running experiments hold.
 
         ``gpus_free`` is the one selection's free cards in the order a start
         takes them (``hitl_state.free_gpus``: matching the sandbox device
-        filter, keeping ``gpu_min_free_mib`` free, claimed by no running arm)
-        and ``gpu_claims`` every running arm's devices. ``gpu_min_free_mib`` is
+        filter, keeping ``gpu_min_free_mib`` free, claimed by no running experiment)
+        and ``gpu_claims`` every running experiment's devices. ``gpu_min_free_mib`` is
         the admission margin this console was started with
         (``AUTOTRADE_GPU_MIN_FREE_GIB``, 12 GiB unset): a card another tenant
         holds is passed over only while it keeps less than that free. When the
@@ -491,8 +495,8 @@ class ExperimentManager:
         return {"gpus_free": free, "gpu_claims": claims, "gpu_min_free_mib": margin}
 
     def _claimable_gpus(self, count: int) -> list[int]:
-        """The ``count`` cards a GPU arm starting now takes, or a refusal
-        naming the free cards and the running arms that hold the rest.
+        """The ``count`` cards a GPU experiment starting now takes, or a refusal
+        naming the free cards and the running experiments that hold the rest.
 
         The same admission margin ``gpu_slots`` reports, so the cards the
         health view offers are exactly the ones a start claims."""
@@ -508,11 +512,11 @@ class ExperimentManager:
             raise ManagerError(f"当前 GPU 无法满足实验默认分配：{exc}") from exc
 
     def running_experiments(self) -> list[str]:
-        return running_arms(self.experiments_root)
+        return running_experiments(self.experiments_root)
 
     def _running_roster(self) -> tuple[list[str], list[str]]:
-        """Every running arm, and those of them that count against the local
-        limit. An arm whose params.json cannot be read counts as local
+        """Every running experiment, and those of them that count against the local
+        limit. An experiment whose params.json cannot be read counts as local
         (:func:`uses_local_model` over the defaults)."""
 
         running = self.running_experiments()
@@ -547,7 +551,7 @@ class ExperimentManager:
             if not entry.is_dir() or entry.name.startswith("."):
                 continue
             state = experiment_state(entry)
-            if state.get("state") == ArmState.UNREADABLE:
+            if state.get("state") == ExperimentState.UNREADABLE:
                 broken.append(
                     {
                         "experiment_id": entry.name,
@@ -565,9 +569,9 @@ class ExperimentManager:
             _modern_ref_store(directory)
             # Archived is finished for good: the prunes may already have taken
             # the views and release a worker would run on.
-            if arm_is_archived(directory):
+            if experiment_is_archived(directory):
                 raise ManagerError(
-                    f"experiment {experiment_id!r} is archived: an archived arm is never run again"
+                    f"experiment {experiment_id!r} is archived: an archived experiment is never run again"
                 )
             status_path = directory / "hitl/status.json"
             status = read_json_object_or_empty(status_path)
@@ -580,7 +584,7 @@ class ExperimentManager:
             if not self.worker_script.is_file():
                 raise ManagerError("interactive worker entrypoint is unavailable")
             # Claimed before anything else is touched, so a refusal leaves the
-            # arm as it was, and written before the spawn, which reads it.
+            # experiment as it was, and written before the spawn, which reads it.
             gpus = gpu_request(params)
             if gpus:
                 write_gpu_claim(directory / "hitl", self._claimable_gpus(gpus))
@@ -635,7 +639,7 @@ class ExperimentManager:
                 status_path,
                 {
                     "schema_version": 1,
-                    "state": ArmState.LAUNCHING,
+                    "state": ExperimentState.LAUNCHING,
                     "pid": process.pid,
                     "pid_start_ticks": proc_start_ticks(process.pid),
                     "launched_at": utc_now_iso(),
@@ -652,19 +656,19 @@ class ExperimentManager:
             }
 
     def _require_running_slot(self, *, local: bool) -> None:
-        """Refuse a start past either running-arm limit, naming the limit and
-        the running arms that count against it."""
+        """Refuse a start past either running-experiment limit, naming the limit and
+        the running experiments that count against it."""
 
         running, running_local = self._running_roster()
         if len(running) >= MAX_RUNNING_EXPERIMENTS:
             raise ManagerError(
-                f"running-arm limit reached: {MAX_RUNNING_EXPERIMENTS} arms in total; "
+                f"running-experiment limit reached: {MAX_RUNNING_EXPERIMENTS} experiments in total; "
                 f"running: {', '.join(sorted(running))}"
             )
         if local and len(running_local) >= MAX_RUNNING_LOCAL_EXPERIMENTS:
             raise ManagerError(
                 "local-model limit reached: "
-                f"{MAX_RUNNING_LOCAL_EXPERIMENTS} running arms whose main session or "
+                f"{MAX_RUNNING_LOCAL_EXPERIMENTS} running experiments whose main session or "
                 f"sub-agents run on {LOCAL_QWEN_MODEL}; running on it: "
                 f"{', '.join(sorted(running_local))}"
             )
@@ -678,14 +682,14 @@ class ExperimentManager:
             if path.exists()
         )
         free = shutil.disk_usage(root).free
-        needed = WORKSPACE_MIN_FREE_BYTES + ARM_DISK_MARGIN_BYTES
+        needed = WORKSPACE_MIN_FREE_BYTES + EXPERIMENT_DISK_MARGIN_BYTES
         if free < needed:
             raise ManagerError(
-                f"not enough free disk space to create an arm: {free / 1024**3:.1f} GiB "
+                f"not enough free disk space to create an experiment: {free / 1024**3:.1f} GiB "
                 f"free on the experiments filesystem, {needed / 1024**3:g} GiB needed "
                 f"(the {WORKSPACE_MIN_FREE_BYTES / 1024**3:g} GiB floor below which "
                 "shell and validate are refused, plus "
-                f"{ARM_DISK_MARGIN_BYTES / 1024**3:g} GiB for the arm's own PIT views)"
+                f"{EXPERIMENT_DISK_MARGIN_BYTES / 1024**3:g} GiB for the experiment's own PIT views)"
             )
 
     def control(
@@ -891,7 +895,7 @@ class ExperimentManager:
             # and the user cannot tell whether termination worked.
             status = read_json_object_or_empty(status_path)
             status.update(
-                {"state": ArmState.TERMINATED, "error": None, "terminated_at": utc_now_iso()}
+                {"state": ExperimentState.TERMINATED, "error": None, "terminated_at": utc_now_iso()}
             )
             write_json_atomic(status_path, status)
         return result
@@ -939,7 +943,7 @@ class ExperimentManager:
         # terminate below frees this experiment's own running slot: taking it
         # only in start_worker let a concurrent create claim that slot while
         # the old worker was exiting, and the restart then failed on a
-        # running-arm limit, leaving the experiment stopped. The price is
+        # running-experiment limit, leaving the experiment stopped. The price is
         # that a create or start begun during a restart waits out its grace;
         # control actions on other experiments still take no slot lock. Lock
         # order stays experiment -> slots: control() already holds this
@@ -971,7 +975,7 @@ class ExperimentManager:
             directory = self._experiment_dir(experiment_id)
             _modern_ref_store(directory)
             state = experiment_state(directory)
-            if state.get("worker_alive") or state.get("state") == ArmState.LAUNCHING:
+            if state.get("worker_alive") or state.get("state") == ExperimentState.LAUNCHING:
                 raise ManagerError(
                     f"experiment {experiment_id!r} has a live worker; stop or terminate it before deleting"
                 )
@@ -1043,9 +1047,9 @@ class ExperimentManager:
 
 def _worker_live(status: Mapping[str, object]) -> bool:
     return str(status.get("state") or "") not in {
-        ArmState.COMPLETED,
-        ArmState.FAILED,
-        ArmState.STOPPED,
-        ArmState.TERMINATED,
-        ArmState.INTERRUPTED,
+        ExperimentState.COMPLETED,
+        ExperimentState.FAILED,
+        ExperimentState.STOPPED,
+        ExperimentState.TERMINATED,
+        ExperimentState.INTERRUPTED,
     } and status_pid_alive(status)

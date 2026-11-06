@@ -506,7 +506,7 @@ class BenchmarkHistoryTest(unittest.TestCase):
 
     def test_history_must_reach_before_research_start(self) -> None:
         # A release whose benchmark history starts in 2020 grades a four-year
-        # arm (2021-07) but not an eight-year one (2017-07): its first research
+        # experiment (2021-07) but not an eight-year one (2017-07): its first research
         # years would have no benchmark return and no membership.
         self._year("index_daily", "ts_code", 2020, ["20200102", "20200103"])
         self._year("index_weight", "index_code", 2020, ["20200123"])

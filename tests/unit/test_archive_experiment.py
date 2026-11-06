@@ -1,10 +1,10 @@
-"""Archiving arms out of the console's home list (``scripts/experiments/archive_arm.py``).
+"""Archiving experiments out of the console's home list (``scripts/experiments/archive_experiment.py``).
 
-An archived arm keeps its directory and gains one marker file. The script
-refuses an arm that still holds something live, archives and restores
-idempotently, and the arm stays exactly what it was to everything but the
+An archived experiment keeps its directory and gains one marker file. The script
+refuses an experiment that still holds something live, archives and restores
+idempotently, and the experiment stays exactly what it was to everything but the
 console's home list, the console's start of its worker and the PIT-view prune:
-it stays an arm of the consistency check.
+it stays an experiment of the consistency check.
 """
 
 from __future__ import annotations
@@ -17,11 +17,11 @@ from pathlib import Path
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.ledger import ExperimentLedger, verdict_void
 from autotrade.webui.registry import ARCHIVED_NAME, experiment_listing
-from scripts.dev.check_verdicts import current_arms
+from scripts.dev.check_verdicts import current_experiments
 from tests.unit.paper_book_fixture import paper_root, write_book_record
-from tests.unit.webui_research_arm import build_arm
+from tests.unit.webui_research_experiment import build_experiment
 
-SCRIPT = Path(__file__).resolve().parents[2] / "scripts/experiments/archive_arm.py"
+SCRIPT = Path(__file__).resolve().parents[2] / "scripts/experiments/archive_experiment.py"
 
 
 def _archive(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
@@ -45,24 +45,24 @@ def _listed(root: Path) -> list[str]:
     return sorted(row["experiment_id"] for row in experiment_listing(root)["experiments"])
 
 
-def test_an_arm_holding_anything_live_is_refused_and_nothing_changes(tmp_path: Path) -> None:
+def test_an_experiment_holding_anything_live_is_refused_and_nothing_changes(tmp_path: Path) -> None:
     """A live worker, a standing graduation, a Paper book or an unknown id
     refuses the whole command before any marker is written; a voided
-    graduate is archived like any other ended arm."""
+    graduate is archived like any other ended experiment."""
 
     root = tmp_path / "experiments"
-    build_arm(root, "ended", "no_deliverable")
-    build_arm(root, "running", "research", alive=True)
-    build_arm(root, "graduate", "graduated")
-    build_arm(root, "traded", "no_deliverable")
+    build_experiment(root, "ended", "no_deliverable")
+    build_experiment(root, "running", "research", alive=True)
+    build_experiment(root, "graduate", "graduated")
+    build_experiment(root, "traded", "no_deliverable")
     write_book_record(paper_root(tmp_path) / "traded_book", experiment_id="traded")
-    for arm, phrase in (
+    for experiment, phrase in (
         ("running", "running has a live worker"),
         ("graduate", "graduate is a graduate; void the graduation first"),
         ("traded", "traded has Paper book traded_book"),
         ("nowhere", "nowhere: unknown experiment: nowhere"),
     ):
-        refused = _archive(tmp_path, "ended", arm, "--reason", "historical")
+        refused = _archive(tmp_path, "ended", experiment, "--reason", "historical")
         assert refused.returncode == 2 and phrase in refused.stderr, refused.stderr
         assert "nothing was changed" in refused.stderr
         assert not any(root.glob(f"*/hitl/{ARCHIVED_NAME}"))
@@ -81,15 +81,15 @@ def test_an_arm_holding_anything_live_is_refused_and_nothing_changes(tmp_path: P
 
 def test_archive_and_restore_are_idempotent_and_move_only_the_home_list(tmp_path: Path) -> None:
     root = tmp_path / "experiments"
-    for arm in ("first", "second", "third"):
-        build_arm(root, arm, "no_deliverable")
+    for experiment in ("first", "second", "third"):
+        build_experiment(root, experiment, "no_deliverable")
     marker = root / "first" / "hitl" / ARCHIVED_NAME
 
-    archived = _archive(tmp_path, "first", "second", "--reason", "historical arm")
+    archived = _archive(tmp_path, "first", "second", "--reason", "historical experiment")
     assert archived.returncode == 0, archived.stderr
     assert json.loads(archived.stdout) == {"action": "archive", "changed": ["first", "second"]}
     written = json.loads(marker.read_text(encoding="utf-8"))
-    assert written["reason"] == "historical arm" and written["archived_at"].endswith("+00:00")
+    assert written["reason"] == "historical experiment" and written["archived_at"].endswith("+00:00")
     assert _listed(root) == ["third"]
     shelf = experiment_listing(root, archived=True)
     assert sorted(row["experiment_id"] for row in shelf["experiments"]) == ["first", "second"]
@@ -107,14 +107,14 @@ def test_archive_and_restore_are_idempotent_and_move_only_the_home_list(tmp_path
     assert experiment_listing(root)["archived"] == 1
 
 
-def test_an_archived_arm_stays_in_the_consistency_check(tmp_path: Path) -> None:
+def test_an_archived_experiment_stays_in_the_consistency_check(tmp_path: Path) -> None:
     root = tmp_path / "experiments"
-    arm = build_arm(root, "current", "discarded")
-    params = arm / "hitl/params.json"
+    experiment = build_experiment(root, "current", "discarded")
+    params = experiment / "hitl/params.json"
     params.write_text(
         json.dumps({**json.loads(params.read_text(encoding="utf-8")), "_created_at": utc_now_iso()}),
         encoding="utf-8",
     )
     archived = _archive(tmp_path, "current", "--reason", "historical")
     assert archived.returncode == 0, archived.stderr
-    assert current_arms(root) == [arm]
+    assert current_experiments(root) == [experiment]

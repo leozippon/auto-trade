@@ -857,7 +857,7 @@ def test_membership_is_read_from_the_decision_view_and_every_slot(tmp_path: Path
                                  weight("20240531", "000905.SH", "000009.SZ")])
     replay = slot("replay", [weight("20240628", BENCHMARK_TS_CODE, "000001.SZ"),
                              weight("20240628", BENCHMARK_TS_CODE, "000002.SZ")])
-    # An arm that did not select index_weight has no such rows, or columns.
+    # An experiment that did not select index_weight has no such rows, or columns.
     plain = slot("plain", [{"dataset": "index_daily", "ts_code": BENCHMARK_TS_CODE,
                             "trade_date": "20240628", "pct_chg": 0.1}])
     # A mounted index_weight keeps its columns where its window holds no row

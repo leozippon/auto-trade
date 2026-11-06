@@ -1,14 +1,14 @@
-"""A synthetic research arm on disk, shaped as the pipeline writes it.
+"""A synthetic research experiment on disk, shaped as the pipeline writes it.
 
 The console reads experiments only through their files: ``hitl/`` control
-plane, the ledger and the result artifacts it names. ``build_arm`` writes those
-for one arm at a chosen stage — researching, frozen with the forward replay
+plane, the ledger and the result artifacts it names. ``build_experiment`` writes those
+for one experiment at a chosen stage — researching, frozen with the forward replay
 running, or with its readout — from synthetic daily series, and computes
 every recorded statistic with the pipeline's own functions
 (``freeze_registration``, ``rolling_record.step_entry``, ``forward_slice``,
 ``heldout_slice``, ``rolling_record.readout``), so a projection test reads
-the same numbers a real arm would carry. The ``graduated`` and ``discarded``
-stages write the records of an arm judged under the retired sealed gate, in
+the same numbers a real experiment would carry. The ``graduated`` and ``discarded``
+stages write the records of an experiment judged under the retired sealed gate, in
 the shape that code left, for the console's reading of such ledgers.
 """
 
@@ -60,7 +60,7 @@ STAGES = (
     "environment_blocked",
     "broken",
 )
-# The reason the host writes for an arm whose session it ended on the
+# The reason the host writes for an experiment whose session it ended on the
 # environment (``session_tools.EnvironmentBlocked``).
 ENVIRONMENT_BLOCKED_REASON = (
     "span full: 2 batches failed on the environment in every candidate; last error: "
@@ -68,7 +68,7 @@ ENVIRONMENT_BLOCKED_REASON = (
     "incompatible types: large_string vs string"
 )
 GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
-# Worker-accepted parameters of a console-created arm.
+# Worker-accepted parameters of a console-created experiment.
 PARAMS: dict[str, object] = {
     **GEOMETRY.to_record(),
     "strategy_path": "configs/agent_output_template/main.py",
@@ -77,7 +77,7 @@ PARAMS: dict[str, object] = {
     "developer_mode": "llm",
     "strategy_period": "day",
     "inference_time": "08:30",
-    # No fundamentals: opening the Paper book of an arm that reads them asks
+    # No fundamentals: opening the Paper book of an experiment that reads them asks
     # the live PIT audit, which a fixture repository does not have
     # (test_paper_books covers that check).
     "include_fundamentals": False,
@@ -91,7 +91,7 @@ REPLAY = {
     "requested_end": "20260930",
     "truncation_reason": "release_ends_20260911",
 }
-# The rules every recorded statistic of the arm is judged under: drawdown
+# The rules every recorded statistic of the experiment is judged under: drawdown
 # limits wide enough that the synthetic series' edge alone decides.
 RULES = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.9, active_max_drawdown=0.9)
 # The validation years of the default geometry under the fixture's rules.
@@ -237,7 +237,7 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
         "nominated_step_id": None,
         "freeze_gate": None,
         "frozen": None,
-        "arm_end": None,
+        "experiment_end": None,
         "attempts": 1,
         "budget_used": {
             "inference_seconds": 600.0, "llm_calls": 40, "main_calls": 30, "subagent_calls": 10, "compact_calls": 0,
@@ -258,10 +258,10 @@ def _with_panel(result_ref: str, scale: float, *, series: str = "strategy_daily"
     write_json_atomic(path, sidecar)
 
 
-def build_arm(
+def build_experiment(
     root: Path, experiment_id: str, stage: str, *, alive: bool = False, seeded: bool = False
 ) -> Path:
-    """Write one arm at ``stage`` (one of :data:`STAGES`) under ``root``.
+    """Write one experiment at ``stage`` (one of :data:`STAGES`) under ``root``.
 
     ``seeded`` makes its nominee one that trains a model and froze with one
     seed replicate and, past the freeze, was replayed with it and judged on
@@ -292,7 +292,7 @@ def build_arm(
     write_json_atomic(hitl / "schedule.json", build_session_plan(forward=REPLAY))
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
     records: list[dict[str, object]] = []
-    # The one research session is in flight while the arm researches: it has
+    # The one research session is in flight while the experiment researches: it has
     # no ledger record until it ends.
     current = "research"
     if stage in ("sealed", "frozen_with_record", "graduated", "discarded"):
@@ -385,7 +385,7 @@ def build_arm(
                 outcome="no_edge",
                 steps=[],
                 reason="没有候选值得冻结。三年都测过了，最好的一个也只有 +0.3%/年。",
-                arm_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
+                experiment_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
             )
         )
         current = ""
@@ -397,7 +397,7 @@ def build_arm(
                 finish_reason="llm_call_budget_exhausted",
                 steps=[],
                 reason=None,
-                arm_end={
+                experiment_end={
                     "status": "no_deliverable",
                     "reason": "research budget exhausted without a freeze (llm_call_budget_exhausted)",
                 },
@@ -412,7 +412,7 @@ def build_arm(
                 finish_reason="environment_blocked",
                 steps=[],
                 reason=ENVIRONMENT_BLOCKED_REASON,
-                arm_end={"status": "environment_blocked", "reason": ENVIRONMENT_BLOCKED_REASON},
+                experiment_end={"status": "environment_blocked", "reason": ENVIRONMENT_BLOCKED_REASON},
             )
         )
         current = ""

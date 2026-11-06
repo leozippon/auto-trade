@@ -1,8 +1,8 @@
-"""The research arm's orchestration: one research session, one freeze, one forward replay.
+"""The research experiment's orchestration: one research session, one freeze, one forward replay.
 
 In-memory providers and a result writer stand in for the PIT backend; the real
 artifact store, ledger, run markers and verdict statistics run unchanged.
-``test_research_arm_worker.py`` drives the same stages through the real worker
+``test_research_experiment_worker.py`` drives the same stages through the real worker
 and the real PIT replay.
 """
 
@@ -57,6 +57,7 @@ from autotrade.pipelines.ledger import (
     frozen_record,
     paper_candidate,
     research_over,
+    research_records,
 )
 from tests.unit.acceptance_fixture import REQUIRED_RULES, RULES
 
@@ -262,10 +263,10 @@ class Developer:
         )
 
 
-_DEFAULT = RollingExperimentConfig(experiment_id="arm", experiments_root=Path("unused"), acceptance=RULES)
+_DEFAULT = RollingExperimentConfig(experiment_id="experiment", experiments_root=Path("unused"), acceptance=RULES)
 CONFIG_SCHEDULE = _DEFAULT.schedule
 CONFIG_PROFILE = _DEFAULT.broker_profile
-# A mandated arm end to end. The operator named a tracking_error_cap at
+# A mandated experiment end to end. The operator named a tracking_error_cap at
 # creation, which is the only thing that turns the mandate on; a blank beta
 # band is filled, drawdowns stay the rules' own 0.45 / 0.30.
 CONFIG_ACCEPTANCE = acceptance_for({**REQUIRED_RULES, "tracking_error_cap": 0.08})
@@ -279,7 +280,7 @@ def _pipeline(
     broker_profile: BrokerProfile = CONFIG_PROFILE,
 ):
     config = RollingExperimentConfig(
-        experiment_id="arm",
+        experiment_id="experiment",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
         acceptance=CONFIG_ACCEPTANCE,
@@ -303,7 +304,7 @@ def _pipeline(
 
 
 def _completed(tmp_path: Path):
-    """An arm whose session's budget ran out after two full-span Validations:
+    """An experiment whose session's budget ran out after two full-span Validations:
     the host freezes the last and fills the whole rolling record from one
     replay of it."""
 
@@ -317,7 +318,7 @@ def _freezing(tmp_path: Path):
 
 
 def test_the_research_session_opens_at_the_validation_start(tmp_path: Path):
-    """The arm researches on its first year and validates through its second:
+    """The experiment researches on its first year and validates through its second:
     the Agent's view is the decision view at the end of the research year,
     ``full`` is the research year alone, and the request carries every year
     of the geometry so a test can replay the validation year."""
@@ -356,8 +357,8 @@ def test_a_freeze_registers_and_records_the_frozen_block(tmp_path: Path):
     assert set(gate) == {"passed", "reasons", "mandate", "seed_replicates", "thresholds"}
     assert "trials_to_date" not in record and "terminal_offline_trials" not in record
     assert [row["control"] for row in record["steps"]] == [False, False]
-    # It is judged under the arm's own rules -- here a tracking mandate,
-    # because the arm was created with a cap -- and the record states the
+    # It is judged under the experiment's own rules -- here a tracking mandate,
+    # because the experiment was created with a cap -- and the record states the
     # account and the rules.
     rules = CONFIG_ACCEPTANCE
     assert rules.tracking_error_cap == 0.08
@@ -365,7 +366,7 @@ def test_a_freeze_registers_and_records_the_frozen_block(tmp_path: Path):
     assert record["acceptance_rules"] == rules.to_record()
     assert gate["thresholds"] == {"max_drawdown": rules.max_drawdown, **rules.mandate}
     assert gate["mandate"]["market_beta"] == pytest.approx(0.9, abs=0.05)
-    assert record["arm_end"] is None
+    assert record["experiment_end"] is None
     frozen = record["frozen"]
     assert frozen["artifact_id"].startswith("strategy_research_")
     assert frozen["source_step_id"] == "research_step_0"
@@ -415,7 +416,7 @@ def test_a_freeze_is_terminal_whatever_the_nominee_read(tmp_path: Path):
     record = pipeline.run_research_session()
     assert record["steps"][0]["graded"]["plain_excess"] < 0
     assert record["freeze_gate"]["passed"] is True
-    assert record["frozen"] is not None and record["arm_end"] is None
+    assert record["frozen"] is not None and record["experiment_end"] is None
     assert research_over(ledger.read())
     assert experiment_verdict(ledger.read()) is None
 
@@ -439,7 +440,7 @@ def test_a_budget_that_ends_before_any_test_freezes_the_last_registrable_candida
     ):
         pipeline, _snapshots, evaluator, _developer, ledger = _pipeline(tmp_path / name, plan)
         record = pipeline.run_research_session()
-        assert (record["outcome"], record["arm_end"]) == ("deadline", None)
+        assert (record["outcome"], record["experiment_end"]) == ("deadline", None)
         assert record["frozen"]["source_step_id"] == f"research_step_{frozen_step}"
         assert record["freeze_gate"]["passed"] is True
         steps = pipeline.validation_steps()
@@ -457,7 +458,7 @@ def test_a_budget_that_ends_before_any_test_freezes_the_last_registrable_candida
         assert experiment_verdict(ledger.read()) is None
 
 
-HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/arm/research"
+HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/experiment/research"
 
 
 def _interrupted_attempt(
@@ -583,7 +584,7 @@ def test_a_resumed_attempt_without_a_summary_starts_from_the_note_alone(tmp_path
     request = developer.requests[-1]
     assert request.resume is not None and request.resume.compaction_summary is None
     assert request.steps_before == () and request.budget_used.llm_calls == 9
-    assert record["attempts"] == 2 and record["arm_end"]["status"] == "no_deliverable"
+    assert record["attempts"] == 2 and record["experiment_end"]["status"] == "no_deliverable"
 
 
 def test_a_resumed_attempt_continues_from_the_frontier_and_the_record(tmp_path: Path):
@@ -613,7 +614,7 @@ def test_a_resumed_attempt_continues_from_the_frontier_and_the_record(tmp_path: 
     replay, analysis = replay_and_analysis(replayed.result_ref)
     ledger.append(
         rolling_record.test_step_record(
-            head={"experiment_id": "arm", "epoch_id": "research", "fold_id": "research", "run_id": "run_ref_first", "session_key": "research"},
+            head={"experiment_id": "experiment", "epoch_id": "research", "fold_id": "research", "run_id": "run_ref_first", "session_key": "research"},
             steps=steps,
             step=1,
             candidate={
@@ -651,10 +652,10 @@ def test_a_resumed_attempt_continues_from_the_frontier_and_the_record(tmp_path: 
     assert (record["frontier"], record["steps_tested"], record["attempts"]) == (steps.end, 4, 2)
 
 
-def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_arm(tmp_path: Path):
+def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_experiment(tmp_path: Path):
     """A session the host ended on its environment ends the attempt, not the
     research: the next attempt resumes from the frontier and the record. Only
-    when the attempts are spent does the arm end ``environment_blocked``, with
+    when the attempts are spent does the experiment end ``environment_blocked``, with
     nothing frozen and no replay to follow."""
 
     reason = "span full: 2 batches failed on the environment in every candidate; last error: ArrowTypeError"
@@ -668,15 +669,27 @@ def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_arm(tmp_pa
         assert "EnvironmentBlockedAttempt" in str(rows[-1]["error"]) and not research_over(rows)
     record = pipeline.run_research_session()
     assert (record["outcome"], record["attempts"], record["frozen"]) == ("environment_blocked", 3, None)
-    assert record["arm_end"] == {"status": "environment_blocked", "reason": reason}
+    assert record["experiment_end"] == {"status": "environment_blocked", "reason": reason}
     assert research_over(ledger.read())
     assert experiment_verdict(ledger.read()) == {"status": "environment_blocked", "reasons": [reason]}
 
 
+def test_a_ledger_that_names_the_end_arm_end_still_reads_as_ended() -> None:
+    """Ledgers written before 2026-11-06 name the research end ``arm_end``;
+    they read exactly as one naming ``experiment_end``."""
+
+    end = {"status": "no_deliverable", "reason": "no_edge: nothing"}
+    for key in ("arm_end", "experiment_end"):
+        records = [{"record_type": "research_session", "frozen": None, key: end}]
+        assert research_over(records)
+        assert experiment_verdict(records) == {"status": "no_deliverable", "reasons": ["no_edge: nothing"]}
+        assert research_records(records)[0]["experiment_end"] == end
+
+
 def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):
     """The trace stops at the cap while the attempt keeps spending, so its last
-    budget block understates the arm's use; a resume that seeded from it would
-    hand the next attempt budget the arm no longer has."""
+    budget block understates the experiment's use; a resume that seeded from it would
+    hand the next attempt budget the experiment no longer has."""
 
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "freeze", {"nominee": 1})}
@@ -704,11 +717,11 @@ def test_a_complete_node_without_its_sidecar_fails_the_attempt(tmp_path: Path):
     assert [row["record_type"] for row in ledger.read()] == []
 
 
-def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path: Path):
+def test_a_moved_experiment_resumes_from_the_recorded_node_where_it_now_lives(tmp_path: Path):
     """The records an interrupted attempt left name the host paths they were
     written at; once the repository moves, the next attempt reads the
-    recorded Validation under the arm's current directory and records it
-    there. A sidecar naming a place outside the arm, or a result no longer on
+    recorded Validation under the experiment's current directory and records it
+    there. A sidecar naming a place outside the experiment, or a result no longer on
     disk, is refused."""
 
     from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR, load_recorded_steps
@@ -732,7 +745,7 @@ def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path:
     assert record["steps"][0]["validation_result_ref"] == earlier.validation.result_ref
     assert record["freeze_gate"]["passed"] is True and record["frozen"] is not None
     for reference, refusal in (
-        (str(tmp_path / "new/experiments/other_arm/artifacts/results/valid_001/result.json"), "outside the experiment"),
+        (str(tmp_path / "new/experiments/other_experiment/artifacts/results/valid_001/result.json"), "outside the experiment"),
         (str(Path(recorded["result_ref"]).with_name("absent.json")), "not on disk"),
     ):
         sidecar.write_text(json.dumps({**recorded, "result_ref": reference}), encoding="utf-8")
@@ -740,7 +753,7 @@ def test_a_moved_arm_resumes_from_the_recorded_node_where_it_now_lives(tmp_path:
             load_recorded_steps(experiment)
 
 
-def test_an_exhausted_budget_without_a_registrable_candidate_ends_the_arm_without_a_deliverable(
+def test_an_exhausted_budget_without_a_registrable_candidate_ends_the_experiment_without_a_deliverable(
     tmp_path: Path,
 ):
     pipeline, *_rest, ledger = _pipeline(
@@ -748,7 +761,7 @@ def test_an_exhausted_budget_without_a_registrable_candidate_ends_the_arm_withou
     )
     record = pipeline.run_research_session()
     assert (record["outcome"], record["frozen"]) == ("deadline", None)
-    assert record["arm_end"] == {
+    assert record["experiment_end"] == {
         "status": "no_deliverable",
         "reason": (
             "research budget exhausted before any test, with no registrable full-span "
@@ -851,8 +864,8 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
         pipeline.run_forward()
 
 
-def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path):
-    """The forward stage replays the frozen book on the Broker profile its arm
+def test_the_forward_replay_trades_under_the_experiments_own_cost_model(tmp_path: Path):
+    """The forward stage replays the frozen book on the Broker profile its experiment
     was created with, the dividend tax included, not on today's defaults."""
 
     taxed = replace(CONFIG_PROFILE, dividend_tax=True)
@@ -868,10 +881,10 @@ def test_the_forward_replay_trades_under_the_arms_own_cost_model(tmp_path: Path)
     assert request.broker_profile == taxed
 
 
-def test_a_moved_arm_replays_the_artifact_its_frozen_block_names(tmp_path: Path):
+def test_a_moved_experiment_replays_the_artifact_its_frozen_block_names(tmp_path: Path):
     """The frozen block names the artifact's output where it was frozen; on an
-    arm moved since, the forward stage holds the store to that path read under
-    the arm's current directory. A block naming a place outside the arm, or
+    experiment moved since, the forward stage holds the store to that path read under
+    the experiment's current directory. A block naming a place outside the experiment, or
     one not on disk, fails the attempt."""
 
     _freezing(tmp_path / "old")[0].run_research_session()
@@ -881,7 +894,7 @@ def test_a_moved_arm_replays_the_artifact_its_frozen_block_names(tmp_path: Path)
     frozen = frozen_record(records)["frozen"]
     assert frozen["output_path"].startswith(str(tmp_path / "old"))
     for reference, refusal in (
-        (frozen["output_path"].replace("/experiments/arm/", "/experiments/other_arm/"), "outside the experiment"),
+        (frozen["output_path"].replace("/experiments/experiment/", "/experiments/other_experiment/"), "outside the experiment"),
         (frozen["output_path"].replace(frozen["artifact_id"], "strategy_research_absent"), "not on disk"),
     ):
         edited = json.loads(json.dumps(records))
@@ -1112,7 +1125,7 @@ def test_an_unreadable_run_marker_becomes_one_attempt_failed_and_is_cleared(tmp_
 
 def test_session_budgets_honor_nondefault_deadline_grace(tmp_path: Path):
     config = replace(
-        RollingExperimentConfig(experiment_id="arm", experiments_root=tmp_path, acceptance=RULES),
+        RollingExperimentConfig(experiment_id="experiment", experiments_root=tmp_path, acceptance=RULES),
         max_research_minutes=60,
         deadline_grace_minutes=5,
     )

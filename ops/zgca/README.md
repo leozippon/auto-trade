@@ -46,7 +46,7 @@ python ops/zgca/zgca.py push hcm_100k_8y_sol_qwen_20261014d hcm_100k_8y_sol_dsf_
 
 `status` 先用 `instance show` 打印实例状态与卡时；实例在运行时再用 `dev report` 打印 GPU、根盘与个人存储余量和 tmux 会话，然后打印控制台健康（含空闲槽位与空闲 GPU）、每条在跑实验的状态、阶段与心跳距今的秒数（worker 已不在却没有结束的实验单独标出）、沙箱镜像，最近一份 `create_round_*` 启动器日志的末尾三行（镜像构建日志也在同一目录，不算在内），以及填充循环：会话 `autotrade-fill` 是否在跑、最近一份填充日志的最后一行汇总，结束了的还有它的 `round-exit`。
 
-`sync <实验 id>` 把开发机上这个实验的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<实验>.log` 用 `dev copy` 拉回本仓库。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的实验一律拒绝覆盖。同步前先打印实验当前的状态；实验还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status`、`push` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_arms`）。
+`sync <实验 id>` 把开发机上这个实验的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<实验>.log` 用 `dev copy` 拉回本仓库。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的实验一律拒绝覆盖。同步前先打印实验当前的状态；实验还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status`、`push` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_experiments`）。
 
 `down` 就是 `instance stop`：等到 STOPPED 后打印卡时。它不问也不检查有没有实验在跑：先看 `status`，由调用者决定。
 

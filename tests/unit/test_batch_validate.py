@@ -397,7 +397,7 @@ class _Session:
         self.tree = StepTree(root / "steps")
         self.evaluator = _Evaluator(
             # Where the worker roots them: a recorded result is read under
-            # the arm it belongs to (``ledger.recorded_path``).
+            # the experiment it belongs to (``ledger.recorded_path``).
             experiment_dir / "artifacts" / "results",
             fail_markers=fail_markers,
             contention_markers=contention_markers,
@@ -817,10 +817,10 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(session.tree.current_node_id, branch_point)
             self.assertEqual(len(session.backtest.steps), 4)
 
-    def test_candidates_replay_concurrently_up_to_the_arms_width(self) -> None:
+    def test_candidates_replay_concurrently_up_to_the_experiments_width(self) -> None:
         """The bound is host capacity, not correctness: each replay owns its
         result directory, as-of view and container, and the bookkeeping around
-        them stays on the calling thread. The width is the arm's own
+        them stays on the calling thread. The width is the experiment's own
         ``batch_validate_max_concurrency``, and both strategy deadlines scale
         with exactly the width it produced."""
         fit_base = SandboxConfig().fit_timeout_seconds
@@ -871,7 +871,7 @@ class BatchValidateRunTest(unittest.TestCase):
         candidate's verdict depended on how many siblings happened to share the
         host: two explore_github folds lost both batch candidates to `strategy
         fit exceeded 3600s` while solo reruns of the same code did the same four
-        refits in 1,550-2,027 s, and three arms lost slots to `strategy
+        refits in 1,550-2,027 s, and three experiments lost slots to `strategy
         inference exceeded 180s` inside a batch -- one with a byte-identical
         serial control that replayed 243 decision days at ~2.0 s/day. Both caps
         therefore move with the batch's own width, and only for the pool's
@@ -958,7 +958,7 @@ class BatchValidateRunTest(unittest.TestCase):
         the same place: the row's own top level, beside ``stats`` rather than
         inside it, because a failed row has no ``stats`` at all.
 
-        Two arms sized a batch from a 3-day smoke and lost 20 replay-years to
+        Two experiments sized a batch from a 3-day smoke and lost 20 replay-years to
         fits that ran past the concurrency-scaled cap, reasoning about a
         ceiling neither of them had measured.
 
@@ -1038,7 +1038,7 @@ class BatchValidateRunTest(unittest.TestCase):
 
     def test_a_leg_the_shared_card_failed_names_the_siblings_beside_it(self) -> None:
         """Legs of a batch that are not pinned to a card of their own (here the
-        arm pins none) attach the same cards, so siblings that replayed while a
+        experiment pins none) attach the same cards, so siblings that replayed while a
         leg ran out of GPU memory held memory on the same device. The leg's
         error names them, wherever it is read, so the Agent
         can tell its own batch may have overcommitted the card. The CUDA
@@ -1081,8 +1081,8 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertIn("other processes on the card held the rest", gpu["error"])
             self.assertNotIn(note, gpu["error"])
 
-    def test_concurrent_legs_each_take_one_card_of_the_arm(self) -> None:
-        """Legs replaying side by side are pinned to the arm's cards in turn, so
+    def test_concurrent_legs_each_take_one_card_of_the_experiment(self) -> None:
+        """Legs replaying side by side are pinned to the experiment's cards in turn, so
         with as many cards as legs no two share one (to-do 32's pile-on onto the
         first card); a replay running alone attaches every card, so one strategy
         can still spread a model across them. A leg the shared card failed names
@@ -1135,7 +1135,7 @@ class BatchValidateRunTest(unittest.TestCase):
             else:
                 self.assertNotIn(note, rows[0]["error"])
 
-    def test_leg_cards_turn_through_the_arms_cards(self) -> None:
+    def test_leg_cards_turn_through_the_experiments_cards(self) -> None:
         self.assertEqual(leg_cards((1, 4), 1), [])
         self.assertEqual(leg_cards((1, 4), 2), [1, 4])
         self.assertEqual(leg_cards((1, 4), 3), [1, 4, 1])
@@ -1274,7 +1274,7 @@ class BatchValidateRunTest(unittest.TestCase):
         """Two sessions quoted 0.148 and 1.608 as one node's "cost stress": the
         graduation's active reading and the raw cumulative excess. Every row
         carries the one both gates judge, computed by the host: the active
-        excess at the arm's multiplier. The holder's readings beside it are
+        excess at the experiment's multiplier. The holder's readings beside it are
         the structure a forward slice carries, plain selection included, so
         the row reads over research what the graduation reads forward."""
         with TemporaryDirectory() as tmp:
@@ -1426,7 +1426,7 @@ class EnvironmentBlockedTest(unittest.TestCase):
     """A span the host fails in every candidate, twice, ends the session.
 
     The refund makes resending a batch the environment failed free, which is
-    right once and wrong forever: in round 20261015 two arms resent batches
+    right once and wrong forever: in round 20261015 two experiments resent batches
     on spans the host could never replay until their sessions ran out.
     """
 

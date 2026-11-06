@@ -140,7 +140,7 @@ _MAX_DEADLINE_OVERRIDE_MINUTES = 4800
 
 class EnvironmentBlockedAttempt(RuntimeError):
     """The research session's attempt ended on an environment block
-    (``session_tools.EnvironmentBlocked``) while the arm still has attempts:
+    (``session_tools.EnvironmentBlocked``) while the experiment still has attempts:
     recorded as a failed attempt, which the runner retries from the frontier
     and the record."""
 
@@ -295,7 +295,7 @@ class RollingExperimentPipeline:
         """The decision view at :meth:`research_view_time` and every year of
         the geometry as :meth:`research_spans`: what a research session gets.
 
-        The first ``research_years`` of the arm's rules are the research years
+        The first ``research_years`` of the experiment's rules are the research years
         (``ResearchGeometry.split_research``). The session's view is the one
         at their end for the whole session, and the spans a Validation may
         replay stay inside them (``session_tools.SessionValidations.span``),
@@ -317,7 +317,7 @@ class RollingExperimentPipeline:
         return validation[0].anchor
 
     def validation_steps(self) -> ValidationSteps:
-        """The validation years tiled into the arm's test steps."""
+        """The validation years tiled into the experiment's test steps."""
 
         _research, validation = self.config.geometry.split_research(
             self.config.acceptance.research_years
@@ -338,7 +338,7 @@ class RollingExperimentPipeline:
     def run_research_session(
         self, *, session_context: dict[str, object] | None = None
     ) -> dict[str, object]:
-        """Run the arm's one research session and record its outcome.
+        """Run the experiment's one research session and record its outcome.
 
         The session sees the research years' data (:meth:`research_inputs`),
         the validation years only through its tests' results, and ends when
@@ -347,11 +347,11 @@ class RollingExperimentPipeline:
         registration alone (:func:`freeze_registration`), never for a score.
         A session whose budget ran out (``deadline``) is completed by the
         host: the last tested candidate is frozen, or before any test the last
-        registrable full-span candidate; with none the arm ends without a
+        registrable full-span candidate; with none the experiment ends without a
         deliverable. An environment block ends the attempt, not the research,
-        until the arm's attempts are spent, when it ends ``environment_blocked``
+        until the experiment's attempts are spent, when it ends ``environment_blocked``
         with nothing frozen. The record always carries ``frozen`` or
-        ``arm_end`` and research is over once it is written. An attempt that
+        ``experiment_end`` and research is over once it is written. An attempt that
         failed before that record is continued, not repeated: the next attempt
         starts from the budget, the compaction summary, the Validations and
         the test steps the interrupted ones left in the trace, the step tree
@@ -363,7 +363,7 @@ class RollingExperimentPipeline:
         if research_over(records):
             raise RuntimeError("research is over; no further research session runs")
         if research_records(records):
-            raise RuntimeError("the arm's research session is already recorded")
+            raise RuntimeError("the experiment's research session is already recorded")
         resume = resume_state(self.config.experiment_dir, records)
         steps_before = load_recorded_steps(self.config.experiment_dir)
         run_started = time.monotonic()
@@ -388,7 +388,7 @@ class RollingExperimentPipeline:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.RESEARCH)
             decision, years = self.research_inputs()
             session = self.developer(
-                ResearchSessionRequest.for_arm(
+                ResearchSessionRequest.for_experiment(
                     self.config,
                     budgets=budgets,
                     run_id=run_id,
@@ -416,14 +416,14 @@ class RollingExperimentPipeline:
             )
             gate: dict[str, object] | None = None
             frozen: dict[str, object] | None = None
-            arm_end: dict[str, object] | None = None
+            experiment_end: dict[str, object] | None = None
             tests = test_step_records(self.ledger.read())
             if session.outcome == ENVIRONMENT_BLOCKED:
                 if session.attempt < self.config.session_max_attempts:
                     # The attempt ends, the research does not: the next one
                     # resumes from the frontier and the record.
                     raise EnvironmentBlockedAttempt(session.reason)
-                arm_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
+                experiment_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
                 # The worker log is the operator's other place to see it.
                 print(
                     f"{utc_now_iso()} {attempt['experiment_id']} {ENVIRONMENT_BLOCKED}: "
@@ -436,7 +436,7 @@ class RollingExperimentPipeline:
                 steps = {step.step_id: step for step in session.steps}
                 candidate = self._frozen_candidate(session, tests, by_step)
                 if candidate is None:
-                    arm_end = {
+                    experiment_end = {
                         "status": VerdictStatus.NO_DELIVERABLE,
                         "reason": (
                             "research budget exhausted before any test, with no registrable "
@@ -493,7 +493,7 @@ class RollingExperimentPipeline:
                 **self._account_record(),
                 "freeze_gate": gate,
                 "frozen": frozen,
-                "arm_end": arm_end,
+                "experiment_end": experiment_end,
                 "skills_ref": skills.skills_ref or None,
                 "skills_generation_id": skills.generation_id or None,
                 **skills.stats.ledger_fields(),
@@ -515,7 +515,7 @@ class RollingExperimentPipeline:
             expire_experiment_session_inbox(
                 self.config.experiment_dir, SessionKind.RESEARCH, expired_by=run_id
             )
-            # Every revision a Validation recorded stays: it is the arm's
+            # Every revision a Validation recorded stays: it is the experiment's
             # artifact history, and the store shares the bytes between
             # revisions. Only frozen artifacts no record still references go.
             prune = getattr(self.artifacts, "prune_superseded_frozen", None)
@@ -554,7 +554,7 @@ class RollingExperimentPipeline:
         tests: Sequence[Mapping[str, object]],
         by_step: Mapping[str, Mapping[str, object]],
     ) -> tuple[str, tuple[str, ...], bool] | None:
-        """The Step the arm freezes, with its seed replicates and declaration.
+        """The Step the experiment freezes, with its seed replicates and declaration.
 
         A completed session froze its last test's candidate; a session whose
         budget ran out after a test freezes the last tested candidate as that
@@ -788,7 +788,7 @@ class RollingExperimentPipeline:
         if frozen_row is None:
             raise RuntimeError("the forward replay needs a frozen artifact")
         if forward_record(records) is not None:
-            raise RuntimeError("the arm's forward record is already recorded")
+            raise RuntimeError("the experiment's forward record is already recorded")
         block: Mapping[str, object] = frozen_row["frozen"]  # type: ignore[assignment]
         artifact = self._frozen_artifact(block)
         replicates = [
@@ -874,7 +874,7 @@ class RollingExperimentPipeline:
         ledger.
 
         One continuous replay over the ``forward`` and ``heldout`` slots and
-        each replicate's, read into the two slices and the arm's readout
+        each replicate's, read into the two slices and the experiment's readout
         (:meth:`_judge`); nothing gates. The strategy's own exception is a
         reading (the record's ``strategy_error`` status naming the slice it
         raised in, and the readout's forward block); a failure that measured
@@ -1041,7 +1041,7 @@ class RollingExperimentPipeline:
         raised_replicates: Sequence[Mapping[str, object]] = (),
     ) -> dict[str, object]:
         """The two reported slices of one completed forward replay through
-        ``broker_profile``, and the arm's readout (``rolling_record.readout``):
+        ``broker_profile``, and the experiment's readout (``rolling_record.readout``):
         the rolling record the ledger holds and the forward slice's reading.
 
         A slice that cannot be measured raises ``ValueError``, which fails the
@@ -1110,7 +1110,7 @@ class RollingExperimentPipeline:
     def _frozen_artifact(self, block: object) -> FrozenArtifact:
         """The frozen artifact a frozen block (or one of its seed replicates)
         names, validated by its store against the output path the block
-        records, read under the arm's current directory
+        records, read under the experiment's current directory
         (``ledger.recorded_path``)."""
 
         if not isinstance(block, Mapping):
@@ -1231,12 +1231,12 @@ def completed_rows(
 ) -> list[Mapping[str, object]]:
     """``rows`` each with what the ledger and the registration read of it.
 
-    The artifact fingerprint: the one a row carries, else the one the arm's
+    The artifact fingerprint: the one a row carries, else the one the experiment's
     revision store recorded for its revision
     (``session_resume.revision_fingerprint``) -- a Step of the host's
     deterministic baseline. And the graded statistics
     (:func:`research_step_record`): the ones a row carries, else those of its
-    style sidecar, read where the arm in ``experiment_dir`` now is.
+    style sidecar, read where the experiment in ``experiment_dir`` now is.
     """
 
     def completed(row: Mapping[str, object]) -> Mapping[str, object]:
@@ -1267,7 +1267,7 @@ def freeze_registration(
     (``verdict.registered_mandate``), and its ``seed_replicates`` are what a
     replicate must be (:func:`_seed_replicates`) -- none owed by a nomination
     declared ``deterministic``. ``nominee`` and the replicates are ledger
-    rows (:func:`research_step_record`) of the arm in ``experiment_dir``. The
+    rows (:func:`research_step_record`) of the experiment in ``experiment_dir``. The
     session reads the same function at every test
     (``session_tools.SessionValidations.registration``) and the pipeline
     again before it freezes.
@@ -1467,7 +1467,7 @@ def _seed_replicates(
 
 def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> dict[str, object]:
     """The style sidecar beside one Validation row's result, the row of the
-    arm in ``experiment_dir`` read where that arm is now
+    experiment in ``experiment_dir`` read where that experiment is now
     (``ledger.recorded_path``)."""
 
     result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
@@ -1633,7 +1633,7 @@ def _keep_frozen_artifact_ids(
     records: Sequence[Mapping[str, object]],
     extra_id: str | None = None,
 ) -> tuple[str, ...]:
-    """The arm's frozen artifact and its seed replicates, the ablation an arm
+    """The experiment's frozen artifact and its seed replicates, the ablation an experiment
     frozen before 2026-11-05 froze beside them (``ledger.RETIRED_ABLATION_KEY``),
     those an incubation recorded before 2026-11-03 froze, any artifact an
     integrity row names, and the freeze now being recorded."""

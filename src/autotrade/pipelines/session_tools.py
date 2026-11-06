@@ -625,7 +625,7 @@ RESIDUAL_READING_NOTE = (
     "z(1 - alpha) / sqrt(years) for this span's length, the same formula the "
     "rolling record is read with; a reading, not a verdict"
 )
-# A row whose bytes and span repeat an earlier node of the arm.
+# A row whose bytes and span repeat an earlier node of the experiment.
 SAME_BYTES_NOTE = (
     "these bytes were already validated on this span as the nodes named: the "
     "zero-skill panel is seeded by the span, so a deterministic strategy repeats "
@@ -821,7 +821,7 @@ class SessionValidations:
         """The residual statistic over one replay's own span.
 
         ``verdict.residual_reading`` of the replay's graded series at the
-        arm's ``alpha``: the residual IR, the three betas and the bar for the
+        experiment's ``alpha``: the residual IR, the three betas and the bar for the
         span's length, beside the active excess after the cost stress on the
         span's turnover (``verdict.summary_excess_at_cost_stress``, the
         reading the forward stage takes too). No pass or fail: the session
@@ -906,7 +906,7 @@ class SessionValidations:
         approved, so an approval can never be transferred to a tree that was
         still being written; a mismatch discards the revision and raises.
 
-        It also records the artifact it descends from, so the revisions the arm
+        It also records the artifact it descends from, so the revisions the experiment
         keeps form the same lineage the Step tree draws.
         """
         revision, snapshot = self.artifact_store.create_revision(
@@ -928,10 +928,10 @@ class SessionValidations:
 
         A tree position the Agent set with ``step_rollback`` is the deliberate
         branch point and wins; otherwise the working copy descends from the last
-        Validation the arm recorded, across attempts. ``validate`` commits
+        Validation the experiment recorded, across attempts. ``validate`` commits
         a whole round before it records any of it, so a round's revisions all
-        resolve to the same parent and stay siblings. ``None`` before the arm's
-        first Validation, and at a position the arm's own Validations do not
+        resolve to the same parent and stay siblings. ``None`` before the experiment's
+        first Validation, and at a position the experiment's own Validations do not
         account for (an inherited seed node), which starts a new lineage root
         rather than inventing a parent.
         """
@@ -1064,7 +1064,7 @@ def recorded_step(
     )
 
 
-# ``validate``'s candidate range and replay width live with the arm's
+# ``validate``'s candidate range and replay width live with the experiment's
 # other budgets (``config.BATCH_VALIDATE_MAX_CANDIDATES``,
 # ``RollingExperimentConfig.batch_validate_max_concurrency``).
 BATCH_NAME_MAX_CHARS = 40
@@ -1096,7 +1096,7 @@ BATCH_FAILURE_ENVIRONMENT = "environment"
 # to resend, which is right for a transient fault (a clock lost to load, a card
 # another process took) and leaves nothing to stop the loop when the host
 # fails the span every time: in round 20261015 every replay crossing
-# 2022-07-01 failed in the host's as-of merge, and two arms resent 6 and 4 such
+# 2022-07-01 failed in the host's as-of merge, and two experiments resent 6 and 4 such
 # batches (2.1 h and 1.5 h of wall time), although nothing past that date had
 # been tested. A batch in which every candidate failed on the environment
 # measured nothing; the second such batch on the same span in one attempt ends
@@ -1130,7 +1130,7 @@ def _failure_cause(error: BaseException | None) -> str:
 class _Replayed:
     """One candidate's replay: its evaluation or the error it raised, the
     ``time.perf_counter`` window it ran in, and the card it was pinned to
-    (None: every card of the arm)."""
+    (None: every card of the experiment)."""
 
     evaluation: EvaluationResult | None
     error: Exception | None
@@ -1156,7 +1156,7 @@ class _Replayed:
 def leg_cards(devices: Sequence[int], width: int) -> list[int]:
     """The card of each of a batch's ``width`` concurrent replay slots.
 
-    The arm's cards in turn, so with at least as many cards as slots no two
+    The experiment's cards in turn, so with at least as many cards as slots no two
     legs running at once share one, and with fewer they share evenly. A batch
     running one replay at a time pins nothing: that replay attaches every card,
     which is what lets one strategy run a model across them (tensor parallel).
@@ -1173,7 +1173,7 @@ def _shared_gpu_note(siblings: Sequence[str]) -> str:
     The siblings that replayed on its card while it ran held memory on the
     same device. The CUDA report cannot say whose memory filled the card -- a
     sibling's, the candidate's own other strategy container's, or a process
-    outside the arm -- so the note names the siblings as sharers, not as the
+    outside the experiment -- so the note names the siblings as sharers, not as the
     cause, and the failure stays the environment's and is refunded like any
     other contention.
     """
@@ -1261,7 +1261,7 @@ def batch_candidate_resources(
 
     What the replay cost its container against the limits it ran under: the
     peak memory and the fit seconds beside the ceilings this batch's own
-    concurrency put them under. Two arms sized a batch from the session
+    concurrency put them under. Two experiments sized a batch from the session
     container's limits instead and lost 20 replay-years to timeouts. A failed
     candidate has no metrics but carries the same block from its exception, so
     every row keeps it in the one place — its own top level. Absent when the
@@ -1269,7 +1269,7 @@ def batch_candidate_resources(
 
     The fit seconds ride as their summary, not as the per-fit list: a strategy
     that refits daily reads 1,941 fits over an eight-year span, and because a
-    batch result is re-sent with every later model call, two arms' lists came
+    batch result is re-sent with every later model call, two experiments' lists came
     to about a fifth of their main input. A completed row's ``result_ref``
     keeps the list under ``stats.resources``; ``smoke_backtest`` replays a few
     days and returns it whole.
@@ -1315,14 +1315,14 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     ``generate_orders(context)`` take longer without the strategy doing
     anything different, so a fixed cap makes the verdict depend on how many
     siblings a candidate happened to be batched with — the failure mode that
-    cost one arm four Validations to fits solo reruns finished in
+    cost one experiment four Validations to fits solo reruns finished in
     1,550-2,027 s. Scaling both caps by ``workers`` keeps the guards (a
     runaway fit or decision still dies) while removing that dependence.
 
     The inference cap was deliberately left fixed when the fit cap was
     scaled, on the argument that a Validation makes hundreds of decision
     calls and widening the per-call cap would stretch a slow batch instead of
-    failing it. Three arms then filed the counter-example on one day: a
+    failing it. Three experiments then filed the counter-example on one day: a
     candidate measured at ~2.0 s/day over 243 serial decision days died at
     ``strategy inference exceeded 180s`` on one rebalance day inside a 2-way
     batch. Both caps bound ONE call, so both are equally distorted by the
@@ -1395,7 +1395,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "you; models/ is shared with the working copy), or output itself to "
         "validate the working copy as it stands; build such a directory by copying "
         "output/, the code you have been editing, not refs/, which only holds the "
-        "pack this arm started from. A candidate whose replay completes becomes its own immutable "
+        "pack this experiment started from. A candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
         "with its span. A candidate whose replay fails has no result_ref and, while "
         "record_failed_attempts is on, is recorded as a dead-end node, so later "
@@ -1567,7 +1567,7 @@ class ValidateTool(SessionTimeBudgetAware):
         self.workspace = workspace
         self.modification_check_factory = modification_check_factory
         self._trace_emit = trace_emit
-        # The arm's replay width (``batch_validate_max_concurrency``), already
+        # The experiment's replay width (``batch_validate_max_concurrency``), already
         # validated with its other budgets.
         self.max_concurrency = max_concurrency
         # Per-session rejection counter, keyed by signature. Not persisted:
@@ -2165,7 +2165,7 @@ TEST_DESCRIPTION = (
     "does not move. A registered candidate is replayed with its random panel as one "
     "fresh continuous book from the validation start to the end of the next step; "
     "nothing carries over from earlier tests, so switching candidates costs only this "
-    "replay. Its result over the newest step becomes that step's entry in the arm's "
+    "replay. Its result over the newest step becomes that step's entry in the experiment's "
     "rolling record and is never rewritten. The step always runs to completion; a "
     "candidate whose own code raises during the replay is refused with the error and "
     "the frontier does not move. Then the frontier advances and the validate allowance "
@@ -2191,7 +2191,7 @@ class TestTool(SessionTimeBudgetAware):
     """``test(candidate)``: one step of the validation period, lived through.
 
     The session's only way forward and the only way it ends: the frontier
-    advances one step per call, the step's entry is appended to the arm's
+    advances one step per call, the step's entry is appended to the experiment's
     rolling record in the ledger as the call completes, and the call that
     tests the last step finishes the session with its candidate as the frozen
     strategy. Nothing here ranks or selects: the agent chooses the candidate,
@@ -2467,7 +2467,7 @@ class NullControlTool(SessionTimeBudgetAware):
             f"Rank one complete Validation node of this session against K={PANEL_DRAWS} "
             "host replays of its own trade skeleton over the node's own span, every "
             "name replaced by a random one that one board lot of the same money could "
-            "buy on the same side of the arm's benchmark_index membership (the "
+            "buy on the same side of the experiment's benchmark_index membership (the "
             "float-cap decile when "
             "index_weight is not mounted): the same null control the Pipeline runs "
             "for the frozen node at freeze. Returns the null_control block the ledger "

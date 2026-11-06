@@ -184,8 +184,8 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
             clock.advance(10.0)
             if self.calls == 1:
                 raise RuntimeError("repairable validation failure")
-            # Under the arm, where the worker roots results: the freeze gate
-            # reads a row's result under its arm (``ledger.recorded_path``).
+            # Under the experiment, where the worker roots results: the freeze gate
+            # reads a row's result under its experiment (``ledger.recorded_path``).
             result = experiment / "artifacts" / "results" / f"valid_{self.calls:03d}" / "result.json"
             result.parent.mkdir(parents=True)
             result.write_text("{}\n", encoding="utf-8")

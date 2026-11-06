@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Interactive (HITL) experiment worker entrypoint (docs/PIPELINE_DESIGN.md).
 
-Runs or resumes one arm (research sessions, then the forward replay) from the parameters in
+Runs or resumes one experiment (research sessions, then the forward replay) from the parameters in
 ``experiments/<id>/hitl/params.json``, honouring ``control.json`` (pause / step
 approvals / per-session directives / stop) and reporting position and heartbeats
 to ``status.json``. Normally spawned detached by the web console
@@ -41,7 +41,7 @@ REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.runtime import utc_now_iso
-from autotrade.pipelines.hitl_state import ArmState, StatusReporter
+from autotrade.pipelines.hitl_state import ExperimentState, StatusReporter
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
 
@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
     status_path = experiment_dir / "hitl" / "status.json"
     bootstrap = StatusReporter(status_path)
     bootstrap.start()
-    bootstrap.set(state=ArmState.PREPARING, phase="strict_params_and_pit_data")
+    bootstrap.set(state=ExperimentState.PREPARING, phase="strict_params_and_pit_data")
     try:
         options = load_worker_options(experiment_dir, repo_root=args.repo_root)
         bootstrap.stop()
@@ -119,7 +119,7 @@ def main(argv: list[str] | None = None) -> int:
         status.update(
             {
                 "schema_version": 1,
-                "state": ArmState.TERMINATED,
+                "state": ExperimentState.TERMINATED,
                 "error": None,
                 "terminated_at": utc_now_iso(),
             }
@@ -133,7 +133,7 @@ def main(argv: list[str] | None = None) -> int:
             status_path,
             {
                 "schema_version": 1,
-                "state": ArmState.FAILED,
+                "state": ExperimentState.FAILED,
                 "pid": os.getpid(),
                 "failed_at": utc_now_iso(),
                 "error": f"{type(exc).__name__}: {exc}",

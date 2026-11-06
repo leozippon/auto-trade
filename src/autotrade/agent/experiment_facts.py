@@ -58,11 +58,11 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
 
     A fact, not advice: how to use the cores and cards is the session's call,
     which a reference pack may suggest. The CPU quota and memory cap are the
-    arm's strategy container's own (``SandboxConfig.spec``, as the run manifest
+    experiment's strategy container's own (``SandboxConfig.spec``, as the run manifest
     carries them) and the thread variables are rendered by
     ``container_thread_env``, the very code the executor builds each strategy
     container's flags from, so the passage cannot drift from what a replay
-    gets; the other per-arm numbers (cards, batch width) are named by their
+    gets; the other per-experiment numbers (cards, batch width) are named by their
     budgets keys. The structure it states is the executor's: a ``fit``-bearing
     strategy gets a second container with the same boundary, called before that
     day's decision (``replay.engine``), and a batch's legs run concurrently, one
@@ -85,7 +85,7 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
 
 
 # Where the read roots are in the Sandbox filesystem. The root names are a
-# file-tool convention, not paths: two arms read `steps` as a shell path,
+# file-tool convention, not paths: two experiments read `steps` as a shell path,
 # failed, and concluded the tree was invisible to `shell`.
 SEARCH_ROOT_SHELL_NOTE = (
     "`read_file`/`grep`/`glob` 的根名是工具约定而不是路径；`shell` 里同一批目录在各自的挂载点下："
@@ -183,10 +183,10 @@ def build_experiment_facts(
         "research_scope": _research_scope(
             manifest=manifest, snapshot_config=snapshot_config
         ),
-        # The arm's state at session start: nothing frozen yet, and the
+        # The experiment's state at session start: nothing frozen yet, and the
         # Validations earlier attempts recorded. ``False`` and zero counts are
         # facts, not absences.
-        "arm": dict(_as_mapping(manifest.get("arm"))) or None,
+        "experiment": dict(_as_mapping(manifest.get("experiment"))) or None,
         "budgets": _budget_facts(
             manifest,
             max_llm_calls=max_llm_calls,
@@ -201,10 +201,10 @@ def build_experiment_facts(
             manifest, model_artifacts_empty=model_artifacts_empty
         ),
         "broker_replay": _broker_replay_facts(manifest),
-        # The index this arm is measured against: the benchmark leg of every
+        # The index this experiment is measured against: the benchmark leg of every
         # factor loading below, and the membership the random-selection control
         # draws its replacement names from. A manifest written before the
-        # parameter existed reads as the default, which is what those arms ran.
+        # parameter existed reads as the default, which is what those experiments ran.
         "benchmark_index": benchmark_index,
         # The caliber every factor loading and residual tracking error in this
         # session was computed under. One sentence, naming that benchmark:
@@ -379,13 +379,13 @@ def _budget_facts(
             # the authoritative device fact: a per-session GPU override moves
             # only the session's own container, never this number.
             "strategy_gpu_count": budgets.get("strategy_gpu_count"),
-            # The totals above are the arm's, spent across every attempt of
+            # The totals above are the experiment's, spent across every attempt of
             # its one session; what earlier attempts already used of them.
             "used_before_this_attempt": budgets.get("used_before_this_attempt"),
             # CPU quota that same container is started with, from which its
             # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read
             # from the run manifest, which carries the evaluator's own
-            # strategy SandboxSpec -- the arm's, and the single source the executor
+            # strategy SandboxSpec -- the experiment's, and the single source the executor
             # builds the `--cpus` flag from -- so a strategy that sets its own
             # thread count has the real number instead of a guess: a session
             # that guessed low spent two backtest slots on fit timeouts it had
@@ -404,7 +404,7 @@ def _budget_facts(
                 if cpus is not None and memory_bytes is not None
                 else None
             ),
-            # Replays one validate call runs at once (the arm's
+            # Replays one validate call runs at once (the experiment's
             # ``batch_validate_max_concurrency``), each with its own strategy
             # container (two when the candidate declares fit). The host is
             # shared with the other running experiments, so wall clock per
@@ -463,7 +463,7 @@ def _artifact_contract_facts(
 
 
 # What ``BrokerProfile.permitted_boards`` means for the Agent, stated beside the
-# boards on an arm whose account carries them.
+# boards on an experiment whose account carries them.
 PERMITTED_BOARDS_RULE = (
     "The account may buy only names listed on these boards (main = Shanghai and Shenzhen "
     "main boards, gem = ChiNext, star = STAR Market, bj = Beijing Stock Exchange): a buy of "

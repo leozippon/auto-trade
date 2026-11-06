@@ -112,7 +112,7 @@ class AgentSessionBudgetExhausted(SessionInterrupt):
     ``session_end`` (status ``deadline_exceeded``, ``call_budget_exhausted``
     or ``api_spend_exhausted``);
     the Pipeline records the ``deadline`` outcome with ``finish_reason`` and
-    ends the arm instead of failing the run. A SessionInterrupt subclass so it
+    ends the experiment instead of failing the run. A SessionInterrupt subclass so it
     re-raises through tool dispatch instead of being swallowed into an error
     observation.
     """
@@ -412,7 +412,7 @@ class AgentSessionRunner:
         seeded as finalization candidates so the resumed session can nominate
         them.
         ``budget_total_seconds`` is the whole session budget the time-budget
-        notices are measured against; a resumed attempt hands over the arm
+        notices are measured against; a resumed attempt hands over the experiment
         total while its time budget only holds what is left of it.
 
         However the conversation ends — a finish, an exhausted budget, an

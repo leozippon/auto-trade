@@ -122,7 +122,7 @@ class CardWait(NamedTuple):
 def wait_for_cards(take: Callable[[], list[int]], wait: CardWait, label: str) -> list[int]:
     """The cards ``take`` gives, looking again every ``poll_seconds`` while it
     refuses, until the deadline; then its last refusal, saying how long it
-    waited. A look only reads the devices and the running arms' claims: nothing
+    waited. A look only reads the devices and the running experiments' claims: nothing
     is held between looks, and the cards are the caller's once returned."""
 
     started = wait.clock()
@@ -247,7 +247,7 @@ def source_history(args: argparse.Namespace) -> int:
     """Backfill one book created before init copied the curve.
 
     A current experiment names its own replay through the forward record; an
-    arm retired under an older ledger has no such record, so the operator names
+    experiment retired under an older ledger has no such record, so the operator names
     the replay result directory instead.
     """
 

@@ -60,7 +60,7 @@ from tests.unit.paper_book_fixture import (
 from tests.unit.test_broker_engine import MATCHED_AT, _bar, _order
 from tests.unit.test_null_control import _board_draws
 from tests.unit.test_snapshot_builder import write_fundamental_status
-from tests.unit.webui_research_arm import build_arm
+from tests.unit.webui_research_experiment import build_experiment
 
 
 def _decided(root: Path) -> list[str]:
@@ -111,7 +111,7 @@ def test_a_run_takes_the_books_the_owner_trades_first(tmp_path: Path):
     assert run_order(root) == ["beta", "traded", "alpha", "gamma"]
     delete_book(root, "traded")
     assert run_order(root) == ["beta", "alpha", "gamma"]
-    _graduated_book(tmp_path, "aaa")  # asks for a GPU, as its arm did
+    _graduated_book(tmp_path, "aaa")  # asks for a GPU, as its experiment did
     fills.enable(root / "aaa")
     assert run_order(root) == ["beta", "alpha", "gamma", "aaa"]
 
@@ -122,10 +122,10 @@ def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_pa
     uses for a strategy artifact, over the book's own copy, so the bytes the
     book trades are named exactly as research named the artifact it approved."""
 
-    arm = build_arm(tmp_path / "experiments", "exp", "graduated")
+    experiment = build_experiment(tmp_path / "experiments", "exp", "graduated")
     book = create_book(
         paper_root(tmp_path) / "exp",
-        experiment_dir=arm,
+        experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
         track="graduated",
@@ -133,7 +133,7 @@ def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_pa
     )
     record = json.loads((book.root / "book.json").read_text(encoding="utf-8"))
     copy = book.root / STRATEGY_COPY_NAME
-    source = arm / "artifacts/strategy/frozen/strategy_research_abc"
+    source = experiment / "artifacts/strategy/frozen/strategy_research_abc"
     assert book.strategy_path == copy / "output" / "main.py"
     assert book.models_dir is None
     assert record["artifact_fingerprint"] == artifact_fingerprint(copy / "output")
@@ -141,7 +141,7 @@ def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_pa
 
 
 def test_book_ids_are_single_path_segments():
-    assert validate_book_id("arm-graduated_2026.09") == "arm-graduated_2026.09"
+    assert validate_book_id("experiment-graduated_2026.09") == "experiment-graduated_2026.09"
     for bad in ("", ".hidden", "a/b", "..", "a..b", "x" * 97):
         with pytest.raises(ValueError):
             validate_book_id(bad)
@@ -158,21 +158,21 @@ def _book_files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def test_a_frozen_strategy_opens_its_book_once_and_an_arm_without_one_opens_none(tmp_path: Path):
+def test_a_frozen_strategy_opens_its_book_once_and_an_experiment_without_one_opens_none(tmp_path: Path):
     experiments = tmp_path / "elsewhere"  # any experiments root, not only <repo>/experiments
-    arm = build_arm(experiments, "exp", "frozen_with_record")
+    experiment = build_experiment(experiments, "exp", "frozen_with_record")
     root = paper_root(tmp_path)
-    assert open_frozen_book(tmp_path, arm) == "exp"
+    assert open_frozen_book(tmp_path, experiment) == "exp"
     record = json.loads((root / "exp" / "book.json").read_text(encoding="utf-8"))
     assert (record["experiment_id"], record["artifact_id"], record["note"]) == (
         "exp", "strategy_research_abc", "frozen"
     )
     assert record["candidate_source"] == "frozen"
     opened = _book_files(root / "exp")
-    assert open_frozen_book(tmp_path, arm) == "exp"  # an open book is left as it is
+    assert open_frozen_book(tmp_path, experiment) == "exp"  # an open book is left as it is
     assert _book_files(root / "exp") == opened
 
-    loser = build_arm(experiments, "loser", "discarded")
+    loser = build_experiment(experiments, "loser", "discarded")
     with pytest.raises(ValueError, match="no frozen strategy with a forward record"):
         open_frozen_book(tmp_path, loser)
     assert list_books(root) == ["exp"] and not (root / "loser").exists()
@@ -183,9 +183,9 @@ def test_deleting_a_book_removes_its_read_only_tree_and_frees_its_id(tmp_path: P
     shared release files. The whole tree goes, no shared file changes mode,
     and the id can be opened again."""
 
-    arm = build_arm(tmp_path / "experiments", "exp", "graduated")
+    experiment = build_experiment(tmp_path / "experiments", "exp", "graduated")
     engine_book(tmp_path, book="other")
-    open_frozen_book(tmp_path, arm)
+    open_frozen_book(tmp_path, experiment)
     root = paper_root(tmp_path)
     output = root / "exp" / STRATEGY_COPY_NAME / "output"
     (output / "lib").mkdir()
@@ -201,7 +201,7 @@ def test_deleting_a_book_removes_its_read_only_tree_and_frees_its_id(tmp_path: P
     delete_book(root, "exp")
     assert sorted(entry.name for entry in root.iterdir()) == ["other"]  # nothing left behind
     assert stat.S_IMODE(shared.stat().st_mode) == 0o444 and shared.read_bytes() == b"release"
-    assert open_frozen_book(tmp_path, arm) == "exp"
+    assert open_frozen_book(tmp_path, experiment) == "exp"
     with pytest.raises(KeyError):
         delete_book(root, "missing")
     with pytest.raises(ValueError):
@@ -223,10 +223,10 @@ def test_a_book_a_run_is_writing_is_refused_and_left_whole(tmp_path: Path):
 
 
 def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
-    arm = build_arm(tmp_path / "experiments", book_id, "graduated")
+    experiment = build_experiment(tmp_path / "experiments", book_id, "graduated")
     return create_book(
         paper_root(tmp_path) / book_id,
-        experiment_dir=arm,
+        experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
         track="graduated",
@@ -234,16 +234,16 @@ def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
 
 
 def _incubate(tmp_path: Path, book_id: str, boards: tuple[str, ...] = ("main", "gem")) -> Book:
-    """An incubating book of a discarded arm, from the replay its forward
+    """An incubating book of a discarded experiment, from the replay its forward
     record names (the shape an incubation record passes), on ``boards``."""
 
-    arm = tmp_path / "experiments" / book_id
-    if not arm.exists():
-        build_arm(tmp_path / "experiments", book_id, "discarded")
-    record = forward_record(ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read())
+    experiment = tmp_path / "experiments" / book_id
+    if not experiment.exists():
+        build_experiment(tmp_path / "experiments", book_id, "discarded")
+    record = forward_record(ExperimentLedger(experiment / "ledgers/experiment_ledger.jsonl").read())
     return create_book(
         paper_root(tmp_path) / book_id,
-        experiment_dir=arm,
+        experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
         track="incubating",
@@ -284,18 +284,18 @@ def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path)
 
 
 def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path: Path):
-    """The fixture arm carries no board stamp: a graduated book pins those its
+    """The fixture experiment carries no board stamp: a graduated book pins those its
     initial cash qualifies for -- CNY 200,000 unless its creator names other
-    capital, whatever the arm's own -- an incubating one the boards its
+    capital, whatever the experiment's own -- an incubating one the boards its
     incubation replayed on, and that one pinned field is what its Broker
     enforces and what its zero-skill panel draws from."""
 
     default = load_book(_graduated_book(tmp_path).root).profile
     assert (default.initial_cash, default.permitted_boards) == (PAPER_INITIAL_CASH, ("main", "gem"))
     assert PAPER_INITIAL_CASH == 200_000
-    arm = tmp_path / "experiments" / "exp"
+    experiment = tmp_path / "experiments" / "exp"
     large = create_book(
-        paper_root(tmp_path) / "large", experiment_dir=arm, artifact_id="strategy_research_abc",
+        paper_root(tmp_path) / "large", experiment_dir=experiment, artifact_id="strategy_research_abc",
         repo_root=tmp_path, track="graduated", initial_cash=1_000_000,
     )
     assert read_json_object(large.root / BOOK_NAME)["profile"]["permitted_boards"] == ["main", "gem", "star", "bj"]
@@ -303,7 +303,7 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path
     book = load_book(_incubate(tmp_path, "inc", boards=("main",)).root)
     assert book.profile.permitted_boards == ("main",)
     broker = DailyBroker(book.profile)
-    broker.open_day("20260105", {}, distributions={})  # every arm's account is taxed
+    broker.open_day("20260105", {}, distributions={})  # every experiment's account is taxed
     rejected = broker.execute(_order(symbol="300001.SZ"), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
     assert (rejected.status, rejected.reason) == ("rejected", "board_not_permitted")
     assert broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=10.0).status == "filled"
@@ -312,7 +312,7 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_panel_buy_on(tmp_path
 
     with pytest.raises(ValueError, match="permitted_boards"):
         create_book(
-            paper_root(tmp_path) / "other", experiment_dir=arm, artifact_id="strategy_research_abc",
+            paper_root(tmp_path) / "other", experiment_dir=experiment, artifact_id="strategy_research_abc",
             repo_root=tmp_path, track="graduated", permitted_boards=("main",),
         )
 
@@ -327,9 +327,9 @@ def test_the_book_cap_refuses_a_book_and_a_killed_book_frees_its_place(tmp_path:
     with pytest.raises(ValueError, match=f"the cap is {BOOK_CAP}"):
         _incubate(tmp_path, "late")
     with pytest.raises(ValueError, match=f"the cap is {BOOK_CAP}"):
-        open_frozen_book(tmp_path, build_arm(tmp_path / "experiments", "late_frozen", "frozen_with_record"))
+        open_frozen_book(tmp_path, build_experiment(tmp_path / "experiments", "late_frozen", "frozen_with_record"))
     assert not (root / "late").exists() and not (root / "late_frozen").exists()
-    require_book_place(root, "fz0")  # an open book is never a second book of its own arm
+    require_book_place(root, "fz0")  # an open book is never a second book of its own experiment
     _kill(root / "fz0")
     assert book_status(root / "fz0") == "killed"
     assert _incubate(tmp_path, "late").candidate_source == "incubating"
@@ -358,13 +358,13 @@ def _pit_lake(repo: Path, *, first_month: str, audited_from: str, calendar: bool
     write_fundamental_status(repo / FUNDAMENTALS_STATUS, scope_start_date=audited_from)
 
 
-def _fundamentals_arm(tmp_path: Path, name: str, window_months: int) -> Path:
-    arm = build_arm(tmp_path / "experiments", name, "graduated")
-    params = read_json_object(arm / "hitl/params.json")
+def _fundamentals_experiment(tmp_path: Path, name: str, window_months: int) -> Path:
+    experiment = build_experiment(tmp_path / "experiments", name, "graduated")
+    params = read_json_object(experiment / "hitl/params.json")
     write_json_atomic(
-        arm / "hitl/params.json", {**params, "include_fundamentals": True, "window_months": window_months}
+        experiment / "hitl/params.json", {**params, "include_fundamentals": True, "window_months": window_months}
     )
-    return arm
+    return experiment
 
 
 def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tmp_path: Path):
@@ -377,11 +377,11 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
 
     first, audited = f"{YEAR - 6}01", f"{YEAR - 3}0101"
     _pit_lake(tmp_path, first_month=first, audited_from=audited)
-    assert open_frozen_book(tmp_path, _fundamentals_arm(tmp_path, "short", 24)) == "short"
+    assert open_frozen_book(tmp_path, _fundamentals_experiment(tmp_path, "short", 24)) == "short"
 
-    arm = _fundamentals_arm(tmp_path, "long", 108)
+    experiment = _fundamentals_experiment(tmp_path, "long", 108)
     with pytest.raises(ValueError, match="cannot open") as refused:
-        open_frozen_book(tmp_path, arm)
+        open_frozen_book(tmp_path, experiment)
     message = str(refused.value)
     assert f"loads PIT fundamental events from {first}, but their audit" in message
     assert f"starts at {audited}" in message
@@ -390,24 +390,24 @@ def test_a_book_reading_fundamentals_opens_only_on_an_audit_covering_its_view(tm
     assert "`python scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build --force-run` once" in message
     # The key it names is the one the nightly runner reads as that job's start.
     assert resolve_job_start_date({"start_date": f"{first}01"}, {}, "20991231") == f"{first}01"
-    record = forward_record(ExperimentLedger(arm / "ledgers/experiment_ledger.jsonl").read())
+    record = forward_record(ExperimentLedger(experiment / "ledgers/experiment_ledger.jsonl").read())
     with pytest.raises(ValueError, match="cannot open"):
         create_book(
-            paper_root(tmp_path) / "long-incubating", experiment_dir=arm, artifact_id="strategy_research_abc",
+            paper_root(tmp_path) / "long-incubating", experiment_dir=experiment, artifact_id="strategy_research_abc",
             repo_root=tmp_path, track="incubating", source_record=record, permitted_boards=("main",),
         )
     assert sorted(entry.name for entry in paper_root(tmp_path).iterdir()) == ["short"]  # nothing written
 
     # The nightly run the refusal configures audits from that month: the book opens.
     write_fundamental_status(tmp_path / FUNDAMENTALS_STATUS, scope_start_date=f"{first}01")
-    assert open_frozen_book(tmp_path, arm) == "long"
+    assert open_frozen_book(tmp_path, experiment) == "long"
 
 
 def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
     # An audit that covers nothing and no exchange calendar: either one read
     # would refuse the book.
     _pit_lake(tmp_path, first_month="201501", audited_from="20990101", calendar=False)
-    assert open_frozen_book(tmp_path, build_arm(tmp_path / "experiments", "exp", "graduated")) == "exp"
+    assert open_frozen_book(tmp_path, build_experiment(tmp_path / "experiments", "exp", "graduated")) == "exp"
 
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
@@ -470,9 +470,9 @@ def test_a_schema_2_book_loads_as_the_book_it_was(tmp_path: Path):
 
 
 def test_every_book_decides_under_the_paper_decision_clock(tmp_path: Path):
-    """A new book carries no decision clock, and the arm's clock an older book
+    """A new book carries no decision clock, and the experiment's clock an older book
     copied (schema 3 or 2) is not read: every Paper decision call runs under
-    PAPER_DECISION_TIMEOUT_SECONDS, whatever the arm's."""
+    PAPER_DECISION_TIMEOUT_SECONDS, whatever the experiment's."""
     book = _graduated_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
     assert "timeout_seconds" not in record["sandbox"]

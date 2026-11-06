@@ -554,7 +554,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             for task, row in _as_mapping(cached.get("subagent_usage")).items()
         }
         # The session's cumulative spend rides on every budgeted event; the
-        # last block seen is the arm's usage so far, earlier attempts included.
+        # last block seen is the experiment's usage so far, earlier attempts included.
         budget_used = cached.get("budget_used")
         for raw in blob[:tail].splitlines():
             event = _decode_event(raw)

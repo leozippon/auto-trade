@@ -2,7 +2,7 @@
 
 The console lists experiments from whatever is on disk, so a Fold-era
 ``params.json`` must degrade to an unreadable row instead of taking the
-listing down; the arm's verdict reaches the listing once its forward record
+listing down; the experiment's verdict reaches the listing once its forward record
 exists; and the create form is seeded with the research geometry the worker
 actually runs.
 """

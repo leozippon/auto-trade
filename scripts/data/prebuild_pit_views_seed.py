@@ -209,7 +209,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=_int_list,
         default=DEFAULT_RESEARCH_YEARS_CHOICES,
         metavar="N,N",
-        help="the research_years an arm may choose on this seed: a warm as-of start at "
+        help="the research_years an experiment may choose on this seed: a warm as-of start at "
         "each choice's validation start; a choice the geometry cannot take is planned "
         f"for nothing. Default: {','.join(map(str, DEFAULT_RESEARCH_YEARS_CHOICES))}",
     )

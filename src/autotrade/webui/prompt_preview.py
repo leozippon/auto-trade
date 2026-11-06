@@ -132,7 +132,7 @@ def _research_prompt(
 ) -> str:
     from autotrade.pipelines.experiment import _session_budgets
     from autotrade.pipelines.research_session import (
-        arm_record,
+        experiment_record,
         research_geometry_record,
         session_fact_blocks,
         start_record,
@@ -157,7 +157,7 @@ def _research_prompt(
         "benchmark_index": rolling.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
-        "arm": arm_record(()),
+        "experiment": experiment_record(()),
         "modification_constraints": rolling.step_constraints.to_record(),
         "acceptance_rules": rolling.acceptance.to_record(),
         "schedule": rolling.schedule.to_record(),

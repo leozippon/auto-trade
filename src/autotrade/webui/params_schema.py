@@ -1,6 +1,6 @@
 """Creation-form parameter schema for the HITL console.
 
-Every field is a console parameter of ``pipelines.arm_params.ArmParams`` and
+Every field is a console parameter of ``pipelines.experiment_params.ExperimentParams`` and
 renders its default from ``hitl_state.WEB_CREATE_DEFAULTS`` (read off the
 record), so the form can never drift from what a create stamps. Each console
 parameter has a form field here or is named in ``_FORMLESS``; the check below
@@ -20,12 +20,12 @@ from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
-from autotrade.pipelines.arm_params import Surface, parameters
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
     acceptance_default,
 )
+from autotrade.pipelines.experiment_params import Surface, parameters
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
     OPERATING_MEMORY_LIBRARY,
@@ -496,7 +496,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "预算与验收",
         "label": "残差统计量显著性水平",
         "type": "float",
-        "help": "残差信息比率的单侧显著性水平，须在 (0, 1)；门槛为 z(1−α)/√年数，只陈述在每个读数旁，不作裁决。全项目共用一个值，各臂的读数才能放在一起比。",
+        "help": "残差信息比率的单侧显著性水平，须在 (0, 1)；门槛为 z(1−α)/√年数，只陈述在每个读数旁，不作裁决。全项目共用一个值，各实验的读数才能放在一起比。",
     },
     {
         "key": "forward_confidence",
@@ -671,7 +671,7 @@ def _require_form_covers_the_console_parameters() -> None:
     missing = sorted(console - set(formed) - _FORMLESS)
     if stray or missing or len(formed) != len(set(formed)) or _FORMLESS & set(formed):
         raise RuntimeError(
-            f"creation form drifted from the arm parameters: fields {stray} are no "
+            f"creation form drifted from the experiment parameters: fields {stray} are no "
             f"console parameter and {missing} have no field"
         )
 

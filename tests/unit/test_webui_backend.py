@@ -2,7 +2,7 @@
 
 No worker subprocesses, Docker, or LLM calls: worker spawn is patched out and
 experiment state is synthesized on disk exactly as the orchestrator writes it
-(``tests/unit/webui_research_arm.py``). The research-arm projections, the
+(``tests/unit/webui_research_experiment.py``). The research-experiment projections, the
 forward seal and the best-experiment ranking are in
 ``test_webui_research_console.py``.
 """
@@ -30,7 +30,6 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL, MODEL_CHOICES
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
 from autotrade.environment.trace import TRACE_PAYLOAD_HEAD_CHARS, AgentTraceWriter
-from autotrade.pipelines.arm_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     OBSOLETE_KEYS,
@@ -38,6 +37,7 @@ from autotrade.pipelines.config import (
     AcceptanceRules,
     acceptance_for,
 )
+from autotrade.pipelines.experiment_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     StatusReporter,
@@ -48,7 +48,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui.manager import (
-    ARM_DISK_MARGIN_BYTES,
+    EXPERIMENT_DISK_MARGIN_BYTES,
     MAX_RUNNING_EXPERIMENTS,
     MAX_RUNNING_LOCAL_EXPERIMENTS,
     ExperimentManager,
@@ -58,7 +58,7 @@ from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app, is_loopback_host
 from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
-from tests.unit.webui_research_arm import build_arm
+from tests.unit.webui_research_experiment import build_experiment
 
 
 def test_local_webui_health_schema_and_brand(tmp_path: Path):
@@ -496,24 +496,24 @@ def test_gpu_allocation_bar_uses_csp_compatible_native_control(tmp_path: Path):
     assert 'select.value === "" ? experimentDefault' in source
 
 
-def test_the_session_gpu_panel_marks_the_cards_the_arm_claimed(tmp_path: Path):
-    """A session attaches some of the cards claimed for its arm's worker and
+def test_the_session_gpu_panel_marks_the_cards_the_experiment_claimed(tmp_path: Path):
+    """A session attaches some of the cards claimed for its experiment's worker and
     no other, so the panel marks those, read from the detail, and never ranks
     the host's cards by free memory. The claim holds only while that worker
     lives: a dead worker's claim file holds nothing and is not shown."""
     from autotrade.pipelines.hitl_state import write_gpu_claim
     from autotrade.webui.registry import experiment_detail
-    from tests.unit.webui_research_arm import build_arm
+    from tests.unit.webui_research_experiment import build_experiment
 
-    hitl = build_arm(tmp_path, "arm", "research", alive=True) / "hitl"
-    assert experiment_detail(tmp_path, "arm")["gpu_claim"] == []
+    hitl = build_experiment(tmp_path, "experiment", "research", alive=True) / "hitl"
+    assert experiment_detail(tmp_path, "experiment")["gpu_claim"] == []
     write_gpu_claim(hitl, [5, 2])
-    assert experiment_detail(tmp_path, "arm")["gpu_claim"] == [5, 2]
+    assert experiment_detail(tmp_path, "experiment")["gpu_claim"] == [5, 2]
     status = json.loads((hitl / "status.json").read_text(encoding="utf-8"))
     (hitl / "status.json").write_text(
         json.dumps({**status, "state": "terminated", "pid": 999_999_999}), encoding="utf-8"
     )
-    detail = experiment_detail(tmp_path, "arm")
+    detail = experiment_detail(tmp_path, "experiment")
     assert (detail["worker_alive"], detail["gpu_claim"]) == (False, [])
     script = (Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js").read_text(
         encoding="utf-8"
@@ -636,7 +636,7 @@ class WebuiBackendTest(unittest.TestCase):
 
     # ---- fixtures ------------------------------------------------------------
     def _build_hitl_experiment(self, experiment_id: str, stage: str = "research") -> Path:
-        experiment_dir = build_arm(self.experiments_root, experiment_id, stage)
+        experiment_dir = build_experiment(self.experiments_root, experiment_id, stage)
         write_json_atomic(
             experiment_dir / "hitl" / "status.json",
             {
@@ -679,7 +679,7 @@ class WebuiBackendTest(unittest.TestCase):
 
     def _validation_result(self, experiment_id: str) -> Path:
         """The first research Validation the ledger names, which a recorded
-        session (a sealed or judged arm) has and a running one does not."""
+        session (a sealed or judged experiment) has and a running one does not."""
         records = ExperimentLedger(
             self.experiments_root / experiment_id / "ledgers/experiment_ledger.jsonl"
         ).read()
@@ -735,7 +735,7 @@ class WebuiBackendTest(unittest.TestCase):
         ):
             self.assertNotIn(retired, fields)
         # Every field is a parameter the worker accepts.
-        from autotrade.pipelines.arm_params import PARAMETERS
+        from autotrade.pipelines.experiment_params import PARAMETERS
 
         self.assertLessEqual(set(fields), set(PARAMETERS))
         self.assertEqual(fields["research_directive"]["type"], "text")
@@ -1418,13 +1418,13 @@ class WebuiBackendTest(unittest.TestCase):
             )
         self.assertEqual(created.status_code, 200, created.text)
 
-    def test_creation_stamps_the_arms_resolved_acceptance_rules(self) -> None:
-        """The gates an arm is judged by live in the arm's own params.json.
+    def test_creation_stamps_the_experiments_resolved_acceptance_rules(self) -> None:
+        """The gates an experiment is judged by live in the experiment's own params.json.
 
         They are resolved once, at creation, and stamped in like every other
-        default, so a restart re-reads the arm's own rules instead of deriving
+        default, so a restart re-reads the experiment's own rules instead of deriving
         them again: a later change to the defaults, or to the limits the
-        tracking mandate brings with it, cannot move an arm that exists.
+        tracking mandate brings with it, cannot move an experiment that exists.
         """
 
         manager = ExperimentManager(self.repo_root, self.experiments_root)
@@ -1484,7 +1484,7 @@ class WebuiBackendTest(unittest.TestCase):
             with self.subTest(experiment=experiment_id):
                 self.assertEqual(written["permitted_boards"], boards)
 
-    def test_creation_stamps_the_arms_relay_key(self) -> None:
+    def test_creation_stamps_the_experiments_relay_key(self) -> None:
         """``llm_key`` is written into params.json, where every worker
         (re)start reads it: ``primary`` unless the request names
         ``alternate``."""
@@ -1507,9 +1507,9 @@ class WebuiBackendTest(unittest.TestCase):
             with self.subTest(experiment=experiment_id):
                 self.assertEqual(written["llm_key"], key)
 
-    # ---- running-arm limits ------------------------------------------------------
-    def _running_arms(self, *, local: int, hosted: int) -> list[str]:
-        """Running arms with their params on disk, as the console reads them:
+    # ---- running-experiment limits ------------------------------------------------------
+    def _running_experiments(self, *, local: int, hosted: int) -> list[str]:
+        """Running experiments with their params on disk, as the console reads them:
         ``local`` on the local model (both roles), ``hosted`` with both the
         main session and the sub-agents on a hosted model."""
 
@@ -1545,16 +1545,16 @@ class WebuiBackendTest(unittest.TestCase):
             )
 
     def test_local_limit_refuses_a_local_create_and_admits_a_hosted_one(self) -> None:
-        """An arm is local when its main session or its sub-agents run on the
+        """An experiment is local when its main session or its sub-agents run on the
         local model; only those are refused at the local limit, and the refusal
-        names the limit and the local arms holding it."""
+        names the limit and the local experiments holding it."""
 
         hosted = {"model": MIMO_FLASH_MODEL, "subagent_model": MIMO_FLASH_MODEL}
-        # The last local slot is still free below the limit, beside hosted arms.
-        running = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS - 1, hosted=2)
+        # The last local slot is still free below the limit, beside hosted experiments.
+        running = self._running_experiments(local=MAX_RUNNING_LOCAL_EXPERIMENTS - 1, hosted=2)
         self._create_under(running, "exp_last_local")
 
-        running = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS, hosted=0)
+        running = self._running_experiments(local=MAX_RUNNING_LOCAL_EXPERIMENTS, hosted=0)
         local_names = ", ".join(sorted(running))
         for experiment_id, roles in (
             ("exp_local", {"model": LOCAL_QWEN_MODEL, "subagent_model": LOCAL_QWEN_MODEL}),
@@ -1566,21 +1566,21 @@ class WebuiBackendTest(unittest.TestCase):
                     self._create_under(running, experiment_id, **roles)
                 message = str(refused.exception)
                 self.assertIn(
-                    f"local-model limit reached: {MAX_RUNNING_LOCAL_EXPERIMENTS} running arms",
+                    f"local-model limit reached: {MAX_RUNNING_LOCAL_EXPERIMENTS} running experiments",
                     message,
                 )
                 self.assertIn(f"running on it: {local_names}", message)
                 self.assertFalse((self.experiments_root / experiment_id).exists())
         created = self._create_under(running, "exp_hosted", **hosted)
         self.assertEqual(created["experiment_id"], "exp_hosted")
-        # The console's default roles are hosted, so a default arm is too.
+        # The console's default roles are hosted, so a default experiment is too.
         created = self._create_under(running, "exp_default")
         self.assertEqual(created["experiment_id"], "exp_default")
 
     def test_health_and_listing_report_both_limits_and_the_roster_by_kind(self) -> None:
-        running = self._running_arms(local=1, hosted=1)
+        running = self._running_experiments(local=1, hosted=1)
         for name in running:
-            # This test process stands in for the arms' live workers.
+            # This test process stands in for the experiments' live workers.
             write_json_atomic(
                 self.experiments_root / name / "hitl/status.json",
                 {
@@ -1611,24 +1611,24 @@ class WebuiBackendTest(unittest.TestCase):
     def test_total_limit_refuses_local_and_hosted_creates_alike(self) -> None:
         hosted = {"model": MIMO_FLASH_MODEL, "subagent_model": MIMO_FLASH_MODEL}
         hosted_count = MAX_RUNNING_EXPERIMENTS - MAX_RUNNING_LOCAL_EXPERIMENTS + 1
-        running = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS - 1, hosted=hosted_count)
+        running = self._running_experiments(local=MAX_RUNNING_LOCAL_EXPERIMENTS - 1, hosted=hosted_count)
         self.assertEqual(len(running), MAX_RUNNING_EXPERIMENTS)
         for experiment_id, roles in (("exp_local", {}), ("exp_hosted", hosted)):
             with self.subTest(experiment_id):
                 with self.assertRaisesRegex(
                     ManagerError,
-                    rf"running-arm limit reached: {MAX_RUNNING_EXPERIMENTS} arms in total; "
+                    rf"running-experiment limit reached: {MAX_RUNNING_EXPERIMENTS} experiments in total; "
                     rf"running: {', '.join(sorted(running))}$",
                 ):
                     self._create_under(running, experiment_id, **roles)
                 self.assertFalse((self.experiments_root / experiment_id).exists())
 
-    def test_create_is_refused_below_the_free_space_floor_plus_one_arm(self) -> None:
-        """An arm created below the Agent tools' floor plus its own views would
+    def test_create_is_refused_below_the_free_space_floor_plus_one_experiment(self) -> None:
+        """An experiment created below the Agent tools' floor plus its own views would
         build them and then be refused every validation: the create is a 400
         that writes nothing, and exactly the floor plus the margin passes."""
 
-        needed = WORKSPACE_MIN_FREE_BYTES + ARM_DISK_MARGIN_BYTES
+        needed = WORKSPACE_MIN_FREE_BYTES + EXPERIMENT_DISK_MARGIN_BYTES
         usage = shutil.disk_usage(self.repo_root)
         request = {"experiment_id": "exp_low_disk", **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES}
         with (
@@ -1658,7 +1658,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(created["experiment_id"], "exp_low_disk")
 
     def test_running_limits_also_guard_worker_restart(self) -> None:
-        """A (re)start reads the arm's kind from its persisted params and obeys
+        """A (re)start reads the experiment's kind from its persisted params and obeys
         the create rule. No worker entrypoint exists in this repository, so a
         start that clears both limits fails on exactly that, one step later."""
 
@@ -1674,14 +1674,14 @@ class WebuiBackendTest(unittest.TestCase):
             "model": MIMO_FLASH_MODEL,
             "subagent_model": MIMO_FLASH_MODEL,
         }
-        local_full = self._running_arms(local=MAX_RUNNING_LOCAL_EXPERIMENTS, hosted=0)
-        total_full = local_full + self._running_arms(
+        local_full = self._running_experiments(local=MAX_RUNNING_LOCAL_EXPERIMENTS, hosted=0)
+        total_full = local_full + self._running_experiments(
             local=0, hosted=MAX_RUNNING_EXPERIMENTS - MAX_RUNNING_LOCAL_EXPERIMENTS
         )
         for params, running, refusal in (
             (local_params, local_full, "local-model limit reached"),
             (hosted_params, local_full, "interactive worker entrypoint is unavailable"),
-            (hosted_params, total_full, "running-arm limit reached"),
+            (hosted_params, total_full, "running-experiment limit reached"),
         ):
             write_json_atomic(params_path, params)
             with (
@@ -1779,7 +1779,7 @@ class WebuiBackendTest(unittest.TestCase):
 
 
 class HitlControlActionTest(unittest.TestCase):
-    """The control actions a research arm still has, and their refusals.
+    """The control actions a research experiment still has, and their refusals.
 
     Every test asserts the control-state change the worker actually reads
     back, not only the HTTP status.
@@ -1791,7 +1791,7 @@ class HitlControlActionTest(unittest.TestCase):
         self.repo_root = Path(self._tmp.name)
         self.experiments_root = self.repo_root / "experiments"
         self.experiments_root.mkdir(parents=True)
-        self.directory = build_arm(self.experiments_root, "exp_ctl", "research")
+        self.directory = build_experiment(self.experiments_root, "exp_ctl", "research")
         self.client = TestClient(create_app(self.repo_root, self.experiments_root))
 
     def _control(self, directory: Path | None = None):
@@ -1823,7 +1823,7 @@ class HitlControlActionTest(unittest.TestCase):
                 self.assertEqual(forward.status_code, 400)
                 self.assertIn("research sessions only", forward.json()["detail"])
         # Once an artifact froze, no Agent session remains to read a setting.
-        frozen = build_arm(self.experiments_root, "exp_frozen", "sealed")
+        frozen = build_experiment(self.experiments_root, "exp_frozen", "sealed")
         refused = self._post(
             "exp_frozen", action="set_directive", session_key="research", directive="x"
         )
@@ -1945,8 +1945,8 @@ class HitlControlActionTest(unittest.TestCase):
                 self.assertEqual(refused.status_code, 400)
                 self.assertIn("unknown control action", refused.json()["detail"])
 
-    def test_lifecycle_actions_work_on_a_finished_arm(self) -> None:
-        build_arm(self.experiments_root, "exp_done", "graduated")
+    def test_lifecycle_actions_work_on_a_finished_experiment(self) -> None:
+        build_experiment(self.experiments_root, "exp_done", "graduated")
         done = self.experiments_root / "exp_done"
         self.assertEqual(self._post("exp_done", action="pause").status_code, 200)
         self.assertEqual(self._control(done).request, "pause")
@@ -2052,8 +2052,8 @@ def test_a_worker_that_dies_during_boot_reads_as_interrupted(tmp_path: Path) -> 
 
 def test_the_local_model_count_reads_the_roles_as_the_worker_runs_them() -> None:
     """An empty main role runs on its hosted default and an empty sub-agent
-    role on the main model (``arm_params.session_models``), so the count
-    neither misses a local arm nor counts a hosted one."""
+    role on the main model (``experiment_params.session_models``), so the count
+    neither misses a local experiment nor counts a hosted one."""
 
     from autotrade.webui.manager import uses_local_model
 

@@ -80,7 +80,7 @@ from autotrade.pipelines.hitl_state import (
     free_gpus,
     gpu_claims,
     proc_start_ticks,
-    running_arms,
+    running_experiments,
     select_gpus,
     write_gpu_claim,
 )
@@ -650,8 +650,8 @@ def test_experiment_gpu_request_reaches_the_formal_strategy_container() -> None:
     )
 
 
-def test_the_arms_boundary_reaches_the_strategy_containers_flags(tmp_path: Path) -> None:
-    """CPUs, memory and the per-call inference limit are the arm's: the docker
+def test_the_experiments_boundary_reaches_the_strategy_containers_flags(tmp_path: Path) -> None:
+    """CPUs, memory and the per-call inference limit are the experiment's: the docker
     flags and thread variables of its strategy containers carry what the
     builder is given, and a builder given none keeps the executor's defaults."""
 
@@ -687,10 +687,10 @@ def test_the_arms_boundary_reaches_the_strategy_containers_flags(tmp_path: Path)
     assert "OMP_NUM_THREADS=16" in command
 
 
-def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
+def test_the_consoles_claim_pins_every_container_of_the_experiment() -> None:
     """A spec carrying the console's claim attaches exactly its devices: every
     strategy container, and a session that asks for fewer gets that many of
-    the arm's own cards, never another one. A spec without a claim gives its
+    the experiment's own cards, never another one. A spec without a claim gives its
     strategy containers no device."""
     from autotrade.pipelines.research_session import LLMResearchDeveloper
 
@@ -710,7 +710,7 @@ def test_the_consoles_claim_pins_every_container_of_the_arm() -> None:
 
     assert (session(1).gpu, session(1).gpu_count) == ((3,), 1)
     assert (session(0).gpu, session(0).gpu_count) == (None, 0)
-    with pytest.raises(GpuUnavailableError, match=r"asks for 3 GPU\(s\) but the arm holds 2"):
+    with pytest.raises(GpuUnavailableError, match=r"asks for 3 GPU\(s\) but the experiment holds 2"):
         session(3)
 
 
@@ -919,7 +919,7 @@ def test_real_shell_created_workspace_files_stay_writable_for_the_typed_writers(
     creates 0o666/0o777 for the sandbox; without the matching zero umask on the
     container side a file the Agent wrote in ``shell`` arrives 0o644 and every
     later ``write_file``/``edit_file`` on it is refused as "not writable" —
-    eleven such refusals across two arms, and the published ``u+w`` recovery
+    eleven such refusals across two experiments, and the published ``u+w`` recovery
     cannot repair any of them.
     """
 
@@ -984,7 +984,7 @@ def test_real_shell_created_workspace_files_stay_writable_for_the_typed_writers(
     )
     assert edited.ok, edited.value
     assert target.read_text(encoding="utf-8") == "VALUE = 2\n"
-    # A new file inside the container-created directory too: the audited arm
+    # A new file inside the container-created directory too: the audited experiment
     # lost that case as well, not only in-place edits.
     written = WriteFileTool(workspace).invoke(
         {"path": "output/lib/probe.txt", "content": "ok\n"}
@@ -1083,7 +1083,7 @@ def test_strategy_container_gpu_request_fails_instead_of_falling_back_to_cpu(
 ):
     """A request that was given no device must abort the replay: training on
     CPU would be a different computation reported under the same result, and
-    picking a card here could land on one a running arm holds."""
+    picking a card here could land on one a running experiment holds."""
 
     strategy = _strategy(tmp_path)
     with (
@@ -2107,11 +2107,11 @@ def _nvidia_smi(used: dict[int, int]) -> Mock:
     return Mock(return_value=subprocess.CompletedProcess([], 0, stdout=rows, stderr=""))
 
 
-def test_a_card_is_eligible_when_it_keeps_the_floor_free_and_no_running_arm_claims_it(
+def test_a_card_is_eligible_when_it_keeps_the_floor_free_and_no_running_experiment_claims_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """One rule for every caller, read from what nvidia-smi reports: a card is
-    eligible when no running arm claims it and it keeps at least the host's
+    eligible when no running experiment claims it and it keeps at least the host's
     floor free (12 GiB unset), whoever else holds memory on it, the most free
     first. A card one MiB short of the floor, or claimed, is never taken however
     few are left, and a refusal names the rule and who holds the rest."""
@@ -2120,13 +2120,13 @@ def test_a_card_is_eligible_when_it_keeps_the_floor_free_and_no_running_arm_clai
 
     monkeypatch.delenv(gpu.MIN_FREE_GPU_GIB_ENV, raising=False)
     root = tmp_path / "experiments"
-    _running_arm(root, "holder", [3])
+    _running_experiment(root, "holder", [3])
     floor = MIN_FREE_GPU_MEMORY_MIB
     used = {
         0: 30_000,  # another user's 30 GB, 16 GB still free
         1: 0,
         2: 46_068 - floor,  # exactly the floor free
-        3: 0,  # empty, but a running arm claims it
+        3: 0,  # empty, but a running experiment claims it
         4: 46_068 - floor + 1,  # one MiB short
     }
     with patch("autotrade.environment.gpu.subprocess.run", _nvidia_smi(used)):
@@ -2139,12 +2139,12 @@ def test_a_card_is_eligible_when_it_keeps_the_floor_free_and_no_running_arm_clai
         assert free_gpus(root, require_name="L20") == [1]
     assert str(refused.value) == (
         f"requested 4 GPU(s), 3 free (1, 0, 2); a card is free only when it keeps {floor} MiB free "
-        "and no running arm claims it; claimed by running arms: holder [3]"
+        "and no running experiment claims it; claimed by running experiments: holder [3]"
     )
 
 
-def _running_arm(root: Path, name: str, devices: list[int] | None, *, state: str = "running_session") -> None:
-    """An arm under ``root`` whose worker is this process, holding ``devices``."""
+def _running_experiment(root: Path, name: str, devices: list[int] | None, *, state: str = "running_session") -> None:
+    """An experiment under ``root`` whose worker is this process, holding ``devices``."""
 
     hitl = root / name / "hitl"
     hitl.mkdir(parents=True)
@@ -2161,18 +2161,18 @@ def _running_arm(root: Path, name: str, devices: list[int] | None, *, state: str
         write_gpu_claim(hitl, devices)
 
 
-def test_the_one_selection_never_hands_out_a_card_a_running_arm_claims(tmp_path: Path):
-    """Whoever asks -- the console for an arm, a Paper run, an operator's
-    replay -- never gets a card a running arm claims, though it shows nothing
-    in use; the claim an ended worker left behind holds nothing, an arm that
+def test_the_one_selection_never_hands_out_a_card_a_running_experiment_claims(tmp_path: Path):
+    """Whoever asks -- the console for an experiment, a Paper run, an operator's
+    replay -- never gets a card a running experiment claims, though it shows nothing
+    in use; the claim an ended worker left behind holds nothing, an experiment that
     asked for no GPU claims none, and a request the eligible cards cannot meet
     is refused naming who holds the rest instead of landing on one of them."""
 
     root = tmp_path / "experiments"
-    _running_arm(root, "holder", [1, 3])
-    _running_arm(root, "cpu_arm", None)
-    _running_arm(root, "ended", [0], state="stopped")
-    assert running_arms(root) == ["cpu_arm", "holder"]
+    _running_experiment(root, "holder", [1, 3])
+    _running_experiment(root, "cpu_experiment", None)
+    _running_experiment(root, "ended", [0], state="stopped")
+    assert running_experiments(root) == ["cpu_experiment", "holder"]
     assert gpu_claims(root) == {"holder": [1, 3]}
     with stubbed_gpu_probe([0, 1, 2, 3]):
         assert free_gpus(root, require_name="L20") == [0, 2]
@@ -2180,7 +2180,7 @@ def test_the_one_selection_never_hands_out_a_card_a_running_arm_claims(tmp_path:
         with pytest.raises(GpuUnavailableError) as refused:
             select_gpus(root, 3, require_name="L20")
         assert "requested 3 GPU(s), 2 free (0, 2)" in str(refused.value)
-        assert "claimed by running arms: holder [1, 3]" in str(refused.value)
+        assert "claimed by running experiments: holder [1, 3]" in str(refused.value)
         assert free_gpus(root, require_name="H100") == []
     # No experiments at all: every eligible card is free.
     with stubbed_gpu_probe([4]):
@@ -2210,12 +2210,12 @@ def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     """A Paper book's strategy container is pinned to cards the one selection
-    gives it, never to a card a running arm claims, and a run that starts no
+    gives it, never to a card a running experiment claims, and a run that starts no
     container (a session already decided) asks for none. A CPU book never
     reads the devices."""
     from scripts.paper import run_paper
 
-    _running_arm(tmp_path / "experiments", "holder", [0])
+    _running_experiment(tmp_path / "experiments", "holder", [0])
     monkeypatch.setattr(run_paper, "REPO_ROOT", tmp_path)
     started: list[SandboxConfig] = []
     monkeypatch.setattr(
@@ -2227,7 +2227,7 @@ def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
         run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
     assert started[-1].spec.gpu == (1,)
     assert book.spec.gpu == GpuMode.AUTO
-    # The only eligible card is the arm's: looking once, the book cannot decide.
+    # The only eligible card is the experiment's: looking once, the book cannot decide.
     with stubbed_gpu_probe([0]), pytest.raises(GpuUnavailableError, match="holder"):
         run_paper._executor_on_free_gpus(tmp_path, book, None, None, None)
     with patch("autotrade.environment.gpu.list_gpus", side_effect=AssertionError("probed")):

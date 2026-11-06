@@ -34,16 +34,16 @@ from tests.unit.test_paper_reconcile import SESSIONS, A, B, _fill, _session
 from tests.unit.test_paper_reconcile import _bars as _two_name_bars
 from tests.unit.test_paper_reconcile import _book as _reconcile_book
 from tests.unit.test_paper_trading import SYMBOL, _bars
-from tests.unit.webui_research_arm import build_arm
+from tests.unit.webui_research_experiment import build_experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
-    arm = build_arm(tmp_path / "experiments", book_id, "graduated")
+    experiment = build_experiment(tmp_path / "experiments", book_id, "graduated")
     return create_book(
         paper_root(tmp_path) / book_id,
-        experiment_dir=arm,
+        experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
         track="graduated",

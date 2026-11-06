@@ -776,7 +776,7 @@ def test_alternate_key_completes_after_a_rejected_primary(
     assert "relay-primary" not in stderr
 
 
-def test_an_arm_on_the_alternate_key_falls_back_to_the_primary(
+def test_an_experiment_on_the_alternate_key_falls_back_to_the_primary(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ):
     """``llm_key`` alternate only swaps the order: the first call carries the

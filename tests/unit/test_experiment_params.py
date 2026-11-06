@@ -1,10 +1,10 @@
-"""The arm parameter record: one declaration every parameter surface reads.
+"""The experiment parameter record: one declaration every parameter surface reads.
 
-An arm's params.json is flat; ``ArmParams`` groups its parameters and is the
+An experiment's params.json is flat; ``ExperimentParams`` groups its parameters and is the
 only list of them, their types, their defaults and who may set them. These
 tests pin the conditions that must hold for that to stay true: every surface
 is read off the record, a file reads back to the parameters it states, an
-older arm still loads, and a key or a value the record does not declare is
+older experiment still loads, and a key or a value the record does not declare is
 refused.
 """
 
@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import pytest
 
-from autotrade.pipelines.arm_params import (
+from autotrade.pipelines.experiment_params import (
     NON_PERSISTABLE_PARAMS,
     PARAMETERS,
-    ArmParams,
+    ExperimentParams,
     Surface,
     console_request,
     parameters,
@@ -36,7 +36,7 @@ ROOTS = {"experiments_root": "experiments", "work_root": ".runtime/sandboxes"}
 
 def _created(**request: object) -> dict[str, object]:
     return console_request(
-        {"experiment_id": "arm_a", **CREATE_RULES, **request},
+        {"experiment_id": "experiment_a", **CREATE_RULES, **request},
         defaults=WEB_CREATE_DEFAULTS,
         **ROOTS,
     )
@@ -58,11 +58,11 @@ def test_every_console_surface_is_read_off_the_record() -> None:
     assert WEB_CREATE_DEFAULTS["alpha"] == 0.05 and "alpha" not in WEB_REQUIRED_PARAMS
 
 
-def test_a_created_arm_reads_back_to_the_parameters_it_states() -> None:
+def test_a_created_experiment_reads_back_to_the_parameters_it_states() -> None:
     created = _created(initial_cash=100_000, screen_boards=["main"], compact_token_threshold=None)
-    params = ArmParams.from_record(created)
+    params = ExperimentParams.from_record(created)
 
-    assert params.experiment_id == "arm_a"
+    assert params.experiment_id == "experiment_a"
     assert params.broker.initial_cash == 100_000
     assert params.data.screen_boards == ("main",)
     assert params.acceptance.research_years == CREATE_RULES["research_years"]
@@ -75,8 +75,8 @@ def test_a_created_arm_reads_back_to_the_parameters_it_states() -> None:
         assert getattr(owner, name) == (tuple(stated) if isinstance(stated, list) else stated), name
 
 
-def test_an_arm_stamped_under_the_sealed_gate_loads_with_its_retired_rules_ignored() -> None:
-    """An arm created between 2026-11-03 and 11-06 states the sealed gate's
+def test_an_experiment_stamped_under_the_sealed_gate_loads_with_its_retired_rules_ignored() -> None:
+    """An experiment created between 2026-11-03 and 11-06 states the sealed gate's
     rules (``config.OBSOLETE_KEYS``): its params.json still loads, the keys
     land among the retired parameters and the acceptance rules it resolves to
     are the same as without them."""
@@ -92,15 +92,15 @@ def test_an_arm_stamped_under_the_sealed_gate_loads_with_its_retired_rules_ignor
         "finalize_before_deadline_seconds": 900,
     }
     assert set(stamped) - set(current) == set(OBSOLETE_KEYS)
-    params = ArmParams.from_record(stamped)
+    params = ExperimentParams.from_record(stamped)
     assert (params.retired.sealed_years, params.retired.ablation_required) == (5, True)
     assert (params.retired.max_replay_years, params.retired.finalize_before_deadline_seconds) == (144, 900)
-    assert params.acceptance == ArmParams.from_record(current).acceptance
+    assert params.acceptance == ExperimentParams.from_record(current).acceptance
     assert acceptance_for(stamped) == acceptance_for(current)
 
 
-def test_an_arm_created_before_a_parameter_existed_still_loads() -> None:
-    # An arm of 2026-09-25 as its params.json stands: the retired gate rules
+def test_an_experiment_created_before_a_parameter_existed_still_loads() -> None:
+    # An experiment of 2026-09-25 as its params.json stands: the retired gate rules
     # and NL parameters, and none of the parameters added since.
     legacy = {
         "experiment_id": "lstm_alla_8y_20260926",
@@ -118,7 +118,7 @@ def test_an_arm_created_before_a_parameter_existed_still_loads() -> None:
         "_created_at": "2026-09-25T18:46:50.236327+00:00",
         "_creation_surface": "webui",
     }
-    params = ArmParams.from_record(legacy)
+    params = ExperimentParams.from_record(legacy)
 
     assert params.retired.min_dsr_probability == 0.975
     assert params.retired.recency_months == 6
@@ -139,14 +139,14 @@ def test_an_arm_created_before_a_parameter_existed_still_loads() -> None:
 )
 def test_a_value_of_another_type_is_refused(key: str, value: object, message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        ArmParams.from_record({"experiment_id": "arm_a", key: value})
+        ExperimentParams.from_record({"experiment_id": "experiment_a", key: value})
     with pytest.raises(ValueError, match=message):
         _created(**{key: value})
 
 
 def test_null_reads_as_unset_and_a_missing_key_as_its_default() -> None:
-    params = ArmParams.from_record(
-        {"experiment_id": "arm_a", "window_months": None, "compact_token_threshold": "", "research_directive": ""}
+    params = ExperimentParams.from_record(
+        {"experiment_id": "experiment_a", "window_months": None, "compact_token_threshold": "", "research_directive": ""}
     )
 
     assert params.data.window_months is None
@@ -158,8 +158,8 @@ def test_null_reads_as_unset_and_a_missing_key_as_its_default() -> None:
 
 def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
     with pytest.raises(ValueError, match=r"unknown experiment parameters: \['nl_budget'\]"):
-        ArmParams.from_record({"experiment_id": "arm_a", "nl_budget": 1})
-    assert ArmParams.from_record({"experiment_id": "arm_a", "_anything": 1}).experiment_id == "arm_a"
+        ExperimentParams.from_record({"experiment_id": "experiment_a", "nl_budget": 1})
+    assert ExperimentParams.from_record({"experiment_id": "experiment_a", "_anything": 1}).experiment_id == "experiment_a"
 
 
 @pytest.mark.parametrize(

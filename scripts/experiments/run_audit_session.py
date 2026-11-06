@@ -2,7 +2,7 @@
 """Run an experiment's research session for a process audit.
 
 This is intentionally narrower than the interactive worker. It is for manual
-process audits where running the whole arm would hide the session being
+process audits where running the whole experiment would hide the session being
 inspected: the Prompt, Trace, Sandbox and artifact handoff of the research
 session alone, with a short budget.
 

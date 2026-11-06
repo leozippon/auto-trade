@@ -1,4 +1,4 @@
-"""Configuration for one research arm."""
+"""Configuration for one research experiment."""
 
 from __future__ import annotations
 
@@ -70,11 +70,11 @@ SNAPSHOT_CACHE_FORMAT_VERSION = 16
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.
 DEFAULT_DEADLINE_GRACE_MINUTES = 10
 # A research session's time, null-control and model-call budgets are
-# arm-level: one session per arm spends them across every attempt.
+# experiment-level: one session per experiment spends them across every attempt.
 DEFAULT_MAX_RESEARCH_MINUTES = 2400
 DEFAULT_MAX_NULL_CONTROLS = 12
 DEFAULT_MAX_LLM_CALLS = 6400
-# What one arm's research session may spend on hosted model APIs, in USD at the
+# What one experiment's research session may spend on hosted model APIs, in USD at the
 # catalog's list prices (``environment.llm.pricing``); the local model is free.
 DEFAULT_MAX_API_SPEND_USD = 50.0
 # ``validate``: one formal step that fans out a pre-registered candidate
@@ -89,13 +89,13 @@ BATCH_VALIDATE_MIN_CANDIDATES = 1
 # tests may make; this cap only bounds what one observation may carry, and six
 # screening candidates already make a wide round.
 BATCH_VALIDATE_MAX_CANDIDATES = 6
-# Concurrent replays per batch, the arm's ``batch_validate_max_concurrency``
+# Concurrent replays per batch, the experiment's ``batch_validate_max_concurrency``
 # (1 up to the candidate cap; more workers than candidates run nothing). Each
 # replay holds its own result/as-of directory and its own strategy container —
 # two when the candidate declares fit, whose read-write state bind needs a
 # second worker — and the Timeview stash serializes part publication across
 # evaluations, so the bound is host capacity (up to two containers per replay
-# at the strategy container's CPUs (SandboxSpec.cpus), and on a GPU arm every one of them on the arm's own
+# at the strategy container's CPUs (SandboxSpec.cpus), and on a GPU experiment every one of them on the experiment's own
 # cards), not correctness — which only holds because both strategy deadlines
 # scale with the batch's own width (``session_tools._batch_replay_timeouts``);
 # a fixed clock made the outcome depend on how many siblings happened to share
@@ -198,7 +198,7 @@ TEST_STEP_MONTHS = (1, 3)
 
 @dataclass(frozen=True)
 class AcceptanceRules:
-    """The arm's create-time rules: the research geometry's split, the test
+    """The experiment's create-time rules: the research geometry's split, the test
     steps, the registration every ``test`` checks its candidate against and
     the readings the forward stage reports.
 
@@ -208,7 +208,7 @@ class AcceptanceRules:
     reads the rolling record and the forward reading with the residual
     statistic (``pipelines/verdict.py``) at ``alpha`` and records them. Every
     field is stamped into ``params.json`` at creation so a later change to
-    the defaults cannot move an arm that already exists.
+    the defaults cannot move an experiment that already exists.
 
     This is the one declaration of the rules. The record (``to_record``), the
     parameters a worker accepts (``ACCEPTANCE_KEYS``), the console's creation
@@ -236,8 +236,8 @@ class AcceptanceRules:
     # cheapest to meet by dropping beta.
     tracking_error_cap: float | None = _rule(
         None,
-        "Tracking mandate: residual tracking error cap against the arm's benchmark index; "
-        "giving it turns the mandate on for this arm.",
+        "Tracking mandate: residual tracking error cap against the experiment's benchmark index; "
+        "giving it turns the mandate on for this experiment.",
     )
     beta_min: float | None = _rule(None, "Tracking mandate: lower end of the market beta band.")
     beta_max: float | None = _rule(None, "Tracking mandate: upper end of the market beta band.")
@@ -346,7 +346,7 @@ class AcceptanceRules:
     def agent_facts(self, *, validation_years: int) -> dict[str, object]:
         """The ``acceptance_rules`` run fact, derived from these rules so no
         prompt restates a threshold. ``validation_years`` is how many years
-        the arm's geometry leaves after the research years, for the bar over
+        the experiment's geometry leaves after the research years, for the bar over
         the whole validation period. Rules and that count only: the dates of
         the research and validation years are the research geometry's
         (``research_session.research_geometry_record``), and no forward or
@@ -357,7 +357,7 @@ class AcceptanceRules:
 
         if self.tracking_error_cap is None:
             mandate: object = (
-                "none for this arm: benchmark.tracking_error and "
+                "none for this experiment: benchmark.tracking_error and "
                 "benchmark.market_beta are reported, not graded"
             )
         else:
@@ -383,7 +383,7 @@ class AcceptanceRules:
                 f"composite, the equal-weight mean of {verdict.PANEL_DRAWS} random-name "
                 "copies of the node's own filled trades (same entry and exit instants, "
                 "same money per round trip, same Broker and costs; each name replaced by "
-                "one on the same side of the arm's benchmark_index membership that one "
+                "one on the same side of the experiment's benchmark_index membership that one "
                 "board lot of that money could buy). Its annualized mean is the active "
                 "excess, its annualized standard deviation the active tracking error "
                 "and their ratio the active information ratio. Every formal validation "
@@ -494,7 +494,7 @@ class AcceptanceRules:
 
 
 # Every rule's name, in declaration order: the keys of a rules record and of
-# the arm parameters that set one.
+# the experiment parameters that set one.
 ACCEPTANCE_KEYS: tuple[str, ...] = tuple(rule.name for rule in fields(AcceptanceRules))
 # The rules without a default, which every record and create request names.
 REQUIRED_ACCEPTANCE_KEYS: tuple[str, ...] = tuple(
@@ -511,7 +511,7 @@ def acceptance_default(name: str) -> object:
     return rule.default
 
 
-# The per-arm on/off switches retired on 2026-10-07, when what they switched on
+# The per-experiment on/off switches retired on 2026-10-07, when what they switched on
 # became the only rules (docs/PIPELINE_DESIGN.md §6). Every params.json written
 # before then carries them, and the run records of that time state the first
 # four in their acceptance rules and thresholds. Readers accept exactly these
@@ -531,7 +531,7 @@ RETIRED_SWITCHES = frozenset(
 # forward and Held-out bars, when the sealed gate became the verdict's one
 # condition. Every params.json written before then carries them; readers
 # accept exactly these keys beside ``RETIRED_SWITCHES`` and derive nothing
-# from them, so an earlier arm still lists in the console.
+# from them, so an earlier experiment still lists in the console.
 RETIRED_RULES = frozenset(
     {
         "min_active_ir",
@@ -551,7 +551,7 @@ RETIRED_RULES = frozenset(
 # the research session's replay-year budget and the hard-finalization window.
 # Every params.json and ledger record written before then carries some of
 # them; readers accept exactly these keys beside the two sets above and derive
-# nothing from them, so an archived arm still loads and lists, while a create
+# nothing from them, so an archived experiment still loads and lists, while a create
 # request naming one is refused like any unknown key.
 OBSOLETE_KEYS = frozenset(
     {
@@ -573,7 +573,7 @@ MANDATED_DEFAULTS: Mapping[str, float] = {
 
 
 def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
-    """An arm's acceptance rules from its own create-time parameters.
+    """An experiment's acceptance rules from its own create-time parameters.
 
     The tracking mandate is a manual setting and no capital anywhere turns it
     on: it exists exactly when ``params`` names a ``tracking_error_cap``. A cap
@@ -598,10 +598,10 @@ def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
 
 def defaulted_acceptance(params: Mapping[str, object]) -> dict[str, object]:
     """Every rule that has a default, as :func:`acceptance_for` resolves it
-    from an arm's parameters: the value they name, else the default, and a
+    from an experiment's parameters: the value they name, else the default, and a
     blank beta band beside a named cap filled from ``MANDATED_DEFAULTS``.
     Read without the required rules, so a reader that needs only these (the
-    console's threshold preview) reads an arm stamped before a rule became
+    console's threshold preview) reads an experiment stamped before a rule became
     required as it was stamped."""
 
     rules = {
@@ -619,17 +619,17 @@ def defaulted_acceptance(params: Mapping[str, object]) -> dict[str, object]:
 class RollingExperimentConfig:
     experiment_id: str
     experiments_root: Path
-    # Research, forward and Held-out dates of the arm (pipelines/calendar.py).
+    # Research, forward and Held-out dates of the experiment (pipelines/calendar.py).
     geometry: ResearchGeometry = DEFAULT_RESEARCH_GEOMETRY
     # The macro data floor is 2020-01, so 24 months before a July 2022
     # decision view is the most history every domain carries.
     window_months: int = 24
-    # The index this arm is measured against: the benchmark leg of the style
+    # The index this experiment is measured against: the benchmark leg of the style
     # attribution and of the factor loadings, and the membership the
     # zero-skill panel draws its replacements from. One of
     # ``contracts.BENCHMARK_INDEXES``.
     benchmark_index: str = DEFAULT_BENCHMARK_INDEX
-    # The research session's budgets, spent across every attempt of the arm's
+    # The research session's budgets, spent across every attempt of the experiment's
     # one session. The host's forward replay is charged to none of them.
     # Host-side random-portfolio null controls the session may request through
     # ``run_null_control`` (``null_control.PANEL_DRAWS`` replays each); the
@@ -656,7 +656,7 @@ class RollingExperimentConfig:
     # The rest of the strategy container's boundary: the wall clock of one
     # ``generate_orders(context)`` call, the CPU quota its thread variables are
     # derived from, and its memory ceiling (a Docker limit). The executor's
-    # defaults are the single source, so an arm whose params.json predates these
+    # defaults are the single source, so an experiment whose params.json predates these
     # knobs replays exactly as before; the session container takes the same CPUs
     # and memory (``worker._llm_settings``).
     strategy_inference_timeout_seconds: int = int(SandboxConfig().timeout_seconds)
@@ -677,9 +677,9 @@ class RollingExperimentConfig:
     record_failed_attempts: bool = True
     schedule: StrategySchedule = field(default_factory=StrategySchedule)
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
-    # The arm's effective rules (``acceptance_for``): a tracking mandate only
+    # The experiment's effective rules (``acceptance_for``): a tracking mandate only
     # when the create request named a ``tracking_error_cap``. No default: the
-    # rules carry required keys only an arm's own parameters can state.
+    # rules carry required keys only an experiment's own parameters can state.
     acceptance: AcceptanceRules = field(kw_only=True)
     step_constraints: ModificationConstraints = field(
         default_factory=ModificationConstraints
@@ -739,7 +739,7 @@ class RollingExperimentConfig:
 
 
 def positive_spend_cap(value: object) -> float:
-    """A spend cap is a positive finite number of USD; there is no uncapped arm."""
+    """A spend cap is a positive finite number of USD; there is no uncapped experiment."""
 
     if (
         isinstance(value, bool)
@@ -844,7 +844,7 @@ class EvaluationRequest:
     # years it does not have.
     year_windows: tuple[tuple[str, str], ...] = ()
     # The cards this replay's strategy containers attach: a leg of a
-    # concurrent batch gets one of the arm's (``session_tools.leg_cards``);
+    # concurrent batch gets one of the experiment's (``session_tools.leg_cards``);
     # None attaches every card the evaluator's sandbox pins.
     gpu_devices: tuple[int, ...] | None = None
 
@@ -867,7 +867,7 @@ class ReplaySpan:
     # The research years the span is made of, as ``(start, end)`` bounds in
     # order; empty for a span that is not over research years (the forward and
     # Held-out span). It rides on the evaluation request so the sub-window
-    # statistics use the years the arm really researches.
+    # statistics use the years the experiment really researches.
     year_windows: tuple[tuple[str, str], ...] = ()
 
     @property
@@ -1086,26 +1086,26 @@ class ResearchSessionRequest:
     window_months: int
     max_llm_calls: int
     deadline_seconds: float
-    # The arm's benchmark index (``RollingExperimentConfig.benchmark_index``),
+    # The experiment's benchmark index (``RollingExperimentConfig.benchmark_index``),
     # published to the session through the run manifest so the Agent grades
     # itself against the index the host grades it on. Required: a request that
-    # omitted it would tell the Agent the default index whatever the arm's is.
+    # omitted it would tell the Agent the default index whatever the experiment's is.
     benchmark_index: str
     # Trailing wrap-up grace reserved from deadline_seconds.
     deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
     directive: str = ""
     # Per-session HITL override of the experiment's default sandbox GPU count;
     # None keeps the experiment default. The session takes that many of the
-    # cards its arm holds.
+    # cards its experiment holds.
     sandbox_gpu_count: int | None = None
-    # The arm's ``AcceptanceRules.to_record()``; no default, as the rules
+    # The experiment's ``AcceptanceRules.to_record()``; no default, as the rules
     # carry required keys.
     acceptance_rules: Mapping[str, object] = field(kw_only=True)
     # The validation years as one span (``experiment.validation_span``): what
     # a test replays from its first day to the new frontier, and the host
     # completes a record over.
     validation: ReplaySpan = field(kw_only=True)
-    # The arm's ``test_step`` ledger records so far (``rolling_record``): the
+    # The experiment's ``test_step`` ledger records so far (``rolling_record``): the
     # record the attempt continues and the frontier it reached.
     tests_before: tuple[Mapping[str, object], ...] = ()
     modification_constraints: ModificationConstraints = field(
@@ -1121,7 +1121,7 @@ class ResearchSessionRequest:
     batch_validate_max_concurrency: int = (
         RollingExperimentConfig.batch_validate_max_concurrency
     )
-    # The arm's API spend cap (RollingExperimentConfig.max_api_spend_usd), after
+    # The experiment's API spend cap (RollingExperimentConfig.max_api_spend_usd), after
     # any HITL resource override.
     max_api_spend_usd: float = RollingExperimentConfig.max_api_spend_usd
     progress_hook: Callable[[str, dict[str, object] | None], None] | None = field(
@@ -1143,16 +1143,16 @@ class ResearchSessionRequest:
     resume: SessionResume | None = None
 
     @classmethod
-    def for_arm(
+    def for_experiment(
         cls,
         config: RollingExperimentConfig,
         *,
         budgets: Mapping[str, float],
         **session: Any,
     ) -> ResearchSessionRequest:
-        """The request for one session of ``config``'s arm.
+        """The request for one session of ``config``'s experiment.
 
-        The arm-level fields come from the config, the four budgets
+        The experiment-level fields come from the config, the four budgets
         (``max_llm_calls``, ``max_api_spend_usd``, ``deadline_seconds``,
         ``deadline_grace_seconds``) as given after any HITL override, and
         every other field is the session's own.

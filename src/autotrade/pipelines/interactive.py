@@ -41,7 +41,7 @@ from autotrade.environment.trace import (
 )
 
 from .hitl_state import (
-    ArmState,
+    ExperimentState,
     PlannedSession,
     StatusReporter,
     consume_restart_request,
@@ -133,7 +133,7 @@ class InteractiveExperimentRunner:
                 control = read_control(self.control_path)
                 if control.request in ("pause", "stop"):
                     self.status.set(
-                        state=ArmState.PAUSED if control.request == "pause" else ArmState.STOPPED
+                        state=ExperimentState.PAUSED if control.request == "pause" else ExperimentState.STOPPED
                     )
                     return {"status": control.request, "sessions_run": ran}
                 if control.restart_pending and consume_restart_request(
@@ -147,7 +147,7 @@ class InteractiveExperimentRunner:
             # run failed for it; only real errors take the failed state below.
             raise
         except Exception as exc:
-            self.status.set(state=ArmState.FAILED, error=f"{type(exc).__name__}: {exc}")
+            self.status.set(state=ExperimentState.FAILED, error=f"{type(exc).__name__}: {exc}")
             raise
         finally:
             self.status.stop()
@@ -200,7 +200,7 @@ class InteractiveExperimentRunner:
         is coming up, and the pid survives the entrypoint's ``execv``, so the
         experiment keeps showing exactly one live worker across the swap."""
 
-        self.status.set(state=ArmState.LAUNCHING)
+        self.status.set(state=ExperimentState.LAUNCHING)
         return {"status": "restart", "sessions_run": ran}
 
     def _gate(self) -> bool:
@@ -218,7 +218,7 @@ class InteractiveExperimentRunner:
         self._session_started_monotonic = time.monotonic()
         self._session_started_at = datetime.now(UTC).isoformat()
         self.status.set(
-            state=ArmState.RUNNING_SESSION,
+            state=ExperimentState.RUNNING_SESSION,
             session_key=session.session_key,
             session_kind=session.kind,
             session_started_at=self._session_started_at,

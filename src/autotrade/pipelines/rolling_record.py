@@ -1,10 +1,10 @@
 """The rolling record: the validation frontier, its test steps and their instrument.
 
-An arm's validation years (the research geometry's years after the first
+An experiment's validation years (the research geometry's years after the first
 ``research_years``) are tiled into steps of ``test_step_months`` (``ValidationSteps``).
 Each ``test`` the session makes replays its candidate as one fresh book from
 the validation start to the end of the next step, and the candidate's result
-over that newest step is the step's entry in the arm's rolling record: one
+over that newest step is the step's entry in the experiment's rolling record: one
 ``test_step`` ledger record per step (:func:`test_step_record`), appended as
 the test completes and never rewritten, so a resumed attempt continues from
 the frontier the ledger states (:func:`frontier_after`). A step the host
@@ -241,7 +241,7 @@ def test_step_record(
     }
 
 
-# The state a frozen strategy's readout gives its arm: a frozen strategy
+# The state a frozen strategy's readout gives its experiment: a frozen strategy
 # with its rolling record and its forward reading (``ledger.VerdictStatus``).
 FROZEN_WITH_RECORD = "frozen_with_record"
 
@@ -253,7 +253,7 @@ def readout(
     forward: Mapping[str, object] | None = None,
     strategy_error: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
-    """The arm's readout, what its forward record states where a verdict once
+    """The experiment's readout, what its forward record states where a verdict once
     stood: nothing here passes or fails.
 
     ``record`` is the rolling record read as one series
@@ -291,7 +291,7 @@ def readout(
 
 
 def test_step_records(records: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """The arm's ``test_step`` records in step order; a ledger whose steps are
+    """The experiment's ``test_step`` records in step order; a ledger whose steps are
     not exactly 1..k raises, since every reader counts on a contiguous record."""
 
     rows = sorted(

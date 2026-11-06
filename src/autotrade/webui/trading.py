@@ -612,9 +612,9 @@ def _day_before(yyyymmdd: str) -> str:
 def _book_benchmark_index(root: Path) -> str:
     """The index this book is measured against, from its own record.
 
-    Frozen at creation from the source arm's ``benchmark_index``; a book
+    Frozen at creation from the source experiment's ``benchmark_index``; a book
     created before the parameter existed carries none and reads as the
-    default, which is the index those arms ran on.
+    default, which is the index those experiments ran on.
     """
     record, _error = _read_json(root / BOOK_NAME)
     code = _mapping(record).get("benchmark_index")

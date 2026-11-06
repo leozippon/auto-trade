@@ -768,11 +768,11 @@ def panel_seed(start: str, end: str) -> int:
     The draws a panel makes are a function of this seed and of what was
     replayed: the book's own trade skeleton (entry, exit and money per round
     trip), the matching pool (the benchmark's membership, what a trip's money
-    can buy) and the slot's bars. Nothing naming the arm, the revision or the
+    can buy) and the slot's bars. Nothing naming the experiment, the revision or the
     session enters, so identical trades on one span meet the identical panel
-    in every arm -- paired arms and lineage follow-ups read the same number --
+    in every experiment -- paired experiments and lineage follow-ups read the same number --
     and neither a resubmission nor a byte change that leaves the trades alone
-    can re-roll it; an arm's candidates and controls on a span share draws.
+    can re-roll it; an experiment's candidates and controls on a span share draws.
     This makes a book's panel noise reproducible, not smaller.
     """
 
@@ -854,7 +854,7 @@ class PITDailyEvaluationBackend:
             raise ValueError("execution_mode must be sandbox or trusted")
         self.results_root = Path(results_root).resolve()
         self.execution_mode = execution_mode
-        # The arm's benchmark, for every replay this backend runs: the series
+        # The experiment's benchmark, for every replay this backend runs: the series
         # the attribution and the verdict regress on, and the membership the
         # zero-skill panel draws replacements from. Refused here if the lake
         # does not carry it, so a wrong code cannot reach a replay.
@@ -1173,7 +1173,7 @@ class PITDailyEvaluationBackend:
         (``pit_views_seed.plan_seed`` plans one per research-years choice,
         ``prebuild_asof_stash`` writes it). A seed without it would encode the
         slot's parts inside the session instead; the missing state is named
-        (``RuntimeError``) so the seed can be rebuilt for this arm's
+        (``RuntimeError``) so the seed can be rebuilt for this experiment's
         ``research_years``.
         """
 
@@ -1184,7 +1184,7 @@ class PITDailyEvaluationBackend:
             raise RuntimeError(
                 f"the PIT view seed carries no prebuilt as-of state for decision view "
                 f"{snapshot_dir.name} and replay slot {replay_dir.name} (schedule "
-                f"{request.schedule.to_record()}); rebuild the seed with this arm's "
+                f"{request.schedule.to_record()}); rebuild the seed with this experiment's "
                 "research_years among its warm starts (scripts/data/prebuild_pit_views_seed.py)"
             )
 

@@ -119,7 +119,7 @@ def run_books(
 
 
 def open_frozen_book(repo_root: str | Path, experiment_dir: str | Path) -> str:
-    """Create the Paper book of an arm's frozen strategy when none exists yet;
+    """Create the Paper book of an experiment's frozen strategy when none exists yet;
     the book id.
 
     The book is named after the experiment and trades its Paper candidate (a

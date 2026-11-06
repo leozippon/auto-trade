@@ -47,7 +47,7 @@ def test_ordinary_words_that_merely_contain_a_key_prefix_are_left_alone(
 
 @pytest.mark.parametrize("prefix", HOST_PATH_PREFIXES)
 def test_an_absolute_path_under_each_known_host_root_is_redacted(prefix: str) -> None:
-    text = f"FileNotFoundError: {prefix}/lzp/ADMCubeQuant/experiments/arm/result.json"
+    text = f"FileNotFoundError: {prefix}/lzp/ADMCubeQuant/experiments/experiment/result.json"
     assert redact_host_paths(text) == "FileNotFoundError: [host_path]"
 
 

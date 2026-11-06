@@ -2,7 +2,7 @@
 
 A whole-window number alone cannot say whether an edge persisted or one
 stretch of market carried it, so every replay result carries the same metrics
-per research year of its window, the years the arm's own geometry lays out
+per research year of its window, the years the experiment's own geometry lays out
 (``pipelines/calendar.py ResearchGeometry.research_years``). These tests pin the
 properties that make the rows readable next to the whole-window figures — they
 use the years the replay was requested over, they chain back to
@@ -257,7 +257,7 @@ class SubWindowBenchmarkTest(unittest.TestCase):
         )
 
 
-# A ten-year arm laid out from 1 August, the geometry that made the hardcoded
+# A ten-year experiment laid out from 1 August, the geometry that made the hardcoded
 # July boundary wrong: 20150801..20250731 is exactly ten whole years, and its
 # last one ends on 31 July instead of leaving a 23-day July tail.
 AUGUST_GEOMETRY = ResearchGeometry(
@@ -334,7 +334,7 @@ def _round_trips(
 
 
 class SubWindowResearchYearTest(unittest.TestCase):
-    """The rows are the arm's own research years, not July-June calendar blocks."""
+    """The rows are the experiment's own research years, not July-June calendar blocks."""
 
     def setUp(self) -> None:
         self.windows = _year_windows(AUGUST_GEOMETRY)

@@ -2,7 +2,7 @@
 
 One transport, stream assembler, retry policy, redaction rule and audit log for
 every provider that speaks the Chat Completions dialect: the authenticated local
-vLLM endpoint every live arm runs on, the public services in ``deepseek.py`` and
+vLLM endpoint every live experiment runs on, the public services in ``deepseek.py`` and
 Xiaomi's hosted MiMo API. Where a provider's request contract differs, its
 ``request_dialect`` decides the fields in :meth:`OpenAICompatibleProxy.complete`.
 """

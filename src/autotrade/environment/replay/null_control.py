@@ -376,10 +376,10 @@ class _Membership:
         position = bisect_left(self._dates, date)
         if position == 0:
             # Drawing on the float-cap decile instead would grade this span
-            # against another panel than the arm's other spans, so nothing is
+            # against another panel than the experiment's other spans, so nothing is
             # drawn: the pools are built before the first draw.
             raise NullControlSetupError(
-                f"no benchmark membership is dated before {date}: the arm mounts index_weight, "
+                f"no benchmark membership is dated before {date}: the experiment mounts index_weight, "
                 + (
                     f"but its first section of the benchmark is {self._dates[0]}"
                     if self._dates

@@ -6,10 +6,10 @@ the session cannot compute before it freezes, how does it research, spend and
 generalize, and what sealed residual reading does it reach?
 `open_200k_10y_astra_local_20261103a` and `…b`, identical but for their ids,
 mount `open_200k_sealed_20261103`, which asks for a strategy that generalizes
-to the sealed years and frames no mechanism. The round's two memory arms,
+to the sealed years and frames no mechanism. The round's two memory experiments,
 which mounted the memory hypothesis pack, left this file with the memory
 machinery on 2026-11-05; their ids are retired (`_round.RETIRED_IDS`). Every
-arm was created stating `ablation_required` (false), a rule retired with the
+experiment was created stating `ablation_required` (false), a rule retired with the
 freeze's ablation on 2026-11-05; the stamped value stays in their
 `params.json`, where readers accept and ignore it.
 
@@ -46,9 +46,9 @@ Create through the existing console round entry, not a separate launcher:
     ~/miniconda3/envs/quant/bin/python scripts/experiments/create_round_20261103.py <port> [--dry-run] [--fill]
 
 `--dry-run` contacts no console and creates nothing. It runs the console's
-create-time pre-flight on the shared parameters and then on every arm, reading
-the seed contract and the release every arm pins, prints the shared request,
-each arm's own parameters, its acceptance rules and its directive, and, unless
+create-time pre-flight on the shared parameters and then on every experiment, reading
+the seed contract and the release every experiment pins, prints the shared request,
+each experiment's own parameters, its acceptance rules and its directive, and, unless
 a smoke record already covers this template, replays the contract template
 from every research-year start, the sealed years included, and over the full
 span. The template reads nothing and places no orders, so that smoke shows only
@@ -90,7 +90,7 @@ OPEN_DIRECTIVE = (
 )
 
 
-def _arm(pack: str, directive: str) -> dict[str, object]:
+def _experiment(pack: str, directive: str) -> dict[str, object]:
     return {
         "model": ASTRA,
         "subagent_model": FLASH,
@@ -102,13 +102,13 @@ def _arm(pack: str, directive: str) -> dict[str, object]:
     }
 
 
-ARMS: dict[str, dict[str, object]] = {
-    "open_200k_10y_astra_local_20261103a": _arm(OPEN_PACK, OPEN_DIRECTIVE),
-    "open_200k_10y_astra_local_20261103b": _arm(OPEN_PACK, OPEN_DIRECTIVE),
+EXPERIMENTS: dict[str, dict[str, object]] = {
+    "open_200k_10y_astra_local_20261103a": _experiment(OPEN_PACK, OPEN_DIRECTIVE),
+    "open_200k_10y_astra_local_20261103b": _experiment(OPEN_PACK, OPEN_DIRECTIVE),
 }
 
 ROUND = Round(
-    arms=ARMS,
+    experiments=EXPERIMENTS,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_TEN_YEAR_CSI1000,

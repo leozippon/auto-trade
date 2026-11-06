@@ -1,6 +1,6 @@
 """Seed replicates: a strategy that trains a model is frozen with its seeds.
 
-The arm's own pipeline runs end to end -- the real artifact store, ledger,
+The experiment's own pipeline runs end to end -- the real artifact store, ledger,
 freeze registration, sealed reading and verdict -- over scripted Validations
 whose daily active return is set per training seed (``SEED_BASE`` in the
 candidate's ``main.py``) and per stage, so the readings each seed gets are
@@ -40,7 +40,7 @@ from autotrade.pipelines.ledger import (
     forward_record,
     paper_candidate,
 )
-from scripts.dev.check_verdicts import check_arm
+from scripts.dev.check_verdicts import check_experiment
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 from tests.unit.test_rolling_pipeline import (
     CONFIG_PROFILE,
@@ -198,7 +198,7 @@ class SeedDeveloper:
         )
 
 
-def _arm(
+def _experiment(
     tmp_path: Path,
     candidates,
     *,
@@ -209,7 +209,7 @@ def _arm(
     **replays,
 ):
     config = RollingExperimentConfig(
-        experiment_id="arm",
+        experiment_id="experiment",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
         acceptance=acceptance_for(REQUIRED_RULES),
@@ -242,7 +242,7 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
     readings beside the nominee's, and a seed mean whose bound is below zero
     decides nothing: the readout reads, it does not judge."""
 
-    pipeline, evaluator = _arm(
+    pipeline, evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(2000), "full"), (_source(3000), "full")],
         replicates=(1, 2),
@@ -302,7 +302,7 @@ def test_a_model_nominee_freezes_with_its_seed_replicate_and_both_replay_forward
 
 
 def test_seeds_that_agree_forward_are_read_together(tmp_path: Path):
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path, [(_source(1000), "full"), (_source(2000), "full")], replicates=(1,)
     )
     pipeline.run_research_session()
@@ -316,14 +316,14 @@ def _refused(
     tmp_path: Path, candidates, *, nominee: int = 0, replicates=(), deterministic: bool = False
 ) -> dict[str, object]:
     """The registration ``test`` reads for ``nominee`` with ``replicates``,
-    off the arm's recorded Validations. The session ends on its budget
+    off the experiment's recorded Validations. The session ends on its budget
     before any test, and a nominee that trains a model owes a replicate no
-    host can name, so the arm itself freezes nothing."""
+    host can name, so the experiment itself freezes nothing."""
 
-    pipeline, _evaluator = _arm(tmp_path, candidates, outcome="deadline")
+    pipeline, _evaluator = _experiment(tmp_path, candidates, outcome="deadline")
     record = pipeline.run_research_session()
     assert record["frozen"] is None
-    assert record["arm_end"]["status"] == "no_deliverable"
+    assert record["experiment_end"]["status"] == "no_deliverable"
     rows = record["steps"]
     return freeze_registration(
         rows[nominee],
@@ -367,7 +367,7 @@ def test_a_replicate_that_loses_does_not_hold_back_the_registration(tmp_path: Pa
     """Registration reads no score: a valid replicate whose seed loses what
     the nominee's wins registers beside it."""
 
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path, [(_source(1000), "full"), (_source(4000), "full")], replicates=(1,)
     )
     record = pipeline.run_research_session()
@@ -383,7 +383,7 @@ def test_a_deterministic_model_nominee_owes_no_replicate(tmp_path: Path, replica
     freezes without a replicate. The gate and the frozen block record the
     declaration for the operator's review."""
 
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(4000), "full")],
         replicates=replicates,
@@ -413,7 +413,7 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
     its gate reads that it had nothing to replicate, and forward its own
     series is read, with its bound."""
 
-    pipeline, evaluator = _arm(
+    pipeline, evaluator = _experiment(
         tmp_path, [(_source(1000, fit=False), "full"), (_source(2000, fit=False), "full")]
     )
     record = pipeline.run_research_session()
@@ -439,7 +439,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
 
     start = "20240701"
 
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(2000), "full")],
         replicates=(1,),
@@ -455,11 +455,11 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
     assert forward["readout"]["forward"]["lower_bound"] == forward["slices"]["forward"]["lower_bound"]
     assert paper_candidate(pipeline.ledger.read())["artifact_id"] == forward["artifact_id"]
     # The consistency check reads the same readings off the stored replays.
-    arm = pipeline.config.experiment_dir
-    (arm / "hitl" / "params.json").write_text(
+    experiment = pipeline.config.experiment_dir
+    (experiment / "hitl" / "params.json").write_text(
         json.dumps({**REQUIRED_RULES, "_created_at": utc_now_iso()}), encoding="utf-8"
     )
-    assert [item.differences for item in check_arm(arm)] == [[], [], []]
+    assert [item.differences for item in check_experiment(experiment)] == [[], [], []]
 
 
 @pytest.mark.parametrize(
@@ -477,7 +477,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
 def test_a_replicate_missing_from_the_mean_fails_the_stage_and_leaves_no_verdict(
     tmp_path: Path, replays, error, message
 ):
-    pipeline, _evaluator = _arm(
+    pipeline, _evaluator = _experiment(
         tmp_path,
         [(_source(1000), "full"), (_source(2000), "full")],
         replicates=(1,),

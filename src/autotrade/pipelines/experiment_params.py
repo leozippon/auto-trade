@@ -1,7 +1,7 @@
-"""An arm's parameters (``hitl/params.json``) as one typed record.
+"""An experiment's parameters (``hitl/params.json``) as one typed record.
 
 The file is flat: a console create, a round file and the command line all
-write one JSON object of parameters. :class:`ArmParams` groups those
+write one JSON object of parameters. :class:`ExperimentParams` groups those
 parameters by what they configure, one sub-record each, and each field is
 one parameter: its type, its default and who may set it (:class:`Surface`).
 The console's creation defaults, the values it stamps, the keys it refuses
@@ -14,7 +14,7 @@ parameter that is not text). A key no field declares is refused. Keys
 beginning with ``_`` are the file's own stamps (who created it and when),
 not parameters. A missing key takes its field's default. That is the
 parameter's one default: the console stamps it at creation, and the worker
-reads it for a file that leaves the key out (:func:`read_param`), so an arm
+reads it for a file that leaves the key out (:func:`read_param`), so an experiment
 created before a parameter existed still loads and runs on it. A parameter
 the worker derives from another one when unset says so beside its field (a
 worker-side ``llm_model`` stands in for an unset main model,
@@ -77,7 +77,7 @@ class Surface(StrEnum):
     # Only a worker-side params.json or the command line sets it; the console
     # refuses it.
     HOST = "host"
-    # No longer read: an arm created before its retirement still loads, and
+    # No longer read: an experiment created before its retirement still loads, and
     # a create request naming it is refused like any unknown key.
     RETIRED = "retired"
 
@@ -136,7 +136,7 @@ class GeometryParams:
 
 @dataclass(frozen=True, kw_only=True)
 class PackParams:
-    """What the arm's sessions are handed: the directive, the reference pack
+    """What the experiment's sessions are handed: the directive, the reference pack
     and whether the curated operating memory mounts."""
 
     research_directive: str = _param(rolling_default("research_directive"))
@@ -210,7 +210,7 @@ class BudgetParams:
 
 @dataclass(frozen=True, kw_only=True)
 class SandboxParams:
-    """The strategy container's boundary, the arm's GPU request and the
+    """The strategy container's boundary, the experiment's GPU request and the
     session container's limits (``sandbox.SandboxSpec``)."""
 
     strategy_fit_timeout_seconds: int = _param(rolling_default("strategy_fit_timeout_seconds"))
@@ -240,7 +240,7 @@ class BrokerParams:
     slippage_bps: float = _param(BrokerProfile().slippage_bps)
     # The boards the account may buy on. Left null, creation stamps the ones
     # its initial cash qualifies for (``broker.default_permitted_boards``), so
-    # the stamped params.json always names them; an arm without the key is
+    # the stamped params.json always names them; an experiment without the key is
     # unrestricted.
     permitted_boards: tuple[str, ...] | None = _param()
 
@@ -255,7 +255,7 @@ class AgentParams:
     model: str = _param(GPT_ASTRA_MODEL)
     subagent_model: str = _param(DEEPSEEK_FLASH_MODEL)
     compact_model: str = _param(DEEPSEEK_FLASH_MODEL)
-    # Which relay credential the arm's calls start on (``primary`` or
+    # Which relay credential the experiment's calls start on (``primary`` or
     # ``alternate``); the other is the fallback.
     llm_key: str = _param("primary")
     reasoning_effort: str = _param("xhigh")
@@ -290,12 +290,12 @@ def _managed(stamp: str, *, default: object = MISSING) -> Any:
 
 @dataclass(frozen=True, kw_only=True)
 class EnvironmentParams:
-    """Where the arm's code, data and work live and how it runs. The console
+    """Where the experiment's code, data and work live and how it runs. The console
     stamps the only supported research environment; the rest belongs to a
     worker-side params.json or the command line."""
 
     strategy_path: str | None = _managed("configs/agent_output_template/main.py", default=None)
-    # Left out: pit for an LLM arm on a host with the raw lake, else daily.
+    # Left out: pit for an LLM experiment on a host with the raw lake, else daily.
     data_backend: str | None = _managed("pit", default=None)
     raw_dir: str | None = _managed("data/raw")
     fundamental_events_root: str | None = _managed("data/pit/fundamental_events")
@@ -318,7 +318,7 @@ class EnvironmentParams:
 # without a default. The residual statistic's level is one for the whole
 # program, so that every reading is stated against the same bar
 # (``_round.BASE_EXPECTED_DEFAULTS`` pins it). How many of the geometry's years
-# a session researches on is the arm's experimental choice, so the console has
+# a session researches on is the experiment's experimental choice, so the console has
 # no value for it: every create request states it.
 _REQUIRED_ACCEPTANCE_DEFAULTS: dict[str, object] = {
     "alpha": 0.05,
@@ -385,8 +385,8 @@ RetiredParams.__doc__ = (
 
 
 @dataclass(frozen=True, kw_only=True)
-class ArmParams:
-    """One arm's parameters, grouped; ``from_record`` reads the flat
+class ExperimentParams:
+    """One experiment's parameters, grouped; ``from_record`` reads the flat
     params.json form. Nothing writes a file from the record: the console
     and the command line write the request they validated through it."""
 
@@ -404,7 +404,7 @@ class ArmParams:
     retired: RetiredParams = field(default_factory=RetiredParams)  # type: ignore[valid-type]
 
     @classmethod
-    def from_record(cls, record: Mapping[str, object]) -> ArmParams:
+    def from_record(cls, record: Mapping[str, object]) -> ExperimentParams:
         """The parameters a params.json (or a merged create request) states.
 
         Refuses a key no parameter declares and a value whose JSON type is
@@ -450,8 +450,8 @@ class _Group:
 
 
 def _groups() -> Iterator[_Group]:
-    hints = get_type_hints(ArmParams)
-    for item in fields(ArmParams):
+    hints = get_type_hints(ExperimentParams)
+    for item in fields(ExperimentParams):
         kind = hints[item.name]
         if isinstance(kind, type) and is_dataclass(kind):
             yield _Group(item.name, kind)
@@ -472,9 +472,9 @@ def _spec(group: str | None, item: Field[object], kind: object) -> ParameterSpec
 @cache
 def _parameters() -> dict[str, ParameterSpec]:
     specs: dict[str, ParameterSpec] = {}
-    hints = get_type_hints(ArmParams)
+    hints = get_type_hints(ExperimentParams)
     groups = {group.name for group in _groups()}
-    for item in fields(ArmParams):
+    for item in fields(ExperimentParams):
         if item.name in groups:
             continue
         specs[item.name] = _spec(None, item, hints[item.name])
@@ -558,7 +558,7 @@ def read_param_or_default(params: Mapping[str, object], name: str) -> object:
 
 
 def session_models(params: Mapping[str, object]) -> tuple[str, str, str]:
-    """The models an arm's main, sub-agent and compaction roles run on.
+    """The models an experiment's main, sub-agent and compaction roles run on.
 
     A role the file leaves out or empty takes its own default, except that
     a worker-side ``llm_model`` stands in for the main role.
@@ -618,7 +618,7 @@ def console_request(
             "work_root": work_root,
         }
     )
-    ArmParams.from_record(merged)
+    ExperimentParams.from_record(merged)
     return merged
 
 
@@ -628,11 +628,11 @@ __all__ = [
     "RETIRED_NL_PARAMS",
     "AcceptanceParams",
     "AgentParams",
-    "ArmParams",
     "BrokerParams",
     "BudgetParams",
     "DataParams",
     "EnvironmentParams",
+    "ExperimentParams",
     "GeometryParams",
     "PackParams",
     "ParameterSpec",

@@ -363,7 +363,7 @@ def test_control_panel_shows_skills_only_once_published_and_no_stage_prose() -> 
     head = source.split("\nfunction ", 1)[0]
     assert "skills ? el(" in head and "`📚 Skills ${skills}`" in head
     assert "generation_id" not in head
-    # The stepper says where the arm is; the panel carries the badge, the
+    # The stepper says where the experiment is; the panel carries the badge, the
     # activity and the budget bars, never a session count.
     assert "研究会话" not in script
     # One activity renderer, drawn here and nowhere else on the page.

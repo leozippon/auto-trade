@@ -91,7 +91,7 @@ def _raw_generation_status(repo_root: Path) -> dict[str, object]:
 
 
 # Raw-lake states that leave health ok. ``updating`` is a write in progress,
-# not a fault: no console path reads the live lake -- an arm pins an
+# not a fault: no console path reads the live lake -- an experiment pins an
 # already-published release (its seed's, or the last complete one while the
 # updater holds the lake) and Paper reads the newest committed one -- so it is
 # reported in ``raw_generation`` without degrading. ``unreadable`` and any
@@ -281,7 +281,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             "status": "ok" if healthy else "degraded",
             **manager.running_slots(),
             # The GPU side of a start, which the research fill reads beside
-            # the two running-arm limits.
+            # the two running-experiment limits.
             **manager.gpu_slots(),
             "unreadable_experiments": unreadable,
             "raw_generation": raw_generation,

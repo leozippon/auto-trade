@@ -5,7 +5,7 @@ directory plus optional ``models/`` directory into
 ``/mnt/artifacts/steps/<node_id>/{output,models}/`` (validation attachments
 such as ``detailed_return.json`` sit at the node root) and appends a node
 (with a parent pointer) to ``steps/tree.json``. The tree accumulates across
-every attempt of the arm's research session: the Environment publishes it to
+every attempt of the experiment's research session: the Environment publishes it to
 the experiment after each recorded Validation and a resumed attempt continues
 it, so the Agent can read where it stands in the search history and branch
 from any validated node via the ``step_rollback`` tool.

@@ -8,7 +8,7 @@ Agent actually saw):
 - strategy daily returns: the window's own ``equity_curve``;
 - holdings: the replay result's end-of-day position snapshots;
 - cross-sectional style ranks: the replay slot's ``daily.parquet``;
-- benchmark: the arm's ``benchmark_index`` rows of ``index_daily`` inside
+- benchmark: the experiment's ``benchmark_index`` rows of ``index_daily`` inside
   the replay slot's ``macro.parquet``;
 - SW L1 industry: each replay slot's as-of ``universe.parquet``, the vintage
   the strategy's view publishes while that slot runs, so a span classifies each
@@ -55,9 +55,9 @@ from .stats import (
     total_return_from_curve,
 )
 
-# The benchmark an arm takes when its create request names none, and the one a
+# The benchmark an experiment takes when its create request names none, and the one a
 # legacy sidecar or book that records none is read under. Every call below takes
-# the arm's ``benchmark_index`` explicitly, so none can grade against this one
+# the experiment's ``benchmark_index`` explicitly, so none can grade against this one
 # by omission.
 BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
@@ -99,7 +99,7 @@ def regression_method(benchmark_index: str) -> str:
     """The caliber sentence every factor loading and residual tracking error
     is computed under.
 
-    Names the arm's own benchmark: the market leg is index-specific, the size
+    Names the experiment's own benchmark: the market leg is index-specific, the size
     leg is built from the replay's own cross-section whatever the benchmark is.
     """
 
@@ -133,7 +133,7 @@ def slot_benchmark(
 ) -> dict[str, float]:
     """Benchmark daily returns of one replay slot, or of every slot of a span.
 
-    ``benchmark_index`` is the arm's own benchmark. Consecutive slots partition
+    ``benchmark_index`` is the experiment's own benchmark. Consecutive slots partition
     their rows, so a span's series is the union.
     """
     if replay_dir is None:
@@ -185,8 +185,8 @@ def slot_membership(
     ``index_weight`` rides in ``macro.parquet``: a replay slot carries the
     month-end cross-sections dated inside it and the decision view the history
     before its anchor, so a span's table is the union over both. None when no
-    slot mounts the dataset -- it is a per-arm selection, and a mounted one
-    writes its columns even where its window holds no row -- so an arm that
+    slot mounts the dataset -- it is a per-experiment selection, and a mounted one
+    writes its columns even where its window holds no row -- so an experiment that
     mounts it but whose release has no section of this index in the span gets
     an empty mapping, never the unmounted answer.
     """
@@ -600,7 +600,7 @@ def replay_style_analysis(
     ``universes`` pairs each slot's first day with the as-of universe file the
     strategy's view published while that slot ran; a day's holdings are
     classified under the industry membership of the vintage in force that day.
-    ``benchmark_index`` is the arm's benchmark: the sidecar records it beside
+    ``benchmark_index`` is the experiment's benchmark: the sidecar records it beside
     the series it was measured on, so a stored result can never be read without
     knowing what it was graded against.
     ``panel`` is the replay's zero-skill panel block

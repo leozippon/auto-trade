@@ -5,7 +5,7 @@ ledger, the hitl/ control-plane files and the result artifacts the ledger
 names. Unparseable experiments still appear in listings so they can be
 deleted; they carry an error note instead of metrics.
 
-An arm researches in sessions, freezes at most once and is then replayed once
+An experiment researches in sessions, freezes at most once and is then replayed once
 over forward and Held-out (docs/PIPELINE_DESIGN.md). The replay stays sealed by
 construction: the console serves a result only when a ledger record names it,
 and the forward record that names the replay is written together with its
@@ -45,7 +45,6 @@ from autotrade.environment.tools.report_issue import (
 )
 from autotrade.pipelines import rolling_record
 from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
-from autotrade.pipelines.arm_params import PARAMETERS
 from autotrade.pipelines.calendar import (
     GEOMETRY_PARAMETERS,
     ResearchGeometry,
@@ -56,6 +55,7 @@ from autotrade.pipelines.config import (
     rolling_default,
 )
 from autotrade.pipelines.experiment import validation_statistics
+from autotrade.pipelines.experiment_params import PARAMETERS
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
     CONTROL_NAME,
@@ -63,8 +63,8 @@ from autotrade.pipelines.hitl_state import (
     PARAMS_NAME,
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
-    ArmState,
-    arm_is_archived,
+    ExperimentState,
+    experiment_is_archived,
     read_control,
     read_gpu_claim,
     read_status,
@@ -98,10 +98,10 @@ from .public_identity import PublicIdentity
 from .traces import resolve_trace_path, trace_stats
 
 ACTIVE_STATES = (
-    ArmState.LAUNCHING,
-    ArmState.INITIALIZING,
-    ArmState.RUNNING_SESSION,
-    ArmState.PAUSED,
+    ExperimentState.LAUNCHING,
+    ExperimentState.INITIALIZING,
+    ExperimentState.RUNNING_SESSION,
+    ExperimentState.PAUSED,
 )
 # Manager-written stub state between spawn and the worker's first status write
 # (interpreter start + imports take seconds). Stale = the worker never came up.
@@ -120,16 +120,16 @@ _PRIVATE_PARAMS = {
 }
 # Replay result modes a style sidecar may carry: research and forward replays.
 _RESULT_MODES = frozenset({RESEARCH_PHASE, FORWARD_PHASE})
-# Arm stages, in order: researching, frozen with the forward replay pending or
+# Experiment stages, in order: researching, frozen with the forward replay pending or
 # running (sealed), verdict recorded.
 STAGES = ("research", "forward", "verdict")
-# How an arm ended, in the order the homepage lists them. The console says an
+# How an experiment ended, in the order the homepage lists them. The console says an
 # ending in this one vocabulary wherever it says it at all, so the ledger's own
 # words (``graduated``/``discarded``/``voided``/``no_deliverable``, the session
 # outcomes) never have to be read twice into the same three blurred endings. A
 # graduation an operator withdrew afterwards (``ledger.verdict_void``) is a
 # failure and ends as ``rejected``; its reason says the graduation was withdrawn.
-# An arm whose session the host ended on the environment (``environment_blocked``)
+# An experiment whose session the host ended on the environment (``environment_blocked``)
 # is no research outcome and keeps that word of its own.
 ENDING_STATES = (
     "frozen_with_record",
@@ -287,7 +287,7 @@ def experiment_state(
     except (OSError, ValueError) as exc:
         return {
             "kind": "hitl",
-            "state": ArmState.UNREADABLE,
+            "state": ExperimentState.UNREADABLE,
             "worker_alive": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
@@ -295,18 +295,18 @@ def experiment_state(
     if not status:
         result: dict[str, object] = {
             "kind": "hitl",
-            "state": ArmState.CREATED,
+            "state": ExperimentState.CREATED,
             "worker_alive": False,
             "status": {},
         }
     else:
         alive = status_pid_alive(status)
         state = str(status.get("state") or "unknown")
-        if state == ArmState.LAUNCHING and not alive:
+        if state == ExperimentState.LAUNCHING and not alive:
             if _age_seconds(status.get("launched_at")) > LAUNCH_GRACE_SECONDS:
-                state = ArmState.INTERRUPTED
+                state = ExperimentState.INTERRUPTED
         elif state in ACTIVE_STATES and not alive:
-            state = ArmState.INTERRUPTED
+            state = ExperimentState.INTERRUPTED
         result = {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
     if log_ref:
         result["worker_log"] = log_ref
@@ -354,8 +354,8 @@ def _public_params(params: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def arm_stage(records: Sequence[Mapping[str, object]]) -> str:
-    """Which of :data:`STAGES` the arm is in, read off the ledger alone."""
+def experiment_stage(records: Sequence[Mapping[str, object]]) -> str:
+    """Which of :data:`STAGES` the experiment is in, read off the ledger alone."""
 
     if experiment_verdict(records) is not None:
         return "readout"
@@ -382,7 +382,7 @@ def _percent(value: object) -> str:
 def _attempt_failures(
     records: Sequence[Mapping[str, object]], phase: str | None = None
 ) -> list[Mapping[str, object]]:
-    """The recorded failed attempts, of one phase or of the whole arm."""
+    """The recorded failed attempts, of one phase or of the whole experiment."""
 
     return [
         row
@@ -392,13 +392,13 @@ def _attempt_failures(
     ]
 
 
-def arm_ending(
+def experiment_ending(
     identity: PublicIdentity,
     records: Sequence[Mapping[str, object]],
     state: Mapping[str, object],
     forward: Mapping[str, object] | None,
 ) -> dict[str, str] | None:
-    """How the arm ended — one of :data:`ENDING_STATES` and a one-line reason —
+    """How the experiment ended — one of :data:`ENDING_STATES` and a one-line reason —
     or ``None`` while it can still run.
 
     Every ending the console shows comes from here, so no page classifies one
@@ -410,13 +410,13 @@ def arm_ending(
     :func:`_forward_view`, which carries those readings for every recorded
     slice) — a replay that refused one by the criteria it failed, a graduation
     the operator withdrew as a refusal whose reason says so with the void's
-    first sentence, and an arm that never reached a replay by how its research
+    first sentence, and an experiment that never reached a replay by how its research
     session ended — the Agent's own ``no_edge``, an exhausted budget, or a
     nomination the freeze gate refused — and one whose session the host ended
     on the environment by the host's own reason.
     """
 
-    if str(state.get("state") or "") == ArmState.FAILED:
+    if str(state.get("state") or "") == ExperimentState.FAILED:
         error = str(_mapping(state.get("status")).get("error") or "")
         if not error:
             failures = _attempt_failures(records)
@@ -455,7 +455,7 @@ def arm_ending(
         line = identity.public_text(text).splitlines()
         return {"state": ENVIRONMENT_BLOCKED, "reason": line[0] if line else ""}
     session = _mapping(
-        next((row for row in research_records(records) if row.get("arm_end")), None)
+        next((row for row in research_records(records) if row.get("experiment_end")), None)
     )
     if session.get("outcome") == "no_edge":
         reason = identity.public_text(str(session.get("reason") or ""))
@@ -483,17 +483,17 @@ def _readout_line(readout: Mapping[str, object]) -> str:
     )
 
 
-def arm_attention(
+def experiment_attention(
     identity: PublicIdentity, directory: Path, ending: Mapping[str, object] | None
 ) -> dict[str, str] | None:
-    """What the home list flags for the operator on this arm, as one line, or
+    """What the home list flags for the operator on this experiment, as one line, or
     ``None``.
 
-    Two things raise it and nothing else does: an arm the host ended on the
+    Two things raise it and nothing else does: an experiment the host ended on the
     environment, which needs a fix and a re-run rather than a reading, and an
-    arm that can still run while an issue report its session filed is
+    experiment that can still run while an issue report its session filed is
     unresolved -- until ``scripts/experiments/resolve_feedback.py issue``
-    answers it or the arm ends.
+    answers it or the experiment ends.
     """
 
     if ending is not None:
@@ -546,7 +546,7 @@ def _forward_view(
         "refits_executed": record.get("refits_executed"),
         # Diagnostic: the forward slice's excess among random-name replays.
         "null_percentile": _number(_mapping(null.get("step")).get("excess_percentile")),
-        # The arm's readout (``rolling_record.readout``); a record judged under
+        # The experiment's readout (``rolling_record.readout``); a record judged under
         # the sealed-gate rules carries its verdict instead.
         "readout": dict(_mapping(record.get("readout"))) or None,
         "verdict": {**verdict, "reasons": _recorded_reasons(verdict.get("reasons"))} if verdict else None,
@@ -568,7 +568,7 @@ def _verdict_view(
 
 
 def _paper_candidate_view(records: list[dict[str, object]]) -> dict[str, object] | None:
-    """The frozen artifact the arm's Paper book is opened from."""
+    """The frozen artifact the experiment's Paper book is opened from."""
     candidate = paper_candidate(records)
     if candidate is None:
         return None
@@ -593,12 +593,12 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         if raw_status is not None:
             summary["status"] = status
         forward = _forward_view(identity, forward_record(records))
-        ending = arm_ending(identity, records, state, forward)
+        ending = experiment_ending(identity, records, state, forward)
         summary.update(
             {
                 "created_at": _created_at(directory, params),
                 "skills": {"count": skills.count, "files": skills.files, "bytes": skills.bytes},
-                "stage": arm_stage(records),
+                "stage": experiment_stage(records),
                 "frozen_session": _frozen_session(records),
                 "record": _record_view(records, params),
                 "research_result": _research_result(records),
@@ -609,7 +609,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": _verdict_view(identity, records),
                 "ending": ending,
-                "attention": arm_attention(identity, directory, ending),
+                "attention": experiment_attention(identity, directory, ending),
                 "forward": forward,
                 "paper_candidate": _paper_candidate_view(records),
             }
@@ -617,7 +617,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable
         summary.update(
             {
-                "state": ArmState.UNREADABLE,
+                "state": ExperimentState.UNREADABLE,
                 "worker_alive": False,
                 "error": f"{type(exc).__name__}: experiment state is unreadable",
             }
@@ -626,7 +626,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
 
 
 def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
-    """The arm's research budget, keyed like the trace's ``budget_used`` block.
+    """The experiment's research budget, keyed like the trace's ``budget_used`` block.
 
     The create form persists only what differs from the defaults, so the
     effective ceilings are the worker defaults overlaid with ``params.json``.
@@ -688,7 +688,7 @@ def research_budget_used(directory: Path) -> dict[str, object] | None:
 
 
 def _ending_rank(row: Mapping[str, object]) -> int:
-    """Listing order: the arms that can still run, then the ended ones in
+    """Listing order: the experiments that can still run, then the ended ones in
     :data:`ENDING_STATES` order."""
 
     ending = _mapping(row.get("ending"))
@@ -737,7 +737,7 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
     if cached is not None and cached[0] == signature:
         return cached[1], signature
     row = summarize_experiment(directory)
-    if row.get("worker_alive") is False and row.get("state") not in (ArmState.LAUNCHING, ArmState.UNREADABLE):
+    if row.get("worker_alive") is False and row.get("state") not in (ExperimentState.LAUNCHING, ExperimentState.UNREADABLE):
         _SUMMARY_CACHE[directory] = (signature, row)
         return row, signature
     _SUMMARY_CACHE.pop(directory, None)
@@ -745,15 +745,15 @@ def _listing_row(directory: Path) -> tuple[dict[str, object], tuple[object, ...]
 
 
 # The console's side of archiving (``hitl_state.ARCHIVED_NAME``): the home page
-# lists an archived arm only when asked for the archived ones, the default
+# lists an archived experiment only when asked for the archived ones, the default
 # listing never summarizes it, its experiment page still opens, and the manager
 # never starts its worker again. Lineage, the consistency check
-# (scripts/dev/check_verdicts.py), the round fill queue and Paper see the arm
+# (scripts/dev/check_verdicts.py), the round fill queue and Paper see the experiment
 # as before.
 
 
 def archive_marker(directory: Path) -> dict[str, object] | None:
-    """The arm's archive marker (when and why), or None when it is not archived."""
+    """The experiment's archive marker (when and why), or None when it is not archived."""
 
     path = Path(directory) / HITL_DIR_NAME / ARCHIVED_NAME
     return read_json_object(path, missing_ok=True) if path.is_file() else None
@@ -767,10 +767,10 @@ _PROCESS_NONCE = uuid.uuid4().hex
 def _listing(
     root: Path, *, archived: bool = False
 ) -> tuple[list[dict[str, object]], set[str], str, int]:
-    """Every row in listing order (the archived arms' when ``archived``, else
-    every other arm's), the ids of the rows derived afresh, a digest of all
-    the kept ones (ids and signatures) and of which arms are archived, and how
-    many arms are archived.
+    """Every row in listing order (the archived experiments' when ``archived``, else
+    every other experiment's), the ids of the rows derived afresh, a digest of all
+    the kept ones (ids and signatures) and of which experiments are archived, and how
+    many experiments are archived.
 
     One listing at a time per process. The server answers requests from a
     thread pool, and two overlapping listings would otherwise both derive the
@@ -784,7 +784,7 @@ def _listing(
         directories = [
             path for path in root.iterdir() if path.is_dir() and not path.name.startswith(".")
         ]
-        shelved = {path.name for path in directories if arm_is_archived(path)}
+        shelved = {path.name for path in directories if experiment_is_archived(path)}
         rows: list[dict[str, object]] = []
         fresh: set[str] = set()
         kept: list[tuple[str, tuple[object, ...]]] = []
@@ -812,16 +812,16 @@ def experiment_listing(
 ) -> dict[str, object]:
     """The home page's listing: every row in order, the ranking of the frozen
     strategies with a readout,
-    ``archived``, how many arms are archived, and ``kept``, the digest of the
-    rows that change only when their files do (every arm without a live
-    worker) and of which arms are archived. With ``archived`` the rows are the
-    archived arms' instead of every other arm's.
+    ``archived``, how many experiments are archived, and ``kept``, the digest of the
+    rows that change only when their files do (every experiment without a live
+    worker) and of which experiments are archived. With ``archived`` the rows are the
+    archived experiments' instead of every other experiment's.
 
     The home page polls it every few seconds, and those rows are nearly all of
     it. A poll that sends back the digest it last received, and finds it
     unchanged, is answered with the rows derived afresh (live workers,
-    launching or unreadable arms) and the order of every id; it keeps the
-    other rows it already holds. Any change to a kept row — an arm ending,
+    launching or unreadable experiments) and the order of every id; it keeps the
+    other rows it already holds. Any change to a kept row — an experiment ending,
     created, deleted, archived or restored, any of its files rewritten, or a
     console restart — changes the digest, and the poll gets every row again.
     """
@@ -844,7 +844,7 @@ def ranking(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     residual IR (a record the instrument could not read sorts last), each with
     its forward reading and whether a Paper book may be opened from it.
 
-    Research-period numbers never rank, and an arm without a forward record is
+    Research-period numbers never rank, and an experiment without a forward record is
     not listed: the record and the forward reading are the whole evidence.
     Ties keep the listing order.
     """
@@ -888,9 +888,9 @@ def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
 
 
 def _cost_stress_multiplier(directory: Path) -> float:
-    """The arm's cost-stress multiplier as its worker resolves it: the value
+    """The experiment's cost-stress multiplier as its worker resolves it: the value
     its params name, else the rule's default. Read alone, without the rest
-    of the rules, so an arm stamped before a rule became required still
+    of the rules, so an experiment stamped before a rule became required still
     lists."""
 
     params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
@@ -900,8 +900,8 @@ def _cost_stress_multiplier(directory: Path) -> float:
 @dataclass(frozen=True)
 class ValidationView:
     """One recorded Validation as the console shows it: its span, headline
-    replay metrics, the raw excess over the arm's benchmark, and the graded
-    figures, the active excess at the arm's cost stress among them. A row
+    replay metrics, the raw excess over the experiment's benchmark, and the graded
+    figures, the active excess at the experiment's cost stress among them. A row
     recorded before rows carried graded figures shows none: its stored ones
     were of the retired regressed measure."""
 
@@ -944,7 +944,7 @@ class ValidationView:
 
 # A recorded Validation is immutable: its sidecar and its result's style file
 # are read once per node and kept for the process lifetime, so a listing poll
-# of a running arm re-reads nothing until the session records another node.
+# of a running experiment re-reads nothing until the session records another node.
 _LIVE_STEP_CACHE: dict[tuple[str, str], dict[str, object]] = {}
 
 
@@ -988,7 +988,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
 
 
 def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
-    """The research session that froze the arm's artifact, or ``None``.
+    """The research session that froze the experiment's artifact, or ``None``.
 
     The listing's one fact about the freeze: the experiment card draws the
     freeze step from it instead of inferring a freeze from the stage and the
@@ -1001,7 +1001,7 @@ def _frozen_session(records: Sequence[Mapping[str, object]]) -> str | None:
 
 def _research_result(records: Sequence[Mapping[str, object]]) -> str | None:
     """The research-period result the console draws beside the forward replay:
-    the frozen strategy's own validation, once the arm froze."""
+    the frozen strategy's own validation, once the experiment froze."""
 
     row = frozen_record(records)
     if row is None:
@@ -1010,15 +1010,15 @@ def _research_result(records: Sequence[Mapping[str, object]]) -> str | None:
 
 
 def _record_alpha(params: Mapping[str, object]) -> float:
-    """The level the arm's record is read at, from its own stamped rules; an
-    arm with a record was created under the rolling validation, whose rules
+    """The level the experiment's record is read at, from its own stamped rules; an
+    experiment with a record was created under the rolling validation, whose rules
     state it."""
 
     return acceptance_for(params).alpha
 
 
 def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, object]) -> dict[str, object] | None:
-    """The arm's rolling record so far, read as one series: the steps the
+    """The experiment's rolling record so far, read as one series: the steps the
     ledger holds, the frontier they reached, the instrument over them
     (``rolling_record.record_instrument``) and how often the candidate
     changed. ``None`` before the first step is recorded: nothing is read off a
@@ -1086,10 +1086,10 @@ def _record_detail(
 
 
 def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
-    """How the arm's record will be read, from its own stamped rules, so the
+    """How the experiment's record will be read, from its own stamped rules, so the
     console states it before any record exists: the residual statistic's
     level, the research years, the step length and the bar for the whole
-    validation period. An arm created before the rolling validation states
+    validation period. An experiment created before the rolling validation states
     none: it can no longer run a session."""
 
     if params.get("research_years") is None:
@@ -1106,14 +1106,14 @@ def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-# The forward record of each arm's ledger, by the ledger's size and mtime: the
-# readouts below read every arm, and an arm page polls them.
+# The forward record of each experiment's ledger, by the ledger's size and mtime: the
+# readouts below read every experiment, and an experiment page polls them.
 _FORWARD_RECORDS: dict[Path, tuple[tuple[int, int], Mapping[str, object] | None]] = {}
 
 
-def _arm_forward_records(root: Path) -> tuple[list[tuple[str, Mapping[str, object]]], int]:
-    """The forward record of every arm under ``root`` that has one, by
-    experiment id, archived arms included, and how many arms' ledgers could
+def _experiment_forward_records(root: Path) -> tuple[list[tuple[str, Mapping[str, object]]], int]:
+    """The forward record of every experiment under ``root`` that has one, by
+    experiment id, archived experiments included, and how many experiments' ledgers could
     not be read (a readout counts them rather than skip them silently)."""
 
     found: list[tuple[str, Mapping[str, object]]] = []
@@ -1138,7 +1138,7 @@ def _arm_forward_records(root: Path) -> tuple[list[tuple[str, Mapping[str, objec
 
 
 def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[str, object] | None:
-    """What every arm under ``root`` read over this arm's validation window and
+    """What every experiment under ``root`` read over this experiment's validation window and
     forward months, beside its own forward ``record``; ``None`` before that
     record, or for a record judged under the sealed gate.
 
@@ -1164,7 +1164,7 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
         return replay.get("start"), replay.get("forward_end")
 
     months = forward_months(_mapping(record))
-    records, unreadable = _arm_forward_records(root)
+    records, unreadable = _experiment_forward_records(root)
     readings: list[dict[str, object]] = []
     pooled: list[dict[str, object]] = []
     raised = 0
@@ -1205,7 +1205,7 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
             **pooled_reading(pooled),
             "raised": raised,
         },
-        "unreadable_arms": unreadable,
+        "unreadable_experiments": unreadable,
     }
 
 
@@ -1286,7 +1286,7 @@ def _research_session_view(
                 },
                 # The limits this nomination was actually judged against, as
                 # its own record states them, so a later change to any of them
-                # does not restate the arm's gate and a limit the record does
+                # does not restate the experiment's gate and a limit the record does
                 # not carry is not drawn.
                 "thresholds": {
                     key: _number(value)
@@ -1300,8 +1300,8 @@ def _research_session_view(
             else None
         ),
         "froze": bool(record.get("frozen")),
-        "arm_end": identity.public_record(record["arm_end"])  # type: ignore[arg-type]
-        if isinstance(record.get("arm_end"), Mapping)
+        "experiment_end": identity.public_record(record["experiment_end"])  # type: ignore[arg-type]
+        if isinstance(record.get("experiment_end"), Mapping)
         else None,
         "validations": [dataclass_record(ValidationView.of(row, multiplier)) for row in steps],
         "attempts": record.get("attempts"),
@@ -1403,7 +1403,7 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
 def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
     detail = {**summarize_experiment(directory), "archived": archive_marker(directory)}
-    if detail.get("state") == ArmState.UNREADABLE:
+    if detail.get("state") == ExperimentState.UNREADABLE:
         return {
             **detail,
             "params": {},
@@ -1435,7 +1435,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         **detail,
         "params": _public_params(params),
         "control": identity.public_control(read_control(hitl / CONTROL_NAME).to_record()),
-        # The cards claimed for the arm's live worker: a session attaches some
+        # The cards claimed for the experiment's live worker: a session attaches some
         # of these and no other. A dead worker's claim holds nothing (a resume
         # writes a fresh one), so it is not shown.
         "gpu_claim": list(read_gpu_claim(hitl) or ()) if detail.get("worker_alive") else [],
@@ -1470,7 +1470,7 @@ def frozen_strategy_dir(root: Path, experiment_id: str) -> Path:
 def _ledger_result_refs(
     directory: Path, records: Sequence[Mapping[str, object]]
 ) -> Iterator[object]:
-    """Every replay result the arm has recorded: the research session's
+    """Every replay result the experiment has recorded: the research session's
     Validations — from the ledger once the session is recorded, from the host
     sidecars while it runs — and, once it is recorded with its verdict, the
     forward replay. The replay itself has no sidecar, so it stays sealed."""

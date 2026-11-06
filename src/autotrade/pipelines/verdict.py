@@ -1,4 +1,4 @@
-"""Readout statistics of one arm: the residual-IR instrument, the forward
+"""Readout statistics of one experiment: the residual-IR instrument, the forward
 and Held-out readings, and the registration conditions.
 
 Pure functions over frozen replay data (docs/PIPELINE_DESIGN.md). Every
@@ -9,7 +9,7 @@ in an account's own shape is a property of the window and the pool, so the
 panel removes what the universe construction hands any zero-skill book (lot
 affordability, boards, equal weighting, the book's own schedule and cash).
 
-The instrument reads the factor residual of that series: OLS on the arm's
+The instrument reads the factor residual of that series: OLS on the experiment's
 benchmark (market), the size and the value legs of the replay's own
 cross-section (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio is read against ``z(1 − alpha) / √years`` for the
@@ -27,7 +27,7 @@ and the panel as stored. The inputs are the daily series a
 forward and Held-out slices of one continuous replay are read from one
 sidecar.
 
-The rules are the arm's create-time rules, which every stage function takes
+The rules are the experiment's create-time rules, which every stage function takes
 whole (``rules``: a ``config.AcceptanceRules``); the module constants below
 are the defaults those fields take, and nothing here falls back to them. A
 slice that cannot be measured (fewer than two days, a slice shorter than one
@@ -504,7 +504,7 @@ def holder_readings(
 ) -> dict[str, float | None]:
     """What a long-only holder of the book saw over one span, unregressed.
 
-    The book's own return after every cost (``strategy_return``), the arm's
+    The book's own return after every cost (``strategy_return``), the experiment's
     benchmark price return (``benchmark_return``) and the zero-skill panel's
     return after its costs (``panel_return``), each compounded from the stored
     daily series over its days in ``start``..``end``; ``raw_excess`` is book
@@ -680,7 +680,7 @@ class Condition(NamedTuple):
     ``holds(measured, thresholds)`` reads the stage's own block and the bars
     its record states; a condition that does not hold records ``reason``.
     ``requires`` names the rule that turns a condition on, the tracking
-    mandate's cap (empty: every arm is held to it); an arm without a mandate
+    mandate's cap (empty: every experiment is held to it); an experiment without a mandate
     is not judged on it.
     """
 
@@ -840,7 +840,7 @@ def forward_slice(
     mean_gross: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """The forward slice's readings under the arm's ``rules``: reported,
+    """The forward slice's readings under the experiment's ``rules``: reported,
     never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series is read as it is (:func:`graded_statistics`) and
@@ -934,7 +934,7 @@ def heldout_slice(
     mean_gross: float,
     seed_replicates: Sequence[tuple[Mapping[str, object], Mapping[str, object]]] = (),
 ) -> dict[str, object]:
-    """The Held-out slice's readings under the arm's ``rules``: reported,
+    """The Held-out slice's readings under the experiment's ``rules``: reported,
     never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series' statistics and its residual reading, the equity and

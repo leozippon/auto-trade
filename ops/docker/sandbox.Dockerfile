@@ -162,7 +162,7 @@ RUN pip freeze > /tmp/installed.txt \
     && python -c "import torch, causal_conv1d_cuda, fla, peft, vllm, triton, tokenspeed_triton, cutlass.cute"
 
 # Both containers run without a network and the only pretrained weights are
-# the store an arm's containers mount read-only (environment.pretrained), so
+# the store an experiment's containers mount read-only (environment.pretrained), so
 # the hub is switched off: a hub model id fails at once instead of waiting on
 # a connection that cannot exist. Hub caches live under XDG_CACHE_HOME like
 # every other cache, and so does Triton's: it holds the launcher modules

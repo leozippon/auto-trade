@@ -1,6 +1,6 @@
 """Orchestration contract of the HITL runner itself (docs/PIPELINE_DESIGN.md).
 
-`tests/unit/test_research_arm_worker.py` drives the worker end to end, so the
+`tests/unit/test_research_experiment_worker.py` drives the worker end to end, so the
 runner's own control-plane branches -- durable stop/pause at a session
 boundary, retries, resume, and which planned session is due -- are exercised
 here directly against a recording executor so each branch is observed,
@@ -35,7 +35,7 @@ from autotrade.pipelines.interactive import (
 )
 from autotrade.pipelines.ledger import ExperimentLedger, FrozenArtifactMutated
 
-# The plan of record of every arm: the research session, then the forward replay.
+# The plan of record of every experiment: the research session, then the forward replay.
 PLAN = planned_sessions()
 
 
@@ -43,7 +43,7 @@ class RecordingExecutor:
     """Appends the session's canonical ledger record, like the real pipeline.
 
     ``outcomes`` maps a session key to the research record's extra fields
-    (``frozen`` or ``arm_end``); without them the research record ends nothing,
+    (``frozen`` or ``experiment_end``); without them the research record ends nothing,
     which the real pipeline never writes, so most tests name one.
     """
 
@@ -119,7 +119,7 @@ class RunnerTestCase(unittest.TestCase):
 
 
 FROZEN = {"frozen": {"artifact_id": "strategy_research_x", "output_path": "unused"}}
-NO_EDGE = {"arm_end": {"status": "no_deliverable", "reason": "no_edge: nothing"}}
+NO_EDGE = {"experiment_end": {"status": "no_deliverable", "reason": "no_edge: nothing"}}
 
 
 class InteractiveRunnerTest(RunnerTestCase):
@@ -401,7 +401,7 @@ class WorkerEntrypointTest(unittest.TestCase):
         unwinds through the handler's `SystemExit`, which is not an `Exception`:
         while this entrypoint caught only `Exception`, `status.json` kept
         `running_session` and its dead pid for good, and the console showed a
-        finished arm as live.
+        finished experiment as live.
         """
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
         from experiments import run_interactive_experiment

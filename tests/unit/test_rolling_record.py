@@ -27,7 +27,7 @@ VALIDATION = (
     Slot("Y7", "20210801", "20220731", "20220731"),
 )
 HEAD = {
-    "experiment_id": "arm",
+    "experiment_id": "experiment",
     "epoch_id": "research",
     "fold_id": "research",
     "run_id": "run_1",

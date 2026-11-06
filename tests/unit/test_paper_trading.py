@@ -28,7 +28,7 @@ SESSIONS = ("20260105", "20260106", "20260107", "20260108", "20260109", "2026011
 SYMBOL = "000001.SZ"
 PROFILE = BrokerProfile(initial_cash=100_000.0, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0)
 
-# A module-level decision counter, the way the graduated arm paces its
+# A module-level decision counter, the way the graduated experiment paces its
 # rebalance: it buys on the first call of a worker and sells on the third.
 COUNTER_STRATEGY = """_CALLS = 0
 

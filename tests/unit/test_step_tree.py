@@ -245,7 +245,7 @@ RESEARCH_MANIFEST = {
         "spans": "full (every year), one year such as Y1, or contiguous years such as Y1..Y3",
     },
     "start": {"kind": "step_node", "node_id": "research__session_ref_x__run_ref_y__valid_003"},
-    "arm": {"validations_to_date": 5, "full_span_validations_to_date": 2},
+    "experiment": {"validations_to_date": 5, "full_span_validations_to_date": 2},
     "snapshot_config": {
         "decision_windows": {
             "daily_months": 24,
@@ -267,7 +267,7 @@ class SessionFactsTest(unittest.TestCase):
         self.addCleanup(self._refs_tmp.cleanup)
         self.ref_store = AgentRefStore(Path(self._refs_tmp.name) / "experiment")
 
-    def test_facts_carry_the_research_geometry_and_the_arm_but_no_later_date(self):
+    def test_facts_carry_the_research_geometry_and_the_experiment_but_no_later_date(self):
         facts = build_experiment_facts(
             manifest=RESEARCH_MANIFEST,
             ref_store=self.ref_store,
@@ -283,8 +283,8 @@ class SessionFactsTest(unittest.TestCase):
         self.assertEqual(facts["research_geometry"], RESEARCH_MANIFEST["research"])
         self.assertNotIn("session", facts["identity"])
         self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
-        self.assertEqual(facts["arm"]["validations_to_date"], 5)
-        self.assertEqual(facts["arm"]["full_span_validations_to_date"], 2)
+        self.assertEqual(facts["experiment"]["validations_to_date"], 5)
+        self.assertEqual(facts["experiment"]["full_span_validations_to_date"], 2)
         self.assertEqual(facts["budgets"]["max_null_controls"], 3)
         self.assertIn("cause: environment", facts["budgets"]["validation_failure_note"])
         self.assertEqual(
@@ -364,7 +364,7 @@ class SessionFactsTest(unittest.TestCase):
             self.assertNotIn("experiment_parameters", public)
             self.assertNotIn("heldout_replay", public["snapshots"])
             self.assertEqual(public["backtest_summaries"], [{"mode": "valid", "span": "Y2", "total_return": 0.1}])
-            for key in ("research", "start", "arm", "budgets"):
+            for key in ("research", "start", "experiment", "budgets"):
                 self.assertEqual(public[key], RESEARCH_MANIFEST[key], key)
             # The raw session id never crosses, only its opaque ref.
             self.assertTrue(str(public["session_ref"]).startswith("session_ref_"))

@@ -607,7 +607,7 @@ class LLMResearchDeveloper:
                 # blocked on bytes only the host may produce.
                 readonly_seed=source,
             )
-            # The arm's budgets minus what earlier attempts spent: the clock
+            # The experiment's budgets minus what earlier attempts spent: the clock
             # holds only the remainder, the counters start from the spend.
             attempt_seconds = max(request.deadline_seconds - used.inference_seconds, 0.001)
             time_budget = InferenceTimeBudget(duration_seconds=attempt_seconds)
@@ -771,8 +771,8 @@ class LLMResearchDeveloper:
         """The session container's spec under this session's GPU allocation."""
 
         # Per-session HITL override: the session attaches that many of the
-        # devices its arm holds (a tuple, worker.load_worker_options) and
-        # never another arm's.
+        # devices its experiment holds (a tuple, worker.load_worker_options) and
+        # never another experiment's.
         if request.sandbox_gpu_count is None:
             return self.sandbox_spec
         count = int(request.sandbox_gpu_count)
@@ -782,7 +782,7 @@ class LLMResearchDeveloper:
         if isinstance(claim, tuple):
             if count > len(claim):
                 raise GpuUnavailableError(
-                    f"this session asks for {count} GPU(s) but the arm holds "
+                    f"this session asks for {count} GPU(s) but the experiment holds "
                     f"{len(claim)}: devices {list(claim)}"
                 )
             return replace(self.sandbox_spec, gpu=claim[:count], gpu_count=count)
@@ -832,7 +832,7 @@ class LLMResearchDeveloper:
                     steps_tested=len(request.tests_before),
                     window_months=request.window_months,
                 ),
-                # The index this arm is graded against; the Agent-visible facts
+                # The index this experiment is graded against; the Agent-visible facts
                 # publish it so a session designs against the same benchmark
                 # the host measures it on.
                 "benchmark_index": request.benchmark_index,
@@ -841,7 +841,7 @@ class LLMResearchDeveloper:
                     "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
                 },
                 "start": start_record(),
-                "arm": arm_record(request.steps_before),
+                "experiment": experiment_record(request.steps_before),
                 "modification_constraints": request.modification_constraints.to_record(),
                 "acceptance_rules": dict(request.acceptance_rules),
                 "schedule": self.schedule.to_record(),
@@ -872,7 +872,7 @@ class LLMResearchDeveloper:
                     # How many replays one validate call runs at once,
                     # and so the factor both wall clocks above are scaled by.
                     "batch_validate_max_concurrency": request.batch_validate_max_concurrency,
-                    # The totals above are the arm's; what earlier attempts
+                    # The totals above are the experiment's; what earlier attempts
                     # already spent of them.
                     "used_before_this_attempt": used.to_record(),
                 },
@@ -901,7 +901,7 @@ class LLMResearchDeveloper:
         if resume is None:
             copy_artifact(source, output_dir)
             copy_model_artifacts(source_models, models_dir)
-            # A reference pack that ships a runnable starter is what the arm
+            # A reference pack that ships a runnable starter is what the experiment
             # starts from; the template supplies the contract files it keeps.
             seed_output_from_starter(
                 output_dir, self.workspace_reference, repo_root=self.repo_root
@@ -1001,7 +1001,7 @@ class LLMResearchDeveloper:
     ) -> tuple[SessionValidations, SmokeBacktestTool, list[Tool], NullControlTool | None]:
         """The parent session's tools over the session's Validations; returns
         the Validations, the smoke tool, the tool list and the null-control
-        tool (None when the arm allows no null controls)."""
+        tool (None when the experiment allows no null controls)."""
 
         backtest = SessionValidations(
             request=request,
@@ -1273,14 +1273,14 @@ class LLMResearchDeveloper:
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace,
             # its model calls or its API spend); the Validations it completed
-            # are still the arm's trials.
+            # are still the experiment's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
             deterministic = False
             finish_reason = exc.finish_reason
         except EnvironmentBlocked as exc:
             # The host ended the session: its replays on one span kept failing
-            # on the environment, so the arm ends on that, not on research.
+            # on the environment, so the experiment ends on that, not on research.
             conversation_id = runner.conversation_id
             outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
             deterministic = False
@@ -1581,7 +1581,7 @@ def start_record() -> dict[str, object]:
     return {"kind": "template", "template_ref": "agent_output_template"}
 
 
-def arm_record(steps: Sequence[StepResult]) -> dict[str, object]:
+def experiment_record(steps: Sequence[StepResult]) -> dict[str, object]:
     """The Validations the session's earlier attempts recorded, as the attempt
     starts; the steps tested so far are the research geometry's fact."""
 
@@ -1719,7 +1719,7 @@ def install_workspace_reference(
 
     The pack lands writable like everything else under the Agent's workspace
     mount. It was installed 0o444/0o555 once, to keep the reference copy from
-    drifting; what that actually bought was a papercut in every arm, because
+    drifting; what that actually bought was a papercut in every experiment, because
     ``cp`` reproduces the source's mode and the copies it seeds -- a candidate
     directory, a working file under ``output/`` -- came out unwritable for the
     typed writers, which run as the host user and cannot chmod a file the
@@ -1750,7 +1750,7 @@ def seed_output_from_starter(
 
     A pack that ships ``starter/main.py`` ships a runnable strategy, so the
     working copy starts as that package rather than as the bare template: every
-    arm otherwise spent its first substantive turn hand-porting the same files,
+    experiment otherwise spent its first substantive turn hand-porting the same files,
     and the copies it made from the read-only ``refs/`` tree came out
     unwritable. The template's read-only contract files are not overwritten —
     ``output/README.md`` remains the strategy contract, whatever the pack

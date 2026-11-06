@@ -338,7 +338,7 @@ DEFAULT_GLOBAL_INDEX_CODES = ["XIN9", "HSI", "HKTECH", "DJI", "SPX", "IXIC", "FT
 
 # Core A-share benchmark indexes for `index_daily` and `index_weight`: market
 # timing, beta management and relative-strength context for the Agent, plus the
-# host-side benchmark an arm's `benchmark_index` selects. The environment owns
+# host-side benchmark an experiment's `benchmark_index` selects. The environment owns
 # the table (BENCHMARK_INDEXES), so what is downloaded and what a create
 # request may name are the same set.
 DEFAULT_CN_INDEX_CODES = list(BENCHMARK_INDEXES)

@@ -96,8 +96,8 @@ def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
 def benchmark_label(result_file: Path) -> str:
     """Which benchmark this result was graded against, from its own sidecar.
 
-    The sidecar records the arm's ``benchmark_index``; a result written before
-    the parameter existed carries the default, which is what those arms ran on.
+    The sidecar records the experiment's ``benchmark_index``; a result written before
+    the parameter existed carries the default, which is what those experiments ran on.
     """
 
     sidecar = read_result(Path(result_file).parent / STYLE_ARTIFACT_NAME)
