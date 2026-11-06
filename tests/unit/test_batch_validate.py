@@ -1366,7 +1366,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertLess(below["residual_reading"]["active_excess_at_cost_stress"], 0)
             self.assertGreater(above["residual_reading"]["active_excess_at_cost_stress"], 0)
             # A reading, not a condition: the node registers and is registered.
-            finished = session.finish.invoke({"outcome": "register", "node_id": below["node_id"]})
+            finished = session.finish.invoke({"node_id": below["node_id"]})
             self.assertTrue(finished.finish)
 
     def test_a_row_that_repeats_earlier_bytes_on_the_same_span_names_them(self) -> None:

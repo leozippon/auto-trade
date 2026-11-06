@@ -1013,7 +1013,7 @@ details.fold.fill-extra .form-grid {
 }
 /* The research budgets: one block per limit — name and used percentage on one
    line, the bar across the block below — laid out as a grid with the same room
-   between blocks that the cards keep between groups. `mini` is the card's three
+   between blocks that the cards keep between groups. `mini` is the card's two
    rows of two at a smaller scale, the amount spent in place of the percentage. */
 .budget-bars {
  display: grid;

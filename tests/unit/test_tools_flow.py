@@ -1271,7 +1271,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             )
             # Before finishing, writes go through.
             assert registry.invoke("write_file", {"path": "draft.txt", "content": "x"}).ok
-            finished = registry.invoke("test", {"outcome": "register", "node_id": node_id})
+            finished = registry.invoke("test", {"node_id": node_id})
             assert finished.ok, finished.error
             assert finished.finish
 
@@ -1294,7 +1294,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             runner = FakeRunner()
             registry = ToolRegistry([SandboxShellTool(workspace, runner), finish])
             assert registry.invoke("shell", {"argv": ["echo", "before"]}).ok
-            assert registry.invoke("test", {"outcome": "register", "node_id": node_id}).ok
+            assert registry.invoke("test", {"node_id": node_id}).ok
             denied = registry.invoke("shell", {"argv": ["echo", "after"]})
             assert not denied.ok
             assert "locked" in denied.error

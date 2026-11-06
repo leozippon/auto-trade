@@ -229,7 +229,6 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
                         "done",
                         "test",
                         {
-                            "outcome": "register",
                             "node_id": (
                                 "research__"
                                 f"{fold_ref}__"
@@ -365,7 +364,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
     scripted = ScriptedLLM(
         [
             ProviderResponse(tool_calls=(ToolCall("b1", "validate", {}),)),
-            ProviderResponse(tool_calls=(ToolCall("f1", "test", {"outcome": "register", "node_id": node_id}),)),
+            ProviderResponse(tool_calls=(ToolCall("f1", "test", {"node_id": node_id}),)),
         ],
         context_window_tokens=128_000,
     )
@@ -889,7 +888,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
             # A turn of pure text while the child is still running: the trap.
             ProviderResponse(content="等子代理返回后再收尾"),
             ProviderResponse(
-                tool_calls=(ToolCall("finish", "test", {"outcome": "register", "node_id": node_id}),)
+                tool_calls=(ToolCall("finish", "test", {"node_id": node_id}),)
             ),
         ]
     )

@@ -1,11 +1,11 @@
-"""The open-exploration packs of round 20261014 that the Paper accounts started from: one common contract, one direction per pack.
+"""The open-exploration packs: round 20261014's, which the Paper accounts started from (one common contract, one direction per pack), and round 20261107's open 200k pack.
 
-What must hold. The packs give a direction each and share the rules file, the
-record of occupied and closed directions and the starter byte for byte, since
-a pack is mounted alone and cannot point at another. The starter is a valid
-strategy package. Its read helpers return only visible rows, matched as asked,
-and its device helper falls back to the CPU. No pack cites a reading after the
-research period.
+What must hold. Round 20261014's packs give a direction each and share the rules
+file, the record of occupied and closed directions and the starter byte for
+byte, since a pack is mounted alone and cannot point at another. Their starter is
+a valid strategy package. Its read helpers return only visible rows, matched as
+asked, and its device helper falls back to the CPU. No open pack cites a reading
+after the research period.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from tests.unit.reference_pack_fixture import AFTER_RESEARCH
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REFS = REPO_ROOT / "configs" / "workspace_refs"
 PACKS_14 = [REFS / f"open_{name}_100k_8y_20261014" for name in ("free", "commit")]
+OPEN_PACKS = [*PACKS_14, REFS / "open_200k_20261107"]
 COMMON = ("families.md", "references/open-rules.md")
 
 
@@ -44,13 +45,14 @@ def test_the_starter_is_a_valid_package(pack: Path) -> None:
     validate_strategy_package(pack / "starter" / "main.py")
 
 
-def test_no_pack_cites_a_reading_after_the_research_period() -> None:
-    for pack in PACKS_14:
-        for path in pack.rglob("*"):
-            if path.is_file() and path.suffix in (".md", ".py"):
-                text = path.read_text(encoding="utf-8")
-                for word in AFTER_RESEARCH:
-                    assert word not in text, (pack.name, path.name, word)
+@pytest.mark.parametrize("pack", OPEN_PACKS, ids=lambda path: path.name)
+def test_no_pack_cites_a_reading_after_the_research_period(pack: Path) -> None:
+    assert (pack / "README.md").is_file()
+    for path in pack.rglob("*"):
+        if path.is_file() and path.suffix in (".md", ".py"):
+            text = path.read_text(encoding="utf-8")
+            for word in AFTER_RESEARCH:
+                assert word not in text, (pack.name, path.name, word)
 
 
 def _drop_packages() -> None:

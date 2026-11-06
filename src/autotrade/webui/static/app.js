@@ -74,7 +74,6 @@ const REASON_LABELS = {
 // baseline the host drew from its own book -- records `series: "active"`; a replay
 // without a random baseline records `absolute`, and its figures are its own.
 const SERIES_LABELS = { active: "主动（策略 − 随机对照组合）", absolute: "策略自身" };
-const ACTIVE_TITLE = "策略日收益减去随机对照组合合成收益后的序列；对照组合由宿主按该策略自己的成交骨架随机换名回放得到";
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
 // A gloss states no threshold: the registration check's own limits are carried by the
@@ -109,10 +108,8 @@ const ACTIVE_BETA_TITLE = "主动序列（账户 − 随机对照）对基准指
 // with only its seed line changed.
 const SEED_MEAN_TITLE = "定版产物与它的种子复现各自读数的平均；只有登记了种子复现的提名才有";
 
-function reasonLabel(reason, thresholds) {
-  const label = REASON_LABELS[reason];
-  if (typeof label === "function") return label(thresholds || {});
-  return label || String(reason);
+function reasonLabel(reason) {
+  return REASON_LABELS[reason] || String(reason);
 }
 
 const ENVIRONMENT_STAGE_LABELS = {
@@ -3042,14 +3039,13 @@ function seedReadingsTable(slices, names) {
 }
 
 /* One criterion of the registration check as a row: the measured figure with
-   its pass or fail mark against the threshold. Every row of a check is worded
-   against the same thresholds, so they are bound once and each row names only
-   its token, figure, threshold and — when the rule is not readable from those
-   — its hover. */
-function criteriaRow(slice, failed, thresholds) {
+   its pass or fail mark against the threshold. The check and its failed tokens
+   are bound once, and each row names only its token, figure, threshold and —
+   when the rule is not readable from those — its hover. */
+function criteriaRow(slice, failed) {
   return (token, value, threshold, title) => ({
     ok: slice ? !failed.has(token) : null,
-    label: reasonLabel(token, thresholds),
+    label: reasonLabel(token),
     value: slice ? value : null,
     threshold,
     title,
@@ -3886,7 +3882,7 @@ function recordPanel(detail) {
 function registrationChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
-  const row = criteriaRow(gate, failed, t);
+  const row = criteriaRow(gate, failed);
   const mandate = ["registration_tracking_error_above_cap", "registration_beta_outside_band"];
   const problems = ((gate.seed_replicates || {}).replicates || [])
     .filter((entry) => entry.problem)
