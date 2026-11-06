@@ -39,14 +39,13 @@ from tests.unit.webui_research_experiment import build_experiment
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _graduated_book(tmp_path: Path, book_id: str = "exp") -> Book:
-    experiment = build_experiment(tmp_path / "experiments", book_id, "graduated")
+def _registered_book(tmp_path: Path, book_id: str = "exp") -> Book:
+    experiment = build_experiment(tmp_path / "experiments", book_id, "registered_with_record")
     return create_book(
         paper_root(tmp_path) / book_id,
         experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
-        track="graduated",
     )
 
 
@@ -88,7 +87,7 @@ def _statistical(book: Book) -> Book:
 
 
 def test_statistical_checks_run_only_at_checkpoints_and_each_once(tmp_path: Path):
-    book = _statistical(_graduated_book(tmp_path))
+    book = _statistical(_registered_book(tmp_path))
     losing = _noisy(-0.002, 260)
 
     before = _read(book, losing[:125])
@@ -126,7 +125,7 @@ def test_a_negative_market_loading_is_judged_on_what_it_earned(tmp_path: Path):
     the index would have credited it back. The same book in a falling market
     earned its lead, and is confirmed."""
 
-    book = _statistical(_graduated_book(tmp_path))
+    book = _statistical(_registered_book(tmp_path))
     noise = _noisy(0.0, 126, seed=5, sd=0.001)
 
     def read(drift: float) -> dict[str, object]:
@@ -141,7 +140,7 @@ def test_a_negative_market_loading_is_judged_on_what_it_earned(tmp_path: Path):
 
 
 def test_a_drawdown_kills_on_an_ordinary_day(tmp_path: Path):
-    book = _graduated_book(tmp_path)  # max_drawdown 0.45, active_max_drawdown 0.30
+    book = _registered_book(tmp_path)  # max_drawdown 0.45, active_max_drawdown 0.30
     calm = [0.001] * 10
     account = _read(book, [*calm, -0.50, *calm])
     assert account["status"] == "killed" and account["transition"]["reason"] == "account_drawdown_exceeded"
@@ -154,13 +153,13 @@ def test_a_drawdown_kills_on_an_ordinary_day(tmp_path: Path):
 
 
 def test_a_terminal_status_is_never_left(tmp_path: Path):
-    book = _graduated_book(tmp_path)
+    book = _registered_book(tmp_path)
     _kill(book.root)
     reading = _read(book, _noisy(0.003, 130))
     assert reading["status"] == "killed" and reading["transition"]["date"] == "20260105"
     assert len(read_jsonl(book.root / VERDICT_LOG_NAME)[0]) == 1
 
-    confirmed = _graduated_book(tmp_path, "conf")
+    confirmed = _registered_book(tmp_path, "conf")
     append_jsonl_once(confirmed.root / VERDICT_LOG_NAME, {"event_id": "terminal", "status": "confirmed", "date": "20270101", "days": 126})
     assert _read(confirmed, [0.001, -0.6, 0.001])["status"] == "confirmed"
 
@@ -209,7 +208,7 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     assert real.journal("corrections.jsonl") and [
         row["quantity"] for row in real.journal("executions_20260105.jsonl") if row["status"] == "filled"
     ] == [300]
-    book = replace(_graduated_book(tmp_path), root=real.root, profile=RECONCILE_PROFILE)
+    book = replace(_registered_book(tmp_path), root=real.root, profile=RECONCILE_PROFILE)
     with pytest.raises(FileNotFoundError, match="no replay slot"):
         paper_reading(book)
 
@@ -251,7 +250,7 @@ def _run_paper():
 
 def test_a_killed_book_writes_its_exit_sheet_decides_nothing_and_is_not_a_failure(tmp_path: Path, monkeypatch):
     run_paper = _run_paper()
-    book = _graduated_book(tmp_path)
+    book = _registered_book(tmp_path)
     run_days(book.root, BOOK_SESSIONS[1], BOOK_SESSIONS[2])
     _kill(book.root, BOOK_SESSIONS[2])
     state_before = (book.root / ".paper_state.json").read_bytes()

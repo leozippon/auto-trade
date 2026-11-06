@@ -20,12 +20,10 @@ from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
 from autotrade.environment.llm.proxy import ScriptedLLM
-from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.pipelines import experiment as experiment_module
 from autotrade.pipelines import worker
 from autotrade.pipelines.hitl_state import read_status
 from autotrade.pipelines.ledger import (
-    LEDGER_RECORD_SCHEMA_VERSION,
     ExperimentLedger,
     experiment_verdict,
     forward_record,
@@ -393,26 +391,6 @@ def test_an_experiment_whose_budget_ends_without_a_registrable_candidate_runs_no
     assert [row["record_type"] for row in rows] == ["research_session"]
 
 
-def test_a_fold_era_ledger_is_refused(tmp_path: Path):
-    from autotrade.environment.identity import AgentRefStore
-
-    repo, experiment = make_experiment(tmp_path)
-    AgentRefStore(experiment)
-    ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
-    archived = {
-        "record_type": "fold",
-        "experiment_id": "experiment",
-        "epoch_id": "epoch_001",
-        "fold_id": "fold_2024",
-        "run_id": "run_old",
-    }
-    with pytest.raises(ValueError, match="unsupported record_type"):
-        ledger.append(archived)
-    append_versioned_jsonl(ledger.path, archived, schema_version=LEDGER_RECORD_SCHEMA_VERSION)
-    with pytest.raises(ValueError, match="Fold-era ledger"):
-        run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
-
-
 def test_the_worker_refuses_a_release_that_does_not_reach_heldout(tmp_path: Path):
     repo, experiment = make_experiment(tmp_path, heldout_end="20251231", forward_end="20250630")
     params_path = experiment / "hitl" / "params.json"
@@ -450,12 +428,10 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         _NominatingLLM,
         _NoShellRunner,
     )
-    from tests.unit.test_operating_memory import _finished_experiment
 
     repo, experiment = make_experiment(tmp_path, developer_mode="llm")
     # The assertions below read the session tree. A finished experiment otherwise deletes it.
     monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
-    _finished_experiment(repo / "experiments", "adopted")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     # The console's GPU allocation for the research session, one-shot.
     write_control(experiment / "hitl" / "control.json", ControlState(gpu_counts={"research": 3}))
@@ -526,7 +502,6 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert "operating_memory_refused" not in host_manifest
     workspace = options.work_root / options.experiment_id / "research" / "agent" / "workspace"
     assert not (workspace / "memory").exists()
-    assert "adopted" not in (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
     assert read_control(experiment / "hitl" / "control.json").gpu_counts == {}
 
     # The session's transcript, named by the run's opaque ref, carries what

@@ -1,21 +1,16 @@
 #!/usr/bin/env python3
-"""Judge every stored reading of the current-rule experiments again and compare.
+"""Judge every stored reading of the experiments again and compare.
 
 The consistency check of the reading code (``pipelines/verdict.py``,
 ``validation_record.py``, ``config.py``, ``experiment.py``). An experiment keeps everything its readings were
 read from -- ``hitl/params.json``, the ledger's Steps with their style
-sidecars and revisions, the replays' results -- so each reading of an experiment
-created under the current rules is judged again by this code, CPU only, and
-compared with the ledger key for key:
+sidecars and revisions, the replays' results -- so each reading is judged again
+by this code, CPU only, and compared with the ledger key for key:
 
 - a research session's final registration (``experiment.check_registration``),
 - a forward record's slices, where its forward replay completed
   (``experiment.judged_replay``), and its readout off the ledger's rolling
   record and that forward slice (``validation_record.readout``).
-
-An experiment whose rules state no ``research_years`` was judged under rules since
-retired (the sealed gate) and is never judged again: its readings are what
-its ledger says.
 
 Run it by hand before landing a change to the reading code, from a checkout
 whose ``experiments/`` holds the experiments, or with ``--experiments``:
@@ -66,19 +61,9 @@ class Judgement(NamedTuple):
 
 
 def current_experiments(root: Path) -> list[Path]:
-    """The experiments under ``experiments`` judged under the current rules: those
-    whose rules state ``research_years`` (the rolling validation's, which the
-    session sees the research years under, every test registers against and
-    the readout reads). An experiment created before then was judged under rules
-    since retired, so its stored readings differ by the rule, not by a
-    defect."""
+    """The experiments under ``root``: every directory holding its params."""
 
-    experiments = []
-    for path in sorted(Path(root).iterdir()):
-        params = path / HITL_DIR_NAME / PARAMS_NAME
-        if params.is_file() and read_json_object(params).get("research_years") is not None:
-            experiments.append(path)
-    return experiments
+    return [path for path in sorted(Path(root).iterdir()) if (path / HITL_DIR_NAME / PARAMS_NAME).is_file()]
 
 
 def _stored(value: object) -> Any:

@@ -11,7 +11,7 @@
    console; charts read them too — decide every pixel from the first frame.
    Surfaces step bg < panel-2 < panel (light) and bg < panel < panel-2 (dark);
    text is --text or --muted; one accent. ok / warn / bad / muted are the
-   states — done or graduated, waiting, failed or rejected, ended — and
+   states — done, waiting, failed, ended — and
    --run (the accent) is running; their pairs keep WCAG AA (4.5:1) on every
    surface and their soft grounds, and stay apart under red-green and
    blue-yellow colour blindness. Dark surfaces are never black and its text
@@ -448,19 +448,12 @@ main {
  color: var(--muted);
  font-weight: 500;
 }
-/* How an experiment ended: a graduate reads as the one good outcome, a refusal (a
-   withdrawn graduation among them) and a broken worker as failures, and the
-   two endings nobody decided stay quiet. */
-.badge.ending-graduated {
- background: var(--ok-soft);
- color: var(--ok);
-}
-.badge.ending-rejected,
+/* How an experiment ended: a broken worker reads as a failure, and a spent
+   budget stays quiet. */
 .badge.ending-broken {
  background: var(--bad-soft);
  color: var(--bad);
 }
-.badge.ending-no_edge,
 .badge.ending-budget_exhausted {
  background: var(--chip-bg);
  color: var(--muted);

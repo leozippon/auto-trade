@@ -51,7 +51,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.webui import manager as manager_module
 from autotrade.webui.manager import ManagerError
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import CREATE_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 SRC_ROOT = str(Path(autotrade.__file__).resolve().parents[1])
@@ -143,7 +143,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.hitl.mkdir(parents=True)
         self.control_path = self.hitl / "control.json"
         self.status_path = self.hitl / "status.json"
-        write_json_atomic(self.hitl / "params.json", {"experiment_id": "exp_ctl"})
+        write_json_atomic(self.hitl / "params.json", {"experiment_id": "exp_ctl", **REQUIRED_RULES})
         write_control(self.control_path, ControlState())
         write_json_atomic(
             self.status_path, {"schema_version": 1, "pid": 999_999_999, "state": "stopped"}
@@ -292,7 +292,7 @@ class WorkerLifecycleTest(unittest.TestCase):
         other = self.experiments_root / "exp_other"
         AgentRefStore(other)
         (other / "hitl").mkdir(parents=True)
-        write_json_atomic(other / "hitl/params.json", {"experiment_id": "exp_other"})
+        write_json_atomic(other / "hitl/params.json", {"experiment_id": "exp_other", **REQUIRED_RULES})
         write_control(other / "hitl/control.json", ControlState())
         write_json_atomic(
             other / "hitl/status.json",

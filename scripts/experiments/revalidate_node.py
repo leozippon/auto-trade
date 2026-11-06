@@ -12,8 +12,7 @@ years (``full``, ``Yk`` or ``Yi..Yj``, the first ``research_years`` of its
 geometry as its params name them), resolved as the session resolved it, so
 nothing past them is ever replayed here: the validation years are the tests'
 and the host's completion, forward and Held-out the experiment's own forward stage.
-An experiment whose params name no ``research_years`` (created before the rolling
-validation) is refused before anything is written. What may be changed is
+What may be changed is
 recorded: ``--variant`` replays a modified copy of the node's ``output/``
 instead (an ablation; the reading keeps the diff against the recorded bytes),
 ``--seed`` gives the strategy's one seed line another integer (the one change
@@ -202,8 +201,7 @@ def main(argv: list[str] | None = None) -> int:
         params = read_json_object(finished / "hitl" / "params.json", missing_ok=True)
         if not params:
             raise ValueError(f"missing experiment params: {finished / 'hitl' / 'params.json'}")
-        # The experiment's own split, read as its worker reads it: a record without
-        # research_years is refused rather than read under every year.
+        # The experiment's own split, read as its worker reads it.
         research_years = acceptance_for(params).research_years
         row = session_step(ExperimentLedger(finished / "ledgers" / "experiment_ledger.jsonl").read(), args.node)
         out = label_dir(args.experiment, node_handle(row["step_id"]), args.label)

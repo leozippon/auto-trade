@@ -482,35 +482,33 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
     assert len(reasons) == 4, reasons
     assert reasons <= keys("const VERDICT_REASON_LABELS = {"), sorted(reasons)
     assert keys("const VERDICT_STATUS = {") == {"observing", "confirmed", "killed"}
-    from autotrade.paper.book import TRACKS
+    from autotrade.paper.book import CANDIDATE_SOURCE
 
-    assert keys("const TRACK_LABELS = {") == set(TRACKS)
+    assert keys("const TRACK_LABELS = {") == {CANDIDATE_SOURCE}
 
 
 def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
     """A creation parameter must not be registered into a Chinese label. 毕业成本压力倍数
     is per-experiment, so an experiment run at ×3 used to read "前推加倍滑点后超额"
     beside a threshold column that correctly said ×3 — a reproducible mislabel.
-    The three labels that name a threshold are functions of the `thresholds`
-    block, and the multiplier is now stated in the name alone, not twice."""
+    A label that names a threshold is a function of the `thresholds` block, and
+    the multiplier is stated in the name alone, not twice."""
 
     labels = _js_literal("const REASON_LABELS = {", "\n};")
-    for token, key in (("freeze_not_positive_at_cost_stress", "cost_stress_multiplier"),):
-        [line] = [row for row in labels.splitlines() if row.strip().startswith(f"{token}:")]
-        assert "(t) =>" in line and f"t.{key}" in line, token
-        # A missing threshold reads as the console's own dash, not as a default.
-        assert "fmtPct(" in line or '?? "—"' in line, token
+    rows = _js_literal("const SLICE_ROWS = [", "\n];")
+    [line] = [row for row in rows.splitlines() if row.strip().startswith('["excess_at_cost_stress",')]
+    assert "(t) =>" in line and "t.cost_stress_multiplier" in line, line
+    # A missing threshold reads as the console's own dash, not as a default.
+    assert '?? "—"' in line, line
     assert "加倍" not in labels + _js_literal("const SLICE_ROWS = [", "\n];")
     # No surface names the confidence in plain text: the lower bound's label is
     # worded from the slice's own parameters (``forward_confidence``), so a
     # change to the pipeline constant cannot leave a page quoting the old one.
     written = set(re.findall(r"(\d+)% 下界", APP_JS.read_text(encoding="utf-8")))
     assert written == set(), sorted(written)
-    # The registration check is worded the same way: its record carries both limits, so
-    # raising either one cannot leave the checklist quoting the old number.
+    # The registration check is worded the same way: its record carries its limits, so
+    # raising one cannot leave the checklist quoting the old number.
     gate = _js_function_body("registrationChecklist")
-    for key in ("min_full_span_validations", "min_deflated_sharpe_probability"):
-        assert f"t.{key}" in gate, key
     assert not re.search(r"≥ [0-9]", gate), gate
 
 
@@ -520,7 +518,6 @@ def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: P
     projection of a synthetic experiment that carries its readout, frozen with seed
     replicates so the fields only such an experiment has are served too."""
 
-    from autotrade.pipelines.ledger import VERDICT_VOID_FIELDS
     from autotrade.webui.registry import experiment_detail
     from tests.unit.webui_research_experiment import build_experiment
 
@@ -571,7 +568,6 @@ def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: P
         ("readoutBlock", reads("readoutBlock", "record"), set(detail["forward"]["readout"]["record"])),
         ("readoutBlock", reads("readoutBlock", "forward"), set(detail["forward"]["readout"]["forward"])),
         ("accountTiles", reads("accountTiles", "raw"), set(slices["forward"]["raw_readings"])),
-        ("readoutStagePanel", reads("readoutStagePanel", "withdrawn"), set(VERDICT_VOID_FIELDS)),
         ("researchSessionPanel", reads("researchSessionPanel", "row"), validation),
         ("registrationChecklist", reads("registrationChecklist", "gate"), gate),
         ("forwardStagePanel", reads("forwardStagePanel", "forward"), forward),

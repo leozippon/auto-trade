@@ -12,44 +12,33 @@ and Held-out replay its verdict named) into ``source_history.json``, so the
 book keeps the history its own days continue. A different capital, artifact or
 environment is a new book in a new state root.
 
-A book's track is recorded as its ``candidate_source``. A ``frozen`` book
-trades the registered strategy of an experiment with its forward record (the experiment's Paper
-candidate), opened by the operator from the console's ranking view; at most
-``BOOK_CAP`` operator-opened books are open at once. Two tracks from the
-sealed-gate rules stay readable: a ``graduated`` book traded a graduate's
-candidate, and an ``incubating`` book a node an operator incubated, whose
-source history is the replay the incubation recorded. Either way creation
-pins the rules its Paper verdict is read by
-(``paper/verdict.py``), so a later change cannot move a book already trading,
-and the boards its account may buy on, in its Broker profile: those of its
-source -- the boards its incubation replayed on, else the experiment's stamp,
-else every board -- that the book's own initial cash qualifies for
-(``broker.default_permitted_boards``), so a Paper account opened with less capital than
-its experiment does not keep the STAR Market or the Beijing exchange. The
+A book trades the registered strategy of an experiment with its forward record (the
+experiment's Paper candidate), recorded as its ``candidate_source``, and is opened by
+the operator from the console's ranking view; at most ``BOOK_CAP`` books are open at
+once. Creation pins the rules its Paper verdict is read by (``paper/verdict.py``),
+so a later change cannot move a book already trading, and the boards its account
+may buy on, in its Broker profile: those of the experiment's stamp (every board
+when it has none) that the book's own initial cash qualifies for
+(``broker.default_permitted_boards``), so a Paper account opened with less capital
+than its experiment does not keep the STAR Market or the Beijing exchange. The
 book's Broker and its verdict's random baseline both read that one field.
 """
 
 from __future__ import annotations
 
 import shutil
-from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, time
 from pathlib import Path
 
-from autotrade.common.records import (
-    dataclass_from_record,
-    read_current_record,
-    read_json_object,
-    write_json_atomic,
-)
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.replay.curve import result_curve
-from autotrade.environment.sandbox import GpuMode, SandboxConfig, SandboxSpec
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.experiment import null_control_seed
@@ -69,18 +58,14 @@ from .pit import require_audited_fundamentals
 from .storage import read_jsonl
 
 BOOK_NAME = "book.json"
-# 2: the track and the pinned verdict rules. An older book is refused, never
-# migrated: its verdict would be read by rules nobody pinned. 3: the snapshot
-# configuration and the strategy sandbox as their own records
-# (``SnapshotConfig.to_record``, ``SandboxConfig.to_record``) where 2 stored
-# the configuration's fields and the sandbox's former image/limits layout; a
-# schema-2 book is read in 3's form (``_schema_2_upgraded``) and its file is
-# never rewritten.
+# 3: the pinned verdict rules, and the snapshot configuration and the strategy
+# sandbox as their own records (``SnapshotConfig.to_record``,
+# ``SandboxConfig.to_record``). A book of another schema is refused.
 BOOK_SCHEMA_VERSION = 3
 STRATEGY_COPY_NAME = "strategy"
-TRACKS = ("frozen", "graduated", "incubating")
-# Operator-opened books (frozen, and the retired incubating track) open at
-# once; a killed book does not count.
+# What every book trades, as its ``candidate_source`` records it.
+CANDIDATE_SOURCE = "frozen"
+# Books open at once; a killed book does not count.
 BOOK_CAP = 4
 # The capital, in CNY, a new book starts with unless its creator names another,
 # whatever the experiment's own initial_cash (the owner's decision of 2026-11-06); a
@@ -117,7 +102,7 @@ class Book:
     root: Path
     experiment_id: str
     artifact_id: str
-    # The track: one of ``TRACKS``.
+    # ``CANDIDATE_SOURCE``.
     candidate_source: str
     note: str
     strategy_path: Path
@@ -143,58 +128,36 @@ def create_book(
     experiment_dir: str | Path,
     artifact_id: str,
     repo_root: str | Path,
-    track: str,
-    source_record: Mapping[str, object] | None = None,
-    permitted_boards: Sequence[str] | None = None,
     initial_cash: float = PAPER_INITIAL_CASH,
     note: str = "",
 ) -> Book:
     """Create the book at ``state_root`` (``<Paper state root>/<book id>``).
 
-    A ``frozen`` book (and a ``graduated`` one, under the sealed-gate rules)
-    trades the experiment's Paper candidate and copies the replay its forward record
-    names; it buys on the experiment's stamped boards (every board when the
-    experiment has none). An
-    ``incubating`` book trades the artifact the caller incubated -- the
-    caller has checked it may -- copies the replay ``source_record`` names,
-    in the forward record's shape (``result_ref`` inside the experiment
-    directory and ``replay.heldout_start``), and buys on the
-    ``permitted_boards`` that replay ran on; both are given exactly for that
-    track. Every book starts with ``initial_cash``, not the experiment's own,
-    and keeps only the boards that capital qualifies for. A
-    frozen or incubating book is refused while ``BOOK_CAP`` other
-    operator-opened books beside it are not killed. Every track is refused, before anything
-    is written, when the experiment reads fundamentals and the PIT fundamental
-    events audit does not cover the book's first decision view
+    The book trades the experiment's Paper candidate, copies the replay its forward
+    record names and buys on the experiment's stamped boards (every board when the
+    experiment has none). It starts with ``initial_cash``, not the experiment's own,
+    and keeps only the boards that capital qualifies for. A book is refused while
+    ``BOOK_CAP`` other books beside it are not killed, and, before anything is
+    written, when the experiment reads fundamentals and the PIT fundamental events
+    audit does not cover the book's first decision view
     (``pit.require_audited_fundamentals``).
     """
 
     root = Path(state_root).resolve()
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"Paper state root is not empty; a new book needs a new state root: {root}")
-    if track not in TRACKS:
-        raise ValueError(f"unknown Paper account track {track!r}; choose one of {', '.join(TRACKS)}")
-    if (track == "incubating") != (source_record is not None) or (track == "incubating") != (
-        permitted_boards is not None
-    ):
-        raise ValueError(
-            "an incubating book copies the replay its incubation recorded and the boards it ran on, "
-            "and only it: pass source_record and permitted_boards exactly for track 'incubating'"
-        )
     experiment = Path(experiment_dir).resolve(strict=True)
-    if track != "incubating":
-        candidate = paper_candidate(
-            ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+    candidate = paper_candidate(
+        ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+    )
+    if candidate is None:
+        raise ValueError(f"{experiment.name} has no Paper candidate: no registered strategy with a forward record")
+    if artifact_id != candidate["artifact_id"]:
+        raise ValueError(
+            f"{artifact_id} is not the Paper candidate of {experiment.name}; "
+            f"choose {candidate['artifact_id']}"
         )
-        if candidate is None:
-            raise ValueError(f"{experiment.name} has no Paper candidate: no registered strategy with a forward record")
-        if artifact_id != candidate["artifact_id"]:
-            raise ValueError(
-                f"{artifact_id} is not the Paper candidate of {experiment.name}; "
-                f"choose {candidate['artifact_id']}"
-            )
-    if track != "graduated":
-        require_book_place(root.parent, root.name)
+    require_book_place(root.parent, root.name)
     source = experiment / "artifacts" / "strategy" / "frozen" / artifact_id
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"registered artifact has no output/main.py: {source}")
@@ -214,8 +177,7 @@ def create_book(
         today=datetime.now(CN_TZ).strftime("%Y%m%d"),
     )
     profile = options.rolling.broker_profile
-    if permitted_boards is None:
-        permitted_boards = profile.permitted_boards or BOARDS
+    permitted_boards = profile.permitted_boards or BOARDS
     eligible = default_permitted_boards(profile.initial_cash)
     profile = replace(profile, permitted_boards=tuple(board for board in permitted_boards if board in eligible))
     sandbox = strategy_sandbox_from_spec(
@@ -240,7 +202,7 @@ def create_book(
         "created_at": datetime.now(CN_TZ).isoformat(),
         "experiment_id": experiment.name,
         "artifact_id": artifact_id,
-        "candidate_source": track,
+        "candidate_source": CANDIDATE_SOURCE,
         "artifact_fingerprint": fingerprint,
         "note": note,
         "strategy_path": str((copy / "output" / "main.py").relative_to(root)),
@@ -270,7 +232,7 @@ def create_book(
         },
     }
     write_json_atomic(root / BOOK_NAME, record, private=True, sort_keys=False)
-    copy_source_history(root, experiment, source_record)
+    copy_source_history(root, experiment)
     return load_book(root)
 
 
@@ -318,24 +280,18 @@ def write_source_history(
     return target
 
 
-def copy_source_history(
-    state_root: str | Path,
-    experiment_dir: str | Path,
-    record: Mapping[str, object] | None = None,
-) -> Path:
+def copy_source_history(state_root: str | Path, experiment_dir: str | Path) -> Path:
     """The book's copy of its source experiment's out-of-sample curve.
 
     The forward record names the one replay carrying the experiment's forward and
-    Held-out slices — the curve the console draws for that verdict — so an experiment
-    without one has no history to copy and says so. An incubated book passes
-    the replay its incubation recorded as ``record``, in the same shape. The
-    recorded path is read under the experiment's current directory
-    (``ledger.recorded_path``), so an experiment moved since its replay copies too.
+    Held-out slices — the curve the console draws beside its readout — so an
+    experiment without one has no history to copy and says so. The recorded path is
+    read under the experiment's current directory (``ledger.recorded_path``), so an
+    experiment moved since its replay copies too.
     """
 
     experiment = Path(experiment_dir).resolve(strict=True)
-    if record is None:
-        record = forward_record(ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read())
+    record = forward_record(ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read())
     if record is None:
         raise ValueError(
             f"{experiment.name} has no forward verdict record: there is no out-of-sample history to copy"
@@ -356,21 +312,14 @@ def copy_source_history(
 
 def load_book(state_root: str | Path) -> Book:
     root = Path(state_root).resolve()
-    record = read_current_record(root / BOOK_NAME, missing_ok=True)
+    record = read_json_object(root / BOOK_NAME, missing_ok=True)
     if not record:
         raise FileNotFoundError(f"no Paper account at {root}; create one with `run_paper.py init`")
-    if record.get("schema_version") == 2:
-        record = _schema_2_upgraded(record)
     if record.get("schema_version") != BOOK_SCHEMA_VERSION:
         raise ValueError(
             f"unsupported Paper account schema {record.get('schema_version')!r} in {root / BOOK_NAME} "
-            f"(this code reads 2 and {BOOK_SCHEMA_VERSION}): a book without a track and pinned verdict "
-            "rules is not migrated; delete it and create it again"
+            f"(this code reads {BOOK_SCHEMA_VERSION}); delete it and create it again"
         )
-    # A book created before the host NL interface was removed (2026-10-20) also
-    # records ``nl_gateway``, ``nl_config`` and ``nl_failure_policy``. They
-    # configured a service that no longer exists, so they are deliberately
-    # left unread: such a book loads, and trades, exactly as one without them.
     return Book(
         root=root,
         experiment_id=str(record["experiment_id"]),
@@ -381,9 +330,7 @@ def load_book(state_root: str | Path) -> Book:
         models_dir=root / str(record["models_dir"]) if record.get("models_dir") else None,
         schedule=StrategySchedule(**record["schedule"]),
         profile=BrokerProfile.from_record(record["profile"]),
-        # A book created before 2026-11-06 still records its experiment's decision
-        # clock; it is replaced, never read: every Paper decision runs under
-        # PAPER_DECISION_TIMEOUT_SECONDS.
+        # Every Paper decision runs under PAPER_DECISION_TIMEOUT_SECONDS.
         sandbox=SandboxConfig.from_record(
             {**record["sandbox"], "timeout_seconds": PAPER_DECISION_TIMEOUT_SECONDS}
         ),
@@ -420,26 +367,21 @@ def book_status(state_root: str | Path) -> str:
 
 
 def open_capped_books(paper_root: str | Path) -> list[str]:
-    """The ids of the operator-opened books under ``paper_root`` that are not
-    killed: the frozen track and the retired incubating one.
-
-    A hidden directory is a book being deleted (``books.delete_book``)."""
+    """The ids of the books under ``paper_root`` that are not killed. A hidden
+    directory is a book being deleted (``books.delete_book``)."""
 
     root = Path(paper_root)
     books = sorted(path.parent for path in root.glob(f"*/{BOOK_NAME}")) if root.is_dir() else []
     return [
         book.name
         for book in books
-        if not book.name.startswith(".")
-        and read_json_object(book / BOOK_NAME, missing_ok=True).get("candidate_source") in ("frozen", "incubating")
-        and book_status(book) != "killed"
+        if not book.name.startswith(".") and book_status(book) != "killed"
     ]
 
 
 def require_book_place(paper_root: str | Path, book_id: str) -> None:
-    """Refuse a new operator-opened book ``book_id`` while ``BOOK_CAP`` other
-    such books under ``paper_root`` are not killed; the book's own id never
-    counts against itself."""
+    """Refuse a new book ``book_id`` while ``BOOK_CAP`` other books under
+    ``paper_root`` are not killed; the book's own id never counts against itself."""
 
     others = [book for book in open_capped_books(paper_root) if book != book_id]
     if len(others) >= BOOK_CAP:
@@ -449,78 +391,14 @@ def require_book_place(paper_root: str | Path, book_id: str) -> None:
         )
 
 
-def _schema_2_upgraded(record: dict[str, object]) -> dict[str, object]:
-    """A schema-2 book's record in schema 3's form.
-
-    2 stored the snapshot configuration's fields, which come back strictly as
-    the configuration whose record 3 stores. Its sandbox kept the image,
-    Docker executable and pretrained-store pin (absent on a book created
-    before the store existed: it mounts nothing) beside a ``limits`` block of
-    the container's resources, the worker's clocks and the GPU request as a
-    count plus pinned devices (none pinned: the run takes its cards).
-    """
-
-    snapshot_config = dataclass_from_record(SnapshotConfig, record["snapshot_config"])
-    sandbox = record["sandbox"]
-    limits = sandbox["limits"]
-    if set(limits) != _SCHEMA_2_LIMIT_KEYS:
-        raise ValueError(f"schema-2 Paper sandbox limits must hold exactly {sorted(_SCHEMA_2_LIMIT_KEYS)}")
-    count = limits["gpu_count"]
-    spec = SandboxSpec(
-        image=str(sandbox["image"]),
-        docker_executable=str(sandbox["docker_executable"]),
-        pretrained_manifest_sha256=str(sandbox.get("pretrained_manifest_sha256") or ""),
-        cpus=limits["cpus"],
-        memory=limits["memory"],
-        pids=limits["pids"],
-        tmpfs_size=limits["tmpfs_size"],
-        shm_size=limits["shm_size"],
-        gpu=(tuple(limits["gpu_devices"]) or GpuMode.AUTO) if count else None,
-        gpu_count=count,
-        gpu_name_filter=limits["gpu_name_filter"],
-    )
-    config = SandboxConfig(
-        spec=spec,
-        # The experiment's copied decision clock is not read (PAPER_DECISION_TIMEOUT_SECONDS).
-        timeout_seconds=PAPER_DECISION_TIMEOUT_SECONDS,
-        fit_timeout_seconds=limits["fit_timeout_seconds"],
-        startup_timeout_seconds=limits["startup_timeout_seconds"],
-        max_output_chars=limits["max_output_chars"],
-    )
-    return {
-        **record,
-        "schema_version": BOOK_SCHEMA_VERSION,
-        "snapshot_config": snapshot_config.to_record(),
-        "sandbox": config.to_record(),
-    }
-
-
-_SCHEMA_2_LIMIT_KEYS = frozenset(
-    {
-        "cpus",
-        "memory",
-        "pids",
-        "timeout_seconds",
-        "fit_timeout_seconds",
-        "startup_timeout_seconds",
-        "max_output_chars",
-        "tmpfs_size",
-        "shm_size",
-        "gpu_count",
-        "gpu_name_filter",
-        "gpu_devices",
-    }
-)
-
-
 __all__ = [
     "BOOK_CAP",
     "BOOK_NAME",
+    "CANDIDATE_SOURCE",
     "PAPER_DECISION_TIMEOUT_SECONDS",
     "PAPER_INITIAL_CASH",
     "PAPER_SHEET_DUE",
     "SOURCE_HISTORY_NAME",
-    "TRACKS",
     "VERDICT_LOG_NAME",
     "Book",
     "book_status",

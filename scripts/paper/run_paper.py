@@ -4,8 +4,7 @@
 Books live side by side under the state root, one directory per book id.
 ``init`` pins one experiment's Paper candidate, its research environment and
 the artifact's out-of-sample curve into a new book (id: the experiment id, or
-``--book``); ``source-history`` backfills that curve into a book created before
-init copied it. ``run`` goes through
+``--book``). ``run`` goes through
 every book (or ``--book`` alone) one at a time, the books that follow real
 fills -- the ones the owner trades by hand -- first: it settles each session
 whose data has landed and makes the pre-open decision for the target session
@@ -57,15 +56,12 @@ from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.paper.book import (
     PAPER_INITIAL_CASH,
-    SOURCE_HISTORY_NAME,
     VERDICT_LOG_NAME,
     Book,
     book_status,
-    copy_source_history,
     create_book,
     load_book,
     verify_book_artifact,
-    write_source_history,
 )
 from autotrade.paper.books import (
     PAPER_STATE_DIR,
@@ -158,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     init = commands.add_parser("init", help="Create a Paper account from one experiment's Paper candidate.")
     init.add_argument("--experiment", required=True, help="Experiment id under experiments/.")
-    init.add_argument("--artifact", required=True, help="Registered artifact id: the graduate, or its adjustment.")
+    init.add_argument("--artifact", required=True, help="Registered artifact id: the experiment's Paper candidate.")
     init.add_argument(
         "--initial-cash",
         type=float,
@@ -168,22 +164,6 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--note", default="", help="One-line status shown at the top of every order sheet.")
     init.add_argument("--book", help="Book id; default: the experiment id.")
     init.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
-    history = commands.add_parser(
-        "source-history",
-        help="Copy an out-of-sample replay curve into a book created before init copied one.",
-    )
-    history.add_argument("--book", required=True, help="Book id under the state root.")
-    picked = history.add_mutually_exclusive_group(required=True)
-    picked.add_argument(
-        "--experiment",
-        help="Source experiment directory, wherever it now lives; its forward record names the replay.",
-    )
-    picked.add_argument(
-        "--result",
-        help="Replay result directory, for a source experiment whose ledger predates the forward record.",
-    )
-    history.add_argument("--heldout-start", help="YYYYMMDD the Held-out slice of --result opens on, if any.")
-    history.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     run = commands.add_parser("run", help="Settle landed sessions and decide one session, book by book.")
     run.add_argument("--trade-date", help="YYYYMMDD session; default: today in Asia/Shanghai.")
     run.add_argument("--book", help="Run this book only; default: every book.")
@@ -230,7 +210,6 @@ def init(args: argparse.Namespace) -> int:
         experiment_dir=REPO_ROOT / "experiments" / args.experiment,
         artifact_id=args.artifact,
         repo_root=REPO_ROOT,
-        track="frozen",
         initial_cash=args.initial_cash,
         note=args.note,
     )
@@ -240,41 +219,6 @@ def init(args: argparse.Namespace) -> int:
         f"commission {book.profile.commission_bps} bps, slippage {book.profile.slippage_bps} bps, "
         f"fit timeout {book.sandbox.fit_timeout_seconds:g}s, image {book.sandbox.spec.image}"
     )
-    return 0
-
-
-def source_history(args: argparse.Namespace) -> int:
-    """Backfill one book created before init copied the curve.
-
-    A current experiment names its own replay through the forward record; an
-    experiment retired under an older ledger has no such record, so the operator names
-    the replay result directory instead.
-    """
-
-    root = args.state_root / validate_book_id(args.book)
-    book = load_book(root)
-    if (root / SOURCE_HISTORY_NAME).exists():
-        raise FileExistsError(f"{book.root.name} already has {SOURCE_HISTORY_NAME}; a book copies it once")
-    if args.experiment:
-        experiment = Path(args.experiment).resolve(strict=True)
-        if experiment.name != book.experiment_id:
-            raise ValueError(
-                f"{experiment} is not the source of {book.root.name}: the book names {book.experiment_id}"
-            )
-        if book.candidate_source == "incubating":
-            raise ValueError(
-                f"{book.root.name} is {book.candidate_source}: its history is the replay its incubation "
-                "recorded, not the forward record's; name that replay with --result"
-            )
-        written = copy_source_history(root, experiment)
-    else:
-        written = write_source_history(
-            root,
-            experiment_id=book.experiment_id,
-            result_file=Path(args.result).resolve(strict=True),
-            heldout_start=args.heldout_start,
-        )
-    print(f"wrote {written}")
     return 0
 
 
@@ -440,7 +384,7 @@ def run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    commands = {"init": init, "run": run, "source-history": source_history, "verdict": verdict, "vintages": vintages}
+    commands = {"init": init, "run": run, "verdict": verdict, "vintages": vintages}
     return commands[args.command](args)
 
 

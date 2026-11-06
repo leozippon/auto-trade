@@ -22,7 +22,7 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from autotrade.common.records import read_current_record, read_json_object
+from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import (
     ArtifactRevision,
     RegisteredArtifact,
@@ -78,7 +78,6 @@ from .config import (
 )
 from .ledger import (
     ENVIRONMENT_BLOCKED,
-    RETIRED_ABLATION_KEY,
     STRATEGY_ERROR,
     ExperimentLedger,
     RegisteredArtifactMutated,
@@ -89,7 +88,6 @@ from .ledger import (
     VerdictStatus,
     assert_no_registered_artifact_mutation,
     forward_record,
-    incubation_record,
     is_registered_artifact_mutation,
     recorded_path,
     registered_record,
@@ -1471,7 +1469,7 @@ def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> di
     (``ledger.recorded_path``)."""
 
     result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
-    return read_current_record(result.parent / STYLE_ARTIFACT_NAME)
+    return read_json_object(result.parent / STYLE_ARTIFACT_NAME)
 
 
 def null_control_seed(key: str, role: str) -> int:
@@ -1508,7 +1506,7 @@ def validation_statistics(result_ref: str) -> dict[str, object] | None:
     """
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
-    return _measured_or_none(read_current_record(path))
+    return _measured_or_none(read_json_object(path))
 
 
 def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, object]]:
@@ -1516,8 +1514,8 @@ def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, o
 
     path = Path(result_ref)
     return (
-        read_current_record(path),
-        read_current_record(path.parent / STYLE_ARTIFACT_NAME),
+        read_json_object(path),
+        read_json_object(path.parent / STYLE_ARTIFACT_NAME),
     )
 
 
@@ -1633,22 +1631,15 @@ def _keep_registered_artifact_ids(
     records: Sequence[Mapping[str, object]],
     extra_id: str | None = None,
 ) -> tuple[str, ...]:
-    """The experiment's registered artifact and its seed replicates, the ablation an experiment
-    frozen before 2026-11-05 registered beside them (``ledger.RETIRED_ABLATION_KEY``),
-    those an incubation recorded before 2026-11-03 registered, any artifact an
+    """The experiment's registered artifact and its seed replicates, any artifact an
     integrity row names, and the registration now being recorded."""
 
     keep = {str(extra_id)} if extra_id else set()
-    for row in (registered_record(records), incubation_record(records)):
-        if row is None:
-            continue
+    row = registered_record(records)
+    if row is not None:
         block: Mapping[str, object] = row["frozen"]  # type: ignore[assignment]
         keep.add(str(block["artifact_id"]))
-        keep.update(
-            str(item["artifact_id"])
-            for item in (*(block.get("seed_replicates") or ()), block.get(RETIRED_ABLATION_KEY))  # type: ignore[misc]
-            if item
-        )
+        keep.update(str(item["artifact_id"]) for item in block.get("seed_replicates") or ())  # type: ignore[index, union-attr]
     for record in records:
         if is_registered_artifact_mutation(record) and record.get("artifact_id"):
             keep.add(str(record["artifact_id"]))

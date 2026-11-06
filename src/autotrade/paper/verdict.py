@@ -10,7 +10,7 @@ from the boards the book may buy on. The days begin at the book's first Paper
 settlement: the forward year selected the book, so it is never read into the
 statistic.
 
-The series is read as graduation reads the forward year, with no
+The series is read as the forward reading reads the forward year, with no
 regression: its annualised mean, F2's statistic.
 
 A book is ``observing`` until one terminal transition, ``confirmed`` or
@@ -35,7 +35,6 @@ import numpy as np
 import pandas as pd
 
 from autotrade.common.records import (
-    read_current_record,
     read_json_object,
     write_json_atomic,
 )
@@ -75,7 +74,7 @@ def paper_reading(book: Book) -> dict[str, object]:
     """
 
     equity, executions = _journals(book.root)
-    previous = read_current_record(book.root / VERDICT_NAME, missing_ok=True)
+    previous = read_json_object(book.root / VERDICT_NAME, missing_ok=True)
     if not equity:
         return evidence_reading(book, equity, executions, None, {}, previous=previous)
     slot = newest_replay_slot(book.root)

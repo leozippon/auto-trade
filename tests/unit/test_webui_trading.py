@@ -105,7 +105,7 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
     payload = trading.book_payload(tmp_path, BOOK)
     assert payload["state"] == "ok"
     assert payload["book"] == {
-        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "graduated",
+        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "frozen",
         "note": "参考簿（观察中）", "initial_cash": 100_000.0,
     }
     assert (payload["start_date"], payload["settled_through"]) == ("20260105", "20260105")
@@ -262,7 +262,7 @@ def test_a_book_carries_the_source_curve_the_console_projects_for_that_result(tm
     therefore copied into the book when the book is created — projected by the
     same code the console projects that very result with."""
     experiments = tmp_path / "experiments"
-    experiment = build_experiment(experiments, "exp", "graduated")
+    experiment = build_experiment(experiments, "exp", "registered_with_record")
     root = engine_book(tmp_path, "20260105", "20260106")
     copy_source_history(root, experiment)
     payload = trading.performance_payload(tmp_path, BOOK)
@@ -291,7 +291,7 @@ def test_a_moved_experiment_copies_its_forward_result_and_nothing_outside_it(tmp
     A book opened from an experiment moved since copies that replay from where the experiment
     now lives; a record naming a path outside the experiment is refused."""
     old_root = tmp_path / "old/experiments"
-    build_experiment(old_root, "exp", "graduated")
+    build_experiment(old_root, "exp", "registered_with_record")
     experiments = tmp_path / "experiments"
     old_root.rename(experiments)
     experiment = experiments / "exp"
@@ -304,9 +304,13 @@ def test_a_moved_experiment_copies_its_forward_result_and_nothing_outside_it(tmp
     assert source["series"][0]["cum"] == console["series"][0]["cum"]
 
     (root / SOURCE_HISTORY_NAME).unlink()
-    outside = {**forward_record(ledger.read()), "result_ref": str(tmp_path / "elsewhere/result.json")}
+    rows = [json.loads(line) for line in ledger.path.read_text(encoding="utf-8").splitlines()]
+    for row in rows:
+        if row["record_type"] == "forward":
+            row["result_ref"] = str(tmp_path / "elsewhere/result.json")
+    ledger.path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
     with pytest.raises(FileNotFoundError, match="outside the experiment"):
-        copy_source_history(root, experiment, outside)
+        copy_source_history(root, experiment)
     assert not (root / SOURCE_HISTORY_NAME).exists()
 
 
@@ -314,10 +318,10 @@ def test_an_experiment_without_a_forward_record_has_no_history_to_copy(tmp_path:
     """The forward record names the replay that carries the verdict's slices;
     without it there is nothing to copy, and init must say so rather than
     leaving a book that silently has no history."""
-    sealed = build_experiment(tmp_path / "experiments", "sealed_experiment", "sealed")
+    replaying = build_experiment(tmp_path / "experiments", "replaying_experiment", "forward")
     root = engine_book(tmp_path, "20260105")
     with pytest.raises(ValueError, match="no forward verdict record"):
-        copy_source_history(root, sealed)
+        copy_source_history(root, replaying)
     assert not (root / SOURCE_HISTORY_NAME).exists()
 
 
@@ -446,7 +450,7 @@ def test_env_and_book_whitelists_reject_everything_else(tmp_path: Path):
 def test_the_console_opens_a_registered_strategys_book_and_deletes_it_between_runs(tmp_path: Path):
     experiments = tmp_path / "elsewhere"  # the console's experiments root
     build_experiment(experiments, "exp", "registered_with_record")
-    build_experiment(experiments, "loser", "discarded")
+    build_experiment(experiments, "loser", "deadline")
     client = TestClient(create_app(tmp_path, experiments))
 
     def open_book(experiment_id: str, env: str = "paper"):
@@ -486,7 +490,7 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     assert (alpha["start_date"], alpha["initial_cash"], alpha["state"]) == ("20260105", 100_000.0, "ok")
     # The card names where the candidate came from and draws the book's own
     # curve; the maximum drawdown the day count gates belongs to the book page.
-    assert alpha["candidate_source"] == "graduated" and "max_drawdown" not in alpha
+    assert alpha["candidate_source"] == "frozen" and "max_drawdown" not in alpha
     # 持仓 is the one figure every settled book has: the lines its own 当前持仓
     # panel lists, absent rather than zero before the first snapshot.
     assert alpha["position_count"] == len(snapshot["positions"])

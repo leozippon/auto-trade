@@ -3,8 +3,8 @@ experiment the real worker ran to its readout.
 
 The run over the real experiments reads ``experiments/`` and is made by hand (the
 script's docstring says how); here it reads an experiment small enough for the unit
-suite: every reading the experiment stores reproduces, a tampered one is named and
-fails the run, and an experiment created under rules since retired is not judged.
+suite: every reading the experiment stores reproduces, and a tampered one is named
+and fails the run.
 """
 
 from __future__ import annotations
@@ -18,8 +18,6 @@ import pytest
 
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines import worker
-from autotrade.pipelines.experiment import _keep_registered_artifact_ids
-from autotrade.pipelines.ledger import RETIRED_ABLATION_KEY
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
     check_experiment,
@@ -120,31 +118,3 @@ def test_a_tampered_reading_is_named_and_fails_the_run(experiment: Path, tmp_pat
         "readout": ["record.residual_information_ratio"],
     }
     assert main(["--experiments", str(copy.parent)]) == 1
-
-
-def test_an_experiment_created_under_retired_rules_is_not_judged(experiment: Path, tmp_path: Path) -> None:
-    """An experiment is judged by the rules it states, whenever it was created: one
-    whose rules name no research years is never judged again."""
-
-    root = tmp_path / "experiments"
-    _copy(experiment, root, research_years=None)
-    assert current_experiments(root) == []
-    assert main(["--experiments", str(root)]) == 0
-
-
-def test_an_experiment_frozen_with_the_retired_ablation_is_not_judged_and_keeps_it(experiment: Path, tmp_path: Path) -> None:
-    """An experiment frozen while the ablation existed states the sealed gate's
-    rules, not ``research_years``, so it is never judged again; the ablation
-    it registered beside its nominee (``ledger.RETIRED_ABLATION_KEY``) stays out
-    of the prune."""
-
-    ablation = {"artifact_id": "strategy_research_0ab1a7e0f00d", "source_step_id": "s", "line": "main.py:7: A -> B"}
-
-    def recorded(records: list[dict]) -> None:
-        _record(records, "research_session")["frozen"][RETIRED_ABLATION_KEY] = ablation
-
-    root = tmp_path / "experiments"
-    copy = _copy(experiment, root, recorded, research_years=None, sealed_years=1, ablation_required=True)
-    assert current_experiments(root) == []
-    records = [json.loads(line) for line in (copy / LEDGER).read_text(encoding="utf-8").splitlines()]
-    assert ablation["artifact_id"] in _keep_registered_artifact_ids(records)

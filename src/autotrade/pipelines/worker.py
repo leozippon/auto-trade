@@ -82,7 +82,6 @@ from .hitl_state import (
 )
 from .interactive import InteractiveExperimentRunner
 from .ledger import (
-    FOLD_ERA_RECORD_TYPES,
     ExperimentLedger,
     RegisteredArtifactMutated,
     RunMarkers,
@@ -820,15 +819,6 @@ def run_local_interactive_worker(
     ledger = ExperimentLedger(options.rolling.ledger_path)
     store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
     records = ledger.read()
-    fold_era = sorted(
-        {str(record.get("record_type")) for record in records}
-        & set(FOLD_ERA_RECORD_TYPES)
-    )
-    if fold_era:
-        raise ValueError(
-            f"{options.experiment_id} holds a Fold-era ledger ({', '.join(fold_era)} "
-            "records); this pipeline does not resume it"
-        )
     try:
         assert_no_registered_artifact_mutation(records)
     except RegisteredArtifactMutated as exc:

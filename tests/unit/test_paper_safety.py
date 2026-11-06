@@ -21,12 +21,12 @@ from autotrade.paper.storage import read_jsonl
 from autotrade.webui import trading
 from tests.unit.paper_book_fixture import BOOK_SESSIONS
 from tests.unit.test_paper_trading import COUNTER_STRATEGY, PROFILE, _bars, _Data
-from tests.unit.test_paper_verdict import _graduated_book, _run_paper, _write_slot
+from tests.unit.test_paper_verdict import _registered_book, _run_paper, _write_slot
 
 
 def _setup(tmp_path, monkeypatch, *, losing=False):
     cli = _run_paper()
-    book = _graduated_book(tmp_path)
+    book = _registered_book(tmp_path)
     book.strategy_path.write_text(COUNTER_STRATEGY, encoding="utf-8")
     models = book.root / "strategy/models"
     models.mkdir()

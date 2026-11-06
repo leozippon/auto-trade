@@ -7,14 +7,13 @@ The directory never moves. The console's home list leaves the experiment out (an
 never summarizes it) and offers it under 已归档 instead, its experiment page
 still opens but the console never starts its worker again, and
 ``prune_pit_views.py`` treats it as finished for good, so its derived PIT
-caches may go. Lineage, the consistency check, the round fill queue, the
-running caps and Paper read the experiment exactly as before. The console need not
+caches may go. The consistency check, the round fill queue, the running caps
+and Paper read the experiment exactly as before. The console need not
 be running.
 
 Only an experiment that is over and holds nothing live is archived. Every experiment named
 is checked before anything changes, and the command refuses them all when one
-has a live or launching worker, a graduation that has not been voided
-(``void_graduation.py``), or a Paper account. Archiving an archived experiment keeps its
+has a live or launching worker or a Paper account. Archiving an archived experiment keeps its
 marker, and restoring an experiment that is not archived changes nothing.
 """
 
@@ -37,12 +36,7 @@ add_repo_src(__file__)
 from autotrade.common.records import write_json_atomic
 from autotrade.paper.books import PAPER_STATE_DIR, experiment_books
 from autotrade.pipelines.hitl_state import ARCHIVED_NAME, HITL_DIR_NAME
-from autotrade.pipelines.ledger import VerdictStatus, experiment_verdict
-from autotrade.webui.registry import (
-    experiment_state,
-    read_ledger_records,
-    resolve_experiment_dir,
-)
+from autotrade.webui.registry import experiment_state, resolve_experiment_dir
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -53,9 +47,6 @@ def refusal(directory: Path, paper_root: Path) -> str | None:
     state = experiment_state(directory)
     if state.get("worker_alive") or state.get("state") == "launching":
         return "has a live worker; stop it first"
-    verdict = experiment_verdict(read_ledger_records(directory))
-    if verdict is not None and verdict["status"] == VerdictStatus.GRADUATED:
-        return "is a graduate; void the graduation first (void_graduation.py)"
     books = experiment_books(paper_root, directory.name)
     if books:
         return f"has Paper account {', '.join(books)}"

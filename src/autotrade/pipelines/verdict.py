@@ -654,8 +654,7 @@ class ConditionStage(StrEnum):
 class ConditionReason(StrEnum):
     """Every reason token a final registration records: one per condition of
     :data:`CONDITIONS`, and the two a registration records when it never read
-    a nominee. The values are persisted in ledger records; a ledger judged
-    under the sealed-gate rules also carries that gate's retired tokens."""
+    a nominee. The values are persisted in ledger records."""
 
     NON_FINITE_TOTAL_RETURN = "non_finite_total_return"
     NON_FINITE_MAX_DRAWDOWN = "non_finite_max_drawdown"

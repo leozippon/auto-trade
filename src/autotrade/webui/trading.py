@@ -39,7 +39,7 @@ from pathlib import Path
 
 import pyarrow as pa
 
-from autotrade.common.records import read_current_record
+from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
@@ -160,7 +160,7 @@ def _read_json(path: Path) -> tuple[dict[str, object] | None, str | None]:
     """(payload, error): (None, None) = missing, (None, msg) = unreadable. The
     reader names the file by its host path, which a console page omits."""
     try:
-        return read_current_record(path), None
+        return read_json_object(path), None
     except FileNotFoundError:
         return None, None
     except (OSError, ValueError) as exc:

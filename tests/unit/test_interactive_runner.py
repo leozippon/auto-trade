@@ -68,7 +68,7 @@ class RecordingExecutor:
                     "run_id": f"run_{len(self.calls)}",
                     "session_key": session.session_key,
                     **(
-                        {"verdict": {"status": "discarded", "reasons": ["x"]}}
+                        {"readout": {"state": "registered_with_record"}}
                         if session.kind == "forward"
                         else {}
                     ),

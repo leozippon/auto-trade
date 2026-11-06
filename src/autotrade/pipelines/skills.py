@@ -45,16 +45,6 @@ OPERATING_MEMORY_SNAPSHOT_NAME = "memory_snapshot.json"
 OPERATING_MEMORY_SNAPSHOT_SCHEMA = 1
 OPERATING_MEMORY_MODES = ("none", "curated")
 DEFAULT_OPERATING_MEMORY = "curated"
-# The graduated tier -- the skills of every graduated experiment, mounted
-# beside the curated library -- was retired on 2026-11-05. Every experiment created
-# before then names this mode, and a snapshot frozen before then may hold
-# entries of this origin. Such an experiment reads as ``curated``
-# (:func:`resolve_operating_memory`); such an entry stays in the record and is
-# never mounted (:func:`snapshot_memory_sources`), which changes no experiment on
-# disk then, whose mount refused every one of them on its Held-out end; and a
-# new experiment cannot name the mode (:func:`create_operating_memory_snapshot`).
-RETIRED_OPERATING_MEMORY_MODE = "curated+graduated"
-RETIRED_MEMORY_ORIGIN = "graduated"
 SKILL_FILENAME = "SKILL.md"
 SKILLS_INDEX_PATH = "inputs/skills_index.json"
 MAX_SKILL_NAME_CHARS = 64
@@ -413,16 +403,9 @@ def operating_memory_entries(library: str | Path) -> tuple[str, ...]:
 
 
 def resolve_operating_memory(value: object) -> str:
-    """An experiment's mode: ``none`` or ``curated``, the default.
-
-    An experiment created before 2026-11-05 names ``RETIRED_OPERATING_MEMORY_MODE``
-    and reads as ``curated``: its frozen snapshot decides what its sessions
-    mount, and the graduated entries the snapshot holds are never mounted.
-    """
+    """An experiment's mode: ``none`` or ``curated``, the default."""
 
     text = str(value).strip() if value not in (None, "") else DEFAULT_OPERATING_MEMORY
-    if text == RETIRED_OPERATING_MEMORY_MODE:
-        return "curated"
     if text not in OPERATING_MEMORY_MODES:
         raise ValueError(
             "operating_memory must be one of " + ", ".join(OPERATING_MEMORY_MODES)
@@ -466,20 +449,13 @@ def create_operating_memory_snapshot(
     The curated library keeps moving; an experiment does not. Resolving it
     once at creation is what makes an experiment's own sessions comparable to
     each other, and what makes a library change something that reaches the
-    *next* experiment rather than the middle of this one. A request that
-    names ``RETIRED_OPERATING_MEMORY_MODE`` is refused.
+    *next* experiment rather than the middle of this one.
 
     The copy lands read-only in ``artifacts/memory/<source>/<name>/`` beside the
     experiment's skills generations, so it survives exactly as long as the
     experiment does.
     """
 
-    if str(mode).strip() == RETIRED_OPERATING_MEMORY_MODE:
-        raise ValueError(
-            f"operating_memory {RETIRED_OPERATING_MEMORY_MODE!r} named the graduated "
-            "tier, retired on 2026-11-05; choose one of "
-            + ", ".join(OPERATING_MEMORY_MODES)
-        )
     resolved = resolve_operating_memory(mode)
     root = operating_memory_snapshot_root(experiment_dir)
     record_path = operating_memory_snapshot_path(experiment_dir)
@@ -574,19 +550,14 @@ def ensure_operating_memory_snapshot(
 def snapshot_memory_sources(
     record: Mapping[str, object], experiment_dir: str | Path
 ) -> tuple[MemorySource, ...]:
-    """The snapshot's curated entries as the one source they mount from.
-
-    An entry of ``RETIRED_MEMORY_ORIGIN`` is accepted and left out; any other
-    entry that is not the curated library's is refused.
-    """
+    """The snapshot's curated entries as the one source they mount from; an
+    entry that is not the curated library's is refused."""
 
     names: list[str] = []
     for entry in record.get("entries") or ():  # type: ignore[union-attr]
         if not isinstance(entry, Mapping):
             raise ValueError("skill library snapshot entry must be an object")
         origin = str(entry.get("origin") or "")
-        if origin == RETIRED_MEMORY_ORIGIN:
-            continue
         name = validate_skill_name(str(entry.get("name") or ""))
         if origin != "curated" or entry.get("source") != CURATED_MEMORY_SOURCE:
             raise ValueError("skill library snapshot entry is invalid")
@@ -995,8 +966,6 @@ __all__ = [
     "OPERATING_MEMORY_LIBRARY",
     "OPERATING_MEMORY_MODES",
     "OPERATING_MEMORY_SNAPSHOT_NAME",
-    "RETIRED_MEMORY_ORIGIN",
-    "RETIRED_OPERATING_MEMORY_MODE",
     "SKILLS_INDEX_PATH",
     "DeleteSkillTool",
     "ExperimentSkillsStore",

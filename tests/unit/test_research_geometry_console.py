@@ -1,8 +1,8 @@
 """Console surfaces of the research geometry.
 
-The console lists experiments from whatever is on disk, so a Fold-era
-``params.json`` must degrade to an unreadable row instead of taking the
-listing down; the experiment's verdict reaches the listing once its forward record
+The console lists experiments from whatever is on disk, so a ``params.json``
+naming parameters no parameter declares must degrade to an unreadable row
+instead of taking the listing down; the experiment's verdict reaches the listing once its forward record
 exists; and the create form is seeded with the research geometry the worker
 actually runs.
 """
@@ -42,7 +42,7 @@ def _experiment(root: Path, experiment_id: str, params: dict[str, object]) -> Pa
 
 # What the console stamps: the geometry and every required rule.
 _CURRENT = {**DEFAULT_RESEARCH_GEOMETRY.to_record(), **REQUIRED_RULES}
-_FOLD_ERA = {
+_UNKNOWN = {
     "fold_period": "year",
     "development_first_period": "2022",
     "development_last_period": "2025",
@@ -51,9 +51,9 @@ _FOLD_ERA = {
 }
 
 
-def test_a_fold_era_params_file_is_flagged_unreadable_and_the_rest_still_list(tmp_path: Path):
+def test_a_params_file_of_unknown_keys_is_flagged_unreadable_and_the_rest_still_list(tmp_path: Path):
     root = tmp_path / "experiments"
-    _experiment(root, "legacy", _FOLD_ERA)
+    _experiment(root, "legacy", _UNKNOWN)
     _experiment(root, "current", _CURRENT)
     rows = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
     assert rows["legacy"]["state"] == "unreadable"
@@ -72,19 +72,19 @@ def test_a_fold_era_params_file_is_flagged_unreadable_and_the_rest_still_list(tm
 
 def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path: Path):
     root = tmp_path / "experiments"
-    directory = _experiment(root, "graduate", _CURRENT)
+    directory = _experiment(root, "registered", _CURRENT)
     write_json_atomic(directory / "hitl/schedule.json", build_session_plan(forward={}))
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
     frozen = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
     ledger.append(
         {
             "record_type": "research_session",
-            "experiment_id": "graduate",
+            "experiment_id": "registered",
             "epoch_id": "research",
             "fold_id": "research",
             "run_id": "run_research",
             "session_key": "research",
-            "outcome": "freeze",
+            "outcome": "completed",
             "steps": [],
             "frozen": {"artifact_id": "strategy_research_abc", "output_path": str(frozen)},
         }
@@ -96,22 +96,22 @@ def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path
     ledger.append(
         {
             "record_type": "forward",
-            "experiment_id": "graduate",
+            "experiment_id": "registered",
             "epoch_id": "forward",
             "fold_id": "forward",
             "run_id": "run_forward",
             "session_key": "forward",
             "artifact_id": "strategy_research_abc",
             "status": "ok",
-            "verdict": {"status": "graduated", "reasons": []},
+            "readout": {"state": "registered_with_record", "record": {}, "forward": {}},
         }
     )
     summary = summarize_experiment(directory)
-    assert summary["verdict"]["status"] == "graduated"
+    assert summary["verdict"]["status"] == "registered_with_record"
     assert summary["verdict"]["reasons"] == []
     assert summary["paper_candidate"]["artifact_id"] == "strategy_research_abc"
-    detail = TestClient(create_app(tmp_path)).get("/api/experiments/graduate").json()
-    assert detail["verdict"]["status"] == "graduated"
+    detail = TestClient(create_app(tmp_path)).get("/api/experiments/registered").json()
+    assert detail["verdict"]["status"] == "registered_with_record"
 
 
 def test_the_create_form_is_seeded_with_the_research_geometry(tmp_path: Path):

@@ -29,8 +29,6 @@ from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
-    OBSOLETE_KEYS,
-    RETIRED_SWITCHES,
     AcceptanceRules,
     RollingExperimentConfig,
     acceptance_for,
@@ -126,11 +124,12 @@ class AcceptanceRulesTest(unittest.TestCase):
 
         from autotrade.pipelines.config import BudgetUsed
 
-        for key in sorted(OBSOLETE_KEYS):
+        retired = {"sealed_years", "ablation_required", "max_replay_years", "finalize_before_deadline_seconds"}
+        for key in sorted(retired):
             with self.subTest(key=key), self.assertRaises(TypeError):
                 AcceptanceRules(**REQUIRED_RULES, **{key: 1})
         names = {field.name for field in fields(AcceptanceRules)}
-        self.assertFalse(names & OBSOLETE_KEYS)
+        self.assertFalse(names & retired)
         self.assertEqual(
             {"alpha", "research_years", "test_step_months", "validates_per_step"} - names, set()
         )
@@ -224,30 +223,22 @@ class AcceptanceRulesTest(unittest.TestCase):
             },
         )
         self.assertEqual(AcceptanceRules.from_record(rules.to_record()), rules)
-        # A params.json or run manifest written before the required rules
-        # existed -- every experiment created under the deflated-Sharpe gate -- is
+        # A params.json or run manifest that leaves a required rule out is
         # refused, never read under a value it did not state.
         for missing in REQUIRED_RULES:
             stated = {key: value for key, value in REQUIRED_RULES.items() if key != missing}
             with self.assertRaisesRegex(ValueError, f"lack the required {missing}"):
-                AcceptanceRules.from_record({"max_drawdown": 0.25, "min_active_ir": 0.75, **stated})
+                AcceptanceRules.from_record({"max_drawdown": 0.25, **stated})
             with self.assertRaisesRegex(ValueError, f"lack the required {missing}"):
                 acceptance_for({"max_drawdown": 0.25, **stated})
             with self.assertRaises(TypeError):
                 AcceptanceRules(max_drawdown=0.25, **stated)  # type: ignore[arg-type]
-        # A record that states them rebuilds the rules it names, retired thresholds
-        # ignored, with no tracking mandate, and the forward thresholds it leaves out
-        # resolve to today's defaults.
-        old = AcceptanceRules.from_record(
-            {
-                "min_return": 0.01,
-                "max_drawdown": 0.25,
-                "min_dsr_probability": 0.975,
-                "min_mean_gross": 0.5,
-                "heldout_tolerance_z": 1.28,
-                **REQUIRED_RULES,
-            }
-        )
+        # A record that states them rebuilds the rules it names, with no tracking
+        # mandate, and the forward thresholds it leaves out resolve to today's
+        # defaults; a key that names no rule is refused.
+        old = AcceptanceRules.from_record({"max_drawdown": 0.25, **REQUIRED_RULES})
+        with self.assertRaisesRegex(ValueError, "name no rule min_dsr_probability"):
+            AcceptanceRules.from_record({"min_dsr_probability": 0.975, **REQUIRED_RULES})
         self.assertEqual(old, AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25))
         self.assertIsNone(old.tracking_error_cap)
         self.assertEqual(old.forward_confidence, verdict.FORWARD_CONFIDENCE)
@@ -366,17 +357,11 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("registered book and its seed replicates", forward["reported"])
         self.assertIn("deciding nothing", forward["reported"])
 
-    def test_a_record_with_a_retired_key_still_rebuilds_the_rules(self) -> None:
-        rules = AcceptanceRules.from_record(
-            {
-                "max_drawdown": 0.2,
-                "heldout_min_trades": 5,
-                "confirmation_folds": 2,
-                **dict.fromkeys(RETIRED_SWITCHES, False),
-                **REQUIRED_RULES,
-            }
-        )
-        self.assertEqual(rules, AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.2))
+    def test_a_record_naming_a_retired_key_is_refused(self) -> None:
+        with self.assertRaisesRegex(ValueError, "name no rule dividend_tax, heldout_min_trades"):
+            AcceptanceRules.from_record(
+                {"max_drawdown": 0.2, "heldout_min_trades": 5, "dividend_tax": False, **REQUIRED_RULES}
+            )
 
     def test_the_cost_stress_multiplier_must_be_a_stress(self) -> None:
         with self.assertRaisesRegex(ValueError, "cost_stress_multiplier must be at least one"):
@@ -470,8 +455,6 @@ class DefaultsDriftTest(unittest.TestCase):
                 continue
             self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(profile, key), key)
         rules = AcceptanceRules(**REQUIRED_RULES).to_record()
-        # A retired switch is no parameter a request can name.
-        self.assertFalse(RETIRED_SWITCHES & set(WEB_CREATE_DEFAULTS))
         # Drawdowns and the mandate switch stay empty so the form does not pin
         # a mandate onto every experiment, and the research years have no console
         # value: every request states them (WEB_REQUIRED_PARAMS). Every other
@@ -534,12 +517,10 @@ class DefaultsDriftTest(unittest.TestCase):
         # off, on whatever capital the Broker profile carries.
         self.assertEqual(options.rolling.acceptance, AcceptanceRules(**REQUIRED_RULES))
 
-    def test_the_retired_switches_are_accepted_and_inert_and_any_other_key_refused(self) -> None:
-        """Every params.json written before 2026-10-07 carries the retired
-        switches. The worker loads such an experiment as if they were absent, whatever
-        their values, and runs it under the one rule set: its account pays the
-        dividend tax, which the run facts state. A key it does not know is
-        refused as ever."""
+    def test_the_account_pays_the_dividend_tax_and_an_unknown_key_is_refused(self) -> None:
+        """The worker runs every experiment under the one rule set: its account pays
+        the dividend tax, which the run facts state. A key it does not know --
+        a retired switch among them -- is refused."""
         import tempfile
 
         from autotrade.agent.experiment_facts import _broker_replay_facts
@@ -554,16 +535,6 @@ class DefaultsDriftTest(unittest.TestCase):
             "fundamental_events_root": "data/pit/fundamental_events",
             "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
         }
-        self.assertEqual(
-            RETIRED_SWITCHES,
-            {
-                "require_raw_excess_at_cost_stress",
-                "require_forward_plain_selection",
-                "require_seed_replicates",
-                "independent_offline_trials",
-                "dividend_tax",
-            },
-        )
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             (repo_root / "experiments").mkdir()
@@ -577,12 +548,9 @@ class DefaultsDriftTest(unittest.TestCase):
                 )
 
             current = options(base)
-            for value in (True, False, "not even a boolean"):
-                with self.subTest(value=value):
-                    legacy = options({**base, **dict.fromkeys(RETIRED_SWITCHES, value)})
-                    self.assertEqual(legacy, current)
-            with self.assertRaisesRegex(ValueError, r"unknown experiment parameters: \['require_heldout_magic'\]"):
-                options({**base, "require_heldout_magic": True})
+            for key in ("require_heldout_magic", "dividend_tax"):
+                with self.assertRaisesRegex(ValueError, rf"unknown experiment parameters: \['{key}'\]"):
+                    options({**base, key: True})
         profile = current.rolling.broker_profile
         self.assertTrue(profile.dividend_tax)
         self.assertEqual(current.rolling.acceptance, AcceptanceRules(**REQUIRED_RULES))
@@ -595,19 +563,14 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(old["final_rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
         self.assertEqual((old["final_rate_beyond"], new["final_rate_beyond"]), (0.05, 0.0))
 
-    def test_the_retired_ablation_rule_loads_inert_and_no_request_may_name_it(self) -> None:
-        """Every experiment created from 2026-11-03 until the registration's ablation was
-        retired states ``ablation_required`` in its params.json and in the
-        acceptance rules its runs recorded. The worker loads it as the same
-        experiment without the key, whatever its value; the rules rebuilt from a
-        record carrying it are the rules without it; and a create request may
-        no longer name it, nor any other key no parameter declares."""
+    def test_the_retired_ablation_rule_is_no_parameter_anywhere(self) -> None:
+        """``ablation_required`` names no parameter and no rule: the worker, the
+        rules and a create request each refuse it like any other unknown key."""
         import tempfile
 
         from autotrade.pipelines.experiment_params import console_request
         from autotrade.pipelines.worker import resolve_worker_options
 
-        self.assertIn("ablation_required", OBSOLETE_KEYS)
         self.assertNotIn("ablation_required", ACCEPTANCE_KEYS)
         base = {
             "experiment_id": "sealed_demo",
@@ -630,14 +593,11 @@ class DefaultsDriftTest(unittest.TestCase):
                     preflight=True,
                 )
 
-            current = options(base)
-            for value in (True, False):
-                with self.subTest(value=value):
-                    self.assertEqual(options({**base, "ablation_required": value}), current)
-                    self.assertEqual(
-                        AcceptanceRules.from_record({**REQUIRED_RULES, "ablation_required": value}),
-                        AcceptanceRules(**REQUIRED_RULES),
-                    )
+            options(base)
+            with self.assertRaisesRegex(ValueError, r"unknown experiment parameters: \['ablation_required'\]"):
+                options({**base, "ablation_required": True})
+            with self.assertRaisesRegex(ValueError, "name no rule ablation_required"):
+                AcceptanceRules.from_record({**REQUIRED_RULES, "ablation_required": True})
             with self.assertRaisesRegex(ValueError, r"unknown experiment parameters: \['ablation_magic'\]"):
                 options({**base, "ablation_magic": True})
         request = {"experiment_id": "sealed_demo", **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES}

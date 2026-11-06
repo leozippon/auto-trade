@@ -33,12 +33,9 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.skills import (
     MAX_SKILL_CHARS,
     OPERATING_MEMORY_LIBRARY,
-    RETIRED_MEMORY_ORIGIN,
-    RETIRED_OPERATING_MEMORY_MODE,
     build_skills_index,
     create_operating_memory_snapshot,
     operating_memory_snapshot_path,
-    operating_memory_snapshot_root,
     read_operating_memory_snapshot,
     validate_skills_tree,
 )
@@ -217,31 +214,6 @@ def _snapshot(
     return create_operating_memory_snapshot(directory, mode=mode, repo_root=repo_root)
 
 
-def _retired_tier_snapshot(repo_root: Path, experiments: Path, experiment_id: str) -> None:
-    """The snapshot an experiment created before 2026-11-05 froze: the curated
-    library beside one graduated experiment's skills, under the retired mode."""
-
-    directory = experiments / experiment_id
-    _snapshot(repo_root, experiments, experiment_id)
-    root = operating_memory_snapshot_root(directory)
-    root.chmod(0o755)
-    item = root / "adopted" / "same-window-parent-control"
-    item.mkdir(parents=True)
-    (item / "SKILL.md").write_text("# 同窗父本对照\n\n正文。\n", encoding="utf-8")
-    path = operating_memory_snapshot_path(directory)
-    record = json.loads(path.read_text(encoding="utf-8"))
-    record["mode"] = RETIRED_OPERATING_MEMORY_MODE
-    record["entries"].append(
-        {
-            "origin": RETIRED_MEMORY_ORIGIN,
-            "source": "adopted",
-            "name": "same-window-parent-control",
-            "heldout_end": "20260930",
-        }
-    )
-    path.write_text(json.dumps(record), encoding="utf-8")
-
-
 def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> None:
     _library(tmp_path)
     experiments = tmp_path / "experiments"
@@ -266,40 +238,6 @@ def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> N
     # Nothing per session is projected any more, and no host identity leaks.
     assert "sessions" not in payload
     assert RUN_ID not in json.dumps(payload, ensure_ascii=False)
-
-
-def test_an_experiment_of_the_retired_graduated_tier_lists_what_it_still_mounts(
-    tmp_path: Path,
-) -> None:
-    """Every experiment created before the graduated tier's retirement names its mode
-    and may hold graduated entries in its snapshot: the block opens, reads the
-    mode as the curated library it is, keeps the snapshot's own record of the
-    mode, and lists only the curated entries its sessions mount."""
-
-    _library(tmp_path)
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    directory = _experiment(experiments, "current")
-    _params(directory, operating_memory=RETIRED_OPERATING_MEMORY_MODE)
-    _retired_tier_snapshot(tmp_path, experiments, "current")
-
-    payload = memory.experiment_memory(experiments, "current")
-    assert "error" not in payload
-    assert payload["mode"] == "curated"
-    assert payload["snapshot"]["mode"] == RETIRED_OPERATING_MEMORY_MODE
-    assert [source["source"] for source in payload["snapshot"]["sources"]] == ["curated"]
-    client = TestClient(create_app(tmp_path, experiments))
-    assert client.get("/api/experiments/current/memory").status_code == 200
-    assert (
-        client.get("/api/experiments/current/memory/curated/pit-read-budget").status_code
-        == 200
-    )
-    assert (
-        client.get(
-            "/api/experiments/current/memory/adopted/same-window-parent-control"
-        ).status_code
-        == 400
-    )
 
 
 def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> None:
