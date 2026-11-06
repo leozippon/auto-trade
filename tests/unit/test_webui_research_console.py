@@ -28,7 +28,6 @@ from autotrade.environment.tools.report_issue import (
     issue_reports_path,
 )
 from autotrade.pipelines.config import (
-    DEFAULT_RESEARCH_GEOMETRY,
     OBSOLETE_KEYS,
     RETIRED_SWITCHES,
 )
@@ -44,7 +43,7 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES, TEST_GEOMETRY
 from tests.unit.test_webui_inject_message import _const_block, _fn
 from tests.unit.webui_research_experiment import (
     ENVIRONMENT_BLOCKED_REASON,
@@ -1249,7 +1248,7 @@ def test_the_create_form_refuses_a_geometry_the_worker_refuses(
         json={
             "params": {
                 "experiment_id": "geometry",
-                **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+                **TEST_GEOMETRY.to_record(), **CREATE_RULES,
                 **patch,
             }
         },

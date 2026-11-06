@@ -19,7 +19,6 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import pit_backend, pit_views_seed
 from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
-    DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
     SnapshotBundle,
 )
@@ -31,6 +30,7 @@ from autotrade.pipelines.pit_views_seed import (
     plan_seed,
     seed_pit_views,
 )
+from tests.unit.acceptance_fixture import TEST_GEOMETRY
 
 
 def _record(raw_dir: Path, *, events: bool = True) -> dict[str, object]:
@@ -534,7 +534,7 @@ def test_the_seed_plan_is_exactly_the_research_forward_and_heldout_views() -> No
     """Five decision views, four research years, the forward and the clipped
     Held-out slot, one bundle at research end and two as-of chains."""
 
-    plan = plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days())
+    plan = plan_seed(TEST_GEOMETRY, _release_days())
     assert [value.isoformat() for value in plan.decision_times] == [
         _cn(day) for day in ("20210630", "20220630", "20230630", "20240630", "20250630")
     ]
@@ -572,7 +572,7 @@ def test_the_seed_plan_is_exactly_the_research_forward_and_heldout_views() -> No
 @pytest.mark.parametrize(
     ("geometry", "release_end"),
     [
-        (DEFAULT_RESEARCH_GEOMETRY, "20260911"),
+        (TEST_GEOMETRY, "20260911"),
         (
             ResearchGeometry("20200701", "20220630", "20230630", "20231231"),
             "20260911",
@@ -637,7 +637,9 @@ def _run_prebuild(
     _FakeProvider.calls = []
     monkeypatch.setattr(prebuild, "ResearchPITSnapshotProvider", _FakeProvider)
     monkeypatch.setattr(prebuild, "prebuild_asof_stash", fake_stash)
-    assert prebuild.main(["--repo-root", str(tmp_path), *argv]) == 0
+    # The synthetic release's geometry, which ``argv`` may then override.
+    geometry = [item for name, value in TEST_GEOMETRY.to_record().items() for item in (prebuild._flag(name), value)]
+    assert prebuild.main(["--repo-root", str(tmp_path), *geometry, *argv]) == 0
     return stashed
 
 
@@ -694,13 +696,13 @@ def test_the_seed_carries_a_prebuilt_asof_state_for_every_research_years_choice(
     assert record["research_years_choices"] == [5, 6, 7] and record["decision_views"] == views
     assert "step_decision_views" not in record
     # Choices the geometry cannot take plan nothing; one it can plans one chain.
-    assert plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days()).research_years_choices == ()
-    two = plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days(), research_years_choices=(2, 4, 9))
+    assert plan_seed(TEST_GEOMETRY, _release_days()).research_years_choices == ()
+    two = plan_seed(TEST_GEOMETRY, _release_days(), research_years_choices=(2, 4, 9))
     assert two.research_years_choices == (2,)
     assert [chain[0].label for _decision, chain in two.stash_chains] == ["Y1", "Y3", "F"]
-    assert two.decision_times == plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days()).decision_times
+    assert two.decision_times == plan_seed(TEST_GEOMETRY, _release_days()).decision_times
     with pytest.raises(ValueError, match="at least one validation year"):
-        pit_views_seed.SeedPlan(DEFAULT_RESEARCH_GEOMETRY, DEFAULT_RESEARCH_GEOMETRY.research_years, (), (4,))
+        pit_views_seed.SeedPlan(TEST_GEOMETRY, TEST_GEOMETRY.research_years, (), (4,))
 
 
 def test_the_prebuild_stashes_each_validation_chain_and_builds_no_other_view(
@@ -729,7 +731,7 @@ def test_the_dry_run_prints_the_plan_and_builds_nothing(
     header = json.loads(lines[0])
     assert header["jobs"] == 6
     assert header["plan"] == json.loads(
-        json.dumps(plan_seed(DEFAULT_RESEARCH_GEOMETRY, _release_days()).to_record())
+        json.dumps(plan_seed(TEST_GEOMETRY, _release_days()).to_record())
     )
     assert lines[1].startswith("[1/6] Y1 valid 20210701..20220630")
     assert json.loads(lines[-1])["status"] == "planned"

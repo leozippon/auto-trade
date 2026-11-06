@@ -24,6 +24,7 @@ from autotrade.environment.llm import (
     ToolCall,
 )
 from autotrade.environment.tools import CommandResult
+from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.experiment_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
@@ -1009,7 +1010,8 @@ def test_worker_params_reject_unknown_keys_fold_era_keys_and_a_bad_geometry(tmp_
     path = experiment / "hitl" / "params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     options = load_worker_options(experiment, repo_root=repo)
-    assert options.rolling.geometry.research_end == "20250630"
+    # A params file that states no geometry runs on the console's.
+    assert options.rolling.geometry == DEFAULT_RESEARCH_GEOMETRY
     assert options.rolling.max_research_minutes == 2400
     for key, value in (
         ("typo_budget", 3),

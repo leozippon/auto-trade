@@ -28,7 +28,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
+from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.experiment import check_registration
 from autotrade.pipelines.hitl_state import (
     ControlState,
@@ -46,7 +46,7 @@ from autotrade.pipelines.verdict import (
     holder_readings,
     residual_reading,
 )
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
 
 STAGES = (
     "created",
@@ -67,7 +67,7 @@ ENVIRONMENT_BLOCKED_REASON = (
     "daily Validation failed: ArrowTypeError: Unable to merge: Field dataset has "
     "incompatible types: large_string vs string"
 )
-GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
+GEOMETRY = TEST_GEOMETRY
 # Worker-accepted parameters of a console-created experiment.
 PARAMS: dict[str, object] = {
     **GEOMETRY.to_record(),

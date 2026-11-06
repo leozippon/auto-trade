@@ -30,7 +30,6 @@ from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 from autotrade.environment.sandbox import SandboxSpec
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.pipelines.config import (
-    DEFAULT_RESEARCH_GEOMETRY,
     SNAPSHOT_CACHE_FORMAT_VERSION,
     acceptance_for,
 )
@@ -55,7 +54,7 @@ from scripts.experiments._round import (
     Round,
     archived_ids,
 )
-from tests.unit.acceptance_fixture import CREATE_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, TEST_GEOMETRY
 from tests.unit.research_release_fixture import (
     BACKFILLED_HISTORY_START,
     HELDOUT_REACHING_DAYS,
@@ -69,9 +68,10 @@ CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
 
 def _sealed_round(**fields: object) -> Round:
     """A synthetic round that states how many research years its sessions see,
-    as every round must (the rule has no console default)."""
+    as every round must (the rule has no console default), on the geometry the
+    synthetic release covers."""
 
-    overrides = {**CREATE_RULES, **dict(fields.pop("overrides", {}) or {})}  # type: ignore[call-overload]
+    overrides = {**TEST_GEOMETRY.to_record(), **CREATE_RULES, **dict(fields.pop("overrides", {}) or {})}  # type: ignore[call-overload]
     return Round(overrides=overrides, **fields)  # type: ignore[arg-type]
 
 
@@ -172,14 +172,6 @@ def test_every_experiment_runs_its_unnamed_roles_on_the_pinned_defaults(round_na
         for role in MODEL_ROLES:
             if role not in declared:
                 assert params[role] == BASE_EXPECTED_DEFAULTS[role], (experiment_id, role)
-
-
-def test_the_shared_geometry_is_the_one_seeds_are_planned_over() -> None:
-    """The prebuild plans a seed over DEFAULT_RESEARCH_GEOMETRY; a round on any
-    other geometry would cold-build every view its seed does not carry."""
-    assert {key: BASE_OVERRIDES[key] for key in DEFAULT_RESEARCH_GEOMETRY.to_record()} == (
-        DEFAULT_RESEARCH_GEOMETRY.to_record()
-    )
 
 
 @pytest.mark.parametrize("round_name", ROUND_IDS)

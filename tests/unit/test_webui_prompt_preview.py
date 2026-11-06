@@ -33,13 +33,12 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     DEFAULT_DEADLINE_GRACE_MINUTES,
-    DEFAULT_RESEARCH_GEOMETRY,
     rolling_default,
     session_deadline_seconds,
 )
 from autotrade.pipelines.hitl_state import build_session_plan
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
 
 SESSION_KEY = "research"
 
@@ -48,7 +47,7 @@ SESSION_KEY = "research"
 RETIRED_WORDING = ("fold_period=quarter", "单文件", "30 秒", "first_test_period")
 
 
-GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
+GEOMETRY = TEST_GEOMETRY
 
 
 def _trading_days() -> list[str]:
