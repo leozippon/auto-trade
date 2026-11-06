@@ -182,7 +182,7 @@ class SyntheticPITProvider:
                 },
             )
             if phase == "valid":
-                # The warm start the seed prebuilds for a research slot
+                # The prebuilt as-of state the seed prebuilds for a research slot
                 # (scripts/data/prebuild_pit_views_seed.py): a test's replay
                 # opens on it, and the backend refuses a slot without one.
                 prebuild_asof_stash(

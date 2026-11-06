@@ -104,7 +104,7 @@ DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY = 3
 
 # Research on four July-June years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
-# (docs/PIPELINE_DESIGN.md). The PIT view seed is planned over it.
+# (docs/PIPELINE_DESIGN.md). The prebuilt view cache is planned over it.
 DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
     research_start="20210701",
     research_end="20250630",
@@ -112,7 +112,7 @@ DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
     heldout_end="20260930",
 )
 
-# The exploration PIT view seed an experiment hardlinks completed views from
+# The exploration prebuilt view cache an experiment hardlinks completed views from
 # unless its ``pit_views_seed`` parameter names another tree, and the scratch
 # directory the offline prebuild pins its research release in. Repo-relative
 # and gitignored; the contract that decides reuse lives in
@@ -219,7 +219,7 @@ class AcceptanceRules:
     written before it existed is refused rather than judged under it.
     """
 
-    # The registration's limit over the candidate's span, and the Paper book's
+    # The registration's limit over the candidate's span, and the Paper account's
     # kill limits.
     max_drawdown: float = _rule(0.45, "Equity drawdown limit of the final registration and of Paper.")
     cost_stress_multiplier: float = _rule(

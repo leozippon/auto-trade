@@ -2,7 +2,7 @@
 
 Every experiment clones the configured local sandbox image once into a UUID4
 tag and persists it in ``hitl/sandbox_image.json``, so a resumed experiment and
-its Paper book keep running the image they started on. The pipeline only wires
+its Paper account keep running the image they started on. The pipeline only wires
 config knobs in and records the result.
 """
 

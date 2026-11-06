@@ -1,6 +1,6 @@
-"""Persistent daily Paper book for the JSON ``generate_orders`` ABI.
+"""Persistent daily Paper account for the JSON ``generate_orders`` ABI.
 
-A Paper book is one research replay stretched over the real calendar. Each run
+A Paper account is one research replay stretched over the real calendar. Each run
 names one target session ``D`` and does two things in order:
 
 1. It settles every earlier session of the book whose daily bars have landed:

@@ -1,4 +1,4 @@
-"""The open-exploration packs of round 20261014 that the Paper books started from: one common contract, one direction per pack.
+"""The open-exploration packs of round 20261014 that the Paper accounts started from: one common contract, one direction per pack.
 
 What must hold. The packs give a direction each and share the rules file, the
 record of occupied and closed directions and the starter byte for byte, since

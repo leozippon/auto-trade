@@ -319,7 +319,7 @@ def resolve_worker_options(
     does not exist yet, so it checks the request rather than the deployment:
     input paths are checked for repository containment but not for existence,
     and the immutable research-release pin (which materialises state inside the
-    experiment directory) is skipped. An experiment naming a PIT view seed pins
+    experiment directory) is skipped. An experiment naming a prebuilt view cache pins
     the release that seed was built from, which is already published, so the
     pre-flight still reads that release and checks it reaches into Held-out;
     without a named seed the release is not known until the pin, and that
@@ -591,7 +591,7 @@ def resolve_worker_options(
 def strategy_boundary(rolling: RollingExperimentConfig) -> dict[str, Any]:
     """The experiment's strategy-container boundary as ``strategy_sandbox_from_spec``
     takes it: the one mapping every builder of an experiment's strategy sandbox (the
-    pipeline, a Paper book, the console's prompt preview) passes on."""
+    pipeline, a Paper account, the console's prompt preview) passes on."""
 
     return {
         "fit_timeout_seconds": rolling.strategy_fit_timeout_seconds,
@@ -903,7 +903,7 @@ def run_local_interactive_worker(
     payload = _terminal_status(
         ledger, {"completed_at": utc_now_iso()}, developer_mode=developer_label
     )
-    # No book opens here: the operator opens a registered strategy's Paper book
+    # No book opens here: the operator opens a registered strategy's Paper account
     # from the console's ranking view (``paper.books.open_registered_book``).
     write_json_atomic(hitl / "status.json", payload)
     _release_finished_experiment(options, payload)
@@ -1289,7 +1289,7 @@ COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
 def _pit_views_seed(
     value: object, repo_root: Path, snapshot_config: SnapshotConfig
 ) -> tuple[Path, str | None]:
-    """The PIT view seed this experiment hardlinks from, and the release it binds.
+    """The prebuilt view cache this experiment hardlinks from, and the release it binds.
 
     The default seed is an optimisation over cold-building: it carries the
     default dataset selection, and an experiment that asks for anything else

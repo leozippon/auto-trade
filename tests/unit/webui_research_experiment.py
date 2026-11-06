@@ -77,7 +77,7 @@ PARAMS: dict[str, object] = {
     "developer_mode": "llm",
     "strategy_period": "day",
     "inference_time": "08:30",
-    # No fundamentals: opening the Paper book of an experiment that reads them asks
+    # No fundamentals: opening the Paper account of an experiment that reads them asks
     # the live PIT audit, which a fixture repository does not have
     # (test_paper_books covers that check).
     "include_fundamentals": False,

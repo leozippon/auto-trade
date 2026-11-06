@@ -41,7 +41,7 @@ const ENDING_LABELS = {
   environment_blocked: "环境阻断",
   broken: "失败",
 };
-// The way a Paper book came in (paper/book.py candidate_source), and where its
+// The way a Paper account came in (paper/book.py candidate_source), and where its
 // Paper verdict stands (paper/verdict.py): the status as [badge state, label],
 // and the reason a terminal row or an unmeasured reading carries. A value not
 // listed renders as written.
@@ -834,7 +834,7 @@ function equityChart(payload, opts = {}) {
   const width = fitChartWidth(opts.width || 680);
   let { ddH = 90 } = opts;
   const INK = themeInk();
-  // A Paper book that follows real fills also draws its simulated track: the
+  // A Paper account that follows real fills also draws its simulated track: the
   // same strategy, so the same ink, dotted as what did not happen. A replay's
   // random baseline (random names on the book's own trades) is a reference
   // like the benchmark, in the same quiet ink, finely dotted.
@@ -886,7 +886,7 @@ function equityChart(payload, opts = {}) {
   const showDD = ddH > 0;
   const showExp = expList.length > 0;
   const expH = showExp ? 64 : 0;
-  // Account pane (a Paper book): end-of-day equity and cash from one journal
+  // Account pane (a Paper account): end-of-day equity and cash from one journal
   // row per day, drawn on this chart's x-scale so a day's cash bar and equity
   // point sit directly under its return.
   const account = mini ? null : payload.account;
@@ -5050,14 +5050,14 @@ function subagentClockNode(block, className = "hint") {
   );
 }
 
-/* Rounds and LLM calls differ when a sub-agent is forced to write a closing
-   summary after its last round, so both are shown. */
+/* Turns and LLM calls differ when a sub-agent is forced to write a closing
+   summary after its last turn, so both are shown. */
 function subagentProgressParts(block) {
   const parts = [];
-  const rounds = Number(block.rounds) || 0;
+  const turns = Number(block.rounds) || 0;
   const llmCalls = Number(block.llm_calls) || 0;
   const toolCalls = Number(block.tool_calls) || 0;
-  if (rounds || llmCalls) parts.push(`${rounds} 回合 · 模型 ${llmCalls} 次`);
+  if (turns || llmCalls) parts.push(`${turns} 回合 · 模型 ${llmCalls} 次`);
   if (toolCalls) parts.push(`工具 ${toolCalls} 次`);
   const total = Number((block.usage || {}).total_tokens) || 0;
   if (total) parts.push(`Σ ${fmtTokens(total)}`);
@@ -5119,7 +5119,7 @@ function subagentDockBlock(block, detail, runRef) {
 }
 
 /* The child's own Trace, opened from its card or from the dock's pinned
-   block: its rounds, tool calls, wrap-up and final report, rendered by the
+   block: its turns, tool calls, wrap-up and final report, rendered by the
    same block renderer as the parent trace. It is a modal over the parent —
    the parent's scroll position and open folds stay exactly as they were, and
    closing returns to them. One box for the modal's lifetime, so a refresh
@@ -5278,9 +5278,9 @@ function parentReasoningLabel(detail) {
 function renderAgentOutputBlock(node, block, detail) {
   const effort = parentReasoningLabel(detail);
   const model = String((block && block.model) || "").trim();
-  const round = Number(block.round) || 0;
-  const title = round
-    ? [`第 ${round} 回合`, model].filter(Boolean).join(" · ")
+  const turn = Number(block.round) || 0;
+  const title = turn
+    ? [`第 ${turn} 回合`, model].filter(Boolean).join(" · ")
     : ["Agent", model, effort ? `推理 ${effort}` : ""].filter(Boolean).join(" · ");
   node.append(
     el(
@@ -5350,11 +5350,11 @@ function subagentContextLabel(block) {
    `model · 推理 xhigh · 上限 48 回合 · 独立上下文`. */
 function subagentMetaLine(block, detail) {
   const thinking = subagentThinkingLabel(block, detail);
-  const roundsLimit = Number(block.rounds_limit) || 0;
+  const turnsLimit = Number(block.rounds_limit) || 0;
   return [
     block.model ? String(block.model) : "",
     thinking ? `推理 ${thinking}` : "",
-    roundsLimit ? `上限 ${roundsLimit} 回合` : "",
+    turnsLimit ? `上限 ${turnsLimit} 回合` : "",
     subagentContextLabel(block),
   ]
     .filter(Boolean)
@@ -5379,7 +5379,7 @@ function subagentHeadMetaNode(block, detail) {
 }
 
 /* What a child reads as, from its one block: role · 状态, task, launch meta
-   and the ticking clock on the head, then the progress line — rounds, model
+   and the ticking clock on the head, then the progress line — turns, model
    calls, tools, tokens, latest tool. The card at the call position and the
    dock's pinned block share it, so they can never disagree. Spans
    throughout, so the dock can wrap the whole readout in a button; ``open``
@@ -5545,14 +5545,14 @@ function toolCallsNode(calls) {
   const list = el("div", { class: "trace-tool-list" });
   for (const call of calls || []) {
     const status = TOOL_STATUS_LABELS.get(String(call.status || "")) || "";
-    const round = Number(call.round) || 0;
+    const turn = Number(call.round) || 0;
     const row = el(
       "div",
       { class: "trace-tool-call" },
       el(
         "div",
         { class: "tool-brief" },
-        [String(call.name || "工具"), round ? `第 ${round} 回合` : "", status]
+        [String(call.name || "工具"), turn ? `第 ${turn} 回合` : "", status]
           .filter(Boolean)
           .join(" · "),
       ),

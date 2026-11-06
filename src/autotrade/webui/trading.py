@@ -1,4 +1,4 @@
-"""Read-only projection of the local daily Paper books, one function per page panel.
+"""Read-only projection of the local daily Paper accounts, one function per page panel.
 
 Books sit side by side under the Paper state root, one directory each
 (``paper.books``). ``books_payload`` is the overview, one row per book. A book's
@@ -102,7 +102,7 @@ def book_dir(repo_root: Path, book: str, env: str = "paper") -> Path:
     """One book's directory; anything that is not a book under the root is unknown."""
     root = env_dir(repo_root, env)
     if not BOOK_ID_PATTERN.fullmatch(book) or ".." in book or not (root / book / BOOK_NAME).is_file():
-        raise KeyError(f"unknown Paper book: {book}")
+        raise KeyError(f"unknown Paper account: {book}")
     return root / book
 
 

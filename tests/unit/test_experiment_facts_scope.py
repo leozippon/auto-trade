@@ -192,7 +192,7 @@ def test_the_facts_say_where_the_session_started() -> None:
 
 
 def test_the_session_is_told_which_index_it_is_measured_against() -> None:
-    """``benchmark_index`` is the key a reference pack reads instead of
+    """``benchmark_index`` is the key a reference workspace reads instead of
     restating an index, and the regression caliber names the same one."""
 
     facts = _facts(benchmark_index="000905.SH")

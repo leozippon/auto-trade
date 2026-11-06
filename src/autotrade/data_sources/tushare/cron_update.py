@@ -203,7 +203,7 @@ def resolve_job_start_date(job: dict, config: dict, end_date: str) -> str:
     TUSHARE_UPDATE_START_DATE overrides.
 
     ``start_date`` (YYYYMMDD) fixes it for this job alone: the nightly PIT
-    event audit must reach back to the first month a Paper book's decision
+    event audit must reach back to the first month a Paper account's decision
     view loads, without widening every job that falls back to the schedule's
     ``default_start_date``. ``start_date_lookback_days`` trails the end date
     instead; a job sets at most one of the two."""
@@ -369,7 +369,7 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
             "--raw-dir",
             raw_dir,
         ],
-        # Which datasets each live Paper book mounts changed vendor vintage
+        # Which datasets each live Paper account mounts changed vendor vintage
         # since the release it last pinned (paper/vintages.py).
         [ctx.python, "scripts/paper/run_paper.py", "vintages"],
     ]

@@ -600,7 +600,7 @@ class RollingExperimentPipeline:
 
         The replay is the one a test would have run at the last step: the
         validation span as one fresh book with its matched random baseline, opened on
-        the seed's warm start. Each step after the ``tests`` already recorded
+        the seed's prebuilt as-of state. Each step after the ``tests`` already recorded
         gets a ``test_step`` record of the same shape, read off that replay's
         window for the step and marked ``host_completion``; the records are
         appended in step order and returned. A registered strategy whose own code
@@ -619,9 +619,9 @@ class RollingExperimentPipeline:
             schedule=self.config.schedule,
             broker_profile=self.config.broker_profile,
         )
-        require_warm = getattr(self.evaluator, "require_warm_start", None)
-        if callable(require_warm):
-            require_warm(request)
+        require_prebuilt = getattr(self.evaluator, "require_prebuilt_asof_state", None)
+        if callable(require_prebuilt):
+            require_prebuilt(request)
         result = self.evaluator.evaluate(request)
         replay, analysis = replay_and_analysis(result.result_ref)
         head = {
@@ -1370,7 +1370,7 @@ def seed_change(experiment_dir: str | Path, nominee_revision: str, replicate_rev
     The one changed line (:func:`one_line_change`) must on both sides assign
     an integer to the same seed name (``_SEED_NAME``), with two different
     values. That is how a strategy changes its training seed and nothing
-    else -- the packs set it in one knob line. Returns ``"<path>: <line>"``;
+    else -- the reference workspaces set it in one knob line. Returns ``"<path>: <line>"``;
     ``ValueError`` says what else differs.
     """
 

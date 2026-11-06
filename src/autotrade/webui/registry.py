@@ -568,7 +568,7 @@ def _verdict_view(
 
 
 def _paper_candidate_view(records: list[dict[str, object]]) -> dict[str, object] | None:
-    """The registered artifact the experiment's Paper book is opened from."""
+    """The registered artifact the experiment's Paper account is opened from."""
     candidate = paper_candidate(records)
     if candidate is None:
         return None
@@ -842,7 +842,7 @@ def experiment_listing(
 def ranking(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
     """The registered strategies with a readout, ranked by their validation record's
     residual IR (a record the significance test could not read sorts last), each with
-    its forward reading and whether a Paper book may be opened from it.
+    its forward reading and whether a Paper account may be opened from it.
 
     Research-period numbers never rank, and an experiment without a forward record is
     not listed: the record and the forward reading are the whole evidence.

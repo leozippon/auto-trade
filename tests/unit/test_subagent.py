@@ -282,7 +282,7 @@ def test_subagent_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
 
 class LockstepLLM:
     """Scripted replies gated on a shared barrier, so two children interleave
-    their tool rounds instead of running back to back."""
+    their tool turns instead of running back to back."""
 
     provider = "scripted"
     model = "scripted"
@@ -1052,7 +1052,7 @@ def test_general_prompts_explain_the_role() -> None:
 
 
 def test_each_role_writes_its_report_within_the_inline_cap() -> None:
-    """44 % of one round's reports ran past an inline cap the child was never
+    """44 % of one turn's reports ran past an inline cap the child was never
     told, each costing the parent a spill read: every role prompt states the
     cap the parent receives, and where the long material goes instead."""
 
@@ -1702,7 +1702,7 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
     result = SubAgentEngine(
         llm=exhausted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_rounds=5),
+        config=SubAgentConfig(max_turns=5),
     ).run("look", role="Explore")
     assert result["status"] == "error"
     assert result["llm_calls"] == 1
@@ -1725,7 +1725,7 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
     result = SubAgentEngine(
         llm=interrupted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_rounds=5),
+        config=SubAgentConfig(max_turns=5),
     ).run("look", role="Explore")
     assert result["status"] == "error"
     assert interrupted.calls == 1
@@ -2974,7 +2974,7 @@ def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> 
 
 
 def test_a_full_round_of_writable_children_runs_concurrently() -> None:
-    """Nothing serialises write-capable children: a whole round of
+    """Nothing serialises write-capable children: a whole turn of
     ``DEFAULT_SUBAGENT_MAX_CONCURRENT`` ``general-purpose`` launches is accepted, all
     of them reach the model before any returns, and none is queued. Path
     confinement (one candidate directory each) is the correctness guard, not a
@@ -3011,7 +3011,7 @@ def test_a_full_round_of_writable_children_runs_concurrently() -> None:
         last = results[-1].value
         assert last["queued_children"] == []
         assert [child["description"] for child in last["running_children"]] == list(scopes)
-        # The pool admits the whole round: every child reached its model call
+        # The pool admits the whole turn: every child reached its model call
         # while all the others were still blocked on their own gate.
         for started, _release, _summary in gates.values():
             assert started.wait(5)
@@ -3096,7 +3096,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
     assert [(e["round"], e["continuation"], e["max_tokens"]) for e in cut_events] == [(1, 1, 500)]
 
     # Every continuation exhausted on reasoning too: the launch failed, and
-    # it says so instead of paying for one more apology round.
+    # it says so instead of paying for one more apology turn.
     exhausted = ScriptedLLM(
         [cut_reply] * (SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1)
         + [ProviderResponse(content="must not be requested")],
@@ -3202,12 +3202,12 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
 
 def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     from autotrade.agent.subagent import (
-        DEFAULT_SUBAGENT_MAX_ROUNDS,
-        SUBAGENT_GRACE_ROUNDS,
+        DEFAULT_SUBAGENT_MAX_TURNS,
+        SUBAGENT_GRACE_TURNS,
     )
 
-    assert DEFAULT_SUBAGENT_MAX_ROUNDS == 48 and SUBAGENT_GRACE_ROUNDS == 2
-    assert SubAgentConfig().max_rounds == 48
+    assert DEFAULT_SUBAGENT_MAX_TURNS == 48 and SUBAGENT_GRACE_TURNS == 2
+    assert SubAgentConfig().max_turns == 48
     assert "48 回合" in AGENT_TOOL_DESCRIPTION and "24 回合" not in AGENT_TOOL_DESCRIPTION
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]["description"]
     assert "48 回合" in max_turns_field and "自动压缩" in max_turns_field
@@ -3230,12 +3230,12 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     engine = SubAgentEngine(
         llm=busy,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_rounds=4),
+        config=SubAgentConfig(max_turns=4),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     result = engine.run("dig", role="Explore")
     assert result["rounds"] == 4 and result["summary"] == "final"
-    # Round 2 of 4 opens with the wrap-up notice; rounds 1 and 3 do not.
+    # Turn 2 of 4 opens with the wrap-up notice; turns 1 and 3 do not.
     second = busy.calls[1]["messages"]
     assert second[-1].role == "user" and "还剩 3 回合模型调用（上限 4）" in str(second[-1].content)
     assert "还剩" not in str(busy.calls[0]["messages"][-1].content)
@@ -3269,7 +3269,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     )
     result = SubAgentEngine(
         llm=short, tools=ToolRegistry([DeclaredReadOnlyShell()])
-    ).run("dig", role="Explore", max_rounds=2)
+    ).run("dig", role="Explore", max_turns=2)
     assert result["rounds"] == 2 and result["summary"] == "done"
     assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])
 
@@ -3410,7 +3410,7 @@ def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_rounds=5),
+        config=SubAgentConfig(max_turns=5),
     ).run("look", role="Explore")
     assert result["status"] == "error" and llm.calls == 1
     assert "context window" in result["error"] and result["llm_errors"] == 1
@@ -3490,7 +3490,7 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
 
 
 def test_child_malformed_tool_call_keeps_its_analysis_and_re_issues_once() -> None:
-    """A call the child wrote unparseably costs a round, not a generation.
+    """A call the child wrote unparseably costs a turn, not a generation.
 
     The text that did arrive is replayed as the child's own turn and only the
     call is asked for again; a second failure in the same streak falls back to
@@ -3545,7 +3545,7 @@ def test_child_malformed_tool_call_keeps_its_analysis_and_re_issues_once() -> No
 
 def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> None:
     """A transient provider failure leaves a trace event and a counter; the
-    child's outcome is what the surviving rounds produced."""
+    child's outcome is what the surviving turns produced."""
 
     class Flaky:
         model = "child"
@@ -3619,7 +3619,7 @@ def _mimo_child_gateway(
     content: str, finish_reason: str
 ) -> tuple[OpenAICompatibleProxy, _ReplayTransport]:
     """A MiMo gateway replaying the stream shape of the two refused child
-    rounds of open_research_100k_8y_mimo_r3_20261004 (2026-10-02): reasoning
+    turns of open_research_100k_8y_mimo_r3_20261004 (2026-10-02): reasoning
     deltas, then one last chunk carrying the whole content, the
     finish_reason and the usage."""
 
@@ -3831,12 +3831,12 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
 
 
 def test_child_without_a_report_is_not_completed() -> None:
-    """``completed`` means a report reached the parent: a child whose rounds ran
+    """``completed`` means a report reached the parent: a child whose turns ran
     out, whose forced summary came back blank, and which left no text anywhere
     to recover is an error — the one case that stays empty."""
     silent = ScriptedLLM(
         [
-            # The tool-calling round carries no assistant text either.
+            # The tool-calling turn carries no assistant text either.
             ProviderResponse(tool_calls=(ToolCall("s", "shell", {"argv": ["ls"]}),)),
             ProviderResponse(content="   "),
         ],
@@ -3845,7 +3845,7 @@ def test_child_without_a_report_is_not_completed() -> None:
     result = SubAgentEngine(
         llm=silent,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_rounds=1),
+        config=SubAgentConfig(max_turns=1),
     ).run("dig", role="general-purpose")
     assert result["status"] == "error" and result["summary"] == ""
     assert result["error"] == "Sub-agent ended without a report"
@@ -3875,7 +3875,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
     result = SubAgentEngine(
         llm=reasoning_only,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_rounds=1),
+        config=SubAgentConfig(max_turns=1),
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run("dig", role="general-purpose")
 
@@ -3887,7 +3887,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
     )
     assert "建议补数后重跑" in summary
     assert result["rounds"] == 1 and result["llm_calls"] == 2
-    # The finalize call is traced like any round instead of vanishing.
+    # The finalize call is traced like any turn instead of vanishing.
     finalize = [
         payload
         for event, payload in events
@@ -3913,7 +3913,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
     fallback = SubAgentEngine(
         llm=quiet,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_rounds=1),
+        config=SubAgentConfig(max_turns=1),
     ).run("dig", role="general-purpose")
     assert fallback["status"] == "exhausted"
     assert str(fallback["summary"]) == (
@@ -3955,7 +3955,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
                 context_window_tokens=128_000,
             ),
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
-            config=SubAgentConfig(max_rounds=1),
+            config=SubAgentConfig(max_turns=1),
         ),
         event_sink=lambda event, payload: attempts.append(payload)
         if event == "subagent_attempt"
@@ -4129,7 +4129,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
 
 def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None:
     from autotrade.agent.subagent import (
-        DEFAULT_SUBAGENT_MAX_ROUNDS,
+        DEFAULT_SUBAGENT_MAX_TURNS,
         SUBAGENT_ROLE_TABLE,
         SubAgentRole,
         resolve_subagent_max_turns,
@@ -4143,12 +4143,12 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
         # No shipped role pins a level or a budget: both defer to the globals.
         assert role.thinking is None and role.max_turns is None
         assert role.default_thinking == DEFAULT_SUBAGENT_THINKING
-        assert role.default_max_turns(DEFAULT_SUBAGENT_MAX_ROUNDS) == DEFAULT_SUBAGENT_MAX_ROUNDS
+        assert role.default_max_turns(DEFAULT_SUBAGENT_MAX_TURNS) == DEFAULT_SUBAGENT_MAX_TURNS
         assert subagent_role(role.name) is role
         line = (
             f"{role.name}：{role.description}（"
             f"{'有 Sandbox shell 与 smoke_backtest、可写' if role.shell else '只读 glob/grep/read_file，不能执行'}；"
-            f"默认 thinking {DEFAULT_SUBAGENT_THINKING}、max_turns {DEFAULT_SUBAGENT_MAX_ROUNDS}）"
+            f"默认 thinking {DEFAULT_SUBAGENT_THINKING}、max_turns {DEFAULT_SUBAGENT_MAX_TURNS}）"
         )
         assert line in AGENT_TOOL_SPEC.input_schema["properties"]["agent"]["description"]
     assert {role.name for role in SUBAGENT_ROLE_TABLE if role.shell} == {"general-purpose"}
@@ -4218,7 +4218,7 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
     started, _ended = _run({})
     assert (started["thinking"], started["rounds_limit"]) == (
         module.DEFAULT_SUBAGENT_THINKING,
-        module.DEFAULT_SUBAGENT_MAX_ROUNDS,
+        module.DEFAULT_SUBAGENT_MAX_TURNS,
     )
 
 
@@ -4393,7 +4393,7 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("look", role="general-purpose", parent_call_id="call_p", steer_queue=steer)
     assert result["status"] == "completed" and result["steers"] == 1 and not steer
-    # Round 1 never saw it; round 2 got it after the tool result, before the model call.
+    # Round 1 never saw it; turn 2 got it after the tool result, before the model call.
     assert not any(
         role == "user" and content.startswith(STEER_MESSAGE_LABEL) for role, content in llm.seen[0]
     )
@@ -4410,7 +4410,7 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
         }
     ]
     assert any(STEER_MESSAGE_LABEL in str(message.content) for message in transcript)
-    # A queued child (instruction sent before its first round) reads it right after the task.
+    # A queued child (instruction sent before its first turn) reads it right after the task.
     early = _RecordingLLM([ProviderResponse(content="ok")])
     result = SubAgentEngine(llm=early, tools=ToolRegistry([DeclaredReadOnlyShell()])).run(
         "queued task", role="Explore", steer_queue=deque(["先看 README"])
@@ -4426,7 +4426,7 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
 
 class _SteerProbeLLM:
     """Child model shared by two children: the ``slow`` one blocks in its first
-    round behind a gate and then makes a tool call; every other request answers."""
+    turn behind a gate and then makes a tool call; every other request answers."""
 
     model = "child"
     provider = "test"
@@ -4489,8 +4489,8 @@ def test_agent_message_action_steers_running_and_queued_children() -> None:
     finally:
         release.set()
     assert [record["ok"] for record in runner._wait_subagent_jobs()] == [True, True]
-    # The running child read it after its tool result, before round 2; the
-    # queued child read it right after its task, before round 1.
+    # The running child read it after its tool result, before turn 2; the
+    # queued child read it right after its task, before turn 1.
     assert child.seen["slow"][1][-1] == ("user", f"{STEER_MESSAGE_LABEL} 提前收尾")
     assert child.seen["slow"][1][-2][0] == "tool"
     assert child.seen["queued"][0][-2:] == [
@@ -4532,9 +4532,9 @@ def test_steer_the_child_never_read_is_reported_undelivered() -> None:
             llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
     )
-    launched = runner.tools.invoke("agent", {"agent": "Explore", "task": "one round"})
+    launched = runner.tools.invoke("agent", {"agent": "Explore", "task": "one turn"})
     assert launched.ok and started.wait(3)
-    # The child is inside its only model call; it reports without another round.
+    # The child is inside its only model call; it reports without another turn.
     assert runner.tools.invoke(
         "agent", {"action": "message", "task_id": launched.value["task_id"], "text": "stop"}
     ).ok
@@ -4654,7 +4654,7 @@ def test_children_compact_at_their_own_models_threshold_not_the_parents() -> Non
         for event, payload in events
         if event == "subagent_context_compaction"
     ]
-    # Rounds 2-4 each crossed the child's threshold of 1 token; the parent's
+    # Turns 2-4 each crossed the child's threshold of 1 token; the parent's
     # 87,040 never applied to the child.
     assert [record["token_threshold"] for record in compactions] == [1, 1, 1]
     assert [record["status"] for record in compactions] == ["ok"] * 3

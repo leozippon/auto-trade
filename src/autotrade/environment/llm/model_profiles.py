@@ -135,9 +135,9 @@ DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 2.0
 # sub-agents (thinking tokens included): the single default for both; the
 # console-managed ``llm_max_response_tokens`` is the only override. Observed
 # calls pool around 1.4k tokens with p90 ≈ 4k, and the earlier 12k cap still cut
-# 1-3 rounds per session; a truncated thinking block loses the whole answer, so
-# the ceiling is the practical per-round maximum the window leaves next to
-# the compaction threshold. A round that spends it all on reasoning costs
+# 1-3 turns per session; a truncated thinking block loses the whole answer, so
+# the ceiling is the practical per-turn maximum the window leaves next to
+# the compaction threshold. A turn that spends it all on reasoning costs
 # ~15 min at 25-40 tok/s — the accepted price of not cutting a long answer.
 # compact and analysis keep their own budgets.
 AGENT_MAX_OUTPUT_TOKENS = 32_768

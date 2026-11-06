@@ -38,7 +38,7 @@ _OPERATING_MEMORY_LIBRARY = Path(__file__).resolve().parents[3] / OPERATING_MEMO
 
 
 def _operating_memory_entries() -> list[dict[str, str]]:
-    """Curated operating-memory entries, used only to describe the mode field.
+    """Curated skill-library entries, used only to describe the mode field.
 
     A missing or malformed library degrades to an empty list (display-only
     concern); what actually mounts is decided by the session at run time."""
@@ -651,7 +651,7 @@ _FIELDS: list[dict[str, object]] = [
 ]
 
 # Console parameters a create request (a round file) may name but the form does
-# not offer: the reference pack, the retired approval mode, the attempt count,
+# not offer: the reference workspace, the retired approval mode, the attempt count,
 # the boards (stamped from the initial cash) and a snapshot-builder knob.
 _FORMLESS = frozenset(
     {

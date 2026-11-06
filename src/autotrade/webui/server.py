@@ -598,7 +598,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             headers={"Content-Disposition": f'attachment; filename="{filename}"'},
         )
 
-    # ---- operating memory ---------------------------------------------------------
+    # ---- skill library ---------------------------------------------------------
     # The curated library is a tracked repository directory, so editing it is
     # a repository write. Who may issue one is decided where every other
     # mutating console route decides it — the loopback/Unix-socket bind and,
@@ -802,7 +802,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except PaperWriterBusy as exc:
             raise HTTPException(
-                status_code=409, detail=f"Paper book {book} is running; delete it after the run"
+                status_code=409, detail=f"Paper account {book} is running; delete it after the run"
             ) from exc
         except OSError as exc:
             raise HTTPException(status_code=500, detail=omit_private_paths(str(exc))) from exc

@@ -198,7 +198,7 @@ RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 -
     && rm /tmp/duckdb_cli.zip \
     && duckdb -c "select 1"
 
-# `free` is the resource check the research packs run. It is a sandbox tool,
+# `free` is the resource check the reference workspaces prescribe. It is a sandbox tool,
 # not part of the strategy contract, so it stays off the heavy install layer.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends procps \

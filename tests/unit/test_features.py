@@ -904,7 +904,7 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         # column the vendor adds reaches the raw lake the same night and the
         # snapshot the next morning. On 2026-09-21 `dividend` gained
         # base_date/base_share and the unit gate stopped every build that
-        # loads the dataset — the Paper book produced no orders for 20260922.
+        # loads the dataset — the Paper account produced no orders for 20260922.
         # The committed inventory is the recorded vendor schema: all of it
         # must classify.
         columns = self._inventory_column_map()[("fundamentals.parquet", "dividend")]

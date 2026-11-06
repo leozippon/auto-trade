@@ -258,7 +258,7 @@ class ResearchPITSnapshotProvider:
                         f"{existing.get('schema_version')!r}, this code requires {record['schema_version']}: "
                         "a view built under another format is never reused, so the cache must be rebuilt: "
                         f"remove {self.cache_root} and its views are rebuilt from the pinned release on the "
-                        "next start (a PIT view seed is rebuilt under a new directory instead)"
+                        "next start (a prebuilt view cache is rebuilt under a new directory instead)"
                     )
                 if contract_identity(existing) != contract_identity(record):
                     raise RuntimeError("PIT view cache is already bound to a different release or configuration")
@@ -1165,7 +1165,7 @@ class PITDailyEvaluationBackend:
             if not keep_result_dir:
                 shutil.rmtree(result_dir, ignore_errors=True)
 
-    def require_warm_start(self, request: EvaluationRequest) -> None:
+    def require_prebuilt_asof_state(self, request: EvaluationRequest) -> None:
         """Refuse a replay whose first slot has no prebuilt as-of state.
 
         A test replays the validation span from its first day, so the span
@@ -1182,10 +1182,10 @@ class PITDailyEvaluationBackend:
         stash_dir = _asof_stash_dir(snapshot_dir, replay_dir, request.schedule, request.mode)
         if not (stash_dir / _STASH_PREBUILD_RECORD).is_file():
             raise RuntimeError(
-                f"the PIT view seed carries no prebuilt as-of state for decision view "
+                f"the prebuilt view cache carries no prebuilt as-of state for decision view "
                 f"{snapshot_dir.name} and replay slot {replay_dir.name} (schedule "
                 f"{request.schedule.to_record()}); rebuild the seed with this experiment's "
-                "research_years among its warm starts (scripts/data/prebuild_pit_views_seed.py)"
+                "research_years among its prebuilt as-of states (scripts/data/prebuild_pit_views_seed.py)"
             )
 
     def null_control(

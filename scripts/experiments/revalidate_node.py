@@ -5,7 +5,7 @@ An independent reading of a node: its recorded revision, checked file by file
 against the revision manifest and the fingerprint the experiment's ledger recorded,
 is replayed by the evaluator a session's ``validate`` calls, assembled
 from the experiment's own ``hitl/params.json`` exactly as the round smoke assembles a
-scratch experiment (``_round._smoke_replays``): the experiment's PIT view seed
+scratch experiment (``_round._smoke_replays``): the experiment's prebuilt view cache
 hardlinked in, the experiment's own sandbox image and pretrained-store pin, cards
 taken by ``hitl_state.select_gpus``. A span is a span of the experiment's research
 years (``full``, ``Yk`` or ``Yi..Yj``, the first ``research_years`` of its

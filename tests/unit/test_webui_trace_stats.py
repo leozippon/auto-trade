@@ -641,7 +641,7 @@ def test_project_subagent_card_carries_the_effective_turn_budget() -> None:
     meta = APP_JS.read_text(encoding="utf-8").split("function subagentMetaLine(", 1)[1].split(
         "\nfunction ", 1
     )[0]
-    assert "block.rounds_limit" in meta and "上限 ${roundsLimit} 回合" in meta
+    assert "block.rounds_limit" in meta and "上限 ${turnsLimit} 回合" in meta
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:

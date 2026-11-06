@@ -40,7 +40,7 @@ from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
-#: new experiment hardlinks the PIT view seed. Period, screen, compact, and
+#: new experiment hardlinks the prebuilt view cache. Period, screen, compact, and
 #: loop knobs that a researcher gets without touching the form live here.
 _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_keep_recent_messages": 10,
@@ -696,7 +696,7 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertIsNone(recorded.to_record()["permitted_boards"])
         self.assertEqual(pinned.permitted_boards, ("main", "gem"))
         self.assertEqual(pinned.to_record()["permitted_boards"], ["main", "gem"])
-        # A profile read back from the JSON a Paper book keeps is the same profile.
+        # A profile read back from the JSON a Paper account keeps is the same profile.
         self.assertEqual(BrokerProfile.from_record(json.loads(json.dumps(pinned.to_record()))), pinned)
         # The run facts state the boards only where the profile pins them.
         self.assertNotIn("permitted_boards", _broker_replay_facts({"broker_profile": recorded.to_record()}))

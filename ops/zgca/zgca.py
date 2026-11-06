@@ -8,7 +8,7 @@ for an owner-only file, `report` for its GPUs, disks and tmux sessions, and
 plain commands for the steps of ops/zgca/remote.sh; both over `zenith`) and
 verifies its own result. up and down are `instance start` and `instance
 stop`; a deploy carries the tracked files, the model gateways' keys from the
-local .env (only the keys the model profiles name), the named PIT view seed
+local .env (only the keys the model profiles name), the named prebuilt view cache
 and the research release that seed was built from (without the text and
 minute datasets its configuration does not read), prunes code the tree no
 longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
@@ -495,7 +495,7 @@ def main(
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
     deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
-    deploy.add_argument("seed", help="PIT view seed directory, relative to the repository (data/pit_views_seed_...)")
+    deploy.add_argument("seed", help="prebuilt view cache directory, relative to the repository (data/pit_views_seed_...)")
     push = commands.add_parser("push", help="copy ended experiments of this host to the instance")
     push.add_argument("experiment_ids", nargs="+", metavar="experiment_id", help="experiment id")
     run = commands.add_parser("run", help="start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it until nothing is pending")

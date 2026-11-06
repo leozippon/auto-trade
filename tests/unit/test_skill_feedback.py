@@ -158,7 +158,7 @@ def test_a_session_mounting_nothing_says_so_instead_of_listing_an_empty_set(
     tmp_path: Path,
 ) -> None:
     tool, _, _ = _session(tmp_path, mounted={})
-    with pytest.raises(ToolError, match="mounts no operating memory"):
+    with pytest.raises(ToolError, match="mounts no skill library"):
         _file(tool)
 
 

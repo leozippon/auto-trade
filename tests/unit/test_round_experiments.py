@@ -1,4 +1,4 @@
-"""Every open round and the reference packs its experiments mount, read through the one launcher.
+"""Every open round and the reference workspaces its experiments mount, read through the one launcher.
 
 The round files are data -- experiments, seed, dataset selection, directives -- and
 `scripts/experiments/_round.py` is the behaviour, so these checks are written
@@ -120,7 +120,7 @@ def _synthetic_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, rnd: Round)
     tree needs nothing else for the create-time pre-flight to accept it. Its
     trading days are the fixture's default ones plus the business days right
     after each geometry's forward period, so a round grading Held-out on its own
-    dates finds the least it needs. Every experiment's reference pack exists, as the
+    dates finds the least it needs. Every experiment's reference workspace exists, as the
     repository holds them, and its starter's smoke passes (the replay needs the
     host's sandbox; the smoke step is tested on its own below). Returns the
     round's tree.
@@ -930,7 +930,7 @@ def test_an_experiment_is_tracked_only_when_it_names_a_tracking_error_cap() -> N
 def test_every_experiment_directive_is_usable(round_name: str, experiment_id: str) -> None:
     """A directive is copied into every research session of the experiment and must
     hold no calendar year: data windows that must be excluded are named by
-    their cause and defined in the reference pack, and no forward or Held-out
+    their cause and defined in the reference workspace, and no forward or Held-out
     date may reach the Agent through it."""
     directive = str(ROUNDS[round_name].request_params(experiment_id)["research_directive"])
     assert directive.strip(), experiment_id
@@ -1003,7 +1003,7 @@ def test_the_selection_matches_the_prebuilt_seed(round_name: str) -> None:
     rnd = ROUNDS[round_name]
     provider = REPO_ROOT / rnd.pit_views_seed / "provider.json"
     if not rnd.pit_views_seed or not provider.is_file():
-        pytest.skip(f"prebuilt PIT view seed {rnd.pit_views_seed or '(default)'} is not present")
+        pytest.skip(f"prebuilt prebuilt view cache {rnd.pit_views_seed or '(default)'} is not present")
     recorded = json.loads(provider.read_text(encoding="utf-8"))
     if recorded.get("schema_version") != SNAPSHOT_CACHE_FORMAT_VERSION:
         pytest.skip(f"{rnd.pit_views_seed} was built under another snapshot cache format")

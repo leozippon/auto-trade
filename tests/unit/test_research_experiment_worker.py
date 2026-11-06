@@ -188,7 +188,7 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     assert not (experiment / "pit_views").exists()
     assert "pit_views_release_error" not in result
     assert {path.name for path in experiment.iterdir()} >= {".host", "artifacts", "hitl", "ledgers"}
-    # No Paper book opens by itself: the operator opens one from the console.
+    # No Paper account opens by itself: the operator opens one from the console.
     assert "paper_book" not in result and not (repo / "data/trading/paper").exists()
     plan = json.loads((experiment / "hitl" / "schedule.json").read_text(encoding="utf-8"))
     assert [row["session_key"] for row in plan["sessions"]] == ["research", "forward"]

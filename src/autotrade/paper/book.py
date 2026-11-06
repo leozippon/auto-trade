@@ -1,4 +1,4 @@
-"""A Paper book's frozen identity: which artifact it trades, in what environment.
+"""A Paper account's frozen identity: which artifact it trades, in what environment.
 
 A book is created once from an experiment's Paper candidate and never changes
 afterwards. Creation copies the registered artifact into the book and resolves the
@@ -168,7 +168,7 @@ def create_book(
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"Paper state root is not empty; a new book needs a new state root: {root}")
     if track not in TRACKS:
-        raise ValueError(f"unknown Paper book track {track!r}; choose one of {', '.join(TRACKS)}")
+        raise ValueError(f"unknown Paper account track {track!r}; choose one of {', '.join(TRACKS)}")
     if (track == "incubating") != (source_record is not None) or (track == "incubating") != (
         permitted_boards is not None
     ):
@@ -200,7 +200,7 @@ def create_book(
     params = {**params, "initial_cash": initial_cash}
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo_root, preflight=True)
     if options.data_backend != "pit":
-        raise ValueError("Paper books trade on the PIT research release only")
+        raise ValueError("Paper accounts trade on the PIT research release only")
     require_audited_fundamentals(
         options.snapshot_config,
         raw_dir=options.raw_dir,
@@ -352,12 +352,12 @@ def load_book(state_root: str | Path) -> Book:
     root = Path(state_root).resolve()
     record = read_json_object(root / BOOK_NAME, missing_ok=True)
     if not record:
-        raise FileNotFoundError(f"no Paper book at {root}; create one with `run_paper.py init`")
+        raise FileNotFoundError(f"no Paper account at {root}; create one with `run_paper.py init`")
     if record.get("schema_version") == 2:
         record = _schema_2_upgraded(record)
     if record.get("schema_version") != BOOK_SCHEMA_VERSION:
         raise ValueError(
-            f"unsupported Paper book schema {record.get('schema_version')!r} in {root / BOOK_NAME} "
+            f"unsupported Paper account schema {record.get('schema_version')!r} in {root / BOOK_NAME} "
             f"(this code reads 2 and {BOOK_SCHEMA_VERSION}): a book without a track and pinned verdict "
             "rules is not migrated; delete it and create it again"
         )
@@ -438,7 +438,7 @@ def require_book_place(paper_root: str | Path, book_id: str) -> None:
     others = [book for book in open_capped_books(paper_root) if book != book_id]
     if len(others) >= BOOK_CAP:
         raise ValueError(
-            f"{len(others)} Paper books are open ({', '.join(others)}), "
+            f"{len(others)} Paper accounts are open ({', '.join(others)}), "
             f"the cap is {BOOK_CAP}; a book frees its place when it is killed"
         )
 

@@ -1,4 +1,4 @@
-"""Paper books the real engine writes, laid out as the Paper state root holds them.
+"""Paper accounts the real engine writes, laid out as the Paper state root holds them.
 
 Each book trades a strategy copied into its own directory, over the synthetic
 bars of ``test_paper_trading`` with a trusted executor, so a book's journals,

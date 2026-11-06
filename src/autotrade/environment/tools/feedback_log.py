@@ -2,7 +2,7 @@
 
 ``report_issue`` files a suspected defect in the environment, a tool's output,
 the mounted data or the mounted docs; ``skill_feedback`` contradicts a mounted
-operating-memory entry. Both write one redacted, version-stamped JSON line per
+skill-library entry. Both write one redacted, version-stamped JSON line per
 report into the owning experiment's ledger, and the researcher answers in the
 same log with a ``resolution`` line naming the report. Nothing is ever
 rewritten — the filed report stays exactly as the session wrote it, and the

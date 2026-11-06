@@ -273,15 +273,15 @@ def test_a_test_whose_replay_fails_leaves_the_test_horizon_where_it_was() -> Non
         assert harness.test.invoke({"candidate": good}).value["step"] == 1
 
 
-def test_a_seed_that_lacks_the_warm_start_ends_the_attempt_by_name() -> None:
+def test_a_seed_that_lacks_the_prebuilt_asof_state_ends_the_attempt_by_name() -> None:
     with TemporaryDirectory() as tmp:
         harness = _Harness(Path(tmp))
         node = harness.node("a", "1")
 
         def missing(request):
-            raise RuntimeError(f"the PIT view seed carries no prebuilt as-of state for replay slot {request.start}")
+            raise RuntimeError(f"the prebuilt view cache carries no prebuilt as-of state for replay slot {request.start}")
 
-        harness.evaluator.require_warm_start = missing
+        harness.evaluator.require_prebuilt_asof_state = missing
         with pytest.raises(EnvironmentBlocked, match=r"test step 1: .*no prebuilt as-of state for replay slot 20250701"):
             harness.test.invoke({"candidate": node})
         assert harness.records() == [] and harness.evaluator.requests[-1][2] is None

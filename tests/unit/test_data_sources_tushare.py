@@ -3465,7 +3465,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         commands = cron_update.build_job_commands(ctx)
 
         self.assertEqual(len(commands), 7)
-        # Last, the vintage report of the live Paper books, which reads no
+        # Last, the vintage report of the live Paper accounts, which reads no
         # date window.
         self.assertEqual(commands.pop(), ["/env/python", "scripts/paper/run_paper.py", "vintages"])
         command_text = [" ".join(command) for command in commands]

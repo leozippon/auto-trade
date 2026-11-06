@@ -37,7 +37,7 @@ OPERATING_MEMORY_LIBRARY = "configs/operating_memory"
 # The mount name of the curated library: ``memory/curated/<name>/`` in a
 # session workspace and in an experiment's snapshot.
 CURATED_MEMORY_SOURCE = "curated"
-# One experiment's frozen operating memory, resolved once when the experiment is
+# One experiment's frozen skill library, resolved once when the experiment is
 # created and mounted unchanged by every session it runs. The library keeps
 # moving; an experiment does not, so its sessions are comparable to each other.
 OPERATING_MEMORY_SNAPSHOT_DIRNAME = "memory"
@@ -299,7 +299,7 @@ def _index_entries(tree: Path, *, directory: str, origin: str) -> list[dict[str,
 
 
 def build_skills_index(root: str | Path) -> dict[str, object]:
-    """Index the writable session skills plus the operating memory mounted beside them.
+    """Index the writable session skills plus the skill library mounted beside them.
 
     ``count``/``files``/``bytes`` describe the writable tree alone, because they
     are the published generation's ledger fields; the read-only entries are a
@@ -314,7 +314,7 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
     if memory_root.is_dir():
         for source in sorted(memory_root.iterdir(), key=lambda path: path.name):
             if source.name != CURATED_MEMORY_SOURCE:
-                raise ValueError(f"unknown operating memory source: {source.name}")
+                raise ValueError(f"unknown skill library source: {source.name}")
             validate_skills_tree(source, require_writable=False)
             for entry in _index_entries(
                 source,
@@ -407,7 +407,7 @@ def operating_memory_entries(library: str | Path) -> tuple[str, ...]:
 
     root = Path(library)
     if not root.is_dir():
-        raise FileNotFoundError(f"operating memory library does not exist: {root}")
+        raise FileNotFoundError(f"skill library library does not exist: {root}")
     validate_skills_tree(root, require_writable=False)
     return tuple(sorted(item.name for item in root.iterdir()))
 
@@ -485,7 +485,7 @@ def create_operating_memory_snapshot(
     record_path = operating_memory_snapshot_path(experiment_dir)
     if record_path.exists() or root.exists():
         raise FileExistsError(
-            f"operating memory snapshot already exists: {record_path}"
+            f"skill library snapshot already exists: {record_path}"
         )
     if resolved == "none":
         sources: tuple[MemorySource, ...] = ()
@@ -541,7 +541,7 @@ def read_operating_memory_snapshot(
         return None
     record = read_json_object(path)
     if int(record.get("schema_version") or 0) != OPERATING_MEMORY_SNAPSHOT_SCHEMA:
-        raise ValueError("operating memory snapshot has an unknown schema_version")
+        raise ValueError("skill library snapshot has an unknown schema_version")
     return record
 
 
@@ -583,13 +583,13 @@ def snapshot_memory_sources(
     names: list[str] = []
     for entry in record.get("entries") or ():  # type: ignore[union-attr]
         if not isinstance(entry, Mapping):
-            raise ValueError("operating memory snapshot entry must be an object")
+            raise ValueError("skill library snapshot entry must be an object")
         origin = str(entry.get("origin") or "")
         if origin == RETIRED_MEMORY_ORIGIN:
             continue
         name = validate_skill_name(str(entry.get("name") or ""))
         if origin != "curated" or entry.get("source") != CURATED_MEMORY_SOURCE:
-            raise ValueError("operating memory snapshot entry is invalid")
+            raise ValueError("skill library snapshot entry is invalid")
         names.append(name)
     if not names:
         return ()
@@ -615,7 +615,7 @@ def install_operating_memory(
     record = read_operating_memory_snapshot(experiment_dir)
     if record is None:
         raise FileNotFoundError(
-            "experiment has no operating memory snapshot to mount: "
+            "experiment has no skill library snapshot to mount: "
             f"{operating_memory_snapshot_path(experiment_dir)}"
         )
     destination = Path(workspace) / OPERATING_MEMORY_DIRNAME
@@ -644,7 +644,7 @@ def _reject_operating_memory_name(workspace_root: Path, name: str) -> None:
     for source in sorted(memory.iterdir(), key=lambda path: path.name):
         if (source / name).is_dir():
             raise ValueError(
-                f"{name} is mounted operating memory ({source.name}) and is "
+                f"{name} is mounted skill library ({source.name}) and is "
                 "read-only; use a different skill name"
             )
 

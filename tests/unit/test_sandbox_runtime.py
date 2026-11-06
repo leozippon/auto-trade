@@ -736,7 +736,7 @@ def test_every_container_of_an_experiment_carries_its_label(tmp_path: Path):
         executor = DockerStrategyExecutor(_strategy(package), config)
     command = executor.docker_command()
     assert command[command.index("--label") + 1] == "adm.experiment=exp_x"
-    # Without an experiment (a Paper book, the console preview) no label.
+    # Without an experiment (a Paper account, the console preview) no label.
     assert not strategy_sandbox_from_spec(None, fit_timeout_seconds=60).labels
     with patch.object(DockerStrategyExecutor, "_start"):
         unlabelled = DockerStrategyExecutor(_strategy(package)).docker_command()
@@ -2209,7 +2209,7 @@ def test_the_console_gpu_margin_setting_defaults_to_the_promised_memory(
 def test_a_paper_run_takes_free_cards_only_when_a_container_starts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
-    """A Paper book's strategy container is pinned to cards the one selection
+    """A Paper account's strategy container is pinned to cards the one selection
     gives it, never to a card a running experiment claims, and a run that starts no
     container (a session already decided) asks for none. A CPU book never
     reads the devices."""

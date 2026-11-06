@@ -901,7 +901,7 @@ class LLMResearchDeveloper:
         if resume is None:
             copy_artifact(source, output_dir)
             copy_model_artifacts(source_models, models_dir)
-            # A reference pack that ships a runnable starter is what the experiment
+            # A reference workspace that ships a runnable starter is what the experiment
             # starts from; the template supplies the contract files it keeps.
             seed_output_from_starter(
                 output_dir, self.workspace_reference, repo_root=self.repo_root
@@ -926,7 +926,7 @@ class LLMResearchDeveloper:
         inputs_dir: Path,
     ) -> list[MemorySource]:
         """Mount what the session reads beside its working copy: operating
-        memory, skills and their index, the reference pack and the PIT view.
+        memory, skills and their index, the reference workspace and the PIT view.
         Returns the memory sources mounted."""
 
         if inputs_dir.exists():
@@ -1572,7 +1572,7 @@ def research_geometry_record(
 def start_record() -> dict[str, object]:
     """Which template seeded the session's working copy and its contract files.
 
-    A reference pack that ships ``starter/`` is then overlaid onto ``output/``
+    A reference workspace that ships ``starter/`` is then overlaid onto ``output/``
     (:func:`seed_output_from_starter`), so this names the template the contract
     files and ``output/README.md`` come from, not necessarily the strategy code
     the session starts reading.
@@ -1679,9 +1679,9 @@ def _resolve_workspace_reference(
     workspace_reference: str | Path | None,
     repo_root: str | Path | None = None,
 ) -> Path | None:
-    """The reference pack directory, or ``None`` when the parameter is unset.
+    """The reference workspace directory, or ``None`` when the parameter is unset.
 
-    One resolution for both things a pack supplies: the read-only ``refs/``
+    One resolution for both things a reference workspace supplies: the read-only ``refs/``
     tree and the starter that seeds ``output/``. An empty value is a no-op; a
     set path must exist, be a directory and stay inside the repository,
     otherwise this fails immediately.
@@ -1715,16 +1715,16 @@ def install_workspace_reference(
     *,
     repo_root: str | Path | None = None,
 ) -> None:
-    """Copy the optional reference pack into ``workspace/refs/`` before sandbox start.
+    """Copy the optional reference workspace into ``workspace/refs/`` before sandbox start.
 
-    The pack lands writable like everything else under the Agent's workspace
+    The reference workspace lands writable like everything else under the Agent's workspace
     mount. It was installed 0o444/0o555 once, to keep the reference copy from
     drifting; what that actually bought was a papercut in every experiment, because
     ``cp`` reproduces the source's mode and the copies it seeds -- a candidate
     directory, a working file under ``output/`` -- came out unwritable for the
     typed writers, which run as the host user and cannot chmod a file the
     sandbox user owns. Drift costs nothing instead: every session start removes
-    this tree and re-copies it from the checked-in pack.
+    this tree and re-copies it from the checked-in reference workspace.
 
     The copy writes only ``refs/``, never ``models/`` or ``inputs/``;
     ``output/`` is seeded separately by :func:`seed_output_from_starter`.
@@ -1746,16 +1746,16 @@ def seed_output_from_starter(
     *,
     repo_root: str | Path | None = None,
 ) -> tuple[str, ...]:
-    """Seed a session's ``output/`` from the reference pack's starter package.
+    """Seed a session's ``output/`` from the reference workspace's starter package.
 
-    A pack that ships ``starter/main.py`` ships a runnable strategy, so the
+    A reference workspace that ships ``starter/main.py`` ships a runnable strategy, so the
     working copy starts as that package rather than as the bare template: every
     experiment otherwise spent its first substantive turn hand-porting the same files,
     and the copies it made from the read-only ``refs/`` tree came out
     unwritable. The template's read-only contract files are not overwritten —
-    ``output/README.md`` remains the strategy contract, whatever the pack
-    carries. Returns the relative paths seeded, empty when there is no pack or
-    the pack ships no starter.
+    ``output/README.md`` remains the strategy contract, whatever the reference workspace
+    carries. Returns the relative paths seeded, empty when there is no reference workspace or
+    the reference workspace ships no starter.
     """
     seed = _resolve_workspace_reference(workspace_reference, repo_root)
     if seed is None:

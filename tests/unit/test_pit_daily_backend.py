@@ -2883,7 +2883,7 @@ def test_a_span_prebuild_encodes_the_parts_its_replay_publishes(tmp_path: Path) 
     assert prebuild("second")["reused"] is True
 
 
-def test_a_test_replay_needs_the_seeds_warm_start(tmp_path: Path) -> None:
+def test_a_test_replay_needs_the_seeds_prebuilt_asof_state(tmp_path: Path) -> None:
     """A test opens its span on the as-of state the seed prebuilt for the
     span's first slot; a seed that lacks it is refused by name, before any
     replay, and a prebuilt one passes."""
@@ -2892,7 +2892,7 @@ def test_a_test_replay_needs_the_seeds_warm_start(tmp_path: Path) -> None:
     request = _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
     backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     with pytest.raises(RuntimeError, match="no prebuilt as-of state") as refused:
-        backend.require_warm_start(request)
+        backend.require_prebuilt_asof_state(request)
     assert snapshot.name in str(refused.value) and slots["a"].name in str(refused.value)
     assert "research_years" in str(refused.value)
     first = json.loads((slots["a"] / "manifest.json").read_text(encoding="utf-8"))
@@ -2906,4 +2906,4 @@ def test_a_test_replay_needs_the_seeds_warm_start(tmp_path: Path) -> None:
         end=str(first["period_end"]),
         host_dir=tmp_path / "stash_build",
     )
-    backend.require_warm_start(request)
+    backend.require_prebuilt_asof_state(request)

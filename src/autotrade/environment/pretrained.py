@@ -7,7 +7,7 @@ when it is created (the experiment parameter ``pretrained_manifest_sha256``,
 stamped by the console), and every container that mounts the store -- each
 strategy container, research and Paper alike, and the Agent's session
 container -- first compares the store's manifest with the pin and refuses to
-start on a missing store or a different one. An experiment or a Paper book without
+start on a missing store or a different one. An experiment or a Paper account without
 the pin mounts nothing.
 
 This is pin-and-compare only: hashing the weights themselves is the one-off

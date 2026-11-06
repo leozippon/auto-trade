@@ -183,7 +183,7 @@ def test_a_readme_edit_is_refused_where_a_session_mounts_it_and_nowhere_else(
     """The experiment's image was built before the template README changed in this
     checkout. A session seeded afterwards mounts the new text and is refused
     before its Agent reads it. A strategy container -- a running experiment's next
-    validation, its forward replay, a Paper book -- never reads the README and
+    validation, its forward replay, a Paper account -- never reads the README and
     starts, and a resumed session keeps the copy it was seeded with."""
 
     built = _contract_tree(tmp_path / "built")

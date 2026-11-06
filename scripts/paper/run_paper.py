@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""ADM-Cube Paper books: create each once, then decide one session per run.
+"""ADM-Cube Paper accounts: create each once, then decide one session per run.
 
 Books live side by side under the state root, one directory per book id.
 ``init`` pins one experiment's Paper candidate, its research environment and
@@ -156,7 +156,7 @@ def wait_for_cards(take: Callable[[], list[int]], wait: CardWait, label: str) ->
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    init = commands.add_parser("init", help="Create a Paper book from one experiment's Paper candidate.")
+    init = commands.add_parser("init", help="Create a Paper account from one experiment's Paper candidate.")
     init.add_argument("--experiment", required=True, help="Experiment id under experiments/.")
     init.add_argument("--artifact", required=True, help="Registered artifact id: the graduate, or its adjustment.")
     init.add_argument(
@@ -235,7 +235,7 @@ def init(args: argparse.Namespace) -> int:
         note=args.note,
     )
     print(
-        f"created Paper book {book.root.name} at {book.root}: {book.experiment_id}/{book.artifact_id} "
+        f"created Paper account {book.root.name} at {book.root}: {book.experiment_id}/{book.artifact_id} "
         f"({book.candidate_source}), initial cash {book.profile.initial_cash:,.2f}, profile {book.profile.profile_id}, "
         f"commission {book.profile.commission_bps} bps, slippage {book.profile.slippage_bps} bps, "
         f"fit timeout {book.sandbox.fit_timeout_seconds:g}s, image {book.sandbox.spec.image}"
@@ -423,7 +423,7 @@ def run(args: argparse.Namespace) -> int:
     trade_date = args.trade_date or datetime.now(CN_TZ).strftime("%Y%m%d")
     book_ids = [validate_book_id(args.book)] if args.book else run_order(args.state_root)
     if not book_ids:
-        print(f"no Paper books under {args.state_root}; create one with `run_paper.py init`", file=sys.stderr)
+        print(f"no Paper accounts under {args.state_root}; create one with `run_paper.py init`", file=sys.stderr)
         return 1
     _resources("before")
     failures = run_books(

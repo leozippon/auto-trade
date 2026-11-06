@@ -1,7 +1,7 @@
 """One launcher for every checked-in round definition.
 
-A round is data: which experiments it starts, which reference pack and exploration
-directive each experiment gets, which PIT view seed and dataset selection they share,
+A round is data: which experiments it starts, which reference workspace and exploration
+directive each experiment gets, which prebuilt view cache and dataset selection they share,
 and the handful of parameters that round decides differently from the console
 creation form. Everything around that data -- merging the console defaults,
 refusing a default drift, running the console's own create-time validation
@@ -43,7 +43,7 @@ history keeps it) and its ids join RETIRED_IDS.
 /api/experiments (ExperimentManager.create_experiment's closed, unknown,
 required and id rules, then the worker's own resolve_worker_options pre-flight,
 which type-checks every knob, refuses a malformed research geometry and, for a
-named PIT view seed, refuses a tree whose cache format or snapshot
+named prebuilt view cache, refuses a tree whose cache format or snapshot
 configuration is not this round's or whose prebuild has not finished,
 and reads the research release the seed was built from -- the release every
 experiment will pin -- refusing it unless it is published here and reaches Held-out).
@@ -64,7 +64,7 @@ console's own rule -- and creates the next pending ones in file order through
 the same validation and POST path. A local experiment reached while the local-model
 limit is full, and a GPU experiment reached while too few cards are free, stays
 pending without stopping the queue, so the experiments behind it still take the free
-slots; so does an experiment whose PIT view seed has no contract yet or whose
+slots; so does an experiment whose prebuilt view cache has no contract yet or whose
 prebuild has not finished, which the next run creates once the seed reports
 status ok. Nothing pending or nothing free is the steady state and exits 0, so
 the mode is idempotent and safe on a timer; only a creation that was attempted
@@ -77,7 +77,7 @@ experiment and whether it takes a free slot. The research cron
 (`ops/cron/research_fill.cron`) runs it over several round files in turn.
 
 Before an experiment is created, and on every dry-run reading of it, `smoke` replays
-what the experiment's `output/` starts as -- its pack's starter, else the contract
+what the experiment's `output/` starts as -- its reference workspace's starter, else the contract
 template -- through the host's own evaluator on the experiment's seed: a few days from
 each research-year start inside the full span, and the full span once. A seed
 whose views break the replay (round 20261015's five-year seed failed every
@@ -151,7 +151,7 @@ from autotrade.webui.manager import gpu_request, uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
 ARCHIVE_ROOT = REPO_ROOT / "logs" / "archive"
-# Where an experiment's reference pack lives when the experiment does not name one.
+# Where an experiment's reference workspace lives when the experiment does not name one.
 PACKS_DIR = "configs/workspace_refs"
 # The id the round-level dry-run validates under. Never created: it only
 # carries the parameters every experiment shares through the pre-flight.
@@ -170,10 +170,10 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     "screen_boards": (),
     "screen_min_circ_mv_yi": None,
     "screen_max_circ_mv_yi": None,
-    # Both the packs and the directives promise the Agent this many host null
+    # Both the reference workspaces and the directives promise the Agent this many host null
     # controls over the research session.
     "max_null_controls": 12,
-    # Derived from SandboxConfig.fit_timeout_seconds; packs promise the Agent a
+    # Derived from SandboxConfig.fit_timeout_seconds; reference workspaces promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
     "operating_memory": "curated",
@@ -203,7 +203,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
 BASE_OVERRIDES: dict[str, object] = {
     # Research on four July-June years, the twelve forward months after them,
     # and a Held-out quarter the replay clips to the release end. Required by
-    # the console, and the geometry the PIT view seeds are planned over.
+    # the console, and the geometry the prebuilt view caches are planned over.
     "research_start": "20210701",
     "research_end": "20250630",
     "forward_end": "20260630",
@@ -614,8 +614,8 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "xsattn_csi1000_8y_20260925",
         # Every experiment of the closed rounds 20261011, 20261012, 20261012b,
         # 20261012c and 20261012d, whose files were removed from the tree on
-        # 2026-10-06 (last in 6a0f487; 20261012b's file and pack in 0144b7c;
-        # 20261013's file and pack in 315e7c5); all finished and stay on disk
+        # 2026-10-06 (last in 6a0f487; 20261012b's file and reference workspace in 0144b7c;
+        # 20261013's file and reference workspace in 315e7c5); all finished and stay on disk
         # or in the archive.
         "incdraft2_100k_8y_qwen_20261013",
         "incdraft_100k_8y_mimo_20261012",
@@ -627,7 +627,7 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "seqnovel_ssm_100k_8y_mimo_20261012",
         "titlemap_100k_8y_mimo_20261012",
         "titlerank_100k_8y_qwen_20261012",
-        # Every experiment of the closed round 20261015, whose file and packs left the
+        # Every experiment of the closed round 20261015, whose file and reference workspaces left the
         # tree with round 20261008b's launch; all ended no_edge and stay on disk.
         "open_chips_100k_5y_mimo_20261015",
         "open_cluster_100k_8y_mimo_20261015",
@@ -684,7 +684,7 @@ RETIRED_IDS: frozenset[str] = frozenset(
         "retrieval_100k_8y_sol_zgca_20261025b",
         "retrieval_100k_8y_sol_zgca_20261027b",
         # Every experiment of rounds 20261026, 20261027, 20261030 and 20261031, whose
-        # files and packs left the tree on 2026-11-02. None is running; the
+        # files and reference workspaces left the tree on 2026-11-02. None is running; the
         # directories that remain stay on disk.
         "memory_100k_10y_argon_local_20261031",
         "memory_100k_10y_astra_local_20261031",
@@ -699,7 +699,7 @@ RETIRED_IDS: frozenset[str] = frozenset(
         # round was narrowed to Astra experiments alone.
         "memory_200k_10y_argon_local_20261102",
         # Every experiment of round 20261102 and the two memory experiments of round
-        # 20261103, whose file, experiments and memory packs left the tree on
+        # 20261103, whose file, experiments and memory reference workspaces left the tree on
         # 2026-11-05 with the memory machinery. All ended and stay on disk.
         "memory_200k_10y_astra_local_20261102",
         "memory_200k_10y_astra_local_20261102b",
@@ -772,9 +772,9 @@ def smoke(merged: Mapping[str, object]) -> str:
     passed, else why not.
 
     ``merged`` is the experiment's validated params.json. What the session's
-    ``output/`` starts as is replayed: the pack's ``starter/``, or the experiment's
-    strategy template (``strategy_path``) when the pack ships no ``starter/``
-    or there is no pack. A ``starter/`` without ``main.py`` is refused, since
+    ``output/`` starts as is replayed: the reference workspace's ``starter/``, or the experiment's
+    strategy template (``strategy_path``) when the reference workspace ships no ``starter/``
+    or there is no reference workspace. A ``starter/`` without ``main.py`` is refused, since
     the session would silently start from the template instead. It is replayed
     by the host's own evaluator as a session's smoke_backtest and Validation
     replay it: over the full research span, a few days from each research-year
@@ -798,7 +798,7 @@ def smoke(merged: Mapping[str, object]) -> str:
     if not reference or not starter.exists():
         starter = (REPO_ROOT / str(merged["strategy_path"])).parent
     elif not (starter / "main.py").is_file():
-        return f"the pack's starter cannot be smoked: {starter} lacks main.py"
+        return f"the reference workspace's starter cannot be smoked: {starter} lacks main.py"
     digest = hashlib.sha256(
         json.dumps({key: merged.get(key) for key in SMOKE_KEYS}, sort_keys=True, default=str).encode("utf-8")
     )
@@ -910,7 +910,7 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
 
 
 def seed_ready(seed: str) -> bool:
-    """Whether a named PIT view seed has its contract and a finished prebuild;
+    """Whether a named prebuilt view cache has its contract and a finished prebuild;
     the console default (no seed) always is. Readiness alone: whether the tree
     is this experiment's is the pre-flight's to judge."""
 
@@ -988,7 +988,7 @@ class Round:
     """One round definition: its experiments and what it decides differently.
 
     ``experiments`` maps experiment id to the per-experiment part of the create request --
-    normally ``research_directive`` (the pack defaults to the one named after
+    normally ``research_directive`` (the reference workspace defaults to the one named after
     the experiment, see :meth:`request_params`), plus any parameter that experiment alone
     changes. ``overrides`` is what the whole round decides on top of
     BASE_OVERRIDES -- normally its dataset selection, and any default every experiment
@@ -1052,7 +1052,7 @@ class Round:
         """The create request body: console defaults, the round's decisions, the id.
 
         ``PROBE_ID`` stands for the part every experiment shares; any other id must be
-        one of the round's experiments. An experiment's pack is the one named after it,
+        one of the round's experiments. An experiment's reference workspace is the one named after it,
         ``configs/workspace_refs/<id>``, unless the experiment or the round names
         another (``""`` for none); the pre-flight refuses one that is missing.
         """
@@ -1084,7 +1084,7 @@ class Round:
                     " failed, until it reports status ok, then re-run --"
                     " no parameter needs changing"
                 )
-            elif "pit_views_seed" in str(exc) or "view seed" in str(exc):
+            elif "pit_views_seed" in str(exc) or "view cache" in str(exc):
                 reason += (
                     f"\n  every experiment shares one prebuilt view tree ({self.pit_views_seed});"
                     " build it with scripts/data/prebuild_pit_views_seed.py for exactly"

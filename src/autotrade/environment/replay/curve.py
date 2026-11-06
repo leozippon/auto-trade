@@ -1,7 +1,7 @@
 """One replay result as a daily curve: cumulative return, benchmark, exposure.
 
 The research console draws an experiment's result through these functions, and
-a Paper book copies its source experiment's curve through the same ones when it
+a Paper account copies its source experiment's curve through the same ones when it
 is created, so the book's own copy and the console's read the same numbers.
 Nothing here is chained or recomputed across results: one result file in, one
 curve out.

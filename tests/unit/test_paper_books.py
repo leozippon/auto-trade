@@ -1,4 +1,4 @@
-"""Paper books under one state root: creation, listing and the book-by-book run."""
+"""Paper accounts under one state root: creation, listing and the book-by-book run."""
 
 from __future__ import annotations
 
@@ -276,7 +276,7 @@ def test_a_new_book_carries_its_track_and_pins_its_verdict_rules(tmp_path: Path)
             paper_root(tmp_path) / "other", experiment_dir=tmp_path / "experiments/inc",
             artifact_id="strategy_research_abc", repo_root=tmp_path, track="incubating",
         )
-    with pytest.raises(ValueError, match="unknown Paper book track"):
+    with pytest.raises(ValueError, match="unknown Paper account track"):
         create_book(
             paper_root(tmp_path) / "other", experiment_dir=tmp_path / "experiments/exp",
             artifact_id="strategy_research_abc", repo_root=tmp_path, track="promoted",
@@ -414,7 +414,7 @@ def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
     book = _graduated_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
     (book.root / BOOK_NAME).write_text(json.dumps({**record, "schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="unsupported Paper book schema 1"):
+    with pytest.raises(ValueError, match="unsupported Paper account schema 1"):
         load_book(book.root)
 
 

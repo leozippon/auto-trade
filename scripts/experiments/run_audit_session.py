@@ -66,14 +66,14 @@ def main() -> int:
     parser.add_argument(
         "--workspace-reference",
         help=(
-            "Repo-relative reference pack mounted read-only into the session, "
+            "Repo-relative reference workspace mounted read-only into the session, "
             "the way the console mounts an experiment's refs; none by default."
         ),
     )
     parser.add_argument(
         "--operating-memory",
         choices=OPERATING_MEMORY_MODES,
-        help="Operating-memory mode for this session; the console default when omitted.",
+        help="Skill-library mode for this session; the console default when omitted.",
     )
     parser.add_argument(
         "--directive-file",

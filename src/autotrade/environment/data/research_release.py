@@ -5,7 +5,7 @@ committed generation into a shared hardlink checkpoint, then stores a durable
 experiment-local manifest.  Resume always reuses that manifest; a new
 experiment started while the updater holds the lake (or a crashed run left it
 ``updating``) uses the last complete release.
-An experiment that names the release it must read (the one its PIT view seed
+An experiment that names the release it must read (the one its prebuilt view cache
 was built from) pins exactly that already-published release instead.
 
 Retention (``retire_research_releases``) removes the releases no consumer

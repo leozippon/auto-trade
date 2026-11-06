@@ -1,4 +1,4 @@
-# ADM-Cube Paper books: the pre-open order sheet of every SSE session, per book.
+# ADM-Cube Paper accounts: the pre-open order sheet of every SSE session, per book.
 # Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block paper
 #
 # Books live in data/trading/paper/<book>/ (run_paper.py init). Each run goes

@@ -84,7 +84,7 @@ class BrokerProfile:
     # Individual dividend tax under the record date's rule (dividend_tax.py),
     # withheld on old-rule distributions and supplemented at sales. Every experiment's
     # account pays it (``worker.resolve_worker_options``), and so does every
-    # Paper book opened from one; it reads each ex-date's bonus shares, which
+    # Paper account opened from one; it reads each ex-date's bonus shares, which
     # a bare Broker over data without an ex-date table does not have, so the
     # field's own default is off.
     dividend_tax: bool = False
@@ -130,7 +130,7 @@ class BrokerProfile:
 
     def to_record(self) -> dict[str, object]:
         """Every field by name: the one record of a profile, in a run
-        manifest and a Paper book alike, which ``from_record`` inverts."""
+        manifest and a Paper account alike, which ``from_record`` inverts."""
 
         return dataclass_record(self)
 

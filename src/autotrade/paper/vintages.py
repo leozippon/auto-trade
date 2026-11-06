@@ -1,4 +1,4 @@
-"""Which datasets a live Paper book mounts have changed vintage since its pin.
+"""Which datasets a live Paper account mounts have changed vintage since its pin.
 
 A dataset's vintage id moves when the vendor's history of it was restated (a
 restatement, promotion or revert in the raw lake), not when rows are appended.

@@ -718,7 +718,7 @@ class SessionValidations:
         }
 
     def record_row(self, record: Mapping[str, object]) -> dict[str, object]:
-        """One rolling-record step as a test result lists it: the step, its
+        """One validation-record step as a test result lists it: the step, its
         window and test horizon, the candidate by handle and its entry without
         the daily rows."""
 
@@ -1398,7 +1398,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "you; models/ is shared with the working copy), or output itself to "
         "validate the working copy as it stands; build such a directory by copying "
         "output/, the code you have been editing, not refs/, which only holds the "
-        "pack this experiment started from. A candidate whose replay completes becomes its own immutable "
+        "reference workspace this experiment started from. A candidate whose replay completes becomes its own immutable "
         "revision and Step node under the CURRENT node as shared parent, recorded "
         "with its span. A candidate whose replay fails has no result_ref and, while "
         "record_failed_attempts is on, is recorded as a dead-end node, so later "
@@ -2296,16 +2296,16 @@ class TestTool(SessionTimeBudgetAware):
         test_horizon = steps.horizon_after(step)
         candidate = next(item for item in backtest.steps if item.step_id == node_id)
         with backtest.time_budget.pause():
-            # The warm start the replay opens on must be in the seed before
+            # The prebuilt as-of state the replay opens on must be in the seed before
             # the replay runs: a seed that lacks it ends the attempt by name.
             try:
-                require_warm = getattr(backtest.evaluator, "require_warm_start", None)
+                require_prebuilt = getattr(backtest.evaluator, "require_prebuilt_asof_state", None)
                 request = backtest.validation_request(
                     backtest.artifact_store.revision(candidate.revision_id),
                     backtest.request.validation,
                 )
-                if callable(require_warm):
-                    require_warm(request)
+                if callable(require_prebuilt):
+                    require_prebuilt(request)
             except (FileNotFoundError, RuntimeError) as exc:
                 raise EnvironmentBlocked(f"test step {step}: {_public_error_text(exc)}") from exc
             started = time.perf_counter()

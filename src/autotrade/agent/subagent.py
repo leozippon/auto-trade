@@ -78,27 +78,27 @@ SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
 _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 # Children a parent may run at once; the rest queue in the same pool.
 # Several writable children may run together as long as each writes only its
-# own task path; the shared call-budget share is unchanged, so a wider round
+# own task path; the shared call-budget share is unchanged, so a wider turn
 # spends the same quota sooner rather than more of it.
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 6
 # Global default child turn budget (the last tier of the launch precedence:
 # call argument > role default > this). A child has the parent's context
-# window and compaction, so the round cap bounds work, not memory: under the
+# window and compaction, so the turn cap bounds work, not memory: under the
 # earlier cap of 24, one child in eleven hit the wrap-up notice while still
-# issuing tool calls every round at 25k-144k prompt tokens, i.e. bounded work
-# was cut short, not wandering. The last ``SUBAGENT_GRACE_ROUNDS`` turns start
+# issuing tool calls every turn at 25k-144k prompt tokens, i.e. bounded work
+# was cut short, not wandering. The last ``SUBAGENT_GRACE_TURNS`` turns start
 # with a wrap-up notice (Pi's grace-turn pattern); an explicit ``max_turns``
 # is honoured as given.
-DEFAULT_SUBAGENT_MAX_ROUNDS = 48
-SUBAGENT_GRACE_ROUNDS = 2
+DEFAULT_SUBAGENT_MAX_TURNS = 48
+SUBAGENT_GRACE_TURNS = 2
 # Global default thinking level; a child never inherits the parent's level.
-# The parent lowers it per launch for bounded mechanical work, where a round
+# The parent lowers it per launch for bounded mechanical work, where a turn
 # that spends the whole completion cap on reasoning costs more than it adds.
 DEFAULT_SUBAGENT_THINKING = "xhigh"
 SUBAGENT_DESCRIPTION_MAX_CHARS = 200
 # A parent's mid-run instruction to a child (``action="message"``): bounded
 # like a brief, queued on the job, and delivered as one labelled user message
-# before the child's next model round.
+# before the child's next model turn.
 SUBAGENT_STEER_MAX_CHARS = 2_000
 STEER_MESSAGE_LABEL = "[父代理指令]"
 # Opens an inherited-context child's task. The forked history ends in the
@@ -127,9 +127,9 @@ OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 # tool call) gets a forced concise continuation — the same observation the
 # parent conversation receives — at most this many times per child before the
 # launch is reported as failed instead of terminated as ``completed``. One:
-# at the 12k cap 1-3 rounds per session were cut and the single observed
-# continuation succeeded at once; at the 32k ceiling a cut round is rare and
-# costs ~15 min, so a second consecutive all-reasoning round after an explicit
+# at the 12k cap 1-3 turns per session were cut and the single observed
+# continuation succeeded at once; at the 32k ceiling a cut turn is rare and
+# costs ~15 min, so a second consecutive all-reasoning turn after an explicit
 # "be concise" instruction is a stuck loop, not an unfinished answer.
 SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
 OUTPUT_TRUNCATED_CONTINUATION = (
@@ -143,7 +143,7 @@ OUTPUT_TRUNCATED_CONTINUATION = (
 # ``ok`` stays False at the parent, so it is never read as a full report.
 SUBAGENT_DEGRADED_SUMMARY_MARKER = "[回合用尽：以下内容由{source}恢复，不是子代理的正式汇报]"
 SUBAGENT_DEGRADED_SUMMARY_ERROR = (
-    "Sub-agent rounds exhausted; summary recovered without a final report"
+    "Sub-agent turns exhausted; summary recovered without a final report"
 )
 
 _READ_TOOLS = frozenset({"glob", "grep", "read_file"})
@@ -245,7 +245,7 @@ def _role_schema_text() -> str:
         )
         lines.append(
             f"{role.name}：{role.description}（{tools}；默认 thinking {role.default_thinking}、"
-            f"max_turns {role.default_max_turns(DEFAULT_SUBAGENT_MAX_ROUNDS)}）"
+            f"max_turns {role.default_max_turns(DEFAULT_SUBAGENT_MAX_TURNS)}）"
         )
     return "；".join(lines) + "。"
 
@@ -307,14 +307,14 @@ AGENT_TOOL_DESCRIPTION = (
     # per-role table on the ``agent`` property (``_role_schema_text``); a
     # hand-written copy could only drift from SUBAGENT_ROLE_TABLE.
     "回合与思考：子代理拥有自己模型的完整上下文窗口、按该窗口推导的压缩阈值和与你相同的输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
-    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_ROUNDS} 回合：倒数第 {SUBAGENT_GRACE_ROUNDS} 回合起收到收尾提示，"
+    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_TURNS} 回合：倒数第 {SUBAGENT_GRACE_TURNS} 回合起收到收尾提示，"
     "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多回合时显式给 max_turns。"
     f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
     "有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium："
     f"每回合输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，把它全部耗在思考里而发不出工具调用的一个回合只得到最多 "
     f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后该次委托记为 error。"
     "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
-    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_ROUNDS} 回合）；生效值记入该子代理的 subagent_task 事件。\n"
+    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_TURNS} 回合）；生效值记入该子代理的 subagent_task 事件。\n"
     f"汇报：最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长的汇报只内联开头（summary_truncated=true），"
     "全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；"
     "子代理的角色提示里写着这个上限：可写的子代理把长材料写进工作区文件、汇报给路径，只读的子代理给出处而不抄原文。"
@@ -371,8 +371,8 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "type": "integer",
                 "minimum": 1,
                 "description": (
-                    f"子代理最多的模型回合，≥1；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_MAX_ROUNDS} 回合），"
-                    f"倒数第 {SUBAGENT_GRACE_ROUNDS} 回合起收到收尾提示，上限后强制简洁总结；显式值按原值生效。"
+                    f"子代理最多的模型回合，≥1；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_MAX_TURNS} 回合），"
+                    f"倒数第 {SUBAGENT_GRACE_TURNS} 回合起收到收尾提示，上限后强制简洁总结；显式值按原值生效。"
                     "子代理的上下文与你同样大并自动压缩，回合只约束工作量。没有 schema 上限，但每回合占用会话共享调用配额中的一次子代理调用"
                     "（全部子代理累计不超过会话 max_llm_calls 的一半），配额耗尽的子代理以 error 结束，所以不要设得远超任务需要。"
                 ),
@@ -484,7 +484,7 @@ def subagent_system_prompt(role: str) -> str:
         template = _READ_PROMPT
         tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_READ_ONLY_SCREEN_NOTE}"
     # The child is told the inline cap its report is delivered under: 44 % of
-    # one round's reports ran past it unaware and cost the parent a spill read.
+    # one turn's reports ran past it unaware and cost the parent a spill read.
     return template.format(
         role=role,
         mission=spec.mission,
@@ -614,7 +614,7 @@ class SubAgentConfig:
     # Turn budget for a child whose launch omits ``max_turns``; None = only the
     # parent session deadline bounds it. Context is not a bound: a child
     # compacts at the parent's threshold (``SubAgentEngine.compactor``).
-    max_rounds: int | None = DEFAULT_SUBAGENT_MAX_ROUNDS
+    max_turns: int | None = DEFAULT_SUBAGENT_MAX_TURNS
     # None = no extra child wall clock; the parent time budget is the cap. One
     # LLM call is bounded by the gateway timeout the run configures, never by a
     # second per-call clock here.
@@ -625,8 +625,8 @@ class SubAgentConfig:
     def __post_init__(self) -> None:
         if self.max_tokens <= 0:
             raise ValueError("Sub-agent max_tokens must be positive")
-        if self.max_rounds is not None and self.max_rounds <= 0:
-            raise ValueError("Sub-agent max_rounds must be positive")
+        if self.max_turns is not None and self.max_turns <= 0:
+            raise ValueError("Sub-agent max_turns must be positive")
         if self.deadline_seconds is not None and self.deadline_seconds <= 0:
             raise ValueError("Sub-agent deadline_seconds must be positive")
         if self.max_concurrent <= 0:
@@ -700,7 +700,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         task: str,
         *,
         role: str,
-        max_rounds: int | None = None,
+        max_turns: int | None = None,
         parent_call_id: str | None = None,
         thinking: str | None = None,
         inherit_context: bool = False,
@@ -716,7 +716,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         ``transcript`` resumes a finished child's own conversation with the
         new task appended; otherwise the child starts from its role prompt,
         optionally forked from ``parent_messages``. ``steer_queue`` is the
-        parent's mid-run instructions: drained before every model round, each
+        parent's mid-run instructions: drained before every model turn, each
         one a labelled user message and a ``subagent_steer`` event.
         """
 
@@ -725,7 +725,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         allowed = allowed_subagent_tools(role)
         self._validate_tools()
         # Launch precedence (Pi's): call argument > role default > global.
-        rounds_limit = resolve_subagent_max_turns(max_rounds, role, self.config.max_rounds)
+        turns_limit = resolve_subagent_max_turns(max_turns, role, self.config.max_turns)
         thinking = normalize_subagent_thinking(thinking, role)
         task_id = task_id or f"{SUBAGENT_TASK_ID_PREFIX}{uuid.uuid4().hex[:12]}"
         child_cap = (
@@ -746,7 +746,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             # The effective launch values, whichever tier they came from.
             "thinking": thinking,
             "thinking_applied": thinking_applied,
-            "rounds_limit": rounds_limit,
+            "rounds_limit": turns_limit,
             "inherit_context": bool(inherit_context),
             # The brief is what delegation quality is judged by; clipped like
             # every other traced argument.
@@ -789,20 +789,20 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 brief = f"{INHERITED_CONTEXT_BOUNDARY.format(role=role)}\n\n{brief}"
         messages.append(ChatMessage("user", brief))
         usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
-        rounds = 0
+        turns = 0
         tool_calls_made = 0
         summary = ""
         status = "completed"
         error = ""
         llm_calls = 0
         llm_errors = 0
-        truncated_rounds = 0
+        truncated_turns = 0
         continuations = 0
         overflow_recovery_used = False
         malformed_reissue_used = False
         steers = 0
         try:
-            while rounds_limit is None or rounds < rounds_limit:
+            while turns_limit is None or turns < turns_limit:
                 if self._cancelled():
                     status = "cancelled"
                     error = "Sub-agent cancelled"
@@ -811,7 +811,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     status = "timeout"
                     error = "Sub-agent deadline reached"
                     break
-                rounds += 1
+                turns += 1
                 # The child is this queue's only consumer, so a non-empty
                 # check followed by popleft cannot race the parent's appends.
                 while steer_queue:
@@ -823,24 +823,24 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         {
                             "task_id": task_id,
                             "role": role,
-                            "round": rounds,
+                            "round": turns,
                             "chars": len(text),
                             "delivery": "delivered",
                             "parent_call_id": parent_call_id,
                         },
                     )
                 if (
-                    rounds_limit is not None
-                    and rounds_limit > SUBAGENT_GRACE_ROUNDS
-                    and rounds == rounds_limit - SUBAGENT_GRACE_ROUNDS
+                    turns_limit is not None
+                    and turns_limit > SUBAGENT_GRACE_TURNS
+                    and turns == turns_limit - SUBAGENT_GRACE_TURNS
                 ):
                     # Grace turns: the child hears about the ceiling while it
                     # can still finish cleanly, instead of being cut off.
-                    remaining_rounds = rounds_limit - rounds + 1
+                    remaining_turns = turns_limit - turns + 1
                     messages.append(
                         ChatMessage(
                             "user",
-                            f"还剩 {remaining_rounds} 回合模型调用（上限 {rounds_limit}）："
+                            f"还剩 {remaining_turns} 回合模型调用（上限 {turns_limit}）："
                             "请立即收尾，用简洁中文汇报结论、关键证据与剩余风险，不要再开新的探索。",
                         )
                     )
@@ -849,8 +849,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         {
                             "task_id": task_id,
                             "role": role,
-                            "round": rounds,
-                            "rounds_limit": rounds_limit,
+                            "round": turns,
+                            "rounds_limit": turns_limit,
                             "parent_call_id": parent_call_id,
                         },
                     )
@@ -863,7 +863,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     deadline,
                     task_id=task_id,
                     role=role,
-                    round_index=rounds,
+                    turn_index=turns,
                     parent_call_id=parent_call_id,
                 )
                 try:
@@ -881,7 +881,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     failure: dict[str, object] = {
                         "task_id": task_id,
                         "role": role,
-                        "round": rounds,
+                        "round": turns,
                         "provider": llm.provider,
                         "model": llm.model,
                         "llm_error": error,
@@ -912,7 +912,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             identity={
                                 "task_id": task_id,
                                 "role": role,
-                                "round": rounds,
+                                "round": turns,
                                 "parent_call_id": parent_call_id,
                             },
                         )
@@ -953,13 +953,13 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     )
                     continue
                 llm_calls += 1
-                # A transient provider error that a later round survived is
+                # A transient provider error that a later turn survived is
                 # not this child's outcome.
                 error = ""
                 malformed_reissue_used = False
                 _add_usage(usage, response.usage)
                 cut_off = _output_truncated(response.usage, output_tokens)
-                truncated_rounds += int(cut_off)
+                truncated_turns += int(cut_off)
                 messages.append(
                     ChatMessage(
                         "assistant",
@@ -973,7 +973,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     {
                         "task_id": task_id,
                         "role": role,
-                        "round": rounds,
+                        "round": turns,
                         "provider": llm.provider,
                         "model": response.model,
                         "usage": dict(response.usage),
@@ -1007,7 +1007,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                                 {
                                     "task_id": task_id,
                                     "role": role,
-                                    "round": rounds,
+                                    "round": turns,
                                     "completion_tokens": completion,
                                     "max_tokens": output_tokens,
                                     "continuation": continuations,
@@ -1033,8 +1033,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             continue
                         status = "error"
                         error = (
-                            f"output budget exhausted on reasoning in {truncated_rounds} "
-                            "rounds without a tool call or report"
+                            f"output budget exhausted on reasoning in {truncated_turns} "
+                            "turns without a tool call or report"
                         )
                         break
                     messages.append(
@@ -1072,7 +1072,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         {
                             "task_id": task_id,
                             "role": role,
-                            "round": rounds,
+                            "round": turns,
                             "tool": call.name,
                             "arguments": _traced_arguments(call.arguments),
                             "result": sanitize_for_log(
@@ -1082,7 +1082,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         },
                     )
             # Force a concise final summary when the loop ended without one
-            # (rounds exhausted, or a round was cut off by output length).
+            # (turns exhausted, or a turn was cut off by output length).
             if (
                 status == "completed"
                 and not summary
@@ -1104,7 +1104,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     deadline,
                     task_id=task_id,
                     role=role,
-                    round_index=rounds,
+                    turn_index=turns,
                     parent_call_id=parent_call_id,
                 )
                 response = llm.complete(
@@ -1120,13 +1120,13 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     {
                         "task_id": task_id,
                         "role": role,
-                        "round": rounds,
+                        "round": turns,
                         "provider": llm.provider,
                         "model": response.model,
                         "usage": dict(response.usage),
                         "content": response.content,
                         "tool_names": [],
-                        # The forced finalize is not one of the child's rounds;
+                        # The forced finalize is not one of the child's turns;
                         # without this the trace loses the call entirely.
                         "finalize": True,
                         "parent_call_id": parent_call_id,
@@ -1138,7 +1138,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     if summary:
                         status, error = "exhausted", SUBAGENT_DEGRADED_SUMMARY_ERROR
                 if _output_truncated(response.usage, output_tokens):
-                    truncated_rounds += 1
+                    truncated_turns += 1
                     summary = (
                         summary + "\n" if summary else ""
                     ) + OUTPUT_TRUNCATED_MARKER.format(limit=output_tokens)
@@ -1165,7 +1165,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         result: dict[str, object] = {
             "task_id": task_id,
             "status": status,
-            "rounds": rounds,
+            "rounds": turns,
             "tool_calls": tool_calls_made,
             "llm_calls": llm_calls,
             "provider": llm.provider,
@@ -1175,14 +1175,14 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "role": role,
             "thinking": thinking,
             "thinking_applied": thinking_applied,
-            "rounds_limit": rounds_limit,
+            "rounds_limit": turns_limit,
             "inherit_context": bool(inherit_context),
         }
         if resumed_from:
             result["resumed_from"] = resumed_from
-        if truncated_rounds:
+        if truncated_turns:
             result["truncated"] = True
-            result["truncated_rounds"] = truncated_rounds
+            result["truncated_rounds"] = truncated_turns
         if llm_errors:
             result["llm_errors"] = llm_errors
         if steers:
@@ -1208,7 +1208,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         *,
         task_id: str,
         role: str,
-        round_index: int,
+        turn_index: int,
         parent_call_id: str | None,
     ) -> tuple[list[ChatMessage], int]:
         """The parent loop's context discipline before one child request.
@@ -1224,7 +1224,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         identity = {
             "task_id": task_id,
             "role": role,
-            "round": round_index,
+            "round": turn_index,
             "parent_call_id": parent_call_id,
         }
         if compactor is not None:
@@ -1504,7 +1504,7 @@ def _is_nonretryable_subagent_error(exc: Exception) -> bool:
     if isinstance(exc, (SessionInterrupt, TimeoutError, ApiSpendExhausted)):
         return True
     if is_context_overflow_error(exc):
-        # Compaction and tool-result editing already ran; the next round
+        # Compaction and tool-result editing already ran; the next turn
         # would only overflow again.
         return True
     text = f"{exc} {safe_error_summary(exc)}"

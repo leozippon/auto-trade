@@ -1,4 +1,4 @@
-"""One-shot hardlink of a matching exploration PIT view seed into an experiment.
+"""One-shot hardlink of a matching exploration prebuilt view cache into an experiment.
 
 The seed tree is a repo-adjacent, gitignored snapshot of completed ``decision/``
 and ``replay/`` views. It is not a live worker ``cache_root``.
@@ -267,7 +267,7 @@ def assert_seed_timing_contract(seed: Path, snapshot_config: SnapshotConfig) -> 
         return
     if not isinstance(recorded, Mapping):
         raise ValueError(
-            f"PIT view seed {seed} records no snapshot timing contract (it was built before seeds recorded "
+            f"prebuilt view cache {seed} records no snapshot timing contract (it was built before seeds recorded "
             "their refresh nodes), so its views cannot be shown to match this code's; rebuild the seed under "
             "a new directory"
         )
@@ -279,7 +279,7 @@ def assert_seed_timing_contract(seed: Path, snapshot_config: SnapshotConfig) -> 
                 label = "node" if section == "nodes" else "dataset" if section == "datasets" else "stamp of"
                 differences.append(f"{label} {name}: seed {json.dumps(before.get(name))} != code {json.dumps(after.get(name))}")
     raise ValueError(
-        f"PIT view seed {seed} was built under another snapshot timing contract ({'; '.join(differences)}); "
+        f"prebuilt view cache {seed} was built under another snapshot timing contract ({'; '.join(differences)}); "
         "rebuild the seed under a new directory"
     )
 
@@ -302,7 +302,7 @@ def assert_seed_snapshot_config(
 
     provider_path = Path(seed) / "provider.json"
     if not provider_path.is_file() or provider_path.is_symlink():
-        raise ValueError(f"PIT view seed is missing provider.json: {provider_path}")
+        raise ValueError(f"prebuilt view cache is missing provider.json: {provider_path}")
     record = read_json_object(provider_path)
     # The on-disk contract version is also known at create time: a seed built
     # under an older one holds views this code would never link, so naming it
@@ -310,14 +310,14 @@ def assert_seed_snapshot_config(
     version = record.get("schema_version")
     if version != SNAPSHOT_CACHE_FORMAT_VERSION:
         raise ValueError(
-            f"PIT view seed {seed} was prebuilt under snapshot cache format {version!r}; "
+            f"prebuilt view cache {seed} was prebuilt under snapshot cache format {version!r}; "
             f"this code writes {SNAPSHOT_CACHE_FORMAT_VERSION}, so rebuild the seed under a new directory"
         )
     recorded = record.get("snapshot_config")
     expected = snapshot_config.to_record()
     if recorded != expected:
         raise ValueError(
-            f"PIT view seed {seed} was prebuilt for a different snapshot "
+            f"prebuilt view cache {seed} was prebuilt for a different snapshot "
             f"configuration: seed has {json.dumps(recorded, ensure_ascii=False, sort_keys=True)}, "
             f"this experiment needs {json.dumps(expected, ensure_ascii=False, sort_keys=True)}"
         )
@@ -327,7 +327,7 @@ def assert_seed_snapshot_config(
     # still running, failed or was killed, wherever it stopped.
     if (Path(seed) / UNFINISHED_BUILD_MARKER).exists():
         raise ValueError(
-            f"PIT view seed {seed} has an unfinished build: {UNFINISHED_BUILD_MARKER} "
+            f"prebuilt view cache {seed} has an unfinished build: {UNFINISHED_BUILD_MARKER} "
             "is still present, so scripts/data/prebuild_pit_views_seed.py has not "
             "reported status ok for this seed. Wait for a running prebuild; re-run "
             "one that failed or was killed until it reports status ok"
@@ -352,7 +352,7 @@ def assert_seed_carries_bonus_split(seed: Path) -> None:
     ]
     if stale:
         raise ValueError(
-            f"PIT view seed {seed} predates the bonus-share column the dividend tax reads "
+            f"prebuilt view cache {seed} predates the bonus-share column the dividend tax reads "
             f"({len(stale)} replay slot table(s), first {stale[0].parent.relative_to(seed)}); "
             "rebuild the seed under a new directory"
         )
@@ -394,7 +394,7 @@ def assert_seed_views_share_types(seed: Path) -> int:
     ]
     if conflicts:
         raise ValueError(
-            f"PIT view seed {seed} types {len(conflicts)} column(s) differently across its views "
+            f"prebuilt view cache {seed} types {len(conflicts)} column(s) differently across its views "
             "after the replay round trip, so the Timeview cannot merge a part that spans them; "
             "rebuild the seed under a new directory. First: " + "; ".join(conflicts[:5])
         )
@@ -454,18 +454,18 @@ def seed_pit_views(
     seed = Path(seed)
     if not seed.exists():
         if required:
-            raise FileNotFoundError(f"PIT view seed does not exist: {seed}")
+            raise FileNotFoundError(f"prebuilt view cache does not exist: {seed}")
         return False
     if not seed.is_dir() or seed.is_symlink():
-        raise RuntimeError(f"PIT view seed must be a real directory: {seed}")
+        raise RuntimeError(f"prebuilt view cache must be a real directory: {seed}")
     provider_path = seed / "provider.json"
     if not provider_path.is_file() or provider_path.is_symlink():
-        raise RuntimeError(f"PIT view seed is missing provider.json: {provider_path}")
+        raise RuntimeError(f"prebuilt view cache is missing provider.json: {provider_path}")
     seed_record = read_json_object(provider_path)
     if contract_identity(seed_record) != contract_identity(expected_provider):
         if required:
             raise RuntimeError(
-                f"PIT view seed {seed} does not match this experiment's provider "
+                f"prebuilt view cache {seed} does not match this experiment's provider "
                 "contract; refusing to mix views"
             )
         return False
@@ -564,10 +564,10 @@ def _hardlink_tree(source: Path, dest: Path, *, dest_root: Path) -> None:
     _assert_inside(dest, dest_root)
     source_mode = source.lstat().st_mode
     if stat.S_ISLNK(source_mode):
-        raise RuntimeError(f"symbolic link is forbidden in a PIT view seed: {source}")
+        raise RuntimeError(f"symbolic link is forbidden in a prebuilt view cache: {source}")
     if stat.S_ISDIR(source_mode):
         if dest.exists() and not dest.is_dir():
-            raise RuntimeError(f"PIT view seed destination is not a directory: {dest}")
+            raise RuntimeError(f"prebuilt view cache destination is not a directory: {dest}")
         dest.mkdir(parents=True, exist_ok=True)
         _assert_inside(dest, dest_root)
         for child in source.iterdir():
@@ -576,7 +576,7 @@ def _hardlink_tree(source: Path, dest: Path, *, dest_root: Path) -> None:
             _hardlink_tree(child, dest / child.name, dest_root=dest_root)
         return
     if not stat.S_ISREG(source_mode):
-        raise RuntimeError(f"unsupported PIT view seed entry: {source}")
+        raise RuntimeError(f"unsupported prebuilt view cache entry: {source}")
     if dest.exists():
         return
     try:
@@ -584,7 +584,7 @@ def _hardlink_tree(source: Path, dest: Path, *, dest_root: Path) -> None:
     except OSError as exc:
         if exc.errno == errno.EXDEV:
             raise RuntimeError(
-                f"PIT view seed is on a different filesystem than {dest}; "
+                f"prebuilt view cache is on a different filesystem than {dest}; "
                 "hardlink is required and copy is refused"
             ) from exc
         raise
@@ -594,7 +594,7 @@ def _assert_inside(path: Path, root: Path) -> None:
     resolved = path.resolve()
     root = root.resolve()
     if resolved != root and not resolved.is_relative_to(root):
-        raise RuntimeError(f"PIT view seed refused to write outside {root}: {resolved}")
+        raise RuntimeError(f"prebuilt view cache refused to write outside {root}: {resolved}")
 
 
 def _skip_seed_name(name: str) -> bool:

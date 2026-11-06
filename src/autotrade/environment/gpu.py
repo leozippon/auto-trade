@@ -6,7 +6,7 @@ one rule: a card is eligible when no running experiment claims it and it keeps a
 least the host's floor free (``host_min_free_gpu_memory_mib``), the most free
 first (``gpus_with_free_memory``). The console takes an experiment's cards there when
 it starts its worker, and every container of that worker attaches exactly
-those; whatever else needs a card -- a Paper book's morning run, a round's
+those; whatever else needs a card -- a Paper account's morning run, a round's
 smoke, an operator's replay -- takes its cards there for one run and pins them
 the same way.
 

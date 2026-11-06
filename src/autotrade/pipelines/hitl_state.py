@@ -307,7 +307,7 @@ def select_gpus(
     """The one way a GPU is chosen: the first ``count`` of :func:`free_gpus`.
 
     The console takes an experiment's cards here when it starts the worker and
-    records them as its claim. Whatever else needs a card -- a Paper book's
+    records them as its claim. Whatever else needs a card -- a Paper account's
     morning run, a round's smoke, a session audited from the command line, an
     operator's replay -- takes its cards here for that run and pins them on its
     containers, so it is never given a card a running experiment holds. Every caller

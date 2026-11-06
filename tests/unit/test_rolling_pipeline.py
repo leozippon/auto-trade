@@ -955,7 +955,7 @@ def test_a_strategy_error_names_the_slice_it_raised_in_and_is_a_reading(
     """The registered book's own exception during the forward replay is a reading:
     the record names the slice it raised in, the readout's forward block
     carries it in place of a lower bound, the validation record stands, and no
-    Paper book can continue a replay that did not complete."""
+    Paper account can continue a replay that did not complete."""
 
     pipeline, _snapshots, evaluator, _developer, ledger = _freezing(tmp_path)
     pipeline.run_research_session()

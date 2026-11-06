@@ -175,7 +175,7 @@ class ResearchReleaseTest(unittest.TestCase):
         self.assertIn('"status": "ok"', resumed.fundamental_events_status.read_text(encoding="utf-8"))
 
     def test_a_named_generation_pins_that_release_not_the_newest(self) -> None:
-        # A PIT view seed built from gen1 must stay usable after the nightly
+        # A prebuilt view cache built from gen1 must stay usable after the nightly
         # chain commits gen2: the experiment pins gen1 and its own baseline
         # quality, never the newest generation or the live status files.
         seed_release = self._pin("seed")

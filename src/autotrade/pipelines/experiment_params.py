@@ -136,8 +136,8 @@ class GeometryParams:
 
 @dataclass(frozen=True, kw_only=True)
 class PackParams:
-    """What the experiment's sessions are handed: the directive, the reference pack
-    and whether the curated operating memory mounts."""
+    """What the experiment's sessions are handed: the directive, the reference workspace
+    and whether the curated skill library mounts."""
 
     research_directive: str = _param(rolling_default("research_directive"))
     workspace_reference: str = _param(rolling_default("workspace_reference"))
@@ -158,7 +158,7 @@ class ScheduleParams:
 
 @dataclass(frozen=True, kw_only=True)
 class DataParams:
-    """The decision view's windows and domains, its PIT view seed and the
+    """The decision view's windows and domains, its prebuilt view cache and the
     universe screen."""
 
     window_months: int = _param(rolling_default("window_months"))

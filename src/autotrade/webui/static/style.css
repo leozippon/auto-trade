@@ -508,7 +508,7 @@ main {
  grid-template-columns: repeat(auto-fill, minmax(min(27rem, 100%), 1fr));
  gap: var(--space-4);
 }
-/* One vertical rhythm for every card, research experiment and Paper book alike: the
+/* One vertical rhythm for every card, research experiment and Paper account alike: the
    flex gap is the only spacing between groups (title row, stepper, activity,
    budget bar, tiles, chart), so a group that carries its own margin would read
    as a different card. Inside a group the scale steps down one. */
@@ -619,7 +619,7 @@ progress.progress.done::-moz-progress-bar {
  border-radius: var(--radius-sm);
  padding: var(--space-2) var(--space-3);
 }
-/* A Paper book measures its figures one by one as days settle, so early on it
+/* A Paper account measures its figures one by one as days settle, so early on it
    fills two of seven tiles. Keeping the empty tracks holds every tile to the
    width it will have when the rest arrive, instead of stretching two of them
    across the panel. */
@@ -1313,7 +1313,7 @@ blockquote.quote {
 .page-head > .sub {
  flex-basis: 100%;
 }
-/* The Paper book's identity: one wrapping line of chips under the title, and
+/* The Paper account's identity: one wrapping line of chips under the title, and
    the 建账户 note behind a quiet fold — prose that belongs on the page whole,
    not above the day's orders and not cut off mid-sentence. Both keep the full
    basis of their row, so neither rides up beside the heading. */

@@ -194,7 +194,7 @@ def test_a_pinned_session_mounts_the_store_and_refuses_another(tmp_path: Path) -
     run.assert_not_called()
 
 
-# ----- creation, worker options and Paper books -----
+# ----- creation, worker options and Paper accounts -----
 
 
 def _create(client: TestClient, experiment_id: str, **params: object):

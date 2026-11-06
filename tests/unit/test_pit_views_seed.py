@@ -667,7 +667,7 @@ def test_the_prebuild_prepares_every_planned_slot_and_stashes_each_chain_head(
     assert json.loads(out.strip().splitlines()[-1])["status"] == "ok"
 
 
-def test_the_seed_carries_a_warm_start_for_every_research_years_choice() -> None:
+def test_the_seed_carries_a_prebuilt_asof_state_for_every_research_years_choice() -> None:
     """On the ten-year geometry the default choices 5, 6 and 7 add an as-of
     chain from each choice's first validation year. The decision views stay
     the year anchors and research end: each choice's session reads the view

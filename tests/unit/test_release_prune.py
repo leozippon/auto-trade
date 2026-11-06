@@ -115,7 +115,7 @@ class ReleasePruneTest(unittest.TestCase):
             "g2": ["seed data/seed_8y"],
             "g3": ["experiment stopped_one (stopped)"],
             "g4": ["experiment created_one (created)"],
-            "g5": ["Paper book book_live"],
+            "g5": ["Paper account book_live"],
             "g7": ["raw generation record"],
         })
         self.assertEqual([line["generation_id"] for line in lines if line["action"] == "remove"], ["g1", "g6"])

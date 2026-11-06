@@ -292,7 +292,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     ):
         for surface in (prompt, prompts.WRAP_UP_PROMPT):
             assert retired not in surface, retired
-    # How to research is the Agent's own call, which a reference pack may
+    # How to research is the Agent's own call, which a reference workspace may
     # suggest: the stable prompt carries no research protocol, evidence
     # recipe, process quota, delegation style or compute advice.
     for retired in (

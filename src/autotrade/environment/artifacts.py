@@ -448,7 +448,7 @@ def overlay_artifact(source_root: str | Path, dest_root: str | Path) -> tuple[st
     Unlike :func:`copy_artifact` the destination is not replaced: the read-only
     contract files it was seeded with stay as the template wrote them, and any
     other file it already carries survives. This is how a session's ``output/``
-    starts as the reference pack's runnable starter package instead of the bare
+    starts as the reference workspace's runnable starter package instead of the bare
     template. Returns the relative paths copied.
     """
     source_root = Path(source_root)

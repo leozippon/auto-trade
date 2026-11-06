@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Withdraw one experiment's recorded graduation: delete its Paper books, then append
+"""Withdraw one experiment's recorded graduation: delete its Paper accounts, then append
 a void to its ledger.
 
 The ledger is append-only: this writes one ``verdict_void`` record naming who
 voided the graduation, why and where the evidence is, and never edits the
 forward record the experiment produced. From then on the experiment reads as voided
 (``ledger.experiment_verdict``): the console shows it voided with the reason,
-and no Paper book is opened or offered for it.
+and no Paper account is opened or offered for it.
 
 A failed strategy does not stay in Paper: every book trading the experiment (its
 ``book.json`` names the experiment, whatever the book id) is deleted in the
@@ -89,7 +89,7 @@ def main() -> int:
         real = [book_id for book_id in books if follows_real_fills(paper_root / book_id)]
         if real and not args.delete_real_fill_book:
             raise ValueError(
-                f"Paper book {', '.join(real)} follows real fills: its fills.jsonl is the owner's record "
+                f"Paper account {', '.join(real)} follows real fills: its fills.jsonl is the owner's record "
                 "of what he actually traded. Nothing was changed; keep a copy if it is wanted, then pass "
                 "--delete-real-fill-book to delete the book with the void"
             )

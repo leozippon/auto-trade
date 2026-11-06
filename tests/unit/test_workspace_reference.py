@@ -1,4 +1,4 @@
-"""Workspace reference pack: the read-only ``refs/`` tree and the seeded ``output/``."""
+"""Workspace reference workspace: the read-only ``refs/`` tree and the seeded ``output/``."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ STARTER_PICK = """def first(context):
 
 
 def _pack(root: Path, *, starter: bool) -> Path:
-    """A reference pack as the repository checks one in."""
+    """A reference workspace as the repository checks one in."""
 
     pack = root / "pack"
     pack.mkdir(parents=True)

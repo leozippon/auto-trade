@@ -57,7 +57,7 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
     """What one candidate's replay runs on, in one passage beside its numbers.
 
     A fact, not advice: how to use the cores and cards is the session's call,
-    which a reference pack may suggest. The CPU quota and memory cap are the
+    which a reference workspace may suggest. The CPU quota and memory cap are the
     experiment's strategy container's own (``SandboxConfig.spec``, as the run manifest
     carries them) and the thread variables are rendered by
     ``container_thread_env``, the very code the executor builds each strategy

@@ -286,7 +286,7 @@ class _SubAgentJob:
     # The finished child's own transcript, kept for ``resume``.
     messages: tuple[ChatMessage, ...] | None = None
     # Parent instructions not yet read by the child (``action="message"``);
-    # the child drains it before each model round.
+    # the child drains it before each model turn.
     steer: deque[str] = field(default_factory=deque)
 
 
@@ -571,7 +571,7 @@ class AgentSessionRunner:
                     "error": error,
                 }
                 if malformed:
-                    # Countable in an audit: this class costs one round, not a
+                    # Countable in an audit: this class costs one turn, not a
                     # repeated generation.
                     failure["error_type"] = "malformed_tool_call"
                 elif isinstance(exc, ProviderRefusalError):
@@ -928,7 +928,7 @@ class AgentSessionRunner:
                 # overlap a developer child that may still be writing the
                 # workspace. A finish waits for every child (the close discards
                 # their reports); a backtest waits only for children whose role
-                # can write, so a read-only audit never delays a ready round,
+                # can write, so a read-only audit never delays a ready turn,
                 # and refuses rather than snapshot candidates a writer may
                 # still be changing.
                 self._wait_subagent_jobs(
@@ -1154,8 +1154,8 @@ class AgentSessionRunner:
             # Validated here so a bad value is a tool error on the parent's
             # turn; the engine resolves the same precedence for the record.
             thinking = normalize_subagent_thinking(arguments.get("thinking"), role)
-            max_rounds = resolve_subagent_max_turns(
-                arguments.get("max_turns"), role, self.subagent.config.max_rounds
+            max_turns = resolve_subagent_max_turns(
+                arguments.get("max_turns"), role, self.subagent.config.max_turns
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
@@ -1220,7 +1220,7 @@ class AgentSessionRunner:
                 self.subagent.run_with_transcript,
                 task,
                 role=role,
-                max_rounds=max_rounds,
+                max_turns=max_turns,
                 parent_call_id=call_id,
                 thinking=thinking,
                 inherit_context=inherit,
@@ -1260,7 +1260,7 @@ class AgentSessionRunner:
     def _steer_subagent(self, arguments: Mapping[str, object]) -> dict[str, object]:
         """Queue one parent instruction for a child that has not finished.
 
-        The child reads it before its next model round (a queued child before
+        The child reads it before its next model turn (a queued child before
         its first), so the ack only says it was queued; delivery shows up as
         the child's ``subagent_steer`` event and as ``steers`` /
         ``steers_undelivered`` in its ``subagent_completed`` observation. A

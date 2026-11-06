@@ -17,7 +17,7 @@ scheduled job, so releases and Paper pins never see a half-applied command.
   generation record names it, a seed (or a seed build's workspace pin) one or
   two levels under ``data/`` was built from it, an experiment under
   ``experiments/`` that has not ended pinned it or names a seed built from it,
-  or a Paper book that is not killed has it pinned. The consumers are read
+  or a Paper account that is not killed has it pinned. The consumers are read
   under the release registry lock and the updater lock, so a release a
   consumer records is never removed (``research_release``); a removal prints
   the bytes it freed, those of the files whose last link it removed. Nothing
@@ -225,7 +225,7 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
             killed = False
         if not killed:
             for cache in sorted((paper / book_id / PIT_CACHE_NAME).glob("*")):
-                keep(pinned_generation(cache), f"Paper book {book_id}")
+                keep(pinned_generation(cache), f"Paper account {book_id}")
     return kept
 
 

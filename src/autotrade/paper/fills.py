@@ -1,4 +1,4 @@
-"""Real-fill reconciliation: a Paper book that follows what its owner traded.
+"""Real-fill reconciliation: a Paper account that follows what its owner traded.
 
 A book is traded by hand from its order sheet. Once the owner switches it to
 real fills (an ``enable`` record), every later session settles from the

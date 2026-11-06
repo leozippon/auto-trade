@@ -341,7 +341,7 @@ class ExperimentManager:
         # limits. A holder keeps it from the running-slot count through the
         # spawn that consumes the slot, so two callers can never claim the same
         # one: create_experiment holds it across its pre-flight and the
-        # operating-memory snapshot as well, and restart holds it across the
+        # skill-library snapshot as well, and restart holds it across the
         # terminate that frees the slot it is about to retake. Creates and starts therefore wait for each other, and for a
         # restart's SIGTERM grace; control actions on other experiments never
         # take it. Reentrant because both paths end in the start_worker that
@@ -396,7 +396,7 @@ class ExperimentManager:
             _modern_ref_store(directory)
             hitl = directory / "hitl"
             hitl.mkdir(parents=True)
-            # Operating memory is fixed for the life of the experiment: resolve
+            # Skill library is fixed for the life of the experiment: resolve
             # the curated library once, here, and copy the result in read-only.
             # Every session then mounts that snapshot, so a library change
             # reaches the next experiment instead of the middle of this one.
@@ -435,7 +435,7 @@ class ExperimentManager:
     def _discard_half_created(self, directory: Path) -> None:
         """Leave no half-created experiment, and never mask why it failed.
 
-        The tree can already hold read-only copies (the operating-memory
+        The tree can already hold read-only copies (the skill-library
         snapshot), which a plain ``rmtree`` leaves behind.
         """
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prebuild the exploration PIT view seed (docs/DATA_DOCUMENTATION.md §3.4).
+"""Prebuild the exploration prebuilt view cache (docs/DATA_DOCUMENTATION.md §3.4).
 
 Pins the current research generation (or, with ``--generation-id``, a release that is
 already published), plans the seed of one research geometry

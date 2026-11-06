@@ -371,7 +371,7 @@ def experiment_verdict(
 
 
 def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The artifact a Paper book trades: the registered strategy of an experiment with its
+    """The artifact a Paper account trades: the registered strategy of an experiment with its
     forward record (``registered_with_record``) whose forward replay completed (a
     book continues that replay's history), or the graduate of an experiment judged
     under the sealed-gate rules; else None."""

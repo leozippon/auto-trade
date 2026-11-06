@@ -1,4 +1,4 @@
-"""Several Paper books side by side under one Paper state root.
+"""Several Paper accounts side by side under one Paper state root.
 
 Each book is an independent account in its own directory,
 ``<state root>/<book id>/``, holding everything ``create_book`` and the engine
@@ -32,7 +32,7 @@ BOOK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 
 def validate_book_id(book_id: str) -> str:
     if not BOOK_ID_PATTERN.fullmatch(book_id) or ".." in book_id:
-        raise ValueError(f"invalid Paper book id {book_id!r}: letters, digits, '_', '.', '-'")
+        raise ValueError(f"invalid Paper account id {book_id!r}: letters, digits, '_', '.', '-'")
     return book_id
 
 
@@ -119,7 +119,7 @@ def run_books(
 
 
 def open_registered_book(repo_root: str | Path, experiment_dir: str | Path) -> str:
-    """Create the Paper book of an experiment's registered strategy when none exists yet;
+    """Create the Paper account of an experiment's registered strategy when none exists yet;
     the book id.
 
     The book is named after the experiment and trades its Paper candidate (a
@@ -149,7 +149,7 @@ def open_registered_book(repo_root: str | Path, experiment_dir: str | Path) -> s
 
 
 def delete_book(state_root: str | Path, book_id: str) -> None:
-    """Remove one Paper book whole, or leave it listed as it was.
+    """Remove one Paper account whole, or leave it listed as it was.
 
     An unknown id raises ``KeyError`` and a book a Paper run is writing raises
     ``PaperWriterBusy``, both before anything changes. Under the book's writer
@@ -162,13 +162,13 @@ def delete_book(state_root: str | Path, book_id: str) -> None:
     book_id = validate_book_id(book_id)
     root = Path(state_root).resolve()
     if book_id not in list_books(root):
-        raise KeyError(f"unknown Paper book: {book_id}")
+        raise KeyError(f"unknown Paper account: {book_id}")
     path = root / book_id
     with writer_lock(path):
         removed = root / f".deleted-{book_id}-{uuid.uuid4().hex[:8]}"
         path.rename(removed)
         if not remove_sandbox_tree(removed):
-            raise OSError(f"Paper book {book_id} is deleted, but files remain under {removed}")
+            raise OSError(f"Paper account {book_id} is deleted, but files remain under {removed}")
 
 
 __all__ = [

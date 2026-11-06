@@ -1,4 +1,4 @@
-"""Operating memory: library, snapshot, mount, index, guard -- and the void.
+"""Skill library: library, snapshot, mount, index, guard -- and the void.
 
 The curated library reaches a session read-only. It is repository content a
 researcher wrote or copied in by hand, so it must satisfy the same format
@@ -385,7 +385,7 @@ def test_the_index_lists_every_source_tagged_by_origin(tmp_path: Path) -> None:
     stray = tmp_path / "stray"
     (stray / "skills").mkdir(parents=True)
     (stray / OPERATING_MEMORY_DIRNAME / "adopted").mkdir(parents=True)
-    with pytest.raises(ValueError, match="unknown operating memory source: adopted"):
+    with pytest.raises(ValueError, match="unknown skill library source: adopted"):
         build_skills_index(stray / "skills")
 
 

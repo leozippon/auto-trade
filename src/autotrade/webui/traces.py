@@ -326,9 +326,9 @@ def read_subagent_trace(path: Path, task_id: str) -> dict[str, object]:
 
 
 def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
-    """One child's rounds in order, in the block model the parent view renders.
+    """One child's turns in order, in the block model the parent view renders.
 
-    ``agent_output`` per model round and ``tool_group`` per batch of tool calls
+    ``agent_output`` per model turn and ``tool_group`` per batch of tool calls
     reuse the parent renderers; ``marker`` and ``summary`` carry the wrap-up,
     truncation and final report.
     """
@@ -566,7 +566,7 @@ def trace_stats(path: Path) -> dict[str, object]:
             if task_id is not None:
                 task_ids.add(task_id)
                 # A finished task reports authoritative totals; a live one is
-                # summed from the per-round records seen so far.
+                # summed from the per-turn records seen so far.
                 if _subagent_phase(event) == "ended":
                     ended_ids.add(task_id)
                     totals = _as_mapping(event.get("usage_totals"))
@@ -992,7 +992,7 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
 
 
 def _absorb_subagent_totals(state: _SubagentState, event: dict[str, object]) -> None:
-    """The terminal event's own totals win: they also cover rounds whose
+    """The terminal event's own totals win: they also cover turns whose
     events fell outside the read window."""
 
     for field in ("rounds", "llm_calls", "tool_calls"):

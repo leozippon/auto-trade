@@ -14,7 +14,7 @@ be running.
 Only an experiment that is over and holds nothing live is archived. Every experiment named
 is checked before anything changes, and the command refuses them all when one
 has a live or launching worker, a graduation that has not been voided
-(``void_graduation.py``), or a Paper book. Archiving an archived experiment keeps its
+(``void_graduation.py``), or a Paper account. Archiving an archived experiment keeps its
 marker, and restoring an experiment that is not archived changes nothing.
 """
 
@@ -58,7 +58,7 @@ def refusal(directory: Path, paper_root: Path) -> str | None:
         return "is a graduate; void the graduation first (void_graduation.py)"
     books = experiment_books(paper_root, directory.name)
     if books:
-        return f"has Paper book {', '.join(books)}"
+        return f"has Paper account {', '.join(books)}"
     return None
 
 

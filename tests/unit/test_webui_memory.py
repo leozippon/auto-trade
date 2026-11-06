@@ -1,4 +1,4 @@
-"""Operating-memory console model: the curated library, snapshots, curated CRUD.
+"""Skill-library console model: the curated library, snapshots, curated CRUD.
 
 The read view's invariants are what it refuses to show and what it refuses to
 invent: a malformed library reports an error rather than an empty shelf, an
@@ -200,7 +200,7 @@ def test_a_curated_body_is_served_verbatim_so_an_edit_round_trips(
 
 # ---- the snapshot one experiment froze -------------------------------------
 #
-# Operating memory is fixed per experiment: the curated library is resolved
+# Skill library is fixed per experiment: the curated library is resolved
 # once, when the experiment is created, and every session mounts that same
 # copy. So the block answers one question for the whole experiment, and a
 # library change after the fact belongs to the next experiment.
@@ -388,7 +388,7 @@ def test_an_unreadable_snapshot_is_reported_not_hidden(tmp_path: Path) -> None:
     operating_memory_snapshot_path(directory).write_text("{truncated", encoding="utf-8")
     payload = memory.experiment_memory(experiments, "current")
     assert payload["snapshot"] is None
-    assert payload["error"].endswith("operating memory snapshot is unreadable")
+    assert payload["error"].endswith("skill library snapshot is unreadable")
     assert str(tmp_path) not in payload["error"]
 
 

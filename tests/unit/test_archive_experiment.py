@@ -46,7 +46,7 @@ def _listed(root: Path) -> list[str]:
 
 
 def test_an_experiment_holding_anything_live_is_refused_and_nothing_changes(tmp_path: Path) -> None:
-    """A live worker, a standing graduation, a Paper book or an unknown id
+    """A live worker, a standing graduation, a Paper account or an unknown id
     refuses the whole command before any marker is written; a voided
     graduate is archived like any other ended experiment."""
 
@@ -59,7 +59,7 @@ def test_an_experiment_holding_anything_live_is_refused_and_nothing_changes(tmp_
     for experiment, phrase in (
         ("running", "running has a live worker"),
         ("graduate", "graduate is a graduate; void the graduation first"),
-        ("traded", "traded has Paper book traded_book"),
+        ("traded", "traded has Paper account traded_book"),
         ("nowhere", "nowhere: unknown experiment: nowhere"),
     ):
         refused = _archive(tmp_path, "ended", experiment, "--reason", "historical")
