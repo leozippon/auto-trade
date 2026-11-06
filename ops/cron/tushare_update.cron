@@ -116,7 +116,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
 # Ann-date disclosure tables (holder counts/trades, top-10 holders,
 # repurchases), every calendar day at the end of the chain: after the morning's
-# last Paper run (08:05, ops/cron/paper.cron) and the pre-open jobs, before the
+# last Paper run (08:25, ops/cron/paper.cron) and the pre-open jobs, before the
 # evening chain. A vendor restatement found here is accepted as a new version
 # and queues the dataset's whole-history re-pull, which runs at the end of the
 # same run. Rows announced on day D land the next morning: the replay node

@@ -21,36 +21,46 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 
 # The operator places the sheet's orders by hand: an order that fills at the
 # open goes into the 09:15-09:25 opening call auction, one that fills at the
-# close into the 14:57-15:00 closing call auction. A sheet is due ten minutes
-# after its decision, 08:10 for the default 08:00 one, so the three runs all
-# start before then.
+# close into the 14:57-15:00 closing call auction. Every sheet is due at 09:10,
+# five minutes before the opening auction, whatever its book's decision time;
+# the decision time stays the moment the strategy's data is as of, wherever in
+# the morning the run falls.
+#
+# The runs work back from 09:10 with a 45-minute budget for one attempt: a
+# book's run -- its PIT build, the replay of its earlier decisions and one
+# decision -- takes 8-13 min on a quiet host and 42 min measured with four
+# research arms on the box. Books run one after another. No clock enforces the
+# budget: the per-call clocks init froze into each book.json (decision, fit,
+# container start) only stop a runaway, and a run that ends after 09:10 still
+# writes its sheet -- the same decision, too late for the opening auction.
 #
 # 05:40 is the first, after the nightly chain has committed the previous
 # session: the evening update (23:35, visible from 03:05), the intraday-flow
 # build (02:45), the PIT event build (03:35), the revision sentinel (04:00) and
-# the text audit (05:00). Each book takes its PIT build, the replay of its
-# earlier decisions and one decision -- 8-13 min measured on a quiet host, 42
-# min with four research arms on the box; on a refit day the fit adds 10-40
-# min, capped at the fit timeout init froze into that book's book.json from its
-# experiment's strategy_fit_timeout_seconds. Books run one after another.
+# the text audit (05:00). It has the slack for a refit day, when the fit adds
+# 10-40 min, capped at the fit timeout init froze into that book's book.json
+# from its experiment's strategy_fit_timeout_seconds; the last retry's budget
+# does not cover a fit.
 #
-# 07:40 and 08:05 are retries for a morning whose data landed late or whose
+# 07:40 and 08:25 are retries for a morning whose data landed late or whose
 # first run was slow: flock skips a retry while an earlier run is still
 # working, and a book whose session is already decided is a no-op re-render,
 # never a second decision. 07:40 follows the latest the PIT event build has
-# run; 08:05 is the last one that still starts before the sheet is due. The
-# PIT event build is the part of the chain that can push past 05:40 under load
-# (03:35-05:32 on a quiet night, 03:35-07:14 on 2026-09-16 with four arms
-# running); a night where it runs past 08:05 needs the arms throttled, not
-# another retry.
+# run; 08:25 is the last that still has the budget before 09:10, and the two
+# are a budget apart, so a 07:40 retry that runs one book in full has ended
+# when the last one starts. The PIT event build is the part of the chain that
+# can push past 05:40 under load (03:35-05:32 on a quiet night, 03:35-07:14 on
+# 2026-09-16 with four arms running); a night where it runs past 08:25 needs
+# the arms throttled, not another retry.
 #
 # A GPU book takes its card only as its strategy container starts; with no
-# eligible card it looks again every 60 s until 145 min after its run began
+# eligible card it looks again every 60 s until 165 min after its run began
 # (run_paper.py --gpu-poll-seconds / --gpu-wait-minutes), so the 05:40 run keeps
-# looking until 08:05, when the last retry starts. A run waiting for
+# looking until 08:25, when the last retry starts: a card found at its last
+# look still leaves the budget before the sheet is due. A run waiting for
 # a card is still working: the retries skip while it waits, so a book that
 # failed in it for late data is retried only after it ends, or by hand with
 # run_paper.py run --book <book>.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-5 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+25 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
