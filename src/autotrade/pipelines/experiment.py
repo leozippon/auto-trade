@@ -22,7 +22,7 @@ from tempfile import TemporaryDirectory
 
 import pandas as pd
 
-from autotrade.common.records import read_current_record, read_json_object
+from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import (
     ArtifactRevision,
     RegisteredArtifact,
@@ -78,7 +78,6 @@ from .config import (
 )
 from .ledger import (
     ENVIRONMENT_BLOCKED,
-    RETIRED_ABLATION_KEY,
     STRATEGY_ERROR,
     ExperimentLedger,
     RegisteredArtifactMutated,
@@ -89,7 +88,6 @@ from .ledger import (
     VerdictStatus,
     assert_no_registered_artifact_mutation,
     forward_record,
-    incubation_record,
     is_registered_artifact_mutation,
     recorded_path,
     registered_record,
@@ -350,7 +348,7 @@ class RollingExperimentPipeline:
         registrable full-span candidate; with none the experiment ends without a
         deliverable. An environment block ends the attempt, not the research,
         until the experiment's attempts are spent, when it ends ``environment_blocked``
-        with nothing registered. The record always carries ``frozen`` or
+        with nothing registered. The record always carries ``registered`` or
         ``experiment_end`` and research is over once it is written. An attempt that
         failed before that record is continued, not repeated: the next attempt
         starts from the budget, the compaction summary, the Validations and
@@ -415,7 +413,7 @@ class RollingExperimentPipeline:
                 [research_step_record(step) for step in session.steps],
             )
             gate: dict[str, object] | None = None
-            frozen: dict[str, object] | None = None
+            registered: dict[str, object] | None = None
             experiment_end: dict[str, object] | None = None
             tests = test_step_records(self.ledger.read())
             if session.outcome == ENVIRONMENT_BLOCKED:
@@ -458,19 +456,19 @@ class RollingExperimentPipeline:
                             f"the registered candidate {node_id} no longer registers: "
                             + ", ".join(str(reason) for reason in gate["reasons"])
                         )
-                    _publish_progress(progress, "freezing", run_id=run_id)
-                    frozen = self._register(
+                    _publish_progress(progress, "registering", run_id=run_id)
+                    registered = self._register(
                         steps[node_id],
                         gate=gate,
                         run_id=run_id,
                         null_controls=session.null_controls,
                         seed_replicates=[steps[step_id] for step_id in replicates],
                     )
-                    registered_id = str(frozen["artifact_id"])
+                    registered_id = str(registered["artifact_id"])
                     if session.outcome == "deadline":
                         _publish_progress(progress, "completing_record", run_id=run_id)
                         self.complete_record(
-                            frozen, gate, tests, fingerprint=str(by_step[node_id]["fingerprint"]), run_id=run_id
+                            registered, gate, tests, fingerprint=str(by_step[node_id]["fingerprint"]), run_id=run_id
                         )
             _publish_progress(progress, "publishing", run_id=run_id)
             skills = self._publish_or_keep_skills(
@@ -488,11 +486,11 @@ class RollingExperimentPipeline:
                 "finish_reason": session.finish_reason,
                 "outcome": session.outcome,
                 "reason": session.reason or None,
-                "nominated_step_id": str(frozen["source_step_id"]) if frozen else None,
+                "nominated_step_id": str(registered["source_step_id"]) if registered else None,
                 "steps": step_rows,
                 **self._account_record(),
-                "freeze_gate": gate,
-                "frozen": frozen,
+                "registration": gate,
+                "registered": registered,
                 "experiment_end": experiment_end,
                 "skills_ref": skills.skills_ref or None,
                 "skills_generation_id": skills.generation_id or None,
@@ -789,7 +787,7 @@ class RollingExperimentPipeline:
             raise RuntimeError("the forward replay needs a registered artifact")
         if forward_record(records) is not None:
             raise RuntimeError("the experiment's forward record is already recorded")
-        block: Mapping[str, object] = registered_row["frozen"]  # type: ignore[assignment]
+        block: Mapping[str, object] = registered_row["registered"]  # type: ignore[assignment]
         artifact = self._registered_artifact(block)
         replicates = [
             self._registered_artifact(item)
@@ -1114,7 +1112,7 @@ class RollingExperimentPipeline:
         (``ledger.recorded_path``)."""
 
         if not isinstance(block, Mapping):
-            raise TypeError("the registered record carries no frozen block")
+            raise TypeError("the registered record carries no registered block")
         return self.artifacts.registered(
             str(block["artifact_id"]),
             expected_path=recorded_path(self.config.experiment_dir, str(block["output_path"])),
@@ -1471,7 +1469,7 @@ def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> di
     (``ledger.recorded_path``)."""
 
     result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
-    return read_current_record(result.parent / STYLE_ARTIFACT_NAME)
+    return read_json_object(result.parent / STYLE_ARTIFACT_NAME)
 
 
 def null_control_seed(key: str, role: str) -> int:
@@ -1508,7 +1506,7 @@ def validation_statistics(result_ref: str) -> dict[str, object] | None:
     """
 
     path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
-    return _measured_or_none(read_current_record(path))
+    return _measured_or_none(read_json_object(path))
 
 
 def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, object]]:
@@ -1516,8 +1514,8 @@ def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, o
 
     path = Path(result_ref)
     return (
-        read_current_record(path),
-        read_current_record(path.parent / STYLE_ARTIFACT_NAME),
+        read_json_object(path),
+        read_json_object(path.parent / STYLE_ARTIFACT_NAME),
     )
 
 
@@ -1633,22 +1631,15 @@ def _keep_registered_artifact_ids(
     records: Sequence[Mapping[str, object]],
     extra_id: str | None = None,
 ) -> tuple[str, ...]:
-    """The experiment's registered artifact and its seed replicates, the ablation an experiment
-    frozen before 2026-11-05 registered beside them (``ledger.RETIRED_ABLATION_KEY``),
-    those an incubation recorded before 2026-11-03 registered, any artifact an
+    """The experiment's registered artifact and its seed replicates, any artifact an
     integrity row names, and the registration now being recorded."""
 
     keep = {str(extra_id)} if extra_id else set()
-    for row in (registered_record(records), incubation_record(records)):
-        if row is None:
-            continue
-        block: Mapping[str, object] = row["frozen"]  # type: ignore[assignment]
+    row = registered_record(records)
+    if row is not None:
+        block: Mapping[str, object] = row["registered"]  # type: ignore[assignment]
         keep.add(str(block["artifact_id"]))
-        keep.update(
-            str(item["artifact_id"])
-            for item in (*(block.get("seed_replicates") or ()), block.get(RETIRED_ABLATION_KEY))  # type: ignore[misc]
-            if item
-        )
+        keep.update(str(item["artifact_id"]) for item in block.get("seed_replicates") or ())  # type: ignore[index, union-attr]
     for record in records:
         if is_registered_artifact_mutation(record) and record.get("artifact_id"):
             keep.add(str(record["artifact_id"]))

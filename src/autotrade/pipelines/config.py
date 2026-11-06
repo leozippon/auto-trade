@@ -218,8 +218,7 @@ class AcceptanceRules:
     defaults (``hitl_state.WEB_CREATE_DEFAULTS``) and the audit entrypoint's
     flags (``scripts/experiments/_cli.py``) are read off its fields, and the
     verdict functions take the rules whole. A rule without a default
-    (``REQUIRED_ACCEPTANCE_KEYS``) is named by every record, so a record
-    written before it existed is refused rather than judged under it.
+    (``REQUIRED_ACCEPTANCE_KEYS``) is named by every record.
     """
 
     # The registration's limit over the candidate's span, and the Paper account's
@@ -325,26 +324,20 @@ class AcceptanceRules:
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> AcceptanceRules:
-        """These rules from a ``to_record`` mapping, ignoring unknown keys.
+        """These rules from a ``to_record`` mapping. A rule the mapping leaves
+        out takes its default; a key that names no rule, and a required rule
+        (``REQUIRED_ACCEPTANCE_KEYS``) left out, are refused."""
 
-        Run manifests and ``hitl/params.json`` are read back long after they
-        were written, so a record that carries a retired key (the former
-        ``min_return``/``min_sharpe`` targets, the deflated-Sharpe thresholds, the
-        ``RETIRED_SWITCHES``, the sealed gate's ``OBSOLETE_KEYS``) must still
-        rebuild the rules it does name. A record that lacks a required rule
-        (``REQUIRED_ACCEPTANCE_KEYS``) is refused: it was written under rules
-        these are not.
-        """
-
+        names = {rule.name for rule in fields(cls)}
+        unknown = sorted(set(record) - names)
+        if unknown:
+            raise ValueError(f"the acceptance rules name no rule {', '.join(unknown)}")
         missing = [
             rule.name for rule in fields(cls) if rule.default is MISSING and rule.name not in record
         ]
         if missing:
-            raise ValueError(
-                f"the acceptance rules lack the required {', '.join(missing)}: a record "
-                "written before those rules existed is not read under them"
-            )
-        return cls(**{rule.name: record[rule.name] for rule in fields(cls) if rule.name in record})  # type: ignore[arg-type]
+            raise ValueError(f"the acceptance rules lack the required {', '.join(missing)}")
+        return cls(**{name: record[name] for name in names if name in record})  # type: ignore[arg-type]
 
     def agent_facts(self, *, validation_years: int) -> dict[str, object]:
         """The ``acceptance_rules`` run fact, derived from these rules so no
@@ -514,57 +507,6 @@ def acceptance_default(name: str) -> object:
     return rule.default
 
 
-# The per-experiment on/off switches retired on 2026-10-07, when what they switched on
-# became the only rules (docs/PIPELINE_DESIGN.md §6). Every params.json written
-# before then carries them, and the run records of that time state the first
-# four in their acceptance rules and thresholds. Readers accept exactly these
-# keys and derive nothing from them; any other unknown parameter is refused.
-RETIRED_SWITCHES = frozenset(
-    {
-        "require_raw_excess_at_cost_stress",
-        "require_forward_plain_selection",
-        "require_seed_replicates",
-        "independent_offline_trials",
-        "dividend_tax",
-    }
-)
-
-# The rules and the create parameter retired on 2026-11-03 with the
-# deflated-Sharpe registration check, its trial family and its lineage, and the
-# forward and Held-out thresholds, when the sealed gate became the verdict's one
-# condition. Every params.json written before then carries them; readers
-# accept exactly these keys beside ``RETIRED_SWITCHES`` and derive nothing
-# from them, so an earlier experiment still lists in the console.
-RETIRED_RULES = frozenset(
-    {
-        "min_active_ir",
-        "min_dsr_probability",
-        "min_positive_year_share",
-        "min_full_span_validations",
-        "recency_months",
-        "lineage_arms",
-        "min_mean_gross",
-        "min_round_trips_per_month",
-        "heldout_tolerance_z",
-    }
-)
-
-# The keys retired with the registration's ablation on 2026-11-05 and with the
-# rolling validation on 2026-11-06: the ablation rule, the sealed gate's rule,
-# the research session's replay-year budget and the hard-finalization window.
-# Every params.json and ledger record written before then carries some of
-# them; readers accept exactly these keys beside the two sets above and derive
-# nothing from them, so an archived experiment still loads and lists, while a create
-# request naming one is refused like any unknown key.
-OBSOLETE_KEYS = frozenset(
-    {
-        "sealed_years",
-        "ablation_required",
-        "max_replay_years",
-        "finalize_before_deadline_seconds",
-    }
-)
-
 # The beta band that travels with a tracking mandate when the create request
 # names a cap and leaves the band blank. A cap alone is cheapest to meet by
 # dropping beta. Drawdowns are not here: they stay the rules' own 45 % / 30 %
@@ -602,10 +544,8 @@ def acceptance_for(params: Mapping[str, object]) -> AcceptanceRules:
 def defaulted_acceptance(params: Mapping[str, object]) -> dict[str, object]:
     """Every rule that has a default, as :func:`acceptance_for` resolves it
     from an experiment's parameters: the value they name, else the default, and a
-    blank beta band beside a named cap filled from ``MANDATED_DEFAULTS``.
-    Read without the required rules, so a reader that needs only these (the
-    console's threshold preview) reads an experiment stamped before a rule became
-    required as it was stamped."""
+    blank beta band beside a named cap filled from ``MANDATED_DEFAULTS``;
+    the required rules are not among them."""
 
     rules = {
         rule.name: rule.default for rule in fields(AcceptanceRules) if rule.default is not MISSING
@@ -1238,9 +1178,7 @@ __all__ = [
     "DEFAULT_MAX_NULL_CONTROLS",
     "DEFAULT_MAX_RESEARCH_MINUTES",
     "DEFAULT_RESEARCH_GEOMETRY",
-    "OBSOLETE_KEYS",
     "REQUIRED_ACCEPTANCE_KEYS",
-    "RETIRED_RULES",
     "SESSION_OUTCOMES",
     "TEST_STEP_MONTHS",
     "AcceptanceRules",

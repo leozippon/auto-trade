@@ -153,7 +153,7 @@ def test_recorded_revisions_survive_the_end_of_session_prune(tmp_path: Path):
         encoding="utf-8"
     ) == STRATEGY + "# tuned\n"
     assert store.registered("artifact_keep", experiment_id="experiment_001").artifact_id == "artifact_keep"
-    assert not (tmp_path / "store" / "frozen" / "artifact_drop").exists()
+    assert not (tmp_path / "store" / "registered" / "artifact_drop").exists()
 
 
 def test_registering_a_shared_revision_copies_the_bytes_it_locks(tmp_path: Path):

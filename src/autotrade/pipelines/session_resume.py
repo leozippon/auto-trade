@@ -23,7 +23,6 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from autotrade.common.records import (
-    read_current_record,
     read_json_object,
     redact_host_paths,
     write_json_atomic,
@@ -106,7 +105,7 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
                 f"step node {node_id} is recorded without its host sidecar; the "
                 "session cannot resume with a validation it cannot account for"
             )
-        record = read_current_record(sidecar)
+        record = read_json_object(sidecar)
         steps.append(
             StepResult(
                 str(record["step_id"]),

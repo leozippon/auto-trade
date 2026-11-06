@@ -50,42 +50,6 @@ def read_json_object(path: str | Path, *, missing_ok: bool = False) -> dict[str,
     return value
 
 
-# Keys that files written before 2026-11-06 carry under retired names: the
-# random baselines' readings (once the "panel") and the research session's end
-# (once ``arm_end``). Every loader of a ledger, a replay result or its
-# sidecars, a step tree or a Paper account reads through
-# :func:`with_current_keys`, so no consumer meets a retired name and every
-# writer writes today's. The draws' seed salt "panel" is a value, not a key.
-LEGACY_KEYS: Mapping[str, str] = {
-    "arm_end": "experiment_end",
-    "panel": "baseline",
-    "panel_daily": "baseline_daily",
-    "panel_draw_sd": "baseline_draw_sd",
-    "panel_draws": "baseline_draws",
-    "panel_return": "baseline_return",
-    "panel_seed": "baseline_seed",
-    "zero_skill_panel": "random_baselines",
-}
-
-
-def with_current_keys(value: T) -> T:
-    """``value`` with every mapping key at any depth under today's name
-    (:data:`LEGACY_KEYS`); values, and keys that were never renamed, as they are."""
-
-    if isinstance(value, dict):
-        return {LEGACY_KEYS.get(key, key): with_current_keys(item) for key, item in value.items()}  # type: ignore[return-value]
-    if isinstance(value, list):
-        return [with_current_keys(item) for item in value]  # type: ignore[return-value]
-    return value
-
-
-def read_current_record(path: str | Path, *, missing_ok: bool = False) -> dict[str, object]:
-    """:func:`read_json_object` under today's key names (:func:`with_current_keys`):
-    the reader of every file that carries readings."""
-
-    return with_current_keys(read_json_object(path, missing_ok=missing_ok))
-
-
 def read_json_object_or_empty(path: str | Path) -> dict[str, object]:
     """``read_json_object`` for a reader that must not fail on one file: a
     missing or unreadable file reads as ``{}``."""
@@ -227,13 +191,10 @@ __all__ = [
     "HOST_PATH_MARKER",
     "HOST_PATH_PREFIXES",
     "HOST_PATH_RE",
-    "LEGACY_KEYS",
     "dataclass_from_record",
     "dataclass_record",
-    "read_current_record",
     "read_json_object",
     "read_json_object_or_empty",
     "redact_host_paths",
-    "with_current_keys",
     "write_json_atomic",
 ]

@@ -22,21 +22,15 @@ const STATE_LABELS = {
 // session that ended the experiment says it in the experiment's own ending word below.
 const OUTCOME_LABELS = {
   completed: "验证期完成",
-  freeze: "提名定版",
-  no_edge: "未发现超额",
   deadline: "预算耗尽",
   environment_blocked: "环境阻断",
 };
 // How an experiment ended (webui/registry.py ENDING_STATES). The server classifies
 // the ending and writes its one-line reason; the console only words it, and
 // words it the same way on the card, the page header, the process list, the
-// 裁决 view. A graduation withdrawn afterwards is a failure, `rejected`, and
-// only its reason says it had graduated.
+// 读出 view.
 const ENDING_LABELS = {
   registered_with_record: "已定版，有记录",
-  graduated: "验收通过",
-  rejected: "未通过",
-  no_edge: "未发现超额",
   budget_exhausted: "预算耗尽",
   environment_blocked: "环境阻断",
   broken: "失败",
@@ -46,9 +40,7 @@ const ENDING_LABELS = {
 // and the reason a terminal row or an unmeasured reading carries. A value not
 // listed renders as written.
 const TRACK_LABELS = {
-  frozen: "定版策略",
-  graduated: "验收通过",
-  incubating: "模拟观察中",
+  registered: "定版策略",
 };
 const VERDICT_STATUS = {
   observing: ["stopped", "观察中"],
@@ -61,53 +53,32 @@ const VERDICT_REASON_LABELS = {
   kill_upper_bound_below_zero: "主动超额的终止上界低于 0",
   confirm_lower_bound_above_zero: "主动超额的确认下界高于 0",
 };
-// The conditions of the registration check and of the forward and Held-out verdict
-// (pipelines/verdict.py), keyed by the token the pipeline records when one
-// fails, worded as the criterion so a checklist reads them with a pass or fail
-// mark. A token not listed renders as written. A criterion whose name states a
-// threshold is a function of the `thresholds` block the record carries, not a
-// frozen phrase: the cost-stress multiplier is a creation parameter, so "加倍"
-// mislabels every experiment run at another multiple. A threshold the record
-// does not carry reads as "—", so the gap shows instead of today's default.
+// The conditions of the registration check (pipelines/verdict.py
+// ConditionReason), keyed by the token the pipeline records when one fails,
+// worded as the criterion so a checklist reads them with a pass or fail mark.
+// A token not listed renders as written.
 const REASON_LABELS = {
   non_finite_total_return: "研究期总收益可算",
   non_finite_max_drawdown: "研究期回撤可算",
   non_finite_sharpe: "研究期夏普可算",
   max_drawdown_above_limit: "研究期回撤",
-  freeze_needs_full_span_validation: "提名节点为全区间验证",
-  freeze_nominee_is_control: "提名节点不是对照",
-  freeze_too_few_full_span_validations: "全区间验证次数",
-  freeze_deflated_sharpe_unavailable: "DSR 可算",
-  freeze_deflated_sharpe_below_threshold: "DSR",
-  freeze_information_ratio_below_threshold: "研究期主动 IR",
-  freeze_too_few_positive_years: "主动超额为正的研究年数",
-  freeze_active_drawdown_exceeded: "研究期主动回撤",
-  freeze_tracking_error_above_cap: "研究期对基准指数跟踪误差",
-  freeze_beta_outside_band: "研究期市场 β",
-  freeze_not_positive_at_cost_stress: (t) => `研究期滑点 ×${t.cost_stress_multiplier ?? "—"} 后主动超额`,
-  freeze_unmeasurable: "研究期统计可算",
-  freeze_too_few_seed_replicates: "训练模型的提名登记了种子复现",
-  freeze_seed_replicate_invalid: "种子复现只改种子一行",
-  freeze_seed_mean_information_ratio_below_threshold: "研究期种子均值主动 IR",
-  sealed_strategy_error: "封存年份策略无报错",
-  sealed_unmeasurable: "封存年份残差可读（不是全程空仓）",
-  sealed_residual_ir_below_bar: "封存年份残差 IR",
-  forward_strategy_error: "前推期策略无报错",
-  heldout_strategy_error: "Held-out 期策略无报错",
-  replicate_strategy_error: "种子复现回测无报错",
+  registration_needs_full_span_validation: "提名节点为全区间验证",
+  registration_nominee_is_control: "提名节点不是对照",
+  registration_tracking_error_above_cap: "研究期对基准指数跟踪误差",
+  registration_beta_outside_band: "研究期市场 β",
+  registration_unmeasurable: "研究期统计可算",
+  registration_too_few_seed_replicates: "训练模型的提名登记了种子复现",
+  registration_seed_replicate_invalid: "种子复现只改种子一行",
 };
 // An experiment judged on its active series -- its daily return minus the random
-// baseline the host drew from its own book -- records `series: "active"`; an experiment
-// judged before random baselines existed records nothing, and its figures are its own.
+// baseline the host drew from its own book -- records `series: "active"`; a replay
+// without a random baseline records `absolute`, and its figures are its own.
 const SERIES_LABELS = { active: "主动（策略 − 随机对照组合）", absolute: "策略自身" };
-const ACTIVE_TITLE = "策略日收益减去随机对照组合合成收益后的序列；对照组合由宿主按该策略自己的成交骨架随机换名回放得到";
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
 // A gloss states no threshold: the registration check's own limits are carried by the
 // gate record, and the checklist draws both the measured value and the limit
 // from there.
-const DSR_TITLE = "去膨胀夏普概率（DSR）：按本实验试验数折减后，研究期 IR 仍高于 SR* 的概率";
-const TRIALS_TITLE = "DSR 据以折减的试验数：本实验验证过的不同策略版本";
 // The three figures every gate reads off the active series, as
 // pipelines/verdict.py measures them: the series as it is, with no regression.
 const EXCESS_TITLE = "主动序列（账户日收益 − 随机对照组合日收益，不做回归）的年化均值";
@@ -132,17 +103,13 @@ const LOWER_BOUND_TITLE = "主动序列（登记了种子复现时为定版产�
 const HOLDER_TITLE = "定版产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
 const PLAIN_SELECTION_TITLE = "账户收益减随机对照组合收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
 const ACTIVE_BETA_TITLE = "主动序列（账户 − 随机对照）对基准指数的回归载荷，只作诊断；为负表示相对随机对照的市场暴露较低，涨市中可能因此落后";
-// A model-training nominee judged on its training seeds together
-// (pipelines/experiment.py `_seed_replicate_gate`, verdict.py `seed_mean` and
-// `forward_lower_bound`): a seed replicate is the same strategy with only its
-// seed line changed.
-const SEED_IR_TITLE = "提名节点与它的种子复现（同一策略只换训练种子那一行）研究期主动 IR 的平均，须达到提名节点自己的 IR 门槛";
+// A model-training nominee read on its training seeds together (verdict.py
+// `seed_mean` and `forward_lower_bound`): a seed replicate is the same strategy
+// with only its seed line changed.
 const SEED_MEAN_TITLE = "定版产物与它的种子复现各自读数的平均；只有登记了种子复现的提名才有";
 
-function reasonLabel(reason, thresholds) {
-  const label = REASON_LABELS[reason];
-  if (typeof label === "function") return label(thresholds || {});
-  return label || String(reason);
+function reasonLabel(reason) {
+  return REASON_LABELS[reason] || String(reason);
 }
 
 const ENVIRONMENT_STAGE_LABELS = {
@@ -156,7 +123,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   subagent_wait: "等待子代理",
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
-  freezing: "定版策略",
+  registering: "定版策略",
   completing_record: "宿主补完验证记录",
   forward_replay: "前推与 Held-out 连续回测",
   readout: "读出记录",
@@ -170,7 +137,7 @@ const ENVIRONMENT_STAGE_ICONS = {
   subagent_wait: "🧩",
   backtest: "📊",
   agent_complete: "🤖",
-  freezing: "❄",
+  registering: "❄",
   completing_record: "▶",
   forward_replay: "▶",
   readout: "📖",
@@ -1366,7 +1333,8 @@ function ratioBar(ratio, { cls = "", tone = true } = {}) {
 }
 
 // The research budgets, keyed as the trace's budget_used block and the
-// listing's budget totals carry them.
+// listing's budget totals carry them. The home card leaves out the random
+// baselines (null_controls); the experiment page shows every row.
 const BUDGET_ROWS = [
   ["inference_seconds", "时间", fmtDuration],
   ["llm_calls", "模型调用", String],
@@ -1376,16 +1344,17 @@ const BUDGET_ROWS = [
 ];
 
 /* The research budget as one block per limit — its name and used percentage on
-   one line, its bar across the block underneath — so six budgets read as six
-   figures instead of one run-on line. `mini` is the home card's block: it says
-   what was spent, never against its limit, and leaves the share used to the
-   bar alone. A budget the experiment has a limit for but never metered (an experiment from
-   before that figure was recorded) keeps its block with a dash and an empty
-   bar, so the grid stays six figures wherever it appears. Null while nothing
-   was spent or no limit is known. */
+   one line, its bar across the block underneath — so the budgets read as
+   separate figures instead of one run-on line. `mini` is the home card's block:
+   it leaves out the random baselines, says what was spent, never against its
+   limit, and leaves the share used to the bar alone. A budget the experiment
+   has a limit for but never metered keeps its block with a dash and an empty
+   bar, so the grid keeps its shape. Null while nothing was spent or no limit
+   is known. */
 function budgetBars(used, total, { mini = false } = {}) {
   if (!used || !total) return null;
-  const rows = BUDGET_ROWS.map(([key, label, fmt]) => {
+  const shown = BUDGET_ROWS.filter(([key]) => !(mini && key === "null_controls"));
+  const rows = shown.map(([key, label, fmt]) => {
     const limit = Number(total[key]);
     const spent = Number(used[key]);
     if (!(limit > 0)) return null;
@@ -1735,14 +1704,10 @@ const STEP_STATUS_LABELS = {
 };
 
 /* How an ending draws the 读出 node: a registered strategy with its record is
-   the step done; only a sealed-gate refusal of old is a failure of the step
-   itself; an ending nothing judged is a terminus, and a broken worker wears
-   its cross on the step that broke. */
+   the step done; an ending nothing judged is a terminus, and a broken worker
+   wears its cross on the step that broke. */
 const ENDING_STEP_STATES = {
   registered_with_record: "done",
-  graduated: "done",
-  rejected: "failed",
-  no_edge: "ended",
   budget_exhausted: "ended",
   environment_blocked: "ended",
   broken: "ended",
@@ -3073,16 +3038,14 @@ function seedReadingsTable(slices, names) {
   );
 }
 
-/* One slice's graduation criteria (pipelines/verdict.py), as rows: before the
-   record the threshold alone, unmarked; after it the measured figure with its
-   pass or fail mark. A slice the strategy's error left unmeasured stays
-   unmarked. Every row of a slice is worded against the same thresholds, so
-   they are bound once and each row names only its token, figure, threshold
-   and — when the rule is not readable from those — its hover. */
-function criteriaRow(slice, failed, thresholds) {
+/* One criterion of the registration check as a row: the measured figure with
+   its pass or fail mark against the threshold. The check and its failed tokens
+   are bound once, and each row names only its token, figure, threshold and —
+   when the rule is not readable from those — its hover. */
+function criteriaRow(slice, failed) {
   return (token, value, threshold, title) => ({
     ok: slice ? !failed.has(token) : null,
-    label: reasonLabel(token, thresholds),
+    label: reasonLabel(token),
     value: slice ? value : null,
     threshold,
     title,
@@ -3095,24 +3058,8 @@ function thresholdCell(mark, value, fmt = fmtPct) {
   return value === undefined || value === null ? "" : `${mark} ${fmt(value)}`;
 }
 
-
-/* The criteria an experiment is held to only when its own thresholds state them: the
-   active-series drawdown, and the tracking mandate's two limits. `measured` is
-   the slice or gate record carrying the figures; a threshold the record does
-   not carry draws no row, so an experiment judged before these existed reads as it
-   was judged. */
-function activeDrawdownRows(token, measured, row, t) {
-  if (t.active_max_drawdown === undefined || t.active_max_drawdown === null) return [];
-  return [
-    row(
-      token,
-      fmtPct(measured && measured.active_max_drawdown),
-      thresholdCell("≤", t.active_max_drawdown),
-      ACTIVE_TITLE,
-    ),
-  ];
-}
-
+/* The tracking mandate's two limits, held only where the experiment's own
+   thresholds state a cap. `measured` is the gate record carrying the figures. */
 function mandateRows(capToken, bandToken, measured, row, t) {
   if (t.tracking_error_cap === undefined || t.tracking_error_cap === null) return [];
   const mandate = (measured && measured.mandate) || {};
@@ -3243,12 +3190,9 @@ function heldoutStagePanel(detail) {
    (the lower bound and residual IR, or the strategy error that left it
    unread); the holder's lines and seed readings; every experiment's record over the
    same validation window and the pooled forward readings; what the experiment cost
-   and when it was recorded; and the Paper handoff. Nothing judges. A record
-   written under the retired sealed gate shows its verdict as recorded (a
-   withdrawn graduation with who, when, why and the evidence). An ending no
+   and when it was recorded; and the Paper handoff. Nothing judges. An ending no
    replay decided has the reason alone; before any, the rule and 待记录. */
 function readoutStagePanel(detail) {
-  const verdict = detail.verdict || {};
   const { forward } = replayContext(detail);
   const slices = forward ? forward.slices || {} : {};
   const readout = (forward || {}).readout;
@@ -3272,29 +3216,14 @@ function readoutStagePanel(detail) {
       : null,
     recordedAt ? kvRow("记录于", fmtTs(recordedAt)) : null,
   ].filter(Boolean);
-  const withdrawn = verdict.void;
   return el(
     "div",
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.readout, badge),
-    withdrawn
-      ? el("div", { class: "hint warn" }, `验收通过的结论已于 ${fmtTs(withdrawn.recorded_at)} 撤销，记为未通过；以下保留回测当时的读数与判定`)
-      : null,
-    withdrawn
-      ? el(
-          "table",
-          { class: "kv" },
-          kvRow("撤销人", withdrawn.voided_by || "—"),
-          kvRow("理由", withdrawn.reason || "—"),
-          kvRow("依据", withdrawn.evidence_ref || "—"),
-        )
-      : null,
     readout ? readoutBlock(readout) : null,
     forward ? holderLine("前推", slices.forward) : null,
     forward ? holderLine("Held-out", slices.heldout) : null,
     seedReadingsTable(slices, ["forward", "heldout"]),
-    forward && forward.verdict ? legacyVerdictLine(forward.verdict) : null,
-    forward && forward.sealed ? legacySealedBlock(detail.experiment_id, forward.sealed) : null,
     forward
       ? null
       : endingReason(detail) ||
@@ -3333,42 +3262,6 @@ function readoutBlock(readout) {
         ? `${SLICE_NAMES[error.slice] || error.slice}段策略异常：${error.error || "—"}`
         : `${fmtPct(forward.lower_bound)} 下界 · 残差 IR ${fmtSharpe((forward.residual_reading || {}).residual_information_ratio)}`,
     ),
-  );
-}
-
-/* A verdict recorded under the retired sealed gate, as recorded: its status
-   and the reasons that refused it, worded by their labels. */
-function legacyVerdictLine(verdict) {
-  const reasons = (verdict.reasons || []).map((token) => reasonLabel(token, verdict.thresholds));
-  return el(
-    "div",
-    { class: "meta-line section-gap" },
-    `封存门裁决（旧规则）：${ENDING_LABELS[verdict.status] || verdict.status}${reasons.length ? ` · ${reasons.join(" · ")}` : ""}`,
-  );
-}
-
-/* The sealed reading a record judged under the retired sealed gate carries
-   beside that verdict: the registered strategy's residual IR over the sealed
-   research years against its threshold, and the trades of the replay it was
-   read off. A record without one requests nothing. */
-function legacySealedBlock(experimentId, s) {
-  return el(
-    "div",
-    { class: "section-gap" },
-    el(
-      "table",
-      { class: "kv" },
-      kvRow(
-        `封存读数（旧规则）· ${s.label || "—"}`,
-        `${fmtDate(s.start)} ～ ${fmtDate(s.end)} · 残差 IR ${fmtSharpe(s.residual_information_ratio)}（门槛 ${fmtSharpe(s.bar)}，${fmtSharpe(s.years)} 年）`,
-      ),
-    ),
-    s.result
-      ? Object.assign(
-          lazyDetails("封存回测交易明细", () => ordersNode(experimentId, s.result)),
-          { className: "fold section-gap" },
-        )
-      : null,
   );
 }
 
@@ -3430,8 +3323,7 @@ function paperHandoff(detail) {
 }
 
 /* The registered artifact and the research statistics it was registered on. An
-   artifact registered with seed replicates also shows the seed-mean IR beside
-   its own IR and the threshold both were held to, and one row per seed. */
+   artifact registered with seed replicates also shows one row per seed. */
 function registeredPanel(detail) {
   const registered = detail.registered;
   if (!registered) return null;
@@ -3446,7 +3338,7 @@ function registeredPanel(detail) {
         "a",
         {
           class: "btn small",
-          href: `/api/experiments/${encodeURIComponent(detail.experiment_id)}/frozen/strategy.zip`,
+          href: `/api/experiments/${encodeURIComponent(detail.experiment_id)}/registered/strategy.zip`,
         },
         "⬇ 下载 ZIP",
       ),
@@ -3463,35 +3355,6 @@ function registeredPanel(detail) {
         { label: "主动跟踪误差", value: registered.tracking_error, fmt: fmtPct, title: TRACKING_ERROR_TITLE },
         { label: "IR", value: registered.information_ratio, fmt: fmtSharpe, signed: true, title: IR_TITLE },
         {
-          label: "种子均值 IR",
-          value: seeds.mean_information_ratio,
-          fmt: fmtSharpe,
-          signed: true,
-          title: SEED_IR_TITLE,
-        },
-        {
-          label: "IR 门槛",
-          value: seeds.information_ratio_bar,
-          fmt: fmtSharpe,
-          title: "DSR 达到门槛时的研究期 IR，按本实验试验数折算；提名节点与种子均值都须达到",
-        },
-        {
-          label: "DSR",
-          value: registered.deflated_sharpe_probability,
-          fmt: fmtSharpe,
-          // The same gloss the other DSR tiles carry, then what this
-          // nomination's probability was deflated against.
-          title: [
-            DSR_TITLE,
-            registered.trials === null || registered.trials === undefined ? null : `试验 ${registered.trials} 个`,
-            registered.sharpe_star === null || registered.sharpe_star === undefined
-              ? null
-              : `SR* ${fmtSharpe(registered.sharpe_star)}`,
-          ]
-            .filter(Boolean)
-            .join(" · "),
-        },
-        {
           label: "前推可检出超额",
           value: registered.forward_mde,
           fmt: fmtPct,
@@ -3500,9 +3363,6 @@ function registeredPanel(detail) {
       ]),
     ),
     chipsRow([
-      registered.full_span_validations === null || registered.full_span_validations === undefined
-        ? null
-        : chip(`全区间验证 ${registered.full_span_validations}`),
       registered.null_percentile === null || registered.null_percentile === undefined
         ? null
         : chip(`null 分位 ${fmtSharpe(registered.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
@@ -3857,7 +3717,7 @@ function sessionDetailPanel(detail, selectedKey) {
     return panel;
   }
   if (selectedKey === "registered") {
-    panel.append(registeredPanel(detail) || stepPlaceholder(detail, "frozen", "定版产物"));
+    panel.append(registeredPanel(detail) || stepPlaceholder(detail, "registered", "定版产物"));
     return panel;
   }
   if (selectedKey === "forward") {
@@ -4014,94 +3874,29 @@ function recordPanel(detail) {
   );
 }
 
-/* The registration check as the pipeline judged the nomination: a failed
-   precondition only when it failed, and the conditions the record's own
-   thresholds state. A registration (since the sealed gate, 2026-11-03)
-   states only its drawdown limit and mandate; a deflated-Sharpe gate before
-   it also states its full-span count, DSR and IR bars. Where the experiment holds
-   seed replicates the gate records them (`seed_replicates`): a missing or
-   invalid replicate is a precondition, each invalid one's problem in the
-   row's hover, and an earlier gate's seed-mean IR against the nominee's IR
-   threshold is a row whenever it read one. */
+/* The registration check as the pipeline judged the nomination: every
+   condition it failed, then the tracking mandate where the record's own
+   thresholds state one. Where the experiment holds seed replicates the gate
+   records them (`seed_replicates`): each invalid one's problem is in the
+   hover of the row that refused it. */
 function registrationChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
-  const row = criteriaRow(gate, failed, t);
-  const seeds = gate.seed_replicates;
-  const problems = ((seeds || {}).replicates || [])
+  const row = criteriaRow(gate, failed);
+  const mandate = ["registration_tracking_error_above_cap", "registration_beta_outside_band"];
+  const problems = ((gate.seed_replicates || {}).replicates || [])
     .filter((entry) => entry.problem)
     .map((entry) => `${String(entry.step_id).split("__").pop()}：${entry.problem}`)
     .join("\n");
-  const preconditions = [
-    "freeze_needs_full_span_validation",
-    "freeze_nominee_is_control",
-    "freeze_unmeasurable",
-    "freeze_deflated_sharpe_unavailable",
-    "freeze_too_few_seed_replicates",
-    "freeze_seed_replicate_invalid",
-  ].filter((token) => failed.has(token));
-  const seedMean = "freeze_seed_mean_information_ratio_below_threshold";
   return checklist([
-    ...preconditions.map((token) => ({
-      ok: false,
-      label: reasonLabel(token),
-      title: token === "freeze_seed_replicate_invalid" ? problems || null : null,
-    })),
-    ...(t.min_full_span_validations === undefined
-      ? []
-      : [
-          {
-            ok: !failed.has("freeze_too_few_full_span_validations"),
-            label: reasonLabel("freeze_too_few_full_span_validations"),
-            value: gate.full_span_validations ?? "—",
-            threshold: `≥ ${t.min_full_span_validations ?? "—"}`,
-          },
-        ]),
-    ...(t.min_deflated_sharpe_probability === undefined
-      ? []
-      : [
-          {
-            ok: failed.has("freeze_deflated_sharpe_unavailable")
-              ? null
-              : !failed.has("freeze_deflated_sharpe_below_threshold"),
-            label: reasonLabel("freeze_deflated_sharpe_below_threshold"),
-            value: fmtSharpe(gate.deflated_sharpe_probability),
-            threshold: `≥ ${t.min_deflated_sharpe_probability ?? "—"}`,
-            title: DSR_TITLE,
-          },
-        ]),
-    // The conditions a gate recorded since the active series is graded states
-    // in its own thresholds; an earlier gate states none and draws none.
-    ...(t.min_information_ratio === undefined || t.min_information_ratio === null
-      ? []
-      : [
-          row("freeze_information_ratio_below_threshold", fmtSharpe(gate.information_ratio), `≥ ${t.min_information_ratio}`, ACTIVE_TITLE),
-          row("freeze_too_few_positive_years", gate.positive_years ?? "—", `≥ ${t.min_positive_years ?? "—"}`),
-        ]),
-    ...activeDrawdownRows("freeze_active_drawdown_exceeded", gate, row, t),
-    // Judged only where the experiment's rules hold it; such a gate states the
-    // multiplier it was judged at.
-    ...(t.cost_stress_multiplier === undefined || t.cost_stress_multiplier === null
-      ? []
-      : [
-          row(
-            "freeze_not_positive_at_cost_stress",
-            fmtPct(gate.excess_at_cost_stress),
-            "> 0",
-            STRESS_TITLE,
-          ),
-        ]),
-    ...mandateRows("freeze_tracking_error_above_cap", "freeze_beta_outside_band", gate, row, t),
-    ...(seeds && (seeds.mean_information_ratio != null || failed.has(seedMean))
-      ? [
-          row(
-            seedMean,
-            fmtSharpe(seeds.mean_information_ratio),
-            `≥ ${fmtSharpe(seeds.information_ratio_bar)}`,
-            SEED_IR_TITLE,
-          ),
-        ]
-      : []),
+    ...[...failed]
+      .filter((token) => !mandate.includes(token))
+      .map((token) => ({
+        ok: false,
+        label: reasonLabel(token),
+        title: token === "registration_seed_replicate_invalid" ? problems || null : null,
+      })),
+    ...mandateRows(mandate[0], mandate[1], gate, row, t),
   ]);
 }
 
@@ -5080,7 +4875,7 @@ function subagentClockNode(block, className = "hint") {
    summary after its last turn, so both are shown. */
 function subagentProgressParts(block) {
   const parts = [];
-  const turns = Number(block.rounds) || 0;
+  const turns = Number(block.turns) || 0;
   const llmCalls = Number(block.llm_calls) || 0;
   const toolCalls = Number(block.tool_calls) || 0;
   if (turns || llmCalls) parts.push(`${turns} 回合 · 模型 ${llmCalls} 次`);
@@ -5304,7 +5099,7 @@ function parentReasoningLabel(detail) {
 function renderAgentOutputBlock(node, block, detail) {
   const effort = parentReasoningLabel(detail);
   const model = String((block && block.model) || "").trim();
-  const turn = Number(block.round) || 0;
+  const turn = Number(block.turn) || 0;
   const title = turn
     ? [`第 ${turn} 回合`, model].filter(Boolean).join(" · ")
     : ["Agent", model, effort ? `推理 ${effort}` : ""].filter(Boolean).join(" · ");
@@ -5376,7 +5171,7 @@ function subagentContextLabel(block) {
    `model · 推理 xhigh · 上限 48 回合 · 独立上下文`. */
 function subagentMetaLine(block, detail) {
   const thinking = subagentThinkingLabel(block, detail);
-  const turnsLimit = Number(block.rounds_limit) || 0;
+  const turnsLimit = Number(block.turns_limit) || 0;
   return [
     block.model ? String(block.model) : "",
     thinking ? `推理 ${thinking}` : "",
@@ -5571,7 +5366,7 @@ function toolCallsNode(calls) {
   const list = el("div", { class: "trace-tool-list" });
   for (const call of calls || []) {
     const status = TOOL_STATUS_LABELS.get(String(call.status || "")) || "";
-    const turn = Number(call.round) || 0;
+    const turn = Number(call.turn) || 0;
     const row = el(
       "div",
       { class: "trace-tool-call" },

@@ -2,14 +2,12 @@
 
 The console reads experiments only through their files: ``hitl/`` control
 plane, the ledger and the result artifacts it names. ``build_experiment`` writes those
-for one experiment at a chosen stage — researching, frozen with the forward replay
+for one experiment at a chosen stage — researching, registered with the forward replay
 running, or with its readout — from synthetic daily series, and computes
 every recorded statistic with the pipeline's own functions
 (``check_registration``, ``validation_record.step_entry``, ``forward_slice``,
 ``heldout_slice``, ``validation_record.readout``), so a projection test reads
-the same numbers a real experiment would carry. The ``graduated`` and ``discarded``
-stages write the records of an experiment judged under the retired sealed gate, in
-the shape that code left, for the console's reading of such ledgers.
+the same numbers a real experiment would carry.
 """
 
 from __future__ import annotations
@@ -43,7 +41,6 @@ from autotrade.pipelines.verdict import (
     forward_slice,
     graded_statistics,
     heldout_slice,
-    holder_readings,
     residual_reading,
 )
 from tests.unit.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
@@ -51,11 +48,8 @@ from tests.unit.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
 STAGES = (
     "created",
     "research",
-    "sealed",
+    "forward",
     "registered_with_record",
-    "graduated",
-    "discarded",
-    "no_deliverable",
     "deadline",
     "environment_blocked",
     "broken",
@@ -95,7 +89,7 @@ REPLAY = {
 # limits wide enough that the synthetic series' edge alone decides.
 RULES = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.9, active_max_drawdown=0.9)
 # The validation years of the default geometry under the fixture's rules.
-SEALED = (
+VALIDATION = (
     GEOMETRY.split_research(RULES.research_years)[1][0].start,
     GEOMETRY.split_research(RULES.research_years)[1][-1].end,
 )
@@ -235,8 +229,8 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
         "finish_reason": "llm_agent_finish_session",
         "reason": "the session's reason",
         "nominated_step_id": None,
-        "freeze_gate": None,
-        "frozen": None,
+        "registration": None,
+        "registered": None,
         "experiment_end": None,
         "attempts": 1,
         "budget_used": {
@@ -295,7 +289,7 @@ def build_experiment(
     # The one research session is in flight while the experiment researches: it has
     # no ledger record until it ends.
     current = "research"
-    if stage in ("sealed", "registered_with_record", "graduated", "discarded"):
+    if stage in ("forward", "registered_with_record"):
         steps = [
             _step(directory, "research", 0, edge=0.0005, seed=1),
             _step(directory, "research", 1, edge=0.002, seed=3),
@@ -320,10 +314,10 @@ def build_experiment(
                     ],
                 },
             }
-        output = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
+        output = directory / "artifacts/strategy/registered/strategy_research_abc/output"
         output.mkdir(parents=True)
         (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
-        frozen = {
+        registered = {
             "artifact_id": "strategy_research_abc",
             "output_path": str(output),
             "models_path": None,
@@ -366,29 +360,15 @@ def build_experiment(
         records.append(
             _session_record(
                 experiment_id,
-                **(
-                    {"outcome": "completed", "finish_reason": "validation_period_complete"}
-                    if stage == "registered_with_record"
-                    else {"outcome": "freeze"}
-                ),
+                outcome="completed",
+                finish_reason="validation_period_complete",
                 steps=steps,
-                                nominated_step_id=nominee["step_id"],
-                freeze_gate=gate,
-                frozen=frozen,
+                nominated_step_id=nominee["step_id"],
+                registration=gate,
+                registered=registered,
             )
         )
         current = "forward"
-    elif stage == "no_deliverable":
-        records.append(
-            _session_record(
-                experiment_id,
-                outcome="no_edge",
-                steps=[],
-                reason="没有候选值得冻结。三年都测过了，最好的一个也只有 +0.3%/年。",
-                experiment_end={"status": "no_deliverable", "reason": "no_edge: nothing survived"},
-            )
-        )
-        current = ""
     elif stage == "deadline":
         records.append(
             _session_record(
@@ -399,7 +379,10 @@ def build_experiment(
                 reason=None,
                 experiment_end={
                     "status": "no_deliverable",
-                    "reason": "research budget exhausted without a registration (llm_call_budget_exhausted)",
+                    "reason": (
+                        "research budget exhausted before any test, with no registrable "
+                        "full-span candidate (llm_call_budget_exhausted)"
+                    ),
                 },
             )
         )
@@ -435,17 +418,17 @@ def build_experiment(
         current = "research"
     for record in records:
         ledger.append(record)
-    if stage == "sealed":
+    if stage == "forward":
         # The replay is running: its result directory is already on disk, and
         # no ledger record names it.
         write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=0.002, seed=9)
-    if stage == "registered_with_record":
+    if stage in ("forward", "registered_with_record"):
         # The validation record: every step of the validation period, read off
         # one replay of the registered strategy, as the host's completion writes it.
         validation = GEOMETRY.split_research(RULES.research_years)[1]
         plan = validation_record.ValidationSteps.of(validation, RULES.test_step_months)
         record_ref = write_result(
-            directory, "valid", start=SEALED[0], days=_business_day_count(SEALED[0], SEALED[1]), edge=0.002, seed=21
+            directory, "valid", start=VALIDATION[0], days=_business_day_count(VALIDATION[0], VALIDATION[1]), edge=0.002, seed=21
         )
         _with_baselines(record_ref, 0.9, series="benchmark_daily")
         record_replay = json.loads(Path(record_ref).read_text(encoding="utf-8"))
@@ -477,8 +460,8 @@ def build_experiment(
             # The session record is already in the ledger: the steps follow it.
             records.append(step_record)
             ledger.append(step_record)
-    if stage in ("registered_with_record", "graduated", "discarded"):
-        edge = 0.002 if stage in ("registered_with_record", "graduated") else -0.002
+    if stage == "registered_with_record":
+        edge = 0.002
         ref = write_result(directory, "heldout", start=REPLAY["start"], days=300, edge=edge, seed=7)
         replicates: list[tuple[dict[str, object], dict[str, object]]] = []
         replicate_rows: list[dict[str, object]] = []
@@ -524,38 +507,6 @@ def build_experiment(
             mean_gross=0.9,
             seed_replicates=replicates,
         )
-        if stage == "registered_with_record":
-            judged = {"readout": validation_record.readout(records, alpha=RULES.alpha, forward=forward)}
-        else:
-            # The retired sealed gate's reading and verdict, as that code wrote
-            # them: the registered book over the sealed years against its threshold.
-            sealed_ref = write_result(directory, "valid", start=SEALED[0], days=250, edge=2 * edge, seed=11)
-            _with_baselines(sealed_ref, 0.9, series="benchmark_daily")
-            sealed_analysis = _analysis(sealed_ref)
-            sealed_end = sealed_analysis["strategy_daily"][-1][0]
-            reading = residual_reading(sealed_analysis, start=SEALED[0], end=sealed_end, alpha=RULES.alpha)
-            # That code named the threshold ``bar``.
-            reading["bar"] = reading.pop("threshold")
-            reasons = [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
-            thresholds = {"alpha": RULES.alpha, "bar": reading["bar"]}
-            sealed = {
-                "start": SEALED[0],
-                "end": sealed_end,
-                **reading,
-                "raw_readings": holder_readings(sealed_analysis, start=SEALED[0], end=sealed_end),
-                "reasons": reasons,
-                "thresholds": thresholds,
-            }
-            assert bool(reasons) == (stage == "discarded"), stage
-            judged = {
-                "sealed": {"label": "Y4", "start": SEALED[0], "end": sealed_end, "result_ref": sealed_ref, "slice": sealed},
-                "verdict": {
-                    "status": stage,
-                    "reasons": reasons,
-                    "thresholds": thresholds,
-                    "holder_line": {name: f"{name} as the holder read it" for name in ("forward", "heldout")},
-                },
-            }
         ledger.append(
             {
                 "record_type": "forward",
@@ -573,12 +524,12 @@ def build_experiment(
                 "refits_executed": {"forward": 0, "heldout": 0},
                 **({"seed_replicates": replicate_rows} if replicate_rows else {}),
                 "null_control": {"k": 500, "excess_percentile": 0.9, "step": {"excess_percentile": 0.77}},
-                **judged,
+                "readout": validation_record.readout(records, alpha=RULES.alpha, forward=forward),
             }
         )
         current = ""
     status: dict[str, object] = {"schema_version": 1, "pid": 999_999_999, "state": "stopped"}
-    if stage in ("registered_with_record", "graduated", "discarded", "no_deliverable", "deadline", "environment_blocked"):
+    if stage in ("registered_with_record", "deadline", "environment_blocked"):
         status["state"] = "completed"
     elif stage == "broken":
         status["state"] = "failed"

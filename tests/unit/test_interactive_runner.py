@@ -68,7 +68,7 @@ class RecordingExecutor:
                     "run_id": f"run_{len(self.calls)}",
                     "session_key": session.session_key,
                     **(
-                        {"verdict": {"status": "discarded", "reasons": ["x"]}}
+                        {"readout": {"state": "registered_with_record"}}
                         if session.kind == "forward"
                         else {}
                     ),
@@ -118,7 +118,7 @@ class RunnerTestCase(unittest.TestCase):
         write_control(self.control, state)
 
 
-FROZEN = {"frozen": {"artifact_id": "strategy_research_x", "output_path": "unused"}}
+FROZEN = {"registered": {"artifact_id": "strategy_research_x", "output_path": "unused"}}
 NO_EDGE = {"experiment_end": {"status": "no_deliverable", "reason": "no_edge: nothing"}}
 
 

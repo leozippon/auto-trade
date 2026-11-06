@@ -1,44 +1,26 @@
-"""Skill library: library, snapshot, mount, index, guard -- and the void.
+"""Skill library: library, snapshot, mount, index and guard.
 
 The curated library reaches a session read-only. It is repository content a
 researcher wrote or copied in by hand, so it must satisfy the same format
 contract ``write_skill`` enforces, and the session that reads it may not
-rewrite it. An experiment freezes the library once, at creation. The graduated
-tier that mounted other experiments' skills beside it was retired on
-2026-11-05; what the experiments created before then recorded of it is read, never
-mounted.
+rewrite it. An experiment freezes the library once, at creation.
 """
 
 from __future__ import annotations
 
-import fcntl
 import json
 import stat
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.workspace import SafeWorkspace
-from autotrade.paper import fills
-from autotrade.paper.books import list_books
-from autotrade.pipelines.ledger import (
-    LEDGER_RECORD_SCHEMA_VERSION,
-    ExperimentLedger,
-    experiment_verdict,
-    paper_candidate,
-    verdict_void,
-)
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
     DEFAULT_OPERATING_MEMORY,
     OPERATING_MEMORY_DIRNAME,
     OPERATING_MEMORY_LIBRARY,
-    RETIRED_MEMORY_ORIGIN,
-    RETIRED_OPERATING_MEMORY_MODE,
     DeleteSkillTool,
     WriteSkillTool,
     build_skills_index,
@@ -48,7 +30,6 @@ from autotrade.pipelines.skills import (
     install_workspace_skills,
     operating_memory_entries,
     operating_memory_snapshot_path,
-    operating_memory_snapshot_root,
     read_operating_memory_snapshot,
     resolve_operating_memory,
     snapshot_memory_sources,
@@ -56,44 +37,10 @@ from autotrade.pipelines.skills import (
 )
 from autotrade.pipelines.worker import load_worker_options
 
-from .paper_book_fixture import paper_root, write_book_record
 from .test_interactive_worker_local import _experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIBRARY = REPO_ROOT / OPERATING_MEMORY_LIBRARY
-
-
-def _finished_experiment(root: Path, name: str, *, graduated: bool | None = True) -> Path:
-    """One finished experiment on disk: its ledger, graduated or not, or with
-    no forward record at all (``None``)."""
-
-    directory = root / name
-    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
-    ledger.append(
-        {
-            "record_type": "research_session",
-            "experiment_id": name,
-            "epoch_id": "research",
-            "fold_id": "s1",
-            "run_id": f"run_{name}",
-        }
-    )
-    if graduated is not None:
-        ledger.append(
-            {
-                "record_type": "forward",
-                "experiment_id": name,
-                "epoch_id": "forward",
-                "fold_id": "forward",
-                "run_id": f"run_{name}_forward",
-                "verdict": (
-                    {"status": "graduated", "reasons": []}
-                    if graduated
-                    else {"status": "discarded", "reasons": ["forward_lower_bound_not_positive"]}
-                ),
-            }
-        )
-    return directory
 
 
 def _workspace(
@@ -166,75 +113,9 @@ def test_the_mode_parameter_defaults_to_the_curated_library() -> None:
     assert resolve_operating_memory("") == DEFAULT_OPERATING_MEMORY
     assert resolve_operating_memory(" curated ") == "curated"
     assert resolve_operating_memory("none") == "none"
-    # The mode every experiment created before the graduated tier's retirement names
-    # reads as the curated library it still mounts.
-    assert resolve_operating_memory(RETIRED_OPERATING_MEMORY_MODE) == "curated"
-    for bad in ("graduated", "all", "curated+failed", 3):
+    for bad in ("graduated", "curated+graduated", "all", "curated+failed", 3):
         with pytest.raises(ValueError, match="operating_memory must be one of"):
             resolve_operating_memory(bad)
-
-
-def test_a_voided_graduate_is_no_graduate_to_paper(tmp_path: Path) -> None:
-    """A graduation later shown to be untaxed dividend capture is withdrawn by
-    an operator's appended void, never by rewriting the forward record: Paper
-    stops offering it a book, while the record it produced reads as it was."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    directory = _finished_experiment(experiments, "withdrawn")
-    _finished_experiment(experiments, "kept")
-    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
-    forward = ledger.read("forward")
-    void = verdict_void(
-        "withdrawn",
-        voided_by="operator",
-        reason="re-run with the dividend tax, research active IR is -1.80",
-        evidence_ref="logs/notes/x/dividend_tax_rerun",
-    )
-    ledger.append(void)
-    records = ledger.read()
-    verdict = experiment_verdict(records)
-    assert verdict is not None and verdict["status"] == "voided"
-    assert verdict["void"]["voided_by"] == "operator"
-    assert verdict["void"]["evidence_ref"] == "logs/notes/x/dividend_tax_rerun"
-    assert verdict["void"]["recorded_at"]
-    assert ledger.read("forward") == forward
-    assert paper_candidate(records) is None
-    # One void per experiment, and only a recorded graduation can be voided.
-    with pytest.raises(ValueError, match="already voided"):
-        ledger.append(void)
-    rejected = _finished_experiment(experiments, "rejected", graduated=False)
-    with pytest.raises(ValueError, match="only a recorded graduation"):
-        ExperimentLedger(rejected / "ledgers" / "experiment_ledger.jsonl").append(
-            verdict_void("rejected", voided_by="op", reason="r", evidence_ref="e")
-        )
-    with pytest.raises(ValueError, match="must state"):
-        ExperimentLedger(experiments / "kept" / "ledgers" / "experiment_ledger.jsonl").append(
-            verdict_void("kept", voided_by="op", reason=" ", evidence_ref="e")
-        )
-
-
-def test_a_fold_era_graduated_row_is_not_a_verdict(tmp_path: Path) -> None:
-    """Only a forward record's verdict graduates an experiment."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    directory = _finished_experiment(experiments, "fold_era", graduated=None)
-    # The pipeline cannot append a Fold-era row; an archived ledger holds it raw.
-    append_versioned_jsonl(
-        directory / "ledgers" / "experiment_ledger.jsonl",
-        {
-            "record_type": "heldout",
-            "experiment_id": "fold_era",
-            "epoch_id": "epoch_001",
-            "fold_id": "heldout_1",
-            "run_id": "run_fold_era_heldout",
-            "verdict": {"status": "graduated", "reasons": []},
-        },
-        schema_version=LEDGER_RECORD_SCHEMA_VERSION,
-    )
-    records = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl").read()
-    assert experiment_verdict(records) is None
 
 
 def test_the_curated_library_mounts_read_only(tmp_path: Path) -> None:
@@ -253,61 +134,16 @@ def test_the_curated_library_mounts_read_only(tmp_path: Path) -> None:
     assert stat.S_IMODE((workspace / "skills").stat().st_mode) & 0o222
 
 
-def _retired_tier_snapshot(experiment: Path, repo: Path) -> None:
-    """The snapshot an experiment created before 2026-11-05 froze: the curated
-    library beside one graduated experiment's skills, each graduated entry
-    with its source's Held-out end, under the retired mode."""
-
-    create_operating_memory_snapshot(experiment, mode="curated", repo_root=repo)
-    root = operating_memory_snapshot_root(experiment)
-    path = operating_memory_snapshot_path(experiment)
-    record = json.loads(path.read_text(encoding="utf-8"))
-    root.chmod(0o755)
-    item = root / "adopted" / "same-window-parent-control"
-    item.mkdir(parents=True)
-    (item / "SKILL.md").write_text("# 同窗父本对照\n\n正文。\n", encoding="utf-8")
-    record["mode"] = RETIRED_OPERATING_MEMORY_MODE
-    record["entries"].append(
-        {
-            "origin": RETIRED_MEMORY_ORIGIN,
-            "source": "adopted",
-            "name": "same-window-parent-control",
-            "heldout_end": "20260930",
-        }
-    )
-    path.write_text(json.dumps(record), encoding="utf-8")
-
-
-def test_a_snapshot_of_the_retired_graduated_tier_mounts_its_curated_entries_only(
-    tmp_path: Path,
-) -> None:
-    """Every experiment created before the graduated tier's retirement froze a
-    snapshot that may name graduated entries. They are part of its record and
-    are never mounted -- the mount refused each of them on its Held-out end
-    then -- while an entry of any other unknown origin is refused."""
-
+def test_a_snapshot_entry_that_is_not_the_curated_librarys_is_refused(tmp_path: Path) -> None:
     experiment = tmp_path / "current"
     experiment.mkdir()
-    _retired_tier_snapshot(experiment, _repo_with_library(tmp_path))
+    create_operating_memory_snapshot(experiment, mode="curated", repo_root=_repo_with_library(tmp_path))
     record = read_operating_memory_snapshot(experiment)
     assert record is not None
     assert [(source.source, source.entries) for source in snapshot_memory_sources(record, experiment)] == [
         (CURATED_MEMORY_SOURCE, ("pit-read-budget",))
     ]
-    workspace = tmp_path / "workspace"
-    (workspace / "inputs").mkdir(parents=True)
-    mounted = install_operating_memory(workspace, experiment)
-    assert [source.source for source in mounted] == [CURATED_MEMORY_SOURCE]
-    assert [path.name for path in (workspace / OPERATING_MEMORY_DIRNAME).iterdir()] == [
-        CURATED_MEMORY_SOURCE
-    ]
-    install_workspace_skills(None, workspace, index_path=workspace / "inputs" / "skills_index.json")
-    index = json.loads((workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8"))
-    assert [(entry["source"], entry["name"]) for entry in index["operating_memory"]] == [
-        (CURATED_MEMORY_SOURCE, "pit-read-budget")
-    ]
-
-    for origin, source in (("session", CURATED_MEMORY_SOURCE), ("curated", "adopted")):
+    for origin, source in (("graduated", "adopted"), ("session", CURATED_MEMORY_SOURCE), ("curated", "adopted")):
         unknown = {**record, "entries": [*record["entries"], {"origin": origin, "source": source, "name": "x"}]}
         with pytest.raises(ValueError, match="snapshot entry is invalid"):
             snapshot_memory_sources(unknown, experiment)
@@ -330,12 +166,8 @@ def test_snapshotting_and_mounting_each_refuse_an_unusable_request(
     experiment.mkdir()
     with pytest.raises(ValueError, match="operating_memory must be one of"):
         create_operating_memory_snapshot(experiment, mode="graduated", repo_root=REPO_ROOT)
-    # An experiment created before the retirement reads the retired mode as curated;
-    # a new experiment cannot be created under it.
-    with pytest.raises(ValueError, match="graduated tier, retired on 2026-11-05"):
-        create_operating_memory_snapshot(
-            experiment, mode=RETIRED_OPERATING_MEMORY_MODE, repo_root=REPO_ROOT
-        )
+    with pytest.raises(ValueError, match="operating_memory must be one of"):
+        create_operating_memory_snapshot(experiment, mode="curated+graduated", repo_root=REPO_ROOT)
     with pytest.raises(ValueError, match="repository root"):
         create_operating_memory_snapshot(experiment, mode="curated")
     # A refused snapshot writes nothing at all.
@@ -432,15 +264,6 @@ def test_the_run_config_carries_the_mode(tmp_path: Path) -> None:
     assert (
         load_worker_options(experiment, repo_root=repo).rolling.operating_memory
         == "none"
-    )
-
-    # An experiment created before the graduated tier's retirement loads, and runs
-    # on the curated library its snapshot holds.
-    params["operating_memory"] = RETIRED_OPERATING_MEMORY_MODE
-    params_path.write_text(json.dumps(params), encoding="utf-8")
-    assert (
-        load_worker_options(experiment, repo_root=repo).rolling.operating_memory
-        == "curated"
     )
 
     params["operating_memory"] = "everything"
@@ -565,99 +388,3 @@ def test_a_snapshot_with_an_unknown_schema_is_refused(tmp_path: Path) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="schema_version"):
         read_operating_memory_snapshot(experiment)
-
-
-def _void(tmp_path: Path, *arguments: str) -> subprocess.CompletedProcess[str]:
-    """The void entry point on the experiment ``withdrawn`` under ``tmp_path``, with
-    the Paper state root there too."""
-
-    return subprocess.run(
-        [
-            sys.executable,
-            str(REPO_ROOT / "scripts/experiments/void_graduation.py"),
-            "--experiments-root",
-            str(tmp_path / "experiments"),
-            "--paper-state-root",
-            str(paper_root(tmp_path)),
-            "--experiment",
-            "withdrawn",
-            "--by",
-            "operator",
-            "--reason",
-            "untaxed dividend capture",
-            *arguments,
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-
-
-def test_the_operator_voids_a_graduation_by_one_appended_record(tmp_path: Path) -> None:
-    """The entry point checks before it writes: a dry run appends nothing, a
-    void needs evidence that exists, and the experiment is voided exactly once."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    directory = _finished_experiment(experiments, "withdrawn")
-    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
-    before = ledger.read()
-
-    missing = _void(tmp_path, "--evidence", "logs/notes/no_such_evidence_dir")
-    assert missing.returncode != 0 and "evidence" in missing.stderr
-    dry = _void(tmp_path, "--evidence", "src", "--dry-run")
-    assert dry.returncode == 0, dry.stderr
-    assert json.loads(dry.stdout)["dry_run"] is True
-    assert ledger.read() == before
-    applied = _void(tmp_path, "--evidence", "src")
-    assert applied.returncode == 0, applied.stderr
-    written = json.loads(applied.stdout)
-    assert written["record_type"] == "verdict_void" and written["evidence_ref"] == "src"
-    assert written["paper_books_deleted"] == []  # the experiment had no book
-    assert experiment_verdict(ledger.read())["status"] == "voided"
-    again = _void(tmp_path, "--evidence", "src")
-    assert again.returncode == 2 and "already voided" in again.stderr
-
-
-def test_a_void_deletes_the_experiments_paper_books_first_and_a_real_fill_book_only_when_told(
-    tmp_path: Path,
-) -> None:
-    """A failed strategy does not stay in Paper. The void deletes every book
-    trading the experiment, whatever its id, and appends last. A book that follows
-    real fills holds the owner's record of what he traded: it is refused, with
-    nothing changed, unless the operator says to delete it. A book a Paper run
-    is writing stops the void before the append, so the graduation stands and
-    the same command finishes the job once the run is over."""
-
-    experiments = tmp_path / "experiments"
-    experiments.mkdir()
-    directory = _finished_experiment(experiments, "withdrawn")
-    ledger = ExperimentLedger(directory / "ledgers" / "experiment_ledger.jsonl")
-    paper = paper_root(tmp_path)
-    for book, experiment_id in (("withdrawn", "withdrawn"), ("withdrawn_hand", "withdrawn"), ("kept", "kept")):
-        write_book_record(paper / book, experiment_id=experiment_id)
-    fills.enable(paper / "withdrawn_hand")  # the owner trades this one
-    before = ledger.read()
-
-    for dry in ((), ("--dry-run",)):
-        refused = _void(tmp_path, "--evidence", "src", *dry)
-        assert refused.returncode == 2 and "withdrawn_hand follows real fills" in refused.stderr
-        assert list_books(paper) == ["kept", "withdrawn", "withdrawn_hand"] and ledger.read() == before
-    told = _void(tmp_path, "--evidence", "src", "--delete-real-fill-book", "--dry-run")
-    assert told.returncode == 0, told.stderr
-    assert json.loads(told.stdout)["paper_books_deleted"] == ["withdrawn", "withdrawn_hand"]
-    assert list_books(paper) == ["kept", "withdrawn", "withdrawn_hand"] and ledger.read() == before
-
-    with (paper / "withdrawn_hand" / ".paper_engine.lock").open("a+b") as lock:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)  # a Paper run is writing it
-        busy = _void(tmp_path, "--evidence", "src", "--delete-real-fill-book")
-    assert busy.returncode == 2
-    assert "a Paper run is writing book withdrawn_hand" in busy.stderr and "not voided yet" in busy.stderr
-    assert list_books(paper) == ["kept", "withdrawn_hand"]
-    assert experiment_verdict(ledger.read())["status"] == "graduated"
-
-    finished = _void(tmp_path, "--evidence", "src", "--delete-real-fill-book")
-    assert finished.returncode == 0, finished.stderr
-    assert json.loads(finished.stdout)["paper_books_deleted"] == ["withdrawn_hand"]
-    assert list_books(paper) == ["kept"] and sorted(entry.name for entry in paper.iterdir()) == ["kept"]
-    assert experiment_verdict(ledger.read())["status"] == "voided"

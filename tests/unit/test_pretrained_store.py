@@ -39,7 +39,7 @@ from autotrade.environment.strategy_loader import (
     StrategyLoadError,
     validate_strategy_source,
 )
-from autotrade.paper.book import create_book, load_book
+from autotrade.paper.book import create_book
 from autotrade.paper.engine import DailyPaperEngine
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.worker import (
@@ -50,7 +50,6 @@ from autotrade.webui.server import create_app
 from tests.unit.acceptance_fixture import CREATE_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.paper_book_fixture import paper_root
-from tests.unit.test_paper_books import schema_2_record
 from tests.unit.webui_research_experiment import build_experiment
 
 OTHER_PIN = "0" * 64
@@ -243,8 +242,8 @@ def test_the_pin_reaches_the_session_and_every_strategy_container(tmp_path: Path
         spec(pretrained_manifest_sha256="latest")
 
 
-def test_a_book_keeps_its_experiments_pin_and_an_older_book_mounts_nothing(tmp_path: Path) -> None:
-    experiment = build_experiment(tmp_path / "experiments", "exp", "graduated")
+def test_a_book_keeps_its_experiments_pin(tmp_path: Path) -> None:
+    experiment = build_experiment(tmp_path / "experiments", "exp", "registered_with_record")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     path.write_text(json.dumps({**params, "pretrained_manifest_sha256": manifest_digest()}), encoding="utf-8")
@@ -253,17 +252,11 @@ def test_a_book_keeps_its_experiments_pin_and_an_older_book_mounts_nothing(tmp_p
         experiment_dir=experiment,
         artifact_id="strategy_research_abc",
         repo_root=tmp_path,
-        track="graduated",
     )
     assert book.sandbox.spec.pretrained_manifest_sha256 == manifest_digest()
     record_path = book.root / "book.json"
     record = json.loads(record_path.read_text(encoding="utf-8"))
     assert record["sandbox"]["spec"]["pretrained_manifest_sha256"] == manifest_digest()
-    # A schema-2 book created before the store existed has no pin at all.
-    older = schema_2_record(record, book)
-    del older["sandbox"]["pretrained_manifest_sha256"]
-    record_path.write_text(json.dumps(older), encoding="utf-8")
-    assert load_book(book.root).sandbox.spec.pretrained_manifest_sha256 == ""
 
 
 def test_a_paper_run_of_a_pinned_book_refuses_a_different_store(tmp_path: Path) -> None:

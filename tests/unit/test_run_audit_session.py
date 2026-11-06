@@ -12,7 +12,6 @@ from autotrade.environment.sandbox import SandboxSpec
 from autotrade.pipelines import worker as worker_module
 from autotrade.pipelines.config import (
     REQUIRED_ACCEPTANCE_KEYS,
-    RETIRED_SWITCHES,
     AcceptanceRules,
     acceptance_for,
 )
@@ -162,7 +161,7 @@ def test_an_experiment_created_from_the_command_line_holds_the_consoles_creation
 
     created = params()
     assert acceptance_for(created) == AcceptanceRules(**REQUIRED_RULES)
-    assert not RETIRED_SWITCHES & set(created)
+    assert "dividend_tax" not in created
     assert acceptance_for(params("--max-drawdown=0.3")).max_drawdown == 0.3
 
 

@@ -95,7 +95,7 @@ class PublicIdentity:
         self._text_replacements: dict[str, str] = {}
         schedule = read_json_object(self.experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME, missing_ok=True)
         raw_sessions = schedule.get("sessions")
-        # The plan of record, in order; a Fold-era plan is refused here, so such
+        # The plan of record, in order; an invalid plan is refused here, so such
         # an experiment lists as unreadable instead of half-rendering.
         self.sessions: list[dict[str, object]] = []
         if raw_sessions is None:

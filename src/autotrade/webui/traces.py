@@ -366,15 +366,15 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
         _observe_subagent(header_interval, state, event, task_id, seq)
         if kind == TraceEvent.SUBAGENT_LLM:
             flush_tools()
-            blocks.append(_subagent_round_block(event))
+            blocks.append(_subagent_turn_block(event))
         elif kind == TraceEvent.SUBAGENT_WRAP_UP:
             flush_tools()
             blocks.append(
                 _marker_block(
                     event,
                     "收尾提示",
-                    f"第 {_as_int(event.get('round'))} 回合，上限 "
-                    f"{_as_int(event.get('rounds_limit'))}：已要求子代理立即收尾。",
+                    f"第 {_as_int(event.get('turn'))} 回合，上限 "
+                    f"{_as_int(event.get('turns_limit'))}：已要求子代理立即收尾。",
                 )
             )
         elif kind == TraceEvent.SUBAGENT_STEER:
@@ -384,7 +384,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "父代理指令",
-                    f"第 {_as_int(event.get('round'))} 回合前送达（{chars} 字符）。"
+                    f"第 {_as_int(event.get('turn'))} 回合前送达（{chars} 字符）。"
                     if event.get("delivery") == "delivered"
                     else f"已排队（{chars} 字符），子代理下一回合前读取。",
                 )
@@ -396,7 +396,7 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
                 _marker_block(
                     event,
                     "上下文压缩",
-                    f"第 {_as_int(event.get('round'))} 回合："
+                    f"第 {_as_int(event.get('turn'))} 回合："
                     f"{compaction.get('status') or 'unknown'}，消息 "
                     f"{_as_int(compaction.get('messages_before'))}→"
                     f"{_as_int(compaction.get('messages_after'))}，估算 "
@@ -430,11 +430,11 @@ def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
     }
 
 
-def _subagent_round_block(event: dict[str, object]) -> dict[str, object]:
+def _subagent_turn_block(event: dict[str, object]) -> dict[str, object]:
     block: dict[str, object] = {
         "kind": "agent_output",
         "ts": _event_ts(event),
-        "round": _as_int(event.get("round")),
+        "turn": _as_int(event.get("turn")),
         "text": _clip(event.get("content"), _BLOCK_TEXT_CHARS),
         "reasoning_chars": _reasoning_chars(event),
     }
@@ -479,7 +479,7 @@ def _subagent_call_row(event: dict[str, object]) -> dict[str, object]:
         "name": _tool_name(event),
         "status": _tool_outcome(event),
         "ts": _event_ts(event),
-        "round": _as_int(event.get("round")),
+        "turn": _as_int(event.get("turn")),
     }
     arguments = _as_mapping(event.get("arguments"))
     if arguments:
@@ -911,13 +911,13 @@ class _SubagentState:
         self.role = ""
         self.model = ""
         self.thinking = ""
-        self.rounds_limit = 0
+        self.turns_limit = 0
         self.inherit_context: bool | None = None
         self.description = ""
         self.resumed_from = ""
         self.started_at: object = None
         self.ended_at: object = None
-        self.rounds = 0
+        self.turns = 0
         self.llm_calls = 0
         self.tool_calls = 0
         self.usage = _new_usage()
@@ -940,7 +940,7 @@ def _observe_subagent(
     _absorb_subagent_text(state, event)
     if event.get("event_type") == TraceEvent.SUBAGENT_LLM:
         state.llm_calls += 1
-        state.rounds = max(state.rounds, _as_int(event.get("round")), state.llm_calls)
+        state.turns = max(state.turns, _as_int(event.get("turn")), state.llm_calls)
         _add_usage(state.usage, _as_mapping(event.get("usage")))
     if state.block is None:
         state.started_at = _event_ts(event)
@@ -979,8 +979,8 @@ def _absorb_subagent_text(state: _SubagentState, event: dict[str, object]) -> No
     thinking = event.get("thinking")
     if isinstance(thinking, str) and thinking.strip():
         state.thinking = thinking.strip()
-    if _as_int(event.get("rounds_limit")) > 0:
-        state.rounds_limit = _as_int(event.get("rounds_limit"))
+    if _as_int(event.get("turns_limit")) > 0:
+        state.turns_limit = _as_int(event.get("turns_limit"))
     if "inherit_context" in event:
         state.inherit_context = bool(event.get("inherit_context"))
     description = _clip(event.get("description"), _BLOCK_DESCRIPTION_CHARS)
@@ -995,7 +995,7 @@ def _absorb_subagent_totals(state: _SubagentState, event: dict[str, object]) -> 
     """The terminal event's own totals win: they also cover turns whose
     events fell outside the read window."""
 
-    for field in ("rounds", "llm_calls", "tool_calls"):
+    for field in ("turns", "llm_calls", "tool_calls"):
         value = event.get(field)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             setattr(state, field, value)
@@ -1015,7 +1015,7 @@ def _refresh_subagent_block(state: _SubagentState) -> None:
     block["tool_calls"] = state.tool_calls or sum(
         _as_int(row.get("count")) for row in rows
     )
-    block["rounds"] = state.rounds
+    block["turns"] = state.turns
     block["llm_calls"] = state.llm_calls
     block["usage"] = {**state.usage, "total_tokens": _usage_total(state.usage)}
     if state.started_at is not None:
@@ -1031,8 +1031,8 @@ def _refresh_subagent_block(state: _SubagentState) -> None:
         block["model"] = state.model
     if state.thinking:
         block["thinking"] = state.thinking
-    if state.rounds_limit:
-        block["rounds_limit"] = state.rounds_limit
+    if state.turns_limit:
+        block["turns_limit"] = state.turns_limit
     if state.inherit_context is not None:
         block["inherit_context"] = state.inherit_context
     if state.description:

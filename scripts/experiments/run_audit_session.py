@@ -124,7 +124,7 @@ def main() -> int:
     record = pipeline.run_research_session(
         session_context={"directive": directive} if directive else None,
     )
-    frozen = record.get("frozen")
+    registered = record.get("registered")
     result = {
         "status": "ok",
         "experiment_id": args.experiment_id,
@@ -133,7 +133,7 @@ def main() -> int:
         "outcome": record["outcome"],
         "validations": len(record.get("steps") or ()),
         "registered_strategy_artifact_id": (
-            frozen.get("artifact_id") if isinstance(frozen, dict) else None
+            registered.get("artifact_id") if isinstance(registered, dict) else None
         ),
         "experiment_dir": str(options.experiment_dir),
     }

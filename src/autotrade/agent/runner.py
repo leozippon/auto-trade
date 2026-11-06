@@ -1303,7 +1303,7 @@ class AgentSessionRunner:
         record: dict[str, object] = {
             "status": "queued",
             "task_id": task_id,
-            "delivered_at_round": None,
+            "delivered_at_turn": None,
         }
         if child_queued:
             record["child_queued"] = True
@@ -1361,14 +1361,14 @@ class AgentSessionRunner:
             if isinstance(value, dict):
                 # The bounded report (clipped and spilled at collection).
                 payload.update(job.record.get("report") or {"summary": ""})
-                for key in ("rounds", "tool_calls"):
+                for key in ("turns", "tool_calls"):
                     if isinstance(value.get(key), int):
                         payload[key] = value[key]
                 if value.get("truncated"):
                     # A cut-off report is not a complete one; the marker at
                     # the tail of a long summary is easy to miss.
                     payload["truncated"] = True
-                for key in ("truncated_rounds", "llm_errors", "steers"):
+                for key in ("truncated_turns", "llm_errors", "steers"):
                     if isinstance(value.get(key), int) and value[key] > 0:
                         payload[key] = value[key]
                 if value.get("error"):

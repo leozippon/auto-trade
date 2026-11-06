@@ -32,12 +32,9 @@ from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
 from autotrade.environment.trace import TRACE_PAYLOAD_HEAD_CHARS, AgentTraceWriter
 from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
-    OBSOLETE_KEYS,
-    RETIRED_RULES,
     AcceptanceRules,
     acceptance_for,
 )
-from autotrade.pipelines.experiment_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     StatusReporter,
@@ -103,9 +100,8 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     for key in ("research_years", "test_step_months", "validates_per_step", "alpha", "forward_confidence"):
         assert key in fields
         assert fields[key]["default"] == WEB_CREATE_DEFAULTS[key]
-    # The retired bars and the obsolete rules (the ablation's, the sealed
-    # gate's) are no form field.
-    assert not (RETIRED_RULES | OBSOLETE_KEYS) & set(fields)
+    # The retired rules (the ablation's, the sealed gate's) are no form field.
+    assert not {"min_active_ir", "sealed_years", "ablation_required", "max_replay_years"} & set(fields)
     assert [group["name"] for group in schema["groups"]] == [
         "基本与排程",
         "数据窗口",
@@ -185,13 +181,13 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
             "llm_model",
             "llm_max_response_tokens",
             "llm_temperature",
-            *RETIRED_NL_PARAMS,
+            "nl_model",
         }
         & fields.keys()
     )
     # The host NL interface is gone: a create request naming one of its
     # parameters is an unknown parameter, not a default to stamp.
-    assert not RETIRED_NL_PARAMS & set(WEB_CREATE_DEFAULTS)
+    assert "nl_model" not in WEB_CREATE_DEFAULTS
     for key in (
         "max_research_minutes",
         "window_months",
@@ -453,9 +449,9 @@ def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
     # The console words one experiment, one control portfolio and one
     # out-of-sample acceptance; the coinages it used to carry are retired
     # labels, not an alternative spelling of the same thing.
-    for label in ("随机对照组合", "验收通过", "定版登记"):
+    for label in ("随机对照组合", "定版登记"):
         assert label in script
-    for retired in ("零技能面板", "本臂", "一本书", "席位", "回合数", "孵化中", "毕业于"):
+    for retired in ("零技能面板", "本臂", "一本书", "席位", "回合数", "孵化中", "毕业于", "验收通过"):
         assert retired not in script
     # The console has no research-report surface.
     assert "研究报告" not in script
@@ -769,10 +765,10 @@ class WebuiBackendTest(unittest.TestCase):
 
     # ---- result routes ---------------------------------------------------------
     def test_result_orders_rows_and_csv_export(self) -> None:
-        self._build_hitl_experiment("exp_sealed", "sealed")
-        result = self._validation_result("exp_sealed")
+        self._build_hitl_experiment("exp_replaying", "forward")
+        result = self._validation_result("exp_replaying")
         name = result.parent.name
-        base = f"/api/experiments/exp_sealed/results/{name}"
+        base = f"/api/experiments/exp_replaying/results/{name}"
         data = self.client.get(f"{base}/orders").json()
         self.assertEqual(sorted(data), ["result", "row_count", "rows", "stats"])
         self.assertEqual(data["result"], name)
@@ -783,7 +779,7 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(csv_response.status_code, 200)
         self.assertIn("attachment", csv_response.headers.get("content-disposition", ""))
         self.assertEqual(len(csv_response.text.strip().splitlines()), 3)  # header + 2
-        missing = self.client.get("/api/experiments/exp_sealed/results/valid_nope/orders.csv")
+        missing = self.client.get("/api/experiments/exp_replaying/results/valid_nope/orders.csv")
         self.assertEqual(missing.status_code, 404)
 
     def test_result_orders_cap_the_table_at_five_hundred_rows_but_not_the_export(
@@ -795,8 +791,8 @@ class WebuiBackendTest(unittest.TestCase):
         the count would report a lie; and the CSV is the escape hatch from the
         cap, so it must stay uncapped.
         """
-        self._build_hitl_experiment("exp_sealed", "sealed")
-        result = self._validation_result("exp_sealed")
+        self._build_hitl_experiment("exp_replaying", "forward")
+        result = self._validation_result("exp_replaying")
         payload = json.loads(result.read_text(encoding="utf-8"))
         payload["executions"] = [
             {
@@ -810,7 +806,7 @@ class WebuiBackendTest(unittest.TestCase):
             for _ in range(501)
         ]
         result.write_text(json.dumps(payload), encoding="utf-8")
-        base = f"/api/experiments/exp_sealed/results/{result.parent.name}"
+        base = f"/api/experiments/exp_replaying/results/{result.parent.name}"
         data = self.client.get(f"{base}/orders").json()
         self.assertEqual(len(data["rows"]), 500)
         self.assertEqual(data["row_count"], 501)
@@ -821,9 +817,9 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(len(csv_response.text.strip().splitlines()), 502)
 
     def test_a_result_the_ledger_names_outside_the_experiment_is_not_served(self) -> None:
-        self._build_hitl_experiment("exp_sealed", "sealed")
+        self._build_hitl_experiment("exp_replaying", "forward")
         ledger = ExperimentLedger(
-            self.experiments_root / "exp_sealed/ledgers/experiment_ledger.jsonl"
+            self.experiments_root / "exp_replaying/ledgers/experiment_ledger.jsonl"
         )
         records = ledger.read()
         outside = self.repo_root / "outside/valid_outside/result.json"
@@ -836,7 +832,7 @@ class WebuiBackendTest(unittest.TestCase):
         ledger.rewrite(records)
         for route in ("equity", "style", "orders", "orders.csv"):
             response = self.client.get(
-                f"/api/experiments/exp_sealed/results/valid_outside/{route}"
+                f"/api/experiments/exp_replaying/results/valid_outside/{route}"
             )
             self.assertEqual(response.status_code, 404, route)
 
@@ -883,11 +879,11 @@ class WebuiBackendTest(unittest.TestCase):
 
     def test_registered_strategy_zip_contains_output_tree(self) -> None:
         self.assertEqual(
-            self.client.get("/api/experiments/exp_hitl/frozen/strategy.zip").status_code,
+            self.client.get("/api/experiments/exp_hitl/registered/strategy.zip").status_code,
             404,
         )
-        self._build_hitl_experiment("exp_frozen", "sealed")
-        response = self.client.get("/api/experiments/exp_frozen/frozen/strategy.zip")
+        self._build_hitl_experiment("exp_frozen", "forward")
+        response = self.client.get("/api/experiments/exp_frozen/registered/strategy.zip")
         self.assertEqual(response.status_code, 200)
         archive = zipfile.ZipFile(io.BytesIO(response.content))
         self.assertEqual(archive.namelist(), ["output/main.py"])
@@ -1823,7 +1819,7 @@ class HitlControlActionTest(unittest.TestCase):
                 self.assertEqual(forward.status_code, 400)
                 self.assertIn("research sessions only", forward.json()["detail"])
         # Once an artifact registered, no Agent session remains to read a setting.
-        frozen = build_experiment(self.experiments_root, "exp_frozen", "sealed")
+        frozen = build_experiment(self.experiments_root, "exp_frozen", "forward")
         refused = self._post(
             "exp_frozen", action="set_directive", session_key="research", directive="x"
         )
@@ -1946,7 +1942,7 @@ class HitlControlActionTest(unittest.TestCase):
                 self.assertIn("unknown control action", refused.json()["detail"])
 
     def test_lifecycle_actions_work_on_a_finished_experiment(self) -> None:
-        build_experiment(self.experiments_root, "exp_done", "graduated")
+        build_experiment(self.experiments_root, "exp_done", "registered_with_record")
         done = self.experiments_root / "exp_done"
         self.assertEqual(self._post("exp_done", action="pause").status_code, 200)
         self.assertEqual(self._control(done).request, "pause")

@@ -20,12 +20,10 @@ from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
 from autotrade.environment.llm.proxy import ScriptedLLM
-from autotrade.environment.runtime import append_versioned_jsonl
 from autotrade.pipelines import experiment as experiment_module
 from autotrade.pipelines import worker
 from autotrade.pipelines.hitl_state import read_status
 from autotrade.pipelines.ledger import (
-    LEDGER_RECORD_SCHEMA_VERSION,
     ExperimentLedger,
     experiment_verdict,
     forward_record,
@@ -123,7 +121,7 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     assert (research_row["outcome"], research_row["finish_reason"]) == (
         "deadline", "deterministic_baseline_replay_no_agent_improvement"
     )
-    assert research_row["freeze_gate"]["passed"] is True
+    assert research_row["registration"]["passed"] is True
     assert [step["span"] for step in research_row["steps"]] == ["full", "full"]
     assert research_row["nominated_step_id"] == research_row["steps"][-1]["step_id"]
     assert [(row["step"], row["test_horizon"], row["source"]) for row in tests] == [
@@ -134,7 +132,7 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     ]
     assert {row["candidate"]["step_id"] for row in tests} == {research_row["nominated_step_id"]}
     assert (research_row["test_horizon"], research_row["steps_tested"]) == ("20240630", 4)
-    frozen = registered_record(records)["frozen"]
+    frozen = registered_record(records)["registered"]
     assert Path(frozen["output_path"], "main.py").is_file()
 
     # Research and the host's completion never asked for a slot or view after
@@ -393,26 +391,6 @@ def test_an_experiment_whose_budget_ends_without_a_registrable_candidate_runs_no
     assert [row["record_type"] for row in rows] == ["research_session"]
 
 
-def test_a_fold_era_ledger_is_refused(tmp_path: Path):
-    from autotrade.environment.identity import AgentRefStore
-
-    repo, experiment = make_experiment(tmp_path)
-    AgentRefStore(experiment)
-    ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
-    archived = {
-        "record_type": "fold",
-        "experiment_id": "experiment",
-        "epoch_id": "epoch_001",
-        "fold_id": "fold_2024",
-        "run_id": "run_old",
-    }
-    with pytest.raises(ValueError, match="unsupported record_type"):
-        ledger.append(archived)
-    append_versioned_jsonl(ledger.path, archived, schema_version=LEDGER_RECORD_SCHEMA_VERSION)
-    with pytest.raises(ValueError, match="Fold-era ledger"):
-        run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
-
-
 def test_the_worker_refuses_a_release_that_does_not_reach_heldout(tmp_path: Path):
     repo, experiment = make_experiment(tmp_path, heldout_end="20251231", forward_end="20250630")
     params_path = experiment / "hitl" / "params.json"
@@ -450,12 +428,10 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         _NominatingLLM,
         _NoShellRunner,
     )
-    from tests.unit.test_operating_memory import _finished_experiment
 
     repo, experiment = make_experiment(tmp_path, developer_mode="llm")
     # The assertions below read the session tree. A finished experiment otherwise deletes it.
     monkeypatch.setattr(worker, "release_finished_sandbox", lambda _options: None)
-    _finished_experiment(repo / "experiments", "adopted")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     # The console's GPU allocation for the research session, one-shot.
     write_control(experiment / "hitl" / "control.json", ControlState(gpu_counts={"research": 3}))
@@ -484,7 +460,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert (research_row["test_horizon"], research_row["steps_tested"]) == ("20240630", 4)
     tested = research_row["steps"][1]["step_id"]
     assert {row["candidate"]["step_id"] for row in tests} == {tested}
-    assert research_row["frozen"]["source_step_id"] == research_row["nominated_step_id"] == tested
+    assert research_row["registered"]["source_step_id"] == research_row["nominated_step_id"] == tested
     assert research_row["budget_used"]["test_replays"] == 4
     assert replay["record_type"] == "forward"
     assert result["verdict"]["status"] == "registered_with_record"
@@ -526,7 +502,6 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert "operating_memory_refused" not in host_manifest
     workspace = options.work_root / options.experiment_id / "research" / "agent" / "workspace"
     assert not (workspace / "memory").exists()
-    assert "adopted" not in (workspace / "inputs" / "skills_index.json").read_text(encoding="utf-8")
     assert read_control(experiment / "hitl" / "control.json").gpu_counts == {}
 
     # The session's transcript, named by the run's opaque ref, carries what
@@ -684,7 +659,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert record["attempts"] == 2 and record["outcome"] == "completed"
     assert record["steps"][0]["step_id"] == node["node_id"]
     # Both attempts validated the same working copy: two revisions, one set of bytes.
-    assert len(record["steps"]) == 2 and record["freeze_gate"]["passed"] is True
+    assert len(record["steps"]) == 2 and record["registration"]["passed"] is True
     assert len({row["revision_id"] for row in record["steps"]}) == 2
     assert len({row["fingerprint"] for row in record["steps"]}) == 1
     assert record["budget_used"]["test_replays"] == 4
@@ -786,7 +761,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     # Five calls of the first attempt (two scripted, three failed), one of the second.
     assert record["budget_used"]["llm_calls"] == 6 and record["budget_used"]["test_replays"] == 1
     assert [row["step_id"] for row in record["steps"]] != [tested_node]
-    assert record["frozen"]["source_step_id"] == tested_node != record["steps"][-1]["step_id"]
+    assert record["registered"]["source_step_id"] == tested_node != record["steps"][-1]["step_id"]
     completion = records[2:5]
     assert [(row["step"], row["test_horizon"], row["source"]) for row in completion] == [
         (2, "20231231", "host_completion"),
@@ -859,7 +834,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
         2, "deadline", "llm_call_budget_exhausted"
     )
     assert record["experiment_end"] is None and len(record["steps"]) == 1
-    assert record["frozen"]["source_step_id"] == record["steps"][0]["step_id"]
+    assert record["registered"]["source_step_id"] == record["steps"][0]["step_id"]
     assert {row["source"] for row in records[1:5]} == {"host_completion"}
     # Three failed calls of the first attempt, then this attempt's one.
     assert record["budget_used"]["llm_calls"] == 3 + len(second_llm.calls) == 4
@@ -946,7 +921,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     )
     assert record["experiment_end"] is None
     assert len(record["steps"]) == 2
-    assert record["frozen"]["source_step_id"] == record["steps"][-1]["step_id"]
+    assert record["registered"]["source_step_id"] == record["steps"][-1]["step_id"]
     assert record["budget_used"]["api_spend_usd"] == 0.082
     assert result["verdict"]["status"] == "registered_with_record"
     events = [
@@ -1155,7 +1130,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     tested = record["steps"][1]["step_id"]
     assert {row["candidate"]["step_id"] for row in tests} == {tested}
     assert (record["outcome"], record["finish_reason"]) == ("deadline", "llm_call_budget_exhausted")
-    assert record["frozen"]["source_step_id"] == tested and record["experiment_end"] is None
+    assert record["registered"]["source_step_id"] == tested and record["experiment_end"] is None
     assert (record["test_horizon"], record["steps_tested"]) == ("20240630", 4)
     assert record["budget_used"]["test_replays"] == 1
     assert replay["record_type"] == "forward" and result["verdict"]["status"] == "registered_with_record"
@@ -1176,7 +1151,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
         for message in call["messages"]
         if "does not register" in (message.content or "")
     )
-    assert "freeze_nominee_is_control" in refusal and "the test horizon did not move" in refusal
+    assert "registration_nominee_is_control" in refusal and "the test horizon did not move" in refusal
     assert "information_ratio" not in refusal and "continue" not in refusal
     # What the test returned dates no later than the test horizon it reached.
     [returned] = [
@@ -1292,7 +1267,7 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
     reason = record["reason"]
     assert reason.startswith("span full: 2 batches failed on the environment in every candidate")
     assert reason.endswith("ArrowTypeError: Unable to merge: Field dataset has incompatible types: large_string vs string")
-    assert (record["outcome"], record["finish_reason"], record["frozen"]) == (
+    assert (record["outcome"], record["finish_reason"], record["registered"]) == (
         "environment_blocked",
         "environment_blocked",
         None,

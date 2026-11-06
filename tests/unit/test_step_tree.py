@@ -256,7 +256,7 @@ RESEARCH_MANIFEST = {
             "intraday_trade_days": 21,
         }
     },
-    "acceptance_rules": {"min_return": 0.0, **REQUIRED_RULES},
+    "acceptance_rules": dict(REQUIRED_RULES),
     "budgets": {"max_null_controls": 3, "deadline_seconds": 43800.0, "validates_per_step": 6},
 }
 

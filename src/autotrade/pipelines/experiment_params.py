@@ -14,8 +14,7 @@ parameter that is not text). A key no field declares is refused. Keys
 beginning with ``_`` are the file's own stamps (who created it and when),
 not parameters. A missing key takes its field's default. That is the
 parameter's one default: the console stamps it at creation, and the worker
-reads it for a file that leaves the key out (:func:`read_param`), so an experiment
-created before a parameter existed still loads and runs on it. A parameter
+reads it for a worker-side file that leaves the key out (:func:`read_param`). A parameter
 the worker derives from another one when unset says so beside its field (a
 worker-side ``llm_model`` stands in for an unset main model,
 :func:`session_models`).
@@ -56,10 +55,7 @@ from .config import (
     ACCEPTANCE_KEYS,
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_RESEARCH_GEOMETRY,
-    OBSOLETE_KEYS,
     REQUIRED_ACCEPTANCE_KEYS,
-    RETIRED_RULES,
-    RETIRED_SWITCHES,
     AcceptanceRules,
     acceptance_default,
     rolling_default,
@@ -77,9 +73,6 @@ class Surface(StrEnum):
     # Only a worker-side params.json or the command line sets it; the console
     # refuses it.
     HOST = "host"
-    # No longer read: an experiment created before its retirement still loads, and
-    # a create request naming it is refused like any unknown key.
-    RETIRED = "retired"
 
 
 def _param(
@@ -103,19 +96,6 @@ def _host(default: object = None) -> Any:
 
     return _param(default, surface=Surface.HOST)
 
-
-# The parameters of the host NL interface (``context.nl()``), removed on
-# 2026-10-20 with the interface itself.
-RETIRED_NL_PARAMS = frozenset(
-    {
-        "nl_model",
-        "nl_failure_policy",
-        "nl_max_results",
-        "nl_max_calls_per_decision",
-        "nl_max_total_calls",
-        "nl_deadline_seconds",
-    }
-)
 
 # Former operator overrides of the provider endpoint and credential. Endpoints
 # and credentials come only from the trusted model profile's fixed environment
@@ -368,21 +348,6 @@ AcceptanceParams.__doc__ = (
     "null is a limit the request left blank."
 )
 
-RetiredParams = make_dataclass(
-    "RetiredParams",
-    [
-        (name, object, _param(surface=Surface.RETIRED))
-        for name in sorted(RETIRED_SWITCHES | RETIRED_RULES | OBSOLETE_KEYS | RETIRED_NL_PARAMS)
-    ],
-    frozen=True,
-    kw_only=True,
-)
-RetiredParams.__module__ = __name__
-RetiredParams.__doc__ = (
-    "Parameters no reader uses any more (``config.RETIRED_SWITCHES``, "
-    "``config.RETIRED_RULES``, ``config.OBSOLETE_KEYS``, ``RETIRED_NL_PARAMS``)."
-)
-
 
 @dataclass(frozen=True, kw_only=True)
 class ExperimentParams:
@@ -401,7 +366,6 @@ class ExperimentParams:
     broker: BrokerParams = field(default_factory=BrokerParams)
     agent: AgentParams = field(default_factory=AgentParams)
     environment: EnvironmentParams = field(default_factory=EnvironmentParams)
-    retired: RetiredParams = field(default_factory=RetiredParams)  # type: ignore[valid-type]
 
     @classmethod
     def from_record(cls, record: Mapping[str, object]) -> ExperimentParams:
@@ -502,8 +466,6 @@ def _checked(name: str, kind: object, value: object) -> object:
         return None
     for base in bases:
         origin = getattr(base, "__origin__", base)
-        if origin is object:
-            return value
         if origin is bool and isinstance(value, bool):
             return value
         if origin is int and isinstance(value, int) and not isinstance(value, bool):
@@ -625,7 +587,6 @@ def console_request(
 __all__ = [
     "NON_PERSISTABLE_PARAMS",
     "PARAMETERS",
-    "RETIRED_NL_PARAMS",
     "AcceptanceParams",
     "AgentParams",
     "BrokerParams",
@@ -636,7 +597,6 @@ __all__ = [
     "GeometryParams",
     "PackParams",
     "ParameterSpec",
-    "RetiredParams",
     "SandboxParams",
     "ScheduleParams",
     "Surface",

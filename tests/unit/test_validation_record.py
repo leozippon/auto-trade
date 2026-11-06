@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from pathlib import Path
 
@@ -10,7 +11,11 @@ import pytest
 
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import Slot, step_windows
-from autotrade.pipelines.ledger import TEST_STEP_RECORD_TYPE, ExperimentLedger
+from autotrade.pipelines.ledger import (
+    LEDGER_RECORD_SCHEMA_VERSION,
+    TEST_STEP_RECORD_TYPE,
+    ExperimentLedger,
+)
 from autotrade.pipelines.validation_record import (
     SOURCE_HOST_COMPLETION,
     SOURCE_TEST,
@@ -209,3 +214,18 @@ def test_the_ledger_records_each_step_once_in_order(tmp_path: Path) -> None:
     # A ledger whose steps skip one is corrupt for every reader.
     with pytest.raises(ValueError, match="contiguous"):
         validation_record.test_step_records([first, record(3, "ccc")])
+
+
+def test_the_ledger_refuses_a_line_of_the_old_record_shape(tmp_path: Path) -> None:
+    """A ledger line stamped schema_version 1 was written under the old keys
+    (``frozen``, ``freeze_gate``): the reader refuses it rather than reading
+    such an experiment as one that never registered."""
+
+    path = tmp_path / "ledger.jsonl"
+    path.write_text(
+        json.dumps({**HEAD, "record_type": "research_session", "schema_version": 1, "frozen": {"artifact_id": "a"}})
+        + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match=rf"ledger record schema_version 1 != {LEDGER_RECORD_SCHEMA_VERSION}"):
+        ExperimentLedger(path).read()

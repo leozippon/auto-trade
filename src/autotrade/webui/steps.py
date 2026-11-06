@@ -53,9 +53,9 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
         identity = None
     registered_step = None
     if identity is not None:
-        frozen = registered_record(read_ledger_records(experiment_dir))
-        if frozen is not None:
-            registered_step = frozen["frozen"].get("source_step_id")  # type: ignore[union-attr]
+        row = registered_record(read_ledger_records(experiment_dir))
+        if row is not None:
+            registered_step = row["registered"].get("source_step_id")  # type: ignore[union-attr]
 
     nodes: list[dict[str, object]] = []
     for node in tree.nodes():

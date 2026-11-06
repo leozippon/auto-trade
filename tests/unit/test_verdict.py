@@ -381,8 +381,8 @@ def test_the_graded_series_is_the_strategy_minus_its_random_baseline():
     assert registered["reasons"] == []
     tight = AcceptanceRules(**REQUIRED_RULES, tracking_error_cap=0.01, beta_min=0.2, beta_max=0.5)
     assert verdict.registered_mandate(book, rules=tight)["reasons"] == [
-        "freeze_tracking_error_above_cap",
-        "freeze_beta_outside_band",
+        "registration_tracking_error_above_cap",
+        "registration_beta_outside_band",
     ]
 
     # A day the random baseline does not cover would be graded against nothing.
@@ -695,11 +695,11 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     stages: dict[str, list[verdict.Condition]] = {}
     for condition in verdict.CONDITIONS:
         stages.setdefault(condition.stage, []).append(condition)
-    assert list(stages) == ["nomination", "registration", "freeze", "seeds"]
+    assert list(stages) == ["nomination", "registration", "mandate", "seeds"]
     assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
     assert {condition.reason for condition in stages["seeds"]} == {
-        "freeze_seed_replicate_invalid",
-        "freeze_too_few_seed_replicates",
+        "registration_seed_replicate_invalid",
+        "registration_too_few_seed_replicates",
     }
     retired = {"sealed", "validity", "strategy_error", "graduat"}
     assert not any(word in reason for reason in reasons for word in retired)

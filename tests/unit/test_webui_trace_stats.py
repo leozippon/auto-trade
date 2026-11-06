@@ -617,12 +617,12 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
     assert card["thinking"] == "low"
     assert card["inherit_context"] is True
     assert card["description"] == "schema audit"
-    assert "rounds_limit" not in card
+    assert "turns_limit" not in card
 
 
 def test_project_subagent_card_carries_the_effective_turn_budget() -> None:
     """The parent-chosen (or defaulted) ``max_turns`` lands on the card as
-    ``rounds_limit`` and the console spells it out next to the thinking level."""
+    ``turns_limit`` and the console spells it out next to the thinking level."""
 
     blocks = project_trace_blocks(
         [
@@ -632,16 +632,16 @@ def test_project_subagent_card_carries_the_effective_turn_budget() -> None:
                 "status": "started",
                 "role": "developer",
                 "thinking": "medium",
-                "rounds_limit": 12,
+                "turns_limit": 12,
             }
         ]
     )
     (card,) = _subagent_blocks(blocks)
-    assert card["rounds_limit"] == 12
+    assert card["turns_limit"] == 12
     meta = APP_JS.read_text(encoding="utf-8").split("function subagentMetaLine(", 1)[1].split(
         "\nfunction ", 1
     )[0]
-    assert "block.rounds_limit" in meta and "上限 ${turnsLimit} 回合" in meta
+    assert "block.turns_limit" in meta and "上限 ${turnsLimit} 回合" in meta
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:
@@ -869,7 +869,7 @@ def test_project_compaction_and_notice_blocks() -> None:
             },
             {"event_type": "context_compaction", "ts": "t3", "status": "error", "error": "provider timeout"},
             # A child's compaction stays on its own card, not in the parent's flow.
-            {"event_type": "subagent_context_compaction", "task_id": "agent_a", "round": 3, "compaction": {"status": "ok"}},
+            {"event_type": "subagent_context_compaction", "task_id": "agent_a", "turn": 3, "compaction": {"status": "ok"}},
         ]
     )
     assert [block["kind"] for block in blocks] == ["notice", "agent_output", "compaction", "compaction", "subagent"]
@@ -901,15 +901,15 @@ def test_project_subagent_finishing_after_a_compaction_keeps_its_one_card() -> N
     blocks = project_trace_blocks(
         [
             {"event_type": "subagent_task", "task_id": "agent_a", "status": "started", "ts": "t1", "role": "explore"},
-            {"event_type": "subagent_llm", "task_id": "agent_a", "round": 1, "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
+            {"event_type": "subagent_llm", "task_id": "agent_a", "turn": 1, "usage": {"prompt_tokens": 10, "completion_tokens": 2}},
             {"event_type": "context_compaction", "ts": "t2", "trigger": "agent", "status": "ok"},
-            {"event_type": "subagent", "task_id": "agent_a", "ts": "t3", "status": "completed", "rounds": 3, "llm_calls": 3, "tool_calls": 5, "summary": "done"},
+            {"event_type": "subagent", "task_id": "agent_a", "ts": "t3", "status": "completed", "turns": 3, "llm_calls": 3, "tool_calls": 5, "summary": "done"},
         ]
     )
     assert [block["kind"] for block in blocks] == ["subagent", "compaction"]
     card = blocks[0]
     assert (card["task_id"], card["status"], card["phase"]) == ("agent_a", "completed", "ended")
-    assert (card["rounds"], card["tool_calls"], card["summary"]) == (3, 5, "done")
+    assert (card["turns"], card["tool_calls"], card["summary"]) == (3, 5, "done")
 
 
 def test_trace_stats_carries_the_last_budget_block(tmp_path: Path) -> None:
@@ -1183,7 +1183,7 @@ def test_project_subagent_running_card_accumulates_progress() -> None:
             {
                 "event_type": "subagent_llm",
                 "task_id": "agent_live",
-                "round": 1,
+                "turn": 1,
                 "usage": {
                     "prompt_tokens": 1000,
                     "completion_tokens": 100,
@@ -1205,7 +1205,7 @@ def test_project_subagent_running_card_accumulates_progress() -> None:
             {
                 "event_type": "subagent_llm",
                 "task_id": "agent_live",
-                "round": 2,
+                "turn": 2,
                 "usage": {
                     "prompt_tokens": 2000,
                     "completion_tokens": 200,
@@ -1218,7 +1218,7 @@ def test_project_subagent_running_card_accumulates_progress() -> None:
     assert card["phase"] == "started" and card["status"] == "running"
     assert card["started_at"] == "2026-08-27T10:00:00+00:00"
     assert "ended_at" not in card
-    assert card["rounds"] == 2 and card["llm_calls"] == 2
+    assert card["turns"] == 2 and card["llm_calls"] == 2
     assert card["tool_calls"] == 2
     assert card["usage"] == {
         "prompt_tokens": 3000,
@@ -1244,7 +1244,7 @@ def test_project_subagent_finished_card_prefers_terminal_totals() -> None:
             {
                 "event_type": "subagent_llm",
                 "task_id": "agent_done",
-                "round": 1,
+                "turn": 1,
                 "usage": {
                     "prompt_tokens": 10,
                     "completion_tokens": 1,
@@ -1257,7 +1257,7 @@ def test_project_subagent_finished_card_prefers_terminal_totals() -> None:
                 "task_id": "agent_done",
                 "status": "completed",
                 "summary": "结论",
-                "rounds": 19,
+                "turns": 19,
                 "llm_calls": 20,
                 "tool_calls": 143,
                 "usage_totals": {
@@ -1272,7 +1272,7 @@ def test_project_subagent_finished_card_prefers_terminal_totals() -> None:
     assert card["phase"] == "ended" and card["status"] == "completed"
     assert card["started_at"] == "2026-08-27T10:00:00+00:00"
     assert card["ended_at"] == "2026-08-27T10:30:00+00:00"
-    assert card["rounds"] == 19 and card["llm_calls"] == 20
+    assert card["turns"] == 19 and card["llm_calls"] == 20
     assert card["tool_calls"] == 143
     assert card["usage"]["total_tokens"] == 1_082_484
     assert card["summary"] == "结论"
@@ -1500,7 +1500,7 @@ def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
             "event_type": "subagent_llm",
             "ts": "2026-09-01T10:00:20+00:00",
             "task_id": "agent_1",
-            "round": 1,
+            "turn": 1,
             "model": "qwen-3.8-27b-fp8",
             "content": "先看数据布局",
             "usage": {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110},
@@ -1509,7 +1509,7 @@ def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
             "event_type": "subagent_tool",
             "ts": "2026-09-01T10:00:25+00:00",
             "task_id": "agent_1",
-            "round": 1,
+            "turn": 1,
             "tool": "read_file",
             "arguments": {"path": "/mnt/agent/workspace/output/main.py", "limit": 40},
             "result": {"ok": True, "value": {"lines": 40}},
@@ -1518,7 +1518,7 @@ def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
             "event_type": "subagent_tool",
             "ts": "2026-09-01T10:00:26+00:00",
             "task_id": "agent_1",
-            "round": 1,
+            "turn": 1,
             "tool": "grep",
             "arguments": {"pattern": "trade_date"},
             "result": {"ok": False, "error": "no match"},
@@ -1527,7 +1527,7 @@ def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
             "event_type": "subagent_llm",
             "ts": "2026-09-01T10:01:00+00:00",
             "task_id": "agent_1",
-            "round": 2,
+            "turn": 2,
             "content": "已确认字段",
             "usage": {"prompt_tokens": 200, "completion_tokens": 20, "total_tokens": 220},
         },
@@ -1541,14 +1541,14 @@ def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
                 "event_type": "subagent_wrap_up",
                 "ts": "2026-09-01T10:01:10+00:00",
                 "task_id": "agent_1",
-                "round": 2,
-                "rounds_limit": 3,
+                "turn": 2,
+                "turns_limit": 3,
             },
             {
                 "event_type": "subagent_steer",
                 "ts": "2026-09-01T10:01:15+00:00",
                 "task_id": "agent_1",
-                "round": 3,
+                "turn": 3,
                 "chars": 18,
                 "delivery": "delivered",
             },
@@ -1558,7 +1558,7 @@ def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
                 "event_type": "subagent_context_compaction",
                 "ts": "2026-09-01T10:01:20+00:00",
                 "task_id": "agent_1",
-                "round": 3,
+                "turn": 3,
                 "compaction": {
                     "status": "error",
                     "error": "compaction response is empty",
@@ -1574,7 +1574,7 @@ def _child_events(*, terminal: bool = True) -> list[dict[str, object]]:
                 "task_id": "agent_1",
                 "status": "completed",
                 "role": "developer",
-                "rounds": 2,
+                "turns": 2,
                 "llm_calls": 3,
                 "tool_calls": 2,
                 "truncated": True,
@@ -1609,8 +1609,8 @@ def test_project_subagent_trace_orders_rounds_tools_and_summary() -> None:
     assert steer["label"] == "父代理指令" and steer["text"] == "第 3 回合前送达（18 字符）。"
     assert compaction["label"] == "上下文压缩"
     assert "第 3 回合：error，消息 40→40，估算 201000 tokens" in compaction["text"]
-    assert first["round"] == 1 and first["text"] == "先看数据布局"
-    assert second["round"] == 2
+    assert first["turn"] == 1 and first["text"] == "先看数据布局"
+    assert second["turn"] == 2
     assert [row["name"] for row in group["tools"]] == ["read_file", "grep"]
     calls = group["calls"]
     assert [call["name"] for call in calls] == ["read_file", "grep"]
@@ -1628,7 +1628,7 @@ def test_project_subagent_trace_orders_rounds_tools_and_summary() -> None:
     assert header["role"] == "developer"
     assert header["model"] == "qwen-3.8-27b-fp8"
     assert header["thinking"] == "inherit"
-    assert (header["rounds"], header["llm_calls"], header["tool_calls"]) == (2, 3, 2)
+    assert (header["turns"], header["llm_calls"], header["tool_calls"]) == (2, 3, 2)
     assert header["usage"]["total_tokens"] == 330
     assert header["started_at"] == "2026-09-01T10:00:00+00:00"
     assert header["ended_at"] == "2026-09-01T10:02:00+00:00"
@@ -1640,7 +1640,7 @@ def test_project_subagent_trace_running_child_has_no_report_yet() -> None:
     assert header["phase"] == "started" and header["status"] == "running"
     assert "ended_at" not in header
     # Live accumulation, not terminal totals.
-    assert header["llm_calls"] == 2 and header["rounds"] == 2
+    assert header["llm_calls"] == 2 and header["turns"] == 2
     assert header["usage"]["total_tokens"] == 330
     assert all(block["kind"] != "summary" for block in projected["blocks"])
     assert [block["kind"] for block in projected["blocks"]] == [
@@ -1845,7 +1845,7 @@ const block = {
   kind: "subagent", phase: "started", status: "running", role: "developer",
   description: "因子实现", model: "qwen-3.8-27b-fp8", thinking: "medium",
   inherit_context: false, ts: started, started_at: started,
-  rounds: 4, llm_calls: 4, tool_calls: 6,
+  turns: 4, llm_calls: 4, tool_calls: 6,
   usage: { prompt_tokens: 16414, completion_tokens: 444, total_tokens: 16858 },
   last_tool: { name: "shell", status: "running" },
 };
@@ -1896,12 +1896,12 @@ const started = new Date(Date.now() - 188000).toISOString();
 const blocks = [
   { kind: "subagent", phase: "ended", status: "completed", role: "reader",
     task_id: "agent_0", description: "读文档", ts: started, started_at: started,
-    ended_at: new Date().toISOString(), rounds: 2, llm_calls: 2 },
+    ended_at: new Date().toISOString(), turns: 2, llm_calls: 2 },
   { kind: "agent_output", text: "继续" },
   { kind: "subagent", phase: "started", status: "running", role: "developer",
     task_id: "agent_1", description: "因子实现", model: "qwen-3.8-27b-fp8",
     thinking: "medium", inherit_context: false, ts: started, started_at: started,
-    rounds: 4, llm_calls: 4, tool_calls: 6,
+    turns: 4, llm_calls: 4, tool_calls: 6,
     usage: { prompt_tokens: 16414, completion_tokens: 444, total_tokens: 16858 },
     last_tool: { name: "shell", status: "running" } },
 ];

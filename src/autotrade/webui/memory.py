@@ -131,8 +131,7 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     once, at creation, and every one of its sessions mounts that same snapshot
     -- so the question "what did this session get" has one answer for the
     whole experiment, and a later library change belongs to the next
-    experiment rather than to this one's middle. A snapshot frozen before the
-    graduated tier was retired lists only what its sessions still mount.
+    experiment rather than to this one's middle.
     """
 
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)

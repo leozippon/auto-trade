@@ -166,7 +166,7 @@ def test_an_unregistrable_candidate_is_refused_without_advancing_or_counting() -
         harness = _Harness(Path(tmp))
         control = harness.node("c", "7", control=True)
         partial = harness.node("p", "8", span="Y1")
-        for node, reason in ((control, "freeze_nominee_is_control"), (partial, "freeze_needs_full_span_validation")):
+        for node, reason in ((control, "registration_nominee_is_control"), (partial, "registration_needs_full_span_validation")):
             with pytest.raises(ToolError) as refused:
                 harness.test.invoke({"candidate": node})
             assert refused.value.error_type == "test_registration_refused"

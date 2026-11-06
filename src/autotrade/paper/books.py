@@ -142,8 +142,7 @@ def open_registered_book(repo_root: str | Path, experiment_dir: str | Path) -> s
         experiment_dir=experiment,
         artifact_id=str(candidate["artifact_id"]),
         repo_root=repo_root,
-        track="frozen",
-        note="frozen",
+        note="registered",
     )
     return book_id
 

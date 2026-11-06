@@ -746,7 +746,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             # The effective launch values, whichever tier they came from.
             "thinking": thinking,
             "thinking_applied": thinking_applied,
-            "rounds_limit": turns_limit,
+            "turns_limit": turns_limit,
             "inherit_context": bool(inherit_context),
             # The brief is what delegation quality is judged by; clipped like
             # every other traced argument.
@@ -823,7 +823,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         {
                             "task_id": task_id,
                             "role": role,
-                            "round": turns,
+                            "turn": turns,
                             "chars": len(text),
                             "delivery": "delivered",
                             "parent_call_id": parent_call_id,
@@ -849,8 +849,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         {
                             "task_id": task_id,
                             "role": role,
-                            "round": turns,
-                            "rounds_limit": turns_limit,
+                            "turn": turns,
+                            "turns_limit": turns_limit,
                             "parent_call_id": parent_call_id,
                         },
                     )
@@ -881,7 +881,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     failure: dict[str, object] = {
                         "task_id": task_id,
                         "role": role,
-                        "round": turns,
+                        "turn": turns,
                         "provider": llm.provider,
                         "model": llm.model,
                         "llm_error": error,
@@ -912,7 +912,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             identity={
                                 "task_id": task_id,
                                 "role": role,
-                                "round": turns,
+                                "turn": turns,
                                 "parent_call_id": parent_call_id,
                             },
                         )
@@ -973,7 +973,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     {
                         "task_id": task_id,
                         "role": role,
-                        "round": turns,
+                        "turn": turns,
                         "provider": llm.provider,
                         "model": response.model,
                         "usage": dict(response.usage),
@@ -1007,7 +1007,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                                 {
                                     "task_id": task_id,
                                     "role": role,
-                                    "round": turns,
+                                    "turn": turns,
                                     "completion_tokens": completion,
                                     "max_tokens": output_tokens,
                                     "continuation": continuations,
@@ -1072,7 +1072,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         {
                             "task_id": task_id,
                             "role": role,
-                            "round": turns,
+                            "turn": turns,
                             "tool": call.name,
                             "arguments": _traced_arguments(call.arguments),
                             "result": sanitize_for_log(
@@ -1120,7 +1120,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     {
                         "task_id": task_id,
                         "role": role,
-                        "round": turns,
+                        "turn": turns,
                         "provider": llm.provider,
                         "model": response.model,
                         "usage": dict(response.usage),
@@ -1165,7 +1165,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         result: dict[str, object] = {
             "task_id": task_id,
             "status": status,
-            "rounds": turns,
+            "turns": turns,
             "tool_calls": tool_calls_made,
             "llm_calls": llm_calls,
             "provider": llm.provider,
@@ -1175,14 +1175,14 @@ class SubAgentEngine(SessionTimeBudgetAware):
             "role": role,
             "thinking": thinking,
             "thinking_applied": thinking_applied,
-            "rounds_limit": turns_limit,
+            "turns_limit": turns_limit,
             "inherit_context": bool(inherit_context),
         }
         if resumed_from:
             result["resumed_from"] = resumed_from
         if truncated_turns:
             result["truncated"] = True
-            result["truncated_rounds"] = truncated_turns
+            result["truncated_turns"] = truncated_turns
         if llm_errors:
             result["llm_errors"] = llm_errors
         if steers:
@@ -1224,7 +1224,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         identity = {
             "task_id": task_id,
             "role": role,
-            "round": turn_index,
+            "turn": turn_index,
             "parent_call_id": parent_call_id,
         }
         if compactor is not None:

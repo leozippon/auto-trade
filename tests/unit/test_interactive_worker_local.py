@@ -25,7 +25,6 @@ from autotrade.environment.llm import (
 )
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
-from autotrade.pipelines.experiment_params import RETIRED_NL_PARAMS
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     ControlState,
@@ -98,7 +97,6 @@ def _experiment(
     return repo, experiment
 
 
-
 def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
     tmp_path: Path,
 ) -> None:
@@ -136,7 +134,6 @@ def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
         load_worker_options(experiment, repo_root=repo)
-
 
 
 def test_worker_rejects_llm_mode_without_ripgrep_on_the_host(
@@ -221,43 +218,6 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     assert settings.compaction.max_calls == 4
 
 
-
-def test_worker_accepts_and_ignores_the_retired_nl_params(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """Experiments created before the host NL interface was removed carry its
-    parameters. Such an experiment loads exactly as one without them, whatever they
-    say (a hosted model, a failing policy, values no check would pass), and
-    no gateway is built for the retired role."""
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
-    path = experiment / "hitl/params.json"
-    params = json.loads(path.read_text(encoding="utf-8"))
-    params.update(
-        {"model": "deepseek-flash", "subagent_model": "deepseek-flash", "compact_model": "deepseek-flash"}
-    )
-    path.write_text(json.dumps(params), encoding="utf-8")
-    current = load_worker_options(experiment, repo_root=repo)
-
-    legacy = {
-        "nl_model": "gpt-6-luna",
-        "nl_failure_policy": "fail",
-        "nl_max_results": "not even a number",
-        "nl_max_calls_per_decision": 0,
-        "nl_max_total_calls": -1,
-        "nl_deadline_seconds": None,
-    }
-    assert set(legacy) == RETIRED_NL_PARAMS
-    path.write_text(json.dumps({**params, **legacy}), encoding="utf-8")
-    assert load_worker_options(experiment, repo_root=repo) == current
-
-    path.write_text(json.dumps({**params, "nl_query_budget": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match=r"unknown experiment parameters: \['nl_query_budget'\]"):
-        load_worker_options(experiment, repo_root=repo)
-
-
-
-
 def test_worker_refuses_endpoint_and_credential_params(tmp_path: Path) -> None:
     """Neither endpoint nor credential can be redirected by a params file.
 
@@ -278,7 +238,6 @@ def test_worker_refuses_endpoint_and_credential_params(tmp_path: Path) -> None:
         match=r"unknown experiment parameters: \['llm_api_key_env', 'llm_base_url'\]",
     ):
         load_worker_options(experiment, repo_root=repo)
-
 
 
 def test_llm_key_puts_every_relay_role_on_the_chosen_key_at_each_start(
@@ -334,7 +293,6 @@ def test_llm_key_puts_every_relay_role_on_the_chosen_key_at_each_start(
                 "test-alternate",
                 "test-primary",
             )
-
 
 
 def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one_with_them_gets_its_own(
@@ -441,7 +399,6 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
         options.llm.model_for("meta")
 
 
-
 def test_worker_applies_local_output_cap_to_each_role_budget(
     tmp_path: Path,
     monkeypatch,
@@ -469,7 +426,6 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     for role in ("main", "subagent"):
         assert options.llm.build_gateway(role).config.max_tokens == 32_768
     assert options.llm.build_gateway("compact").config.max_tokens == 20_000
-
 
 
 def test_worker_derives_the_compaction_threshold_from_the_model_context(
@@ -517,7 +473,6 @@ def test_worker_derives_the_compaction_threshold_from_the_model_context(
     assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == derived - 1_000
 
 
-
 def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     tmp_path: Path,
     monkeypatch,
@@ -545,7 +500,6 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)
     assert disabled.llm.compact_enabled is False
-
 
 
 def test_a_console_default_experiment_compacts_gpt6_astra_at_its_maximum(
@@ -663,7 +617,6 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     )
 
 
-
 def test_model_roles_share_one_session_call_budget():
     first = ScriptedLLM([ProviderResponse(content="main")])
     second = ScriptedLLM([ProviderResponse(content="subagent")])
@@ -676,7 +629,6 @@ def test_model_roles_share_one_session_call_budget():
     with pytest.raises(RuntimeError, match="budget exhausted"):
         subagent.complete([])
     assert shared.calls == 1
-
 
 
 def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
@@ -731,7 +683,6 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
     assert timing["run_wall_seconds"] >= 0.0
 
 
-
 def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
     tmp_path: Path,
 ):
@@ -784,7 +735,6 @@ def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
     # One-shot, and the console sees one worker coming up rather than a stop.
     assert read_control(control_path).restart_pending is False
     assert read_status(status_path)["state"] == "launching"
-
 
 
 def test_session_boundary_restart_is_taken_before_the_next_session_starts(
@@ -914,7 +864,6 @@ class _NominatingLLM(ScriptedLLM):
         )
 
 
-
 def _agent_then(
     *tool_calls: ToolCall,
     roles: tuple[str, ...] = ("Explore",),
@@ -944,7 +893,6 @@ def _agent_then(
             )
         )
     return tuple(responses)
-
 
 
 def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
@@ -1004,8 +952,7 @@ def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
     assert log_path.read_text(encoding="utf-8").count("===== worker start") == 2
 
 
-
-def test_worker_params_reject_unknown_keys_fold_era_keys_and_a_bad_geometry(tmp_path: Path):
+def test_worker_params_reject_unknown_keys_and_a_bad_geometry(tmp_path: Path):
     repo, experiment = _experiment(tmp_path)
     path = experiment / "hitl" / "params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
@@ -1032,7 +979,6 @@ def test_worker_params_reject_unknown_keys_fold_era_keys_and_a_bad_geometry(tmp_
         path.write_text(json.dumps({**params, key: value}), encoding="utf-8")
         with pytest.raises(ValueError, match=message):
             load_worker_options(experiment, repo_root=repo)
-
 
 
 def test_worker_maps_data_domain_controls_to_snapshot_config(tmp_path: Path):
@@ -1088,7 +1034,6 @@ def test_worker_maps_data_domain_controls_to_snapshot_config(tmp_path: Path):
     assert config.screen_boards == ("main", "gem")
 
 
-
 def test_worker_rejects_unknown_data_domain_selection(tmp_path: Path):
     repo, experiment = _experiment(tmp_path)
     path = experiment / "hitl" / "params.json"
@@ -1098,7 +1043,6 @@ def test_worker_rejects_unknown_data_domain_selection(tmp_path: Path):
 
     with pytest.raises(ValueError, match="unknown events_datasets"):
         load_worker_options(experiment, repo_root=repo)
-
 
 
 def test_webui_persistent_create_uses_available_worker_entrypoint(
@@ -1131,7 +1075,6 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
     assert params["data_backend"] == "pit"
     assert params["execution_mode"] == "sandbox"
     assert params["developer_mode"] == "llm"
-
 
 
 def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -> None:
@@ -1213,7 +1156,6 @@ _REMOVED_BROWSER_BOUNDS = (
 )
 
 
-
 def test_the_worker_rejects_every_value_the_create_form_no_longer_bounds(
     tmp_path: Path,
     monkeypatch,
@@ -1241,7 +1183,6 @@ def test_the_worker_rejects_every_value_the_create_form_no_longer_bounds(
     path.write_text(json.dumps(baseline), encoding="utf-8")
 
 
-
 def _console_params(repo: Path, experiments_root: Path, **overrides) -> dict:
     """The exact params dict `create_experiment` hands to the pre-flight."""
     from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, WEB_INTERNAL_PARAMS
@@ -1263,7 +1204,6 @@ def _console_params(repo: Path, experiments_root: Path, **overrides) -> dict:
     )
     params.update(overrides)
     return params
-
 
 
 def test_preflight_narrows_exactly_three_things_and_nothing_else(
@@ -1346,7 +1286,6 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
         resolve(True, max_research_minutes=-1)
 
 
-
 def test_compaction_gateway_makes_one_attempt(tmp_path: Path, monkeypatch):
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
@@ -1354,7 +1293,6 @@ def test_compaction_gateway_makes_one_attempt(tmp_path: Path, monkeypatch):
     settings = load_worker_options(experiment, repo_root=repo).llm
     assert settings.build_gateway("compact", max_retries=0).config.max_retries == 0
     assert settings.build_gateway("main").config.max_retries == settings.max_retries
-
 
 
 def test_worker_reasoning_effort_offers_exactly_the_wire_levels(

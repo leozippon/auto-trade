@@ -22,7 +22,6 @@ from pathlib import Path, PurePosixPath
 
 from autotrade.agent.compact import safe_error_summary
 from autotrade.common.records import (
-    read_current_record,
     read_json_object,
     redact_host_paths,
 )
@@ -122,7 +121,7 @@ def _step_analysis(step: StepResult) -> dict[str, object]:
     """The style sidecar beside one recorded Validation's result."""
 
     result_dir = Path(step.validation.result_ref).parent
-    return read_current_record(result_dir / STYLE_ARTIFACT_NAME)
+    return read_json_object(result_dir / STYLE_ARTIFACT_NAME)
 
 
 def _public_error_text(exc: Exception) -> str:
@@ -590,7 +589,7 @@ def write_active_daily(result_ref: str) -> Path:
     """
 
     result_dir = Path(result_ref).parent
-    analysis = read_current_record(result_dir / STYLE_ARTIFACT_NAME)
+    analysis = read_json_object(result_dir / STYLE_ARTIFACT_NAME)
     target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
     staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
@@ -863,7 +862,7 @@ class SessionValidations:
         The holder's readings of the span (``verdict.holder_readings``: the
         book, the benchmark and the random baseline as stored, the raw excess
         and the plain selection), in the structure a forward slice carries
-        them, so a row reads over research what the graduation reads forward.
+        them, so a row reads over research what the forward reading reads forward.
         Beside them the book's market loading relative to its random baseline (the
         benchmark coefficient of the active series' factor regression,
         ``verdict.graded_statistics``; a diagnostic no gate reads) and, on a

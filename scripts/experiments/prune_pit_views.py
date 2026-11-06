@@ -15,8 +15,8 @@ experiments.
 
 Finished for good means no live worker and either the archive marker
 (``hitl/archived.json``, written by ``archive_experiment.py``) or hitl status
-``completed`` or ``stopped`` with a ledger verdict (``graduated``,
-``discarded`` or ``no_deliverable``), which rules out a pending forward replay.
+``completed`` or ``stopped`` with a ledger verdict (``registered_with_record``,
+``no_deliverable`` or ``environment_blocked``), which rules out a pending forward replay.
 Archiving is the operator's final word: the console never starts the experiment's
 worker again, and one whose research was interrupted never gets a verdict. Anything else is kept, an experiment
 whose status or ledger cannot be read is refused, and nothing outside

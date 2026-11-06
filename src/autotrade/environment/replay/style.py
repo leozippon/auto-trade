@@ -55,10 +55,9 @@ from .stats import (
     total_return_from_curve,
 )
 
-# The benchmark an experiment takes when its create request names none, and the one a
-# legacy sidecar or book that records none is read under. Every call below takes
-# the experiment's ``benchmark_index`` explicitly, so none can grade against this one
-# by omission.
+# The benchmark an experiment takes when its create request names none. Every call
+# below takes the experiment's ``benchmark_index`` explicitly, so none can grade
+# against this one by omission.
 BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
 # The fewest overlapping days the factor regression runs on: a span shorter
@@ -67,15 +66,9 @@ BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
 # verdict never waits on a replay it cannot read.
 MIN_REGRESSION_DAYS = 8
 STYLE_ARTIFACT_NAME = "style_analysis.json"
-# 2 (2026-10-28): the strategy's ``factor_regression`` block and the compact
-# ``active_excess`` figures replace the regressed ``neutralized_excess`` blocks.
-# 3 (2026-11-03): the value leg (``value_factor_daily``) joins the market and
-# size legs, and the regression is three-factor. Every version stores the
-# strategy, benchmark, size and random baseline series, so a reader takes any
-# (``READABLE_STYLE_SCHEMA_VERSIONS``); a three-factor reading of a version
-# 1 or 2 sidecar finds no value leg and is not measured.
+# 3 (2026-11-03): the strategy, benchmark, size, value and random baseline
+# series, and the three-factor regression over the market, size and value legs.
 STYLE_SCHEMA_VERSION = 3
-READABLE_STYLE_SCHEMA_VERSIONS = (1, 2, STYLE_SCHEMA_VERSION)
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 # The size and value legs of the factor regression: daily spreads of the replay
 # slot's OWN cross-section, equal-weighted inside each leg, the legs formed on
@@ -733,8 +726,7 @@ def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
     of the same day, so every reader of ``strategy_daily`` -- the sub-span
     figure below, the verdict's statistics, bootstrap and drawdown -- measures
     the active series through the code that measures the strategy's own. ``None``
-    when the sidecar carries no random baseline (a truncated smoke replay, or a replay
-    recorded before random baselines existed). A random baseline that misses one of the strategy's
+    when the sidecar carries no random baseline (a truncated smoke replay). A random baseline that misses one of the strategy's
     days raises: a day graded against nothing would read as pure skill.
     """
 
@@ -814,7 +806,6 @@ __all__ = [
     "BENCHMARK_TS_CODE",
     "FACTOR_SERIES",
     "MIN_REGRESSION_DAYS",
-    "READABLE_STYLE_SCHEMA_VERSIONS",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
     "active_analysis",

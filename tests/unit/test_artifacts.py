@@ -342,10 +342,10 @@ class RegisteredRestoreReplaceTest(unittest.TestCase):
             snapshot_models.mkdir()
             (snapshot_models / "weights.bin").write_bytes(b"snap")
             live_output = write_artifact(
-                tmp_path / "frozen" / "output",
+                tmp_path / "registered" / "output",
                 main="def generate_orders(context):\n    return [1]\n",
             )
-            live_models = tmp_path / "frozen" / "models"
+            live_models = tmp_path / "registered" / "models"
             live_models.mkdir()
             (live_models / "old.bin").write_bytes(b"old")
 

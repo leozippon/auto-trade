@@ -82,7 +82,6 @@ from .hitl_state import (
 )
 from .interactive import InteractiveExperimentRunner
 from .ledger import (
-    FOLD_ERA_RECORD_TYPES,
     ExperimentLedger,
     RegisteredArtifactMutated,
     RunMarkers,
@@ -820,15 +819,6 @@ def run_local_interactive_worker(
     ledger = ExperimentLedger(options.rolling.ledger_path)
     store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
     records = ledger.read()
-    fold_era = sorted(
-        {str(record.get("record_type")) for record in records}
-        & set(FOLD_ERA_RECORD_TYPES)
-    )
-    if fold_era:
-        raise ValueError(
-            f"{options.experiment_id} holds a Fold-era ledger ({', '.join(fold_era)} "
-            "records); this pipeline does not resume it"
-        )
     try:
         assert_no_registered_artifact_mutation(records)
     except RegisteredArtifactMutated as exc:
@@ -1010,7 +1000,7 @@ def _terminal_status(
     ``paper_candidate`` are re-read from the ledger on every publish."""
 
     records = ledger.read()
-    frozen = registered_record(records)
+    registered = registered_record(records)
     return {
         "schema_version": 1,
         "state": ExperimentState.COMPLETED,
@@ -1020,7 +1010,7 @@ def _terminal_status(
         "completed_sessions": len(research_records(records))
         + sum(1 for record in records if record.get("record_type") == "forward"),
         "final_strategy_artifact": (
-            str(frozen["frozen"]["artifact_id"]) if frozen is not None else None  # type: ignore[index]
+            str(registered["registered"]["artifact_id"]) if registered is not None else None  # type: ignore[index]
         ),
         "verdict": experiment_verdict(records),
         "paper_candidate": paper_candidate(records),
