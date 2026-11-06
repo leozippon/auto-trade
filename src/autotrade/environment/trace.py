@@ -77,7 +77,7 @@ _TRANSCRIPT_HEADER_FIELDS = (
     ("id", "tool_call_id"),
     ("status", "status"),
     ("task", "task_id"),
-    ("round", "round"),
+    ("turn", "turn"),
 )
 # Fields the transcript leaves out: the system prompt is the Agent's own
 # context already, and the event ids are host-side bookkeeping.

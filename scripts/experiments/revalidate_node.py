@@ -83,7 +83,7 @@ def session_step(records: list[dict], node: str) -> dict:
     """The row of ``node`` (its step id or short handle) in the experiment's one
     research session that ended research."""
 
-    ended = [record for record in research_records(records) if record.get("frozen") or record.get("experiment_end")]
+    ended = [record for record in research_records(records) if record.get("registered") or record.get("experiment_end")]
     if len(ended) != 1:
         raise ValueError("the experiment has no research session that ended its research")
     rows = [row for row in ended[0]["steps"] if node in (row["step_id"], node_handle(row["step_id"]))]

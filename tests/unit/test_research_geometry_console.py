@@ -75,7 +75,7 @@ def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path
     directory = _experiment(root, "registered", _CURRENT)
     write_json_atomic(directory / "hitl/schedule.json", build_session_plan(forward={}))
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
-    frozen = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
+    frozen = directory / "artifacts/strategy/registered/strategy_research_abc/output"
     ledger.append(
         {
             "record_type": "research_session",
@@ -86,7 +86,7 @@ def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path
             "session_key": "research",
             "outcome": "completed",
             "steps": [],
-            "frozen": {"artifact_id": "strategy_research_abc", "output_path": str(frozen)},
+            "registered": {"artifact_id": "strategy_research_abc", "output_path": str(frozen)},
         }
     )
     # Frozen, forward still running: no verdict and no Paper candidate.

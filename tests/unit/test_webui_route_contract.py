@@ -446,7 +446,7 @@ def test_every_reason_the_pipeline_records_has_a_console_label() -> None:
     from autotrade.pipelines.config import SESSION_OUTCOMES
     from autotrade.pipelines.verdict import CONDITIONS, ConditionReason
     recorded = {condition.reason for condition in CONDITIONS} | {ConditionReason.UNMEASURABLE}
-    assert {"freeze_nominee_is_control", "max_drawdown_above_limit"} <= recorded
+    assert {"registration_nominee_is_control", "max_drawdown_above_limit"} <= recorded
     labels = _reason_tokens()
     assert recorded <= labels, sorted(recorded - labels)
     outcomes = set(

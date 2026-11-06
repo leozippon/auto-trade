@@ -243,7 +243,7 @@ def _compact_call(summary: str = SUMMARY) -> ProviderResponse:
 
 def _finish_call(node_id: str) -> ProviderResponse:
     return ProviderResponse(
-        tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+        tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
     )
 
 
@@ -561,7 +561,7 @@ def test_session_tracks_calls_and_finish_value(tmp_path: Path):
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             )
         ]
     )
@@ -587,7 +587,7 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("bad", "test", {"outcome": "freeze", "node_id": "missing"}),)
+                tool_calls=(ToolCall("bad", "test", {"outcome": "register", "node_id": "missing"}),)
             ),
             ProviderResponse(
                 tool_calls=(
@@ -595,7 +595,7 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
                         "f",
                         "test",
                         {
-                            "outcome": "freeze",
+                            "outcome": "register",
                             "node_id": node_id,
                             "reason": "H2 untestable here: the events domain is empty in this window",
                         },
@@ -662,10 +662,10 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
                 ),
                 ProviderResponse(content="等子代理返回。"),
                 ProviderResponse(
-                    tool_calls=(ToolCall("bad", "test", {"outcome": "freeze", "node_id": "missing"}),)
+                    tool_calls=(ToolCall("bad", "test", {"outcome": "register", "node_id": "missing"}),)
                 ),
                 ProviderResponse(
-                    tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                    tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
                 ),
             ]
         ),
@@ -694,7 +694,7 @@ def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path)
         [
             ProviderResponse(content="I should act next."),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -721,7 +721,7 @@ def test_fold_session_replays_reasoning_with_tool_call_on_next_round(tmp_path: P
                 reasoning_content="inspect before finishing",
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -752,7 +752,7 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
                 tool_calls=(ToolCall("shell-1", "shell", {"argv": ["rg", "x"]}),)
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("finish-1", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("finish-1", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ],
         context_window_tokens=3_000,
@@ -887,7 +887,7 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
                     reasoning_content="先复核 Validation",
                 )
             return ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             )
 
     llm = MalformedThenFinish()
@@ -946,7 +946,7 @@ def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
     ]
     responses.append(
         ProviderResponse(
-            tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+            tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
         )
     )
     llm = ScriptedLLM(responses)
@@ -1006,7 +1006,7 @@ def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
                 tool_calls=(ToolCall("s3", "shell", {"argv": ["rg", "c"]}),)
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -1078,7 +1078,7 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
         ]
         + [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             )
         ]
     )
@@ -1161,7 +1161,7 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
         [
             ProviderResponse(
                 tool_calls=(
-                    ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),
+                    ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),
                     ToolCall(
                         "w",
                         "write_file",

@@ -40,7 +40,7 @@ const ENDING_LABELS = {
 // and the reason a terminal row or an unmeasured reading carries. A value not
 // listed renders as written.
 const TRACK_LABELS = {
-  frozen: "定版策略",
+  registered: "定版策略",
 };
 const VERDICT_STATUS = {
   observing: ["stopped", "观察中"],
@@ -62,13 +62,13 @@ const REASON_LABELS = {
   non_finite_max_drawdown: "研究期回撤可算",
   non_finite_sharpe: "研究期夏普可算",
   max_drawdown_above_limit: "研究期回撤",
-  freeze_needs_full_span_validation: "提名节点为全区间验证",
-  freeze_nominee_is_control: "提名节点不是对照",
-  freeze_tracking_error_above_cap: "研究期对基准指数跟踪误差",
-  freeze_beta_outside_band: "研究期市场 β",
-  freeze_unmeasurable: "研究期统计可算",
-  freeze_too_few_seed_replicates: "训练模型的提名登记了种子复现",
-  freeze_seed_replicate_invalid: "种子复现只改种子一行",
+  registration_needs_full_span_validation: "提名节点为全区间验证",
+  registration_nominee_is_control: "提名节点不是对照",
+  registration_tracking_error_above_cap: "研究期对基准指数跟踪误差",
+  registration_beta_outside_band: "研究期市场 β",
+  registration_unmeasurable: "研究期统计可算",
+  registration_too_few_seed_replicates: "训练模型的提名登记了种子复现",
+  registration_seed_replicate_invalid: "种子复现只改种子一行",
 };
 // An experiment judged on its active series -- its daily return minus the random
 // baseline the host drew from its own book -- records `series: "active"`; a replay
@@ -126,7 +126,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   subagent_wait: "等待子代理",
   backtest: "执行验证回测",
   agent_complete: "Agent 推理完成",
-  freezing: "定版策略",
+  registering: "定版策略",
   completing_record: "宿主补完验证记录",
   forward_replay: "前推与 Held-out 连续回测",
   readout: "读出记录",
@@ -140,7 +140,7 @@ const ENVIRONMENT_STAGE_ICONS = {
   subagent_wait: "🧩",
   backtest: "📊",
   agent_complete: "🤖",
-  freezing: "❄",
+  registering: "❄",
   completing_record: "▶",
   forward_replay: "▶",
   readout: "📖",
@@ -3340,7 +3340,7 @@ function registeredPanel(detail) {
         "a",
         {
           class: "btn small",
-          href: `/api/experiments/${encodeURIComponent(detail.experiment_id)}/frozen/strategy.zip`,
+          href: `/api/experiments/${encodeURIComponent(detail.experiment_id)}/registered/strategy.zip`,
         },
         "⬇ 下载 ZIP",
       ),
@@ -3719,7 +3719,7 @@ function sessionDetailPanel(detail, selectedKey) {
     return panel;
   }
   if (selectedKey === "registered") {
-    panel.append(registeredPanel(detail) || stepPlaceholder(detail, "frozen", "定版产物"));
+    panel.append(registeredPanel(detail) || stepPlaceholder(detail, "registered", "定版产物"));
     return panel;
   }
   if (selectedKey === "forward") {
@@ -3885,7 +3885,7 @@ function registrationChecklist(gate) {
   const failed = new Set(gate.reasons || []);
   const t = gate.thresholds || {};
   const row = criteriaRow(gate, failed, t);
-  const mandate = ["freeze_tracking_error_above_cap", "freeze_beta_outside_band"];
+  const mandate = ["registration_tracking_error_above_cap", "registration_beta_outside_band"];
   const problems = ((gate.seed_replicates || {}).replicates || [])
     .filter((entry) => entry.problem)
     .map((entry) => `${String(entry.step_id).split("__").pop()}：${entry.problem}`)
@@ -3896,7 +3896,7 @@ function registrationChecklist(gate) {
       .map((token) => ({
         ok: false,
         label: reasonLabel(token),
-        title: token === "freeze_seed_replicate_invalid" ? problems || null : null,
+        title: token === "registration_seed_replicate_invalid" ? problems || null : null,
       })),
     ...mandateRows(mandate[0], mandate[1], gate, row, t),
   ]);
@@ -4877,7 +4877,7 @@ function subagentClockNode(block, className = "hint") {
    summary after its last turn, so both are shown. */
 function subagentProgressParts(block) {
   const parts = [];
-  const turns = Number(block.rounds) || 0;
+  const turns = Number(block.turns) || 0;
   const llmCalls = Number(block.llm_calls) || 0;
   const toolCalls = Number(block.tool_calls) || 0;
   if (turns || llmCalls) parts.push(`${turns} 回合 · 模型 ${llmCalls} 次`);
@@ -5101,7 +5101,7 @@ function parentReasoningLabel(detail) {
 function renderAgentOutputBlock(node, block, detail) {
   const effort = parentReasoningLabel(detail);
   const model = String((block && block.model) || "").trim();
-  const turn = Number(block.round) || 0;
+  const turn = Number(block.turn) || 0;
   const title = turn
     ? [`第 ${turn} 回合`, model].filter(Boolean).join(" · ")
     : ["Agent", model, effort ? `推理 ${effort}` : ""].filter(Boolean).join(" · ");
@@ -5173,7 +5173,7 @@ function subagentContextLabel(block) {
    `model · 推理 xhigh · 上限 48 回合 · 独立上下文`. */
 function subagentMetaLine(block, detail) {
   const thinking = subagentThinkingLabel(block, detail);
-  const turnsLimit = Number(block.rounds_limit) || 0;
+  const turnsLimit = Number(block.turns_limit) || 0;
   return [
     block.model ? String(block.model) : "",
     thinking ? `推理 ${thinking}` : "",
@@ -5368,7 +5368,7 @@ function toolCallsNode(calls) {
   const list = el("div", { class: "trace-tool-list" });
   for (const call of calls || []) {
     const status = TOOL_STATUS_LABELS.get(String(call.status || "")) || "";
-    const turn = Number(call.round) || 0;
+    const turn = Number(call.turn) || 0;
     const row = el(
       "div",
       { class: "trace-tool-call" },

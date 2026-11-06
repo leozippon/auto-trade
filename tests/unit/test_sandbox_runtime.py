@@ -759,7 +759,7 @@ def test_filesystem_artifact_store_registers_explicit_revision_identity(tmp_path
         step_id="step_001",
     )
     assert frozen.source_step_id == "step_001"
-    metadata = json.loads((tmp_path / "store/frozen/artifact_001/revision.json").read_text(encoding="utf-8"))
+    metadata = json.loads((tmp_path / "store/registered/artifact_001/revision.json").read_text(encoding="utf-8"))
     assert metadata["revision_id"] == "revision_001"
     assert metadata["artifact_id"] == "artifact_001"
 

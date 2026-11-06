@@ -391,7 +391,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         task_id: str,
         run_id: str | None = Query(None),
     ) -> dict[str, object]:
-        """One sub-agent's own rounds, redacted like the parent projection."""
+        """One sub-agent's own turns, redacted like the parent projection."""
 
         if not traces.SUBAGENT_TASK_ID.fullmatch(task_id):
             raise HTTPException(status_code=400, detail="invalid sub-agent task id")
@@ -513,7 +513,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
         return _zip_response(members(), filename)
 
-    @app.get("/api/experiments/{experiment_id}/frozen/strategy.zip")
+    @app.get("/api/experiments/{experiment_id}/registered/strategy.zip")
     def get_registered_strategy(experiment_id: str) -> FileResponse:
         _experiment_dir(experiment_id)
         try:
@@ -522,7 +522,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
         except (KeyError, ValueError) as exc:
             raise HTTPException(status_code=404, detail="the experiment has no registered artifact") from exc
-        return _strategy_zip_response(strategy_dir, f"{experiment_id}__frozen.zip")
+        return _strategy_zip_response(strategy_dir, f"{experiment_id}__registered.zip")
 
     # ---- step tree ---------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/steps")

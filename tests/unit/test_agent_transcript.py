@@ -67,7 +67,7 @@ def test_every_event_lands_as_one_readable_block_named_by_the_run_ref(tmp_path: 
             "result": {"ok": True, "value": {"stdout": "ic=0.031\n", "exit_code": 0}},
         },
     )
-    writer.emit("subagent_tool", {"task_id": "task_1", "round": 2, "tool": "grep", "result": {"ok": True}})
+    writer.emit("subagent_tool", {"task_id": "task_1", "turn": 2, "tool": "grep", "result": {"ok": True}})
 
     transcript = tmp_path / "artifacts" / "transcripts" / "run_ref_x.txt"
     text = transcript.read_text(encoding="utf-8")
@@ -85,7 +85,7 @@ def test_every_event_lands_as_one_readable_block_named_by_the_run_ref(tmp_path: 
     assert "=== " in blocks[2] and " tool_call call=1 tool=shell id=call_1" in blocks[2].splitlines()[0]
     # Structured fields are indented JSON, one value per line.
     assert '"argv": [' in blocks[2] and '"stdout": "ic=0.031\\n"' in blocks[2]
-    assert "subagent_tool tool=grep task=task_1 round=2" in blocks[3].splitlines()[0]
+    assert "subagent_tool tool=grep task=task_1 turn=2" in blocks[3].splitlines()[0]
     # Host bookkeeping stays in the JSONL: no raw run id, no event ids.
     assert "run_raw" not in text and "event_id" not in text and "session_ref_ab" not in text
     jsonl = (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")

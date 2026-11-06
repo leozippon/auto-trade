@@ -248,19 +248,19 @@ def test_a_model_nominee_registers_with_its_seed_replicate_and_both_replay_forwa
         replicates=(1, 2),
     )
     record = pipeline.run_research_session()
-    gate = record["freeze_gate"]
+    gate = record["registration"]
     seeds = gate["seed_replicates"]
     assert gate["passed"] is True and gate["reasons"] == []
     # Nothing was declared, so no record states a declaration.
     assert seeds["trains_a_model"] is True and "deterministic" not in seeds
-    assert "deterministic" not in record["frozen"]
+    assert "deterministic" not in record["registered"]
     assert [entry["seed_line"] for entry in seeds["replicates"]] == [
         "main.py: SEED_BASE = 2000",
         "main.py: SEED_BASE = 3000",
     ]
     # Registration reads no score: no bar, and no mean over the seeds.
     assert "mean_information_ratio" not in seeds and "information_ratio_bar" not in seeds
-    frozen = record["frozen"]
+    frozen = record["registered"]
     assert [item["source_step_id"] for item in frozen["seed_replicates"]] == [
         "research_step_1",
         "research_step_2",
@@ -322,7 +322,7 @@ def _refused(
 
     pipeline, _evaluator = _experiment(tmp_path, candidates, outcome="deadline")
     record = pipeline.run_research_session()
-    assert record["frozen"] is None
+    assert record["registered"] is None
     assert record["experiment_end"]["status"] == "no_deliverable"
     rows = record["steps"]
     return check_registration(
@@ -336,7 +336,7 @@ def _refused(
 
 def test_a_model_nominee_without_a_replicate_is_refused(tmp_path: Path):
     gate = _refused(tmp_path, [(_source(1000), "full"), (_source(1000, swaps=3), "full")])
-    assert gate["reasons"] == ["freeze_too_few_seed_replicates"]
+    assert gate["reasons"] == ["registration_too_few_seed_replicates"]
     assert gate["seed_replicates"]["replicates"] == []
 
 
@@ -358,7 +358,7 @@ def test_a_replicate_that_is_not_the_nominee_on_another_seed_is_refused(
         [(_source(1000), "full"), (_source(3000, swaps=2), "full"), replicate],
         replicates=(2,),
     )
-    assert gate["reasons"] == ["freeze_seed_replicate_invalid"]
+    assert gate["reasons"] == ["registration_seed_replicate_invalid"]
     [entry] = gate["seed_replicates"]["replicates"]
     assert problem in entry["problem"]
 
@@ -371,8 +371,8 @@ def test_a_replicate_that_loses_does_not_hold_back_the_registration(tmp_path: Pa
         tmp_path, [(_source(1000), "full"), (_source(4000), "full")], replicates=(1,)
     )
     record = pipeline.run_research_session()
-    assert record["freeze_gate"]["passed"] is True
-    assert [item["source_step_id"] for item in record["frozen"]["seed_replicates"]] == [
+    assert record["registration"]["passed"] is True
+    assert [item["source_step_id"] for item in record["registered"]["seed_replicates"]] == [
         "research_step_1"
     ]
 
@@ -390,11 +390,11 @@ def test_a_deterministic_model_nominee_owes_no_replicate(tmp_path: Path, replica
         deterministic=True,
     )
     record = pipeline.run_research_session()
-    gate = record["freeze_gate"]
+    gate = record["registration"]
     seeds = gate["seed_replicates"]
     assert gate["passed"] is True and gate["reasons"] == []
     assert seeds["trains_a_model"] is True and seeds["deterministic"] is True
-    assert record["frozen"]["deterministic"] is True
+    assert record["registered"]["deterministic"] is True
 
 
 def test_a_deterministic_nominee_is_held_to_its_replicates_validity(tmp_path: Path):
@@ -404,7 +404,7 @@ def test_a_deterministic_nominee_is_held_to_its_replicates_validity(tmp_path: Pa
         replicates=(2,),
         deterministic=True,
     )
-    assert gate["reasons"] == ["freeze_seed_replicate_invalid"]
+    assert gate["reasons"] == ["registration_seed_replicate_invalid"]
     assert gate["seed_replicates"]["deterministic"] is True
 
 
@@ -417,11 +417,11 @@ def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Pa
         tmp_path, [(_source(1000, fit=False), "full"), (_source(2000, fit=False), "full")]
     )
     record = pipeline.run_research_session()
-    gate = record["freeze_gate"]
+    gate = record["registration"]
     assert gate["passed"] is True
     assert gate["seed_replicates"]["trains_a_model"] is False
     assert gate["seed_replicates"]["replicates"] == []
-    assert "seed_replicates" not in record["frozen"]
+    assert "seed_replicates" not in record["registered"]
     research = len(evaluator.requests)
     forward = pipeline.run_forward()
     # One forward replay, the book's own.

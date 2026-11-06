@@ -103,7 +103,7 @@ def test_a_tampered_reading_is_named_and_fails_the_run(experiment: Path, tmp_pat
     registration's verdict are enough."""
 
     def tampered(records: list[dict]) -> None:
-        _record(records, "research_session")["freeze_gate"]["passed"] = False
+        _record(records, "research_session")["registration"]["passed"] = False
         forward = _record(records, "forward")
         block = forward["slices"]["forward"]
         block["lower_bound"] = math.nextafter(block["lower_bound"], 0.0)

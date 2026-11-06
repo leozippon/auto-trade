@@ -376,11 +376,11 @@ def _mandate(analysis: Mapping[str, object], start: str, end: str) -> dict[str, 
 
 def registered_mandate(analysis: Mapping[str, object], *, rules: AcceptanceRules) -> dict[str, object]:
     """The tracking mandate over a nominee's whole span (:func:`_mandate`)
-    and the ``freeze`` conditions it fails, judged only where the rules set a
+    and the ``mandate`` conditions it fails, judged only where the rules set a
     mandate: the registration's one reading of the strategy's own series."""
 
     measured = {"mandate": _mandate(analysis, "", "")}
-    return {**measured, "reasons": judge(ConditionStage.FREEZE, measured, rules.mandate, rules)}
+    return {**measured, "reasons": judge(ConditionStage.MANDATE, measured, rules.mandate, rules)}
 
 
 def forward_mde(tracking_error: float, forward_days: int) -> float:
@@ -647,7 +647,7 @@ class ConditionStage(StrEnum):
 
     NOMINATION = "nomination"
     REGISTRATION = "registration"
-    FREEZE = "freeze"
+    MANDATE = "mandate"
     SEEDS = "seeds"
 
 
@@ -660,17 +660,17 @@ class ConditionReason(StrEnum):
     NON_FINITE_MAX_DRAWDOWN = "non_finite_max_drawdown"
     NON_FINITE_SHARPE = "non_finite_sharpe"
     MAX_DRAWDOWN_ABOVE_LIMIT = "max_drawdown_above_limit"
-    FREEZE_NEEDS_FULL_SPAN_VALIDATION = "freeze_needs_full_span_validation"
-    FREEZE_NOMINEE_IS_CONTROL = "freeze_nominee_is_control"
-    FREEZE_TRACKING_ERROR_ABOVE_CAP = "freeze_tracking_error_above_cap"
-    FREEZE_BETA_OUTSIDE_BAND = "freeze_beta_outside_band"
-    FREEZE_SEED_REPLICATE_INVALID = "freeze_seed_replicate_invalid"
-    FREEZE_TOO_FEW_SEED_REPLICATES = "freeze_too_few_seed_replicates"
+    REGISTRATION_NEEDS_FULL_SPAN_VALIDATION = "registration_needs_full_span_validation"
+    REGISTRATION_NOMINEE_IS_CONTROL = "registration_nominee_is_control"
+    REGISTRATION_TRACKING_ERROR_ABOVE_CAP = "registration_tracking_error_above_cap"
+    REGISTRATION_BETA_OUTSIDE_BAND = "registration_beta_outside_band"
+    REGISTRATION_SEED_REPLICATE_INVALID = "registration_seed_replicate_invalid"
+    REGISTRATION_TOO_FEW_SEED_REPLICATES = "registration_too_few_seed_replicates"
     # Not a condition's: what a registration that was never read off a
     # nominee records. The session read a node that is not one of its Steps;
     # the nominee's statistics could not be measured.
-    NOT_A_SESSION_STEP = "freeze_needs_a_step_of_this_session"
-    UNMEASURABLE = "freeze_unmeasurable"
+    NOT_A_SESSION_STEP = "registration_needs_a_step_of_this_session"
+    UNMEASURABLE = "registration_unmeasurable"
 
 
 class Condition(NamedTuple):
@@ -731,16 +731,16 @@ CONDITIONS: tuple[Condition, ...] = (
     Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_SHARPE, lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
     Condition(ConditionStage.NOMINATION, ConditionReason.MAX_DRAWDOWN_ABOVE_LIMIT, lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
     # How the nominee was registered (``experiment.check_registration``).
-    Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NEEDS_FULL_SPAN_VALIDATION, lambda m, t: m.get("span") == FULL_SPAN),
-    Condition(ConditionStage.REGISTRATION, ConditionReason.FREEZE_NOMINEE_IS_CONTROL, lambda m, t: m.get("control") is not True),
+    Condition(ConditionStage.REGISTRATION, ConditionReason.REGISTRATION_NEEDS_FULL_SPAN_VALIDATION, lambda m, t: m.get("span") == FULL_SPAN),
+    Condition(ConditionStage.REGISTRATION, ConditionReason.REGISTRATION_NOMINEE_IS_CONTROL, lambda m, t: m.get("control") is not True),
     # The tracking mandate over the nominee's span, when the rules set one.
-    Condition(ConditionStage.FREEZE, ConditionReason.FREEZE_TRACKING_ERROR_ABOVE_CAP, _within_cap, requires=_CAP),
-    Condition(ConditionStage.FREEZE, ConditionReason.FREEZE_BETA_OUTSIDE_BAND, _within_band, requires=_CAP),
+    Condition(ConditionStage.MANDATE, ConditionReason.REGISTRATION_TRACKING_ERROR_ABOVE_CAP, _within_cap, requires=_CAP),
+    Condition(ConditionStage.MANDATE, ConditionReason.REGISTRATION_BETA_OUTSIDE_BAND, _within_band, requires=_CAP),
     # The nominee's seed replicates (``experiment._seed_replicates``): a named
     # replicate that is not one, and a nominee that trains a model and names
     # none, unless the nomination declared its package deterministic.
-    Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_SEED_REPLICATE_INVALID, lambda m, t: not _refused_replicate(m)),
-    Condition(ConditionStage.SEEDS, ConditionReason.FREEZE_TOO_FEW_SEED_REPLICATES, lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
+    Condition(ConditionStage.SEEDS, ConditionReason.REGISTRATION_SEED_REPLICATE_INVALID, lambda m, t: not _refused_replicate(m)),
+    Condition(ConditionStage.SEEDS, ConditionReason.REGISTRATION_TOO_FEW_SEED_REPLICATES, lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
 )
 
 

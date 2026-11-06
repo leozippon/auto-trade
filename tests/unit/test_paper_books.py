@@ -132,7 +132,7 @@ def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_pa
     )
     record = json.loads((book.root / "book.json").read_text(encoding="utf-8"))
     copy = book.root / STRATEGY_COPY_NAME
-    source = experiment / "artifacts/strategy/frozen/strategy_research_abc"
+    source = experiment / "artifacts/strategy/registered/strategy_research_abc"
     assert book.strategy_path == copy / "output" / "main.py"
     assert book.models_dir is None
     assert record["artifact_fingerprint"] == artifact_fingerprint(copy / "output")
@@ -164,9 +164,9 @@ def test_a_registered_strategy_opens_its_book_once_and_an_experiment_without_one
     assert open_registered_book(tmp_path, experiment) == "exp"
     record = json.loads((root / "exp" / "book.json").read_text(encoding="utf-8"))
     assert (record["experiment_id"], record["artifact_id"], record["note"]) == (
-        "exp", "strategy_research_abc", "frozen"
+        "exp", "strategy_research_abc", "registered"
     )
-    assert record["candidate_source"] == "frozen"
+    assert record["candidate_source"] == "registered"
     opened = _book_files(root / "exp")
     assert open_registered_book(tmp_path, experiment) == "exp"  # an open book is left as it is
     assert _book_files(root / "exp") == opened
@@ -246,7 +246,7 @@ def _kill(root: Path, day: str = "20260105") -> None:
 def test_a_new_book_pins_its_verdict_rules(tmp_path: Path):
     book = _registered_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
-    assert record["schema_version"] == 3 and record["candidate_source"] == book.candidate_source == "frozen"
+    assert record["schema_version"] == 3 and record["candidate_source"] == book.candidate_source == "registered"
     rules = record["verdict_rules"]
     assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
     assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)

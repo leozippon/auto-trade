@@ -879,11 +879,11 @@ class WebuiBackendTest(unittest.TestCase):
 
     def test_registered_strategy_zip_contains_output_tree(self) -> None:
         self.assertEqual(
-            self.client.get("/api/experiments/exp_hitl/frozen/strategy.zip").status_code,
+            self.client.get("/api/experiments/exp_hitl/registered/strategy.zip").status_code,
             404,
         )
         self._build_hitl_experiment("exp_frozen", "forward")
-        response = self.client.get("/api/experiments/exp_frozen/frozen/strategy.zip")
+        response = self.client.get("/api/experiments/exp_frozen/registered/strategy.zip")
         self.assertEqual(response.status_code, 200)
         archive = zipfile.ZipFile(io.BytesIO(response.content))
         self.assertEqual(archive.namelist(), ["output/main.py"])

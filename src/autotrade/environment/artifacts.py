@@ -181,7 +181,7 @@ class FilesystemArtifactStore:
     def __init__(self, root: str | Path) -> None:
         self.root = Path(root).resolve()
         self.revisions_root = self.root / "revisions"
-        self.registered_root = self.root / "frozen"
+        self.registered_root = self.root / "registered"
         self.objects_root = self.root / OBJECTS_DIR
         self.revisions_root.mkdir(parents=True, exist_ok=True)
         self.registered_root.mkdir(parents=True, exist_ok=True)

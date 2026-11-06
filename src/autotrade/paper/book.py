@@ -64,7 +64,7 @@ BOOK_NAME = "book.json"
 BOOK_SCHEMA_VERSION = 3
 STRATEGY_COPY_NAME = "strategy"
 # What every book trades, as its ``candidate_source`` records it.
-CANDIDATE_SOURCE = "frozen"
+CANDIDATE_SOURCE = "registered"
 # Books open at once; a killed book does not count.
 BOOK_CAP = 4
 # The capital, in CNY, a new book starts with unless its creator names another,
@@ -158,7 +158,7 @@ def create_book(
             f"choose {candidate['artifact_id']}"
         )
     require_book_place(root.parent, root.name)
-    source = experiment / "artifacts" / "strategy" / "frozen" / artifact_id
+    source = experiment / "artifacts" / "strategy" / "registered" / artifact_id
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"registered artifact has no output/main.py: {source}")
 

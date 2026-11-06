@@ -139,13 +139,13 @@ def check_experiment(experiment: Path) -> list[Judgement]:
 
     for record in records:
         kind = record.get("record_type")
-        if kind == "research_session" and isinstance(record.get("freeze_gate"), dict):
+        if kind == "research_session" and isinstance(record.get("registration"), dict):
             steps = {str(row["step_id"]): row for row in record["steps"]}
             nominee = steps[str(record["nominated_step_id"])]
-            seeds = record["freeze_gate"].get("seed_replicates") or {}
+            seeds = record["registration"].get("seed_replicates") or {}
             judge(
                 "check_registration",
-                record["freeze_gate"],
+                record["registration"],
                 check_registration(
                     nominee,
                     experiment_dir=experiment,

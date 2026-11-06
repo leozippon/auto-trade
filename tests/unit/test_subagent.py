@@ -3086,14 +3086,14 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
     ).run("audit", role="general-purpose")
     assert result["status"] == "completed" and result["llm_calls"] == 3
     assert result["summary"] == "简洁结论" and result["tool_calls"] == 1
-    assert result["truncated"] is True and result["truncated_rounds"] == 1
+    assert result["truncated"] is True and result["truncated_turns"] == 1
     continued = empty.calls[1]["messages"]
     assert continued[-1].role == "user"
     observation = json.loads(str(continued[-1].content))
     assert observation["observation"] == "output_truncated"
     assert observation["max_tokens"] == 500 and "被截断" in observation["message"]
     cut_events = [payload for event, payload in events if event == "subagent_output_truncated"]
-    assert [(e["round"], e["continuation"], e["max_tokens"]) for e in cut_events] == [(1, 1, 500)]
+    assert [(e["turn"], e["continuation"], e["max_tokens"]) for e in cut_events] == [(1, 1, 500)]
 
     # Every continuation exhausted on reasoning too: the launch failed, and
     # it says so instead of paying for one more apology turn.
@@ -3109,7 +3109,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
     ).run("audit", role="Explore")
     assert result["status"] == "error" and result["summary"] == ""
     assert result["llm_calls"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
-    assert result["truncated_rounds"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
+    assert result["truncated_turns"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
     assert "output budget exhausted" in result["error"] and result["tool_calls"] == 0
 
 
@@ -3234,7 +3234,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     result = engine.run("dig", role="Explore")
-    assert result["rounds"] == 4 and result["summary"] == "final"
+    assert result["turns"] == 4 and result["summary"] == "final"
     # Turn 2 of 4 opens with the wrap-up notice; turns 1 and 3 do not.
     second = busy.calls[1]["messages"]
     assert second[-1].role == "user" and "还剩 3 回合模型调用（上限 4）" in str(second[-1].content)
@@ -3245,8 +3245,8 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
         {
             "task_id": result["task_id"],
             "role": "Explore",
-            "round": 2,
-            "rounds_limit": 4,
+            "turn": 2,
+            "turns_limit": 4,
             "parent_call_id": None,
         }
     ]
@@ -3270,7 +3270,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     result = SubAgentEngine(
         llm=short, tools=ToolRegistry([DeclaredReadOnlyShell()])
     ).run("dig", role="Explore", max_turns=2)
-    assert result["rounds"] == 2 and result["summary"] == "done"
+    assert result["turns"] == 2 and result["summary"] == "done"
     assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])
 
 
@@ -3339,7 +3339,7 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
     compactions = [payload for event, payload in events if event == "subagent_context_compaction"]
     assert [payload["task_id"] for payload in compactions] == [first["task_id"], second["task_id"]]
     record = compactions[0]
-    assert record["role"] == "Explore" and record["round"] == 2
+    assert record["role"] == "Explore" and record["turn"] == 2
     assert record["compaction"]["status"] == "ok" and record["compaction"]["messages_before"] == 4
     assert "status" not in record and "summary" not in record
     # ``max_calls=1`` per conversation: the second child compacted too, so
@@ -3383,9 +3383,9 @@ def test_runner_hands_its_compactor_to_children_and_honours_max_turns() -> None:
     assert started.ok is True
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
     wrap = [payload for event, payload in events if event == "subagent_wrap_up"]
-    assert [(payload["round"], payload["rounds_limit"]) for payload in wrap] == [(1, 3)]
+    assert [(payload["turn"], payload["turns_limit"]) for payload in wrap] == [(1, 3)]
     ended = [payload for event, payload in events if event == "subagent"]
-    assert ended[-1]["rounds"] == 3 and ended[-1]["summary"] == "done"
+    assert ended[-1]["turns"] == 3 and ended[-1]["summary"] == "done"
 
 
 def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
@@ -3484,8 +3484,8 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
         for message in llm.calls[-1]["messages"]
         if '"subagent_completed"' in str(message.content or "")
     )
-    assert completed["truncated"] is True and completed["truncated_rounds"] == 1
-    assert completed["rounds"] == 1 and completed["tool_calls"] == 0
+    assert completed["truncated"] is True and completed["truncated_turns"] == 1
+    assert completed["turns"] == 1 and completed["tool_calls"] == 0
     assert completed["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))
 
 
@@ -3572,7 +3572,7 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
     assert result["llm_errors"] == 1 and result["llm_calls"] == 2 and "error" not in result
     traced = [payload for event, payload in events if event == "subagent_llm_error"]
     assert len(traced) == 1
-    assert traced[0]["round"] == 1 and traced[0]["parent_call_id"] == "call_p"
+    assert traced[0]["turn"] == 1 and traced[0]["parent_call_id"] == "call_p"
     assert "invalid stream" in traced[0]["llm_error"]
     assert "error_type" not in traced[0]
     # The runner's observation forwards the counter so the parent sees it.
@@ -3886,7 +3886,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source="本回合推理内容")
     )
     assert "建议补数后重跑" in summary
-    assert result["rounds"] == 1 and result["llm_calls"] == 2
+    assert result["turns"] == 1 and result["llm_calls"] == 2
     # The finalize call is traced like any turn instead of vanishing.
     finalize = [
         payload
@@ -3894,7 +3894,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         if event == "subagent_llm" and payload.get("finalize")
     ]
     assert len(finalize) == 1
-    assert finalize[0]["round"] == 1 and finalize[0]["tool_names"] == []
+    assert finalize[0]["turn"] == 1 and finalize[0]["tool_names"] == []
     assert [payload["status"] for event, payload in events if event == "subagent"] == [
         "exhausted"
     ]
@@ -4206,17 +4206,17 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
         return started, ended
 
     started, ended = _run({})
-    assert (started["thinking"], started["rounds_limit"]) == ("low", 3)
-    assert (ended["thinking"], ended["rounds_limit"]) == ("low", 3)
+    assert (started["thinking"], started["turns_limit"]) == ("low", 3)
+    assert (ended["thinking"], ended["turns_limit"]) == ("low", 3)
     assert isinstance(started["thinking_applied"], bool)
     started, ended = _run({"thinking": "xhigh", "max_turns": 5})
-    assert (started["thinking"], started["rounds_limit"]) == ("xhigh", 5)
-    assert (ended["thinking"], ended["rounds_limit"]) == ("xhigh", 5)
+    assert (started["thinking"], started["turns_limit"]) == ("xhigh", 5)
+    assert (ended["thinking"], ended["turns_limit"]) == ("xhigh", 5)
 
     # Untouched roles still resolve to the global defaults.
     monkeypatch.undo()
     started, _ended = _run({})
-    assert (started["thinking"], started["rounds_limit"]) == (
+    assert (started["thinking"], started["turns_limit"]) == (
         module.DEFAULT_SUBAGENT_THINKING,
         module.DEFAULT_SUBAGENT_MAX_TURNS,
     )
@@ -4403,7 +4403,7 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
         {
             "task_id": result["task_id"],
             "role": "general-purpose",
-            "round": 2,
+            "turn": 2,
             "chars": len(text),
             "delivery": "delivered",
             "parent_call_id": "call_p",
@@ -4474,7 +4474,7 @@ def test_agent_message_action_steers_running_and_queued_children() -> None:
     assert started.wait(3)
     try:
         ack = runner.tools.invoke("agent", {"action": "message", "task_id": slow_id, "text": " 提前收尾 "})
-        assert ack.ok and ack.value == {"status": "queued", "task_id": slow_id, "delivered_at_round": None}
+        assert ack.ok and ack.value == {"status": "queued", "task_id": slow_id, "delivered_at_turn": None}
         ack = runner.tools.invoke("agent", {"action": "message", "task_id": queued_id, "text": "先看 README"})
         assert ack.ok and ack.value["child_queued"] is True
         # Bounded and sanitised like a brief; unknown ids are typed errors.
@@ -4498,7 +4498,7 @@ def test_agent_message_action_steers_running_and_queued_children() -> None:
         ("user", f"{STEER_MESSAGE_LABEL} 先看 README"),
     ]
     steers = [payload for event, payload in events if event == "subagent_steer"]
-    assert [(p["task_id"], p["delivery"], p.get("round")) for p in steers] == [
+    assert [(p["task_id"], p["delivery"], p.get("turn")) for p in steers] == [
         (slow_id, "queued", None),
         (queued_id, "queued", None),
         (slow_id, "delivered", 2),

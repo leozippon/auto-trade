@@ -229,8 +229,8 @@ def _session_record(experiment_id: str, **fields: object) -> dict[str, object]:
         "finish_reason": "llm_agent_finish_session",
         "reason": "the session's reason",
         "nominated_step_id": None,
-        "freeze_gate": None,
-        "frozen": None,
+        "registration": None,
+        "registered": None,
         "experiment_end": None,
         "attempts": 1,
         "budget_used": {
@@ -314,10 +314,10 @@ def build_experiment(
                     ],
                 },
             }
-        output = directory / "artifacts/strategy/frozen/strategy_research_abc/output"
+        output = directory / "artifacts/strategy/registered/strategy_research_abc/output"
         output.mkdir(parents=True)
         (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
-        frozen = {
+        registered = {
             "artifact_id": "strategy_research_abc",
             "output_path": str(output),
             "models_path": None,
@@ -364,8 +364,8 @@ def build_experiment(
                 finish_reason="validation_period_complete",
                 steps=steps,
                 nominated_step_id=nominee["step_id"],
-                freeze_gate=gate,
-                frozen=frozen,
+                registration=gate,
+                registered=registered,
             )
         )
         current = "forward"

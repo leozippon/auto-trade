@@ -879,7 +879,7 @@ def _research_result(records: Sequence[Mapping[str, object]]) -> str | None:
     row = registered_record(records)
     if row is None:
         return None
-    return _result_name(_mapping(row.get("frozen")).get("research_result_ref"))
+    return _result_name(_mapping(row.get("registered")).get("research_result_ref"))
 
 
 def _record_alpha(params: Mapping[str, object]) -> float:
@@ -1107,7 +1107,7 @@ def _research_session_view(
     directory: Path, identity: PublicIdentity, record: Mapping[str, object]
 ) -> dict[str, object]:
     steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
-    gate = _mapping(record.get("freeze_gate"))
+    gate = _mapping(record.get("registration"))
     run_id = str(record.get("run_id") or "")
     multiplier = _cost_stress_multiplier(directory)
     return {
@@ -1143,7 +1143,7 @@ def _research_session_view(
             if gate
             else None
         ),
-        "registered": bool(record.get("frozen")),
+        "registered": bool(record.get("registered")),
         "experiment_end": identity.public_record(record["experiment_end"])  # type: ignore[arg-type]
         if isinstance(record.get("experiment_end"), Mapping)
         else None,
@@ -1161,7 +1161,7 @@ def _registered_view(
     row = registered_record(records)
     if row is None:
         return None
-    block = _mapping(row.get("frozen"))
+    block = _mapping(row.get("registered"))
     fit = _mapping(block.get("fit_plan"))
     return {
         "session_key": row.get("session_key"),
@@ -1180,7 +1180,7 @@ def _registered_view(
         # Registered beside replicates: the gate's reading of them, for the seed
         # mean beside the nominee's IR and their threshold. Absent on one seed.
         "seed_replicates": (
-            _seed_gate_view(identity, _mapping(row.get("freeze_gate")).get("seed_replicates"))
+            _seed_gate_view(identity, _mapping(row.get("registration")).get("seed_replicates"))
             if block.get("seed_replicates")
             else None
         ),
@@ -1287,7 +1287,7 @@ def registered_strategy_dir(root: Path, experiment_id: str) -> Path:
 
     directory = resolve_experiment_dir(root, experiment_id)
     row = registered_record(read_ledger_records(directory))
-    value = _mapping(_mapping(row).get("frozen")).get("output_path")
+    value = _mapping(_mapping(row).get("registered")).get("output_path")
     if not isinstance(value, str) or not value:
         raise KeyError("the experiment has no registered artifact")
     return recorded_path(directory, value)

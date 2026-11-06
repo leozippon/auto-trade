@@ -146,7 +146,7 @@ def _sheet_book(book: _Book, note: str = "") -> object:
 
     return type("SheetBook", (), {
         "root": book.root.resolve(), "note": note,
-        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "frozen",
+        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "registered",
         "profile": PROFILE, "schedule": StrategySchedule(),
     })()
 

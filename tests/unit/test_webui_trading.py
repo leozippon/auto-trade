@@ -105,7 +105,7 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
     payload = trading.book_payload(tmp_path, BOOK)
     assert payload["state"] == "ok"
     assert payload["book"] == {
-        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "frozen",
+        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "registered",
         "note": "参考簿（观察中）", "initial_cash": 100_000.0,
     }
     assert (payload["start_date"], payload["settled_through"]) == ("20260105", "20260105")
@@ -490,7 +490,7 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     assert (alpha["start_date"], alpha["initial_cash"], alpha["state"]) == ("20260105", 100_000.0, "ok")
     # The card names where the candidate came from and draws the book's own
     # curve; the maximum drawdown the day count gates belongs to the book page.
-    assert alpha["candidate_source"] == "frozen" and "max_drawdown" not in alpha
+    assert alpha["candidate_source"] == "registered" and "max_drawdown" not in alpha
     # 持仓 is the one figure every settled book has: the lines its own 当前持仓
     # panel lists, absent rather than zero before the first snapshot.
     assert alpha["position_count"] == len(snapshot["positions"])

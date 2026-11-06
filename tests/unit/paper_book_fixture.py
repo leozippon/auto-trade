@@ -28,7 +28,7 @@ def write_book_record(root: Path, **overrides: object) -> None:
     """The ``book.json`` fields the console and the migration read."""
     root.mkdir(parents=True, exist_ok=True)
     record = {
-        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "frozen",
+        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "registered",
         "note": "参考簿（观察中）", "strategy_path": "strategy/main.py",
         "profile": {"initial_cash": PROFILE.initial_cash}, "schedule": {"inference_time": "08:30"},
         "raw_dir": "/private/lake", **overrides,

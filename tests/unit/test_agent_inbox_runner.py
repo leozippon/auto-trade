@@ -128,7 +128,7 @@ def test_before_llm_applies_guidance_without_system_or_manifest(tmp_path: Path) 
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             )
         ]
     )
@@ -171,11 +171,11 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
             ProviderResponse(
                 tool_calls=(
                     ToolCall("w", "write_file", {"path": "output/main.py"}),
-                    ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),
+                    ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("done", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("done", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -234,11 +234,11 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
                 tool_calls=(
                     ToolCall("w", "write_file", {}),
                     ToolCall("g", "grep", {}),
-                    ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),
+                    ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("done", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("done", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -282,7 +282,7 @@ def test_non_interrupt_after_llm_waits_for_tool_pairing(tmp_path: Path) -> None:
         [
             ProviderResponse(tool_calls=(ToolCall("g", "grep", {}),)),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -320,7 +320,7 @@ def test_after_parallel_readonly_applies_before_next_llm(tmp_path: Path) -> None
                 tool_calls=(ToolCall("a", "glob", {}), ToolCall("b", "grep", {}))
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -364,7 +364,7 @@ def test_subagent_does_not_consume_inbox_until_parent_returns(tmp_path: Path) ->
                 )
             ),
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             ),
         ]
     )
@@ -400,7 +400,7 @@ def test_session_inbox_hook_isolates_sessions_and_run_ids(tmp_path: Path) -> Non
     llm = ScriptedLLM(
         [
             ProviderResponse(
-                tool_calls=(ToolCall("f", "test", {"outcome": "freeze", "node_id": node_id}),)
+                tool_calls=(ToolCall("f", "test", {"outcome": "register", "node_id": node_id}),)
             )
         ]
     )

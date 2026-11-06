@@ -702,7 +702,7 @@ class RegistrationTest(unittest.TestCase):
             year = session.validate_one("year", _strategy("1"), span="Y2")["node_id"]
             registration = session.backtest.registration(year)
             self.assertFalse(registration["passed"])
-            self.assertIn("freeze_needs_full_span_validation", registration["reasons"])
+            self.assertIn("registration_needs_full_span_validation", registration["reasons"])
             # One full-span validation is enough: no count of validations, no
             # score and no other node's reading stands between it and a test.
             full = session.validate_one("full", _strategy("22"))["node_id"]
@@ -756,7 +756,7 @@ class ControlsTest(unittest.TestCase):
                 )
             registration = session.backtest.registration(str(control["node_id"]))
             self.assertFalse(registration["passed"])
-            self.assertIn("freeze_nominee_is_control", registration["reasons"])
+            self.assertIn("registration_nominee_is_control", registration["reasons"])
             # Rows name a node by the short handle the tools accept.
             self.assertEqual(cand["handle"], cand["result_name"])
 
@@ -1264,7 +1264,7 @@ class BatchValidateRunTest(unittest.TestCase):
                     self.assertAlmostEqual(reading[key], expected[key], places=6, msg=key)
                 self.assertIn("not a verdict", reading["note"])
                 flat = json.dumps(row)
-                for word in ("passed", "freeze_gate", "trials", "selection_statistics", "deflated"):
+                for word in ("passed", "registration", "trials", "selection_statistics", "deflated"):
                     self.assertNotIn(word, flat)
                 self.assertNotIn("vs_parent", row)
 
@@ -1366,7 +1366,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertLess(below["residual_reading"]["active_excess_at_cost_stress"], 0)
             self.assertGreater(above["residual_reading"]["active_excess_at_cost_stress"], 0)
             # A reading, not a condition: the node registers and is registered.
-            finished = session.finish.invoke({"outcome": "freeze", "node_id": below["node_id"]})
+            finished = session.finish.invoke({"outcome": "register", "node_id": below["node_id"]})
             self.assertTrue(finished.finish)
 
     def test_a_row_that_repeats_earlier_bytes_on_the_same_span_names_them(self) -> None:

@@ -3,7 +3,7 @@
 One JSONL file per experiment. The pipeline writes three record types:
 
 - ``research_session``: the experiment's one research session, its outcome and the
-  Steps of every attempt; it carries the experiment's ``frozen`` block when the
+  Steps of every attempt; it carries the experiment's ``registered`` block when the
   nominee registered, otherwise ``experiment_end``;
 - ``test_step``: one step of the experiment's validation record, appended by a
   session's ``test`` or by the host's completion (``validation_record``);
@@ -41,8 +41,9 @@ from autotrade.environment.runtime import (
     utc_now_iso,
 )
 
-# Stamped on every appended record; bump when the record shape changes.
-LEDGER_RECORD_SCHEMA_VERSION = 1
+# Stamped on every appended record; bump when the record shape changes. 2: the
+# research session record's ``registration`` and ``registered`` blocks.
+LEDGER_RECORD_SCHEMA_VERSION = 2
 
 
 class Stage(StrEnum):
@@ -212,10 +213,10 @@ def registered_record(records: Sequence[Mapping[str, object]]) -> dict[str, obje
     raises rather than letting a reader pick one.
     """
 
-    frozen = [record for record in research_records(records) if record.get("frozen")]
-    if len(frozen) > 1:
+    rows = [record for record in research_records(records) if record.get("registered")]
+    if len(rows) > 1:
         raise ValueError("the ledger holds more than one registration for one experiment")
-    return frozen[0] if frozen else None
+    return rows[0] if rows else None
 
 
 def forward_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
@@ -281,10 +282,10 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
     verdict = experiment_verdict(records)
     if verdict is None or verdict["status"] != VerdictStatus.REGISTERED_WITH_RECORD:
         return None
-    frozen = registered_record(records)
-    if frozen is None:
+    row = registered_record(records)
+    if row is None:
         raise ValueError("an experiment with a forward record has no registered record")
-    block = frozen["frozen"]
+    block = row["registered"]
     return {
         "artifact_id": str(block["artifact_id"]),
         "output_path": str(block["output_path"]),
@@ -305,7 +306,7 @@ class ExperimentLedger:
             raise ValueError(f"ledger record missing link keys: {missing}")
         if (
             record_type == "research_session"
-            and record.get("frozen")
+            and record.get("registered")
             and registered_record(self.read()) is not None
         ):
             raise ValueError("the experiment already registered an artifact; a second registration is refused")

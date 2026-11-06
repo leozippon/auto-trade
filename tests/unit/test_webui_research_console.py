@@ -197,7 +197,7 @@ def test_a_moved_experiment_serves_its_recorded_paths_from_where_it_now_lives(
     for route in ("equity", "style", "orders", "orders.csv"):
         response = client.get(f"/api/experiments/experiment/results/{name}/{route}")
         assert response.status_code == 200, route
-    assert client.get("/api/experiments/experiment/frozen/strategy.zip").status_code == 200
+    assert client.get("/api/experiments/experiment/registered/strategy.zip").status_code == 200
 
     (new_root / "experiment/artifacts/results" / name / "result.json").unlink()
     missing = client.get(f"/api/experiments/experiment/results/{name}/equity")
@@ -516,12 +516,12 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     block carries the same keys afterwards."""
 
     build_experiment(tmp_path, "researching", "research")
-    build_experiment(tmp_path, "frozen", "forward")
+    build_experiment(tmp_path, "registered", "forward")
     build_experiment(tmp_path, "judged", "registered_with_record")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["research_result"] is None
-    registered_ref = _records(tmp_path / "frozen")[0]["frozen"]["research_result_ref"]
-    assert rows["frozen"]["research_result"] == Path(str(registered_ref)).parent.name
+    registered_ref = _records(tmp_path / "registered")[0]["registered"]["research_result_ref"]
+    assert rows["registered"]["research_result"] == Path(str(registered_ref)).parent.name
 
     # The forward step states how the record will be read: the level, the
     # research and validation years, the step length and the threshold over the
@@ -611,7 +611,7 @@ def test_an_ended_experiment_is_read_off_its_ledger_and_never_judged_again(
 
     root = tmp_path / "experiments"
     for experiment_id, stage in (
-        ("frozen", "forward"),
+        ("registered", "forward"),
         ("recorded", "registered_with_record"),
         ("exhausted", "deadline"),
     ):
@@ -920,7 +920,7 @@ def test_an_experiment_without_a_readout_is_not_ranked(tmp_path: Path) -> None:
     ranking is empty, and the homepage draws no ranking panel."""
 
     build_experiment(tmp_path, "early", "research", alive=True)
-    build_experiment(tmp_path, "frozen", "forward", alive=True)
+    build_experiment(tmp_path, "registered", "forward", alive=True)
     rows = experiment_listing(tmp_path)["experiments"]
     assert ranking(rows) == []
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
@@ -1037,12 +1037,12 @@ def test_the_listing_carries_the_registration_and_the_record_so_far(tmp_path: Pa
     listing alone, and must read the same numbers the experiment page does."""
 
     build_experiment(tmp_path, "researching", "research")
-    build_experiment(tmp_path, "frozen", "forward")
+    build_experiment(tmp_path, "registered", "forward")
     build_experiment(tmp_path, "recorded", "registered_with_record")
     build_experiment(tmp_path, "fresh", "created")
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["registered_session"] is None
-    assert rows["frozen"]["registered_session"] == "research"
+    assert rows["registered"]["registered_session"] == "research"
     # An experiment without a recorded step has no record to read.
     assert rows["fresh"]["record"] is None and rows["researching"]["record"] is None
     record = rows["recorded"]["record"]
@@ -1086,7 +1086,7 @@ def test_the_create_form_refuses_a_geometry_the_worker_refuses(
 def test_the_step_tree_names_the_session_and_the_registered_node(tmp_path: Path) -> None:
     directory = build_experiment(tmp_path, "experiment", "forward")
     refs = AgentRefStore(directory)
-    frozen = _records(directory)[0]["frozen"]
+    frozen = _records(directory)[0]["registered"]
     output = Path(frozen["output_path"])
     tree = StepTree(directory / "steps")
     node_id = tree.record_step(
@@ -1100,7 +1100,7 @@ def test_the_step_tree_names_the_session_and_the_registered_node(tmp_path: Path)
     )
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
     records = ledger.read()
-    records[0]["frozen"]["source_step_id"] = node_id
+    records[0]["registered"]["source_step_id"] = node_id
     ledger.rewrite(records)
     [node] = step_tree_view(directory)["nodes"]
     assert node["session_key"] == "research"

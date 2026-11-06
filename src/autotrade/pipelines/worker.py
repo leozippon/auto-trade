@@ -1000,7 +1000,7 @@ def _terminal_status(
     ``paper_candidate`` are re-read from the ledger on every publish."""
 
     records = ledger.read()
-    frozen = registered_record(records)
+    registered = registered_record(records)
     return {
         "schema_version": 1,
         "state": ExperimentState.COMPLETED,
@@ -1010,7 +1010,7 @@ def _terminal_status(
         "completed_sessions": len(research_records(records))
         + sum(1 for record in records if record.get("record_type") == "forward"),
         "final_strategy_artifact": (
-            str(frozen["frozen"]["artifact_id"]) if frozen is not None else None  # type: ignore[index]
+            str(registered["registered"]["artifact_id"]) if registered is not None else None  # type: ignore[index]
         ),
         "verdict": experiment_verdict(records),
         "paper_candidate": paper_candidate(records),
