@@ -11,8 +11,9 @@ point.
 
 Two decisions are shared rather than per-round because the console runs rounds
 side by side and their verdicts only compare while they agree: BASE_OVERRIDES
-carries the research geometry, the account, the cost stress and the
-per-session budgets, and BASE_EXPECTED_DEFAULTS pins the console creation
+carries the account, the cost stress and the per-session budgets (the research
+geometry is the console's, `config.DEFAULT_RESEARCH_GEOMETRY`, unless a
+round's profile names another), and BASE_EXPECTED_DEFAULTS pins the console creation
 defaults every round relies on -- above all the model roles an experiment does not
 name, so a change of the console's model defaults must stop the launcher
 rather than silently move an experiment onto another model, and the residual
@@ -201,13 +202,6 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
 
 # What every round decides the same way. Values, not commentary.
 BASE_OVERRIDES: dict[str, object] = {
-    # Research on four July-June years, the twelve forward months after them,
-    # and a Held-out quarter the replay clips to the release end. Required by
-    # the console, and the geometry the prebuilt view caches are planned over.
-    "research_start": "20210701",
-    "research_end": "20250630",
-    "forward_end": "20260630",
-    "heldout_end": "20260930",
     # Sixty months behind the research-end decision view reach 2020-07, just
     # inside the 2020 floor of fundamentals and macro; part of every seed's
     # snapshot configuration.

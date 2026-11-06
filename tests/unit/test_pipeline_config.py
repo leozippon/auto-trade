@@ -36,7 +36,7 @@ from autotrade.pipelines.config import (
     acceptance_for,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, WEB_REQUIRED_PARAMS
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES, TEST_GEOMETRY
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
@@ -48,11 +48,12 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_max_tokens": 10_000,
     # Null: each conversation role compacts at its bound.
     "compact_token_threshold": None,
-    # Four July-June research years, a forward year, a Held-out quarter.
-    "research_start": "20210701",
-    "research_end": "20250630",
-    "forward_end": "20260630",
-    "heldout_end": "20260930",
+    # Ten August-July research years, a forward year, a Held-out quarter: the
+    # current rounds' geometry (scripts/experiments/_profiles.py).
+    "research_start": "20150801",
+    "research_end": "20250731",
+    "forward_end": "20260731",
+    "heldout_end": "20261031",
     "gpu_count": 1,
     "include_events": True,
     "include_intraday": False,
@@ -1070,6 +1071,8 @@ class WorkerEntryPointTest(unittest.TestCase):
 
 PIT_SEED_BASE_PARAMS = {
     "experiment_id": "seed_demo",
+    # The span the synthetic release covers.
+    **TEST_GEOMETRY.to_record(),
     "strategy_path": "configs/agent_output_template/main.py",
     "data_backend": "pit",
     "raw_dir": "data/raw",

@@ -8,6 +8,7 @@ loopback host or a Unix socket.
 
 from __future__ import annotations
 
+import copy
 import ipaddress
 import json
 import logging
@@ -49,6 +50,13 @@ from .prompt_preview import build_prompt_preview
 from .public_identity import PublicIdentity, omit_private_paths
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
+# The console's own log file under the repository root, size-rotated, beside
+# its stderr: the supervisor that keeps the console up discards stdout and
+# stderr. Not logs/webui/console.log, which a ZGCA instance appends the
+# console's stdout and stderr to (ops/zgca/remote.sh).
+CONSOLE_LOG = Path("logs/webui/webui.log")
+CONSOLE_LOG_MAX_BYTES = 10 * 1024 * 1024
+CONSOLE_LOG_BACKUPS = 4
 
 
 def is_loopback_host(host: str) -> bool:
@@ -909,6 +917,7 @@ def run(
     import signal
 
     import uvicorn
+    from uvicorn.config import LOGGING_CONFIG
 
     # Auto-reap detached workers so exited experiments never linger as zombies
     # (their liveness is judged via status.json pid checks).
@@ -917,10 +926,26 @@ def run(
     # callers (docker cleanup, nvidia-smi) parse stdout or check filesystem
     # state only; new code here must not rely on returncode/check=True.
     signal.signal(signal.SIGCHLD, signal.SIG_IGN)
+    log_file = Path(repo_root) / CONSOLE_LOG
+    log_file.parent.mkdir(parents=True, exist_ok=True)
+    log_config = copy.deepcopy(LOGGING_CONFIG)
+    log_config["formatters"]["file"] = {"format": "%(asctime)s %(levelname)s %(name)s: %(message)s"}
+    log_config["handlers"]["file"] = {
+        "class": "logging.handlers.RotatingFileHandler",
+        "formatter": "file",
+        "filename": str(log_file),
+        "maxBytes": CONSOLE_LOG_MAX_BYTES,
+        "backupCount": CONSOLE_LOG_BACKUPS,
+        "encoding": "utf-8",
+    }
+    # uvicorn.error, which the 5xx lines and escaped exceptions are logged
+    # on, propagates to uvicorn.
+    log_config["loggers"]["uvicorn"]["handlers"].append("file")
     options: dict[str, object] = {
         "app": create_app(repo_root, experiments_root),
         "access_log": False,
         "log_level": "warning",
+        "log_config": log_config,
     }
     if uds is not None:
         # Unix-socket bind: local access control is the parent directory's

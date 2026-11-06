@@ -636,7 +636,8 @@ _REJECTED_CREATES = (
     ({"reasoning_effort": "turbo"}, "reasoning_effort must be one of"),
     ({"events_datasets": ["not_a_dataset"]}, "unknown events_datasets"),
     ({"screen_min_price": -1.0}, "screen_min_price must be a non-negative finite number"),
-    ({"forward_end": "20270630"}, "forward_end must be 20260630"),
+    # Twelve months after the default research end, not a year past them.
+    ({"forward_end": "20270731"}, f"forward_end must be {DEFAULT_RESEARCH_GEOMETRY.forward_end}"),
 )
 
 

@@ -11,7 +11,10 @@ which mounted the memory hypothesis pack, left this file with the memory
 machinery on 2026-11-05; their ids are retired (`_round.RETIRED_IDS`). Every
 experiment was created stating `ablation_required` (false), a rule retired with the
 registration's ablation on 2026-11-05; the stamped value stays in their
-`params.json`, where readers accept and ignore it.
+`params.json`, where readers accept and ignore it. So do `sealed_years` 5 and
+`max_replay_years` 144, which they were also created with and which were
+retired with the sealed gate and the replay-year budget; this file no longer
+sends them, since creation refuses both.
 
 The pack states the direction and the host's sealed-gate paragraph states the
 rule; this file copies neither. Research runs ten August-July years,
@@ -108,17 +111,17 @@ EXPERIMENTS: dict[str, dict[str, object]] = {
 }
 
 ROUND = Round(
+    # Both experiments were created on 2026-11-03; the file is the record of
+    # what was run.
+    closed=True,
     experiments=EXPERIMENTS,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_TEN_YEAR_CSI1000,
         "initial_cash": 200_000,
         "permitted_boards": ["main", "gem"],
-        # The trailing five research years, 2020-08..2025-07, are sealed.
-        "sealed_years": 5,
         # This round's defaults. An experiment entry may override them at create.
         "batch_validate_max_concurrency": 3,
-        "max_replay_years": 144,
         "max_null_controls": 36,
         "max_api_spend_usd": 150.0,
         "max_llm_calls": 19_200,

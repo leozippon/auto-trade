@@ -28,7 +28,6 @@ from autotrade.environment.tools.report_issue import (
     issue_reports_path,
 )
 from autotrade.pipelines.config import (
-    DEFAULT_RESEARCH_GEOMETRY,
     OBSOLETE_KEYS,
     RETIRED_SWITCHES,
 )
@@ -44,7 +43,7 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES, TEST_GEOMETRY
 from tests.unit.test_webui_inject_message import _const_block, _fn
 from tests.unit.webui_research_experiment import (
     ENVIRONMENT_BLOCKED_REASON,
@@ -244,6 +243,20 @@ def test_a_sealed_gate_record_still_opens_its_forward_replay(tmp_path: Path, sta
     assert equity["exposure"]["strategy"]["long"][0] == pytest.approx(0.9)
     orders = client.get(f"/api/experiments/experiment/results/{forward['result']}/orders").json()
     assert orders["row_count"] == 2
+    # Its sealed reading, and the sealed replay it was read off, which the
+    # record names and the console therefore serves.
+    sealed = record["sealed"]
+    assert forward["sealed"] == {
+        "label": "Y4",
+        "start": sealed["start"],
+        "end": sealed["end"],
+        "result": Path(sealed["result_ref"]).parent.name,
+        "residual_information_ratio": sealed["slice"]["residual_information_ratio"],
+        "bar": sealed["slice"]["bar"],
+        "years": sealed["slice"]["years"],
+    }
+    for route in ("equity", "style", "orders"):
+        assert client.get(f"/api/experiments/experiment/results/{forward['sealed']['result']}/{route}").status_code == 200
     if status == "graduated":
         assert detail["verdict"]["reasons"] == []
         assert detail["paper_candidate"] == {"artifact_id": "strategy_research_abc"}
@@ -790,6 +803,8 @@ def test_an_ended_experiment_is_read_off_its_ledger_and_never_judged_again(
     recorded = _records(root / "recorded")[-1]
     assert details["recorded"]["forward"]["readout"] == recorded["readout"]
     assert rows["recorded"]["record"]["steps"] == recorded["readout"]["record"]["steps"]
+    # Only a sealed-gate record carries a sealed reading for the page to show.
+    assert details["recorded"]["forward"]["sealed"] is None and details["refused"]["forward"]["sealed"]
 
 
 def test_a_page_poll_keeps_one_request_in_flight() -> None:
@@ -1233,7 +1248,7 @@ def test_the_create_form_refuses_a_geometry_the_worker_refuses(
         json={
             "params": {
                 "experiment_id": "geometry",
-                **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+                **TEST_GEOMETRY.to_record(), **CREATE_RULES,
                 **patch,
             }
         },

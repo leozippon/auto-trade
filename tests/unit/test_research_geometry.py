@@ -20,7 +20,7 @@ import pytest
 from autotrade.common.time import CN_TZ
 from autotrade.pipelines import calendar
 from autotrade.pipelines.calendar import ResearchGeometry, load_sse_trading_days
-from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
+from tests.unit.acceptance_fixture import TEST_GEOMETRY
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -41,7 +41,7 @@ def test_the_default_geometry_on_the_sse_calendar() -> None:
     if not (raw / "trade_cal" / "exchange=SSE").is_dir():
         pytest.skip("the SSE trade calendar is not in this checkout's data lake")
     release = [day for day in load_sse_trading_days(raw) if day <= "20260911"]
-    geometry = DEFAULT_RESEARCH_GEOMETRY
+    geometry = TEST_GEOMETRY
 
     def count(slot: calendar.Slot) -> int:
         return sum(1 for day in release if slot.start <= day <= slot.end)
@@ -73,7 +73,7 @@ def test_each_slot_starts_the_instant_the_previous_one_ends() -> None:
     the same rows as one long slot."""
 
     for geometry, release_end in (
-        (DEFAULT_RESEARCH_GEOMETRY, "20260911"),
+        (TEST_GEOMETRY, "20260911"),
         (ResearchGeometry("20190701", "20220630", "20230630", "20241231"), "20260911"),
     ):
         slots = (
@@ -110,7 +110,7 @@ def test_a_misaligned_or_disordered_geometry_is_refused(
     change: dict[str, object], message: str
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        dataclasses.replace(DEFAULT_RESEARCH_GEOMETRY, **change)
+        dataclasses.replace(TEST_GEOMETRY, **change)
 
 
 def test_whole_years_follow_the_start_month_and_a_leap_day_boundary() -> None:
@@ -155,7 +155,7 @@ def test_whole_years_follow_the_start_month_and_a_leap_day_boundary() -> None:
 def test_heldout_is_clipped_to_the_release_and_refused_below_what_grading_reads() -> None:
     from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 
-    geometry = DEFAULT_RESEARCH_GEOMETRY
+    geometry = TEST_GEOMETRY
     whole = geometry.heldout(_weekdays("20261231"))
     assert (whole.end, whole.requested_end, whole.truncation_reason) == ("20260930", "20260930", None)
     clipped = geometry.heldout(_weekdays("20260911"))

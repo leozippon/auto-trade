@@ -102,14 +102,17 @@ BATCH_VALIDATE_MAX_CANDIDATES = 6
 # the host.
 DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY = 3
 
-# Research on four July-June years, a twelve-month forward test after them,
+# Research on ten August-July years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
-# (docs/PIPELINE_DESIGN.md). The prebuilt view cache is planned over it.
+# (docs/PIPELINE_DESIGN.md): the current rounds' geometry
+# (scripts/experiments/_profiles.py, FUND_TITLE_TEN_YEAR), which the console's
+# create form offers and the round launcher sends unless a round names another.
+# The prebuilt view cache is planned over it.
 DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
-    research_start="20210701",
-    research_end="20250630",
-    forward_end="20260630",
-    heldout_end="20260930",
+    research_start="20150801",
+    research_end="20250731",
+    forward_end="20260731",
+    heldout_end="20261031",
 )
 
 # The exploration prebuilt view cache an experiment hardlinks completed views from

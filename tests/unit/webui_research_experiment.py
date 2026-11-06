@@ -28,7 +28,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import FULL_SPAN
-from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY, AcceptanceRules
+from autotrade.pipelines.config import AcceptanceRules
 from autotrade.pipelines.experiment import check_registration
 from autotrade.pipelines.hitl_state import (
     ControlState,
@@ -46,7 +46,7 @@ from autotrade.pipelines.verdict import (
     holder_readings,
     residual_reading,
 )
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
 
 STAGES = (
     "created",
@@ -67,7 +67,7 @@ ENVIRONMENT_BLOCKED_REASON = (
     "daily Validation failed: ArrowTypeError: Unable to merge: Field dataset has "
     "incompatible types: large_string vs string"
 )
-GEOMETRY = DEFAULT_RESEARCH_GEOMETRY
+GEOMETRY = TEST_GEOMETRY
 # Worker-accepted parameters of a console-created experiment.
 PARAMS: dict[str, object] = {
     **GEOMETRY.to_record(),
@@ -534,8 +534,10 @@ def build_experiment(
             sealed_analysis = _analysis(sealed_ref)
             sealed_end = sealed_analysis["strategy_daily"][-1][0]
             reading = residual_reading(sealed_analysis, start=SEALED[0], end=sealed_end, alpha=RULES.alpha)
-            reasons = [] if reading["residual_information_ratio"] >= reading["threshold"] else ["sealed_residual_ir_below_bar"]
-            thresholds = {"alpha": RULES.alpha, "bar": reading["threshold"]}
+            # That code named the threshold ``bar``.
+            reading["bar"] = reading.pop("threshold")
+            reasons = [] if reading["residual_information_ratio"] >= reading["bar"] else ["sealed_residual_ir_below_bar"]
+            thresholds = {"alpha": RULES.alpha, "bar": reading["bar"]}
             sealed = {
                 "start": SEALED[0],
                 "end": sealed_end,

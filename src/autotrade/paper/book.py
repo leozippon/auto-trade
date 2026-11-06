@@ -21,10 +21,12 @@ candidate, and an ``incubating`` book a node an operator incubated, whose
 source history is the replay the incubation recorded. Either way creation
 pins the rules its Paper verdict is read by
 (``paper/verdict.py``), so a later change cannot move a book already trading,
-and the boards its account may buy on, in its Broker profile: the boards its
-incubation replayed on, else the experiment's stamp, else those the book's initial
-cash qualifies for. The book's Broker and its verdict's random baseline both
-read that one field.
+and the boards its account may buy on, in its Broker profile: those of its
+source -- the boards its incubation replayed on, else the experiment's stamp,
+else every board -- that the book's own initial cash qualifies for
+(``broker.default_permitted_boards``), so a Paper account opened with less capital than
+its experiment does not keep the STAR Market or the Beijing exchange. The
+book's Broker and its verdict's random baseline both read that one field.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from autotrade.common.records import (
 from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
+from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.replay.curve import result_curve
 from autotrade.environment.sandbox import GpuMode, SandboxConfig, SandboxSpec
@@ -150,14 +153,15 @@ def create_book(
 
     A ``frozen`` book (and a ``graduated`` one, under the sealed-gate rules)
     trades the experiment's Paper candidate and copies the replay its forward record
-    names; it buys on the experiment's stamped boards, or on those its initial cash
-    qualifies for when the experiment has none. An
+    names; it buys on the experiment's stamped boards (every board when the
+    experiment has none). An
     ``incubating`` book trades the artifact the caller incubated -- the
     caller has checked it may -- copies the replay ``source_record`` names,
     in the forward record's shape (``result_ref`` inside the experiment
     directory and ``replay.heldout_start``), and buys on the
     ``permitted_boards`` that replay ran on; both are given exactly for that
-    track. Every book starts with ``initial_cash``, not the experiment's own. A
+    track. Every book starts with ``initial_cash``, not the experiment's own,
+    and keeps only the boards that capital qualifies for. A
     frozen or incubating book is refused while ``BOOK_CAP`` other
     operator-opened books beside it are not killed. Every track is refused, before anything
     is written, when the experiment reads fundamentals and the PIT fundamental
@@ -211,8 +215,9 @@ def create_book(
     )
     profile = options.rolling.broker_profile
     if permitted_boards is None:
-        permitted_boards = profile.permitted_boards or default_permitted_boards(profile.initial_cash)
-    profile = replace(profile, permitted_boards=tuple(permitted_boards))
+        permitted_boards = profile.permitted_boards or BOARDS
+    eligible = default_permitted_boards(profile.initial_cash)
+    profile = replace(profile, permitted_boards=tuple(board for board in permitted_boards if board in eligible))
     sandbox = strategy_sandbox_from_spec(
         options.agent_sandbox, **strategy_boundary(options.rolling)
     )

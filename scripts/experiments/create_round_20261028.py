@@ -119,8 +119,9 @@ ROUND = Round(
         "batch_validate_max_concurrency": 4,
         "reasoning_effort": "xhigh",
         # Three times round 20261027's budgets (the console defaults, and
-        # BASE_OVERRIDES for the session's minutes and model calls).
-        "max_replay_years": 288,
+        # BASE_OVERRIDES for the session's minutes and model calls). It also
+        # sent max_replay_years 288, a budget retired on 2026-11-06 that its
+        # experiments' params.json keep and creation now refuses.
         "max_null_controls": 36,
         "max_api_spend_usd": 150.0,
         "max_llm_calls": 19_200,
