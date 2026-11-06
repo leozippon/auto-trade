@@ -3,18 +3,18 @@
 docs/AGENT_DESIGN.md plus docs/ENVIRONMENT_DESIGN.md §2.2 define the Agent
 session and tool-entrypoint contract: one conversation per session attempt,
 Steps share the session, only documented tools are callable, and the session
-budget is the master constraint. The budget the pipeline hands over includes
-a trailing wrap-up grace window (``deadline_grace_seconds``): reaching the
-main deadline never interrupts the model — with no complete Validation a
-single wrap-up prompt is injected and the session keeps its full autonomy
-through the grace window; when the grace window, the model-call budget or the
-API spend cap is exhausted the session closes gracefully (``session_end`` with
-status ``deadline_exceeded``, ``call_budget_exhausted`` or
-``api_spend_exhausted``) and the Pipeline records a ``deadline`` outcome
-instead of failing the run. Inside the finalize window
-a complete Validation instead switches to the restricted hard-finalization
-capability view. Main conversation calls and compactions are logged in the
-Agent trace (docs/ENVIRONMENT_DESIGN.md §2.4 and §4.2).
+budget is the master constraint. The session finishes when the ``test`` that
+brings the frontier to the end of the validation years returns; no other
+action ends it. The budget the pipeline hands over includes a trailing
+wrap-up grace window (``deadline_grace_seconds``): reaching the main deadline
+never interrupts the model — a single wrap-up prompt is injected and the
+session keeps its full tool surface through the grace window; when the grace
+window, the model-call budget or the API spend cap is exhausted the session
+closes gracefully (``session_end`` with status ``deadline_exceeded``,
+``call_budget_exhausted`` or ``api_spend_exhausted``) and the Pipeline
+records a ``deadline`` outcome and completes the rolling record from the
+frontier instead of failing the run. Main conversation calls and compactions
+are logged in the Agent trace (docs/ENVIRONMENT_DESIGN.md §2.4 and §4.2).
 """
 
 from __future__ import annotations
