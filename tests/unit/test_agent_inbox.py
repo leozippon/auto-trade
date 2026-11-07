@@ -39,6 +39,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app
+from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 SESSION_A = "s2"
 SESSION_B = "s1"
@@ -48,7 +49,7 @@ def _write_inbox_experiment(root: Path, experiment_id: str = "exp_in") -> Path:
     directory = root / "experiments" / experiment_id
     hitl = directory / "hitl"
     hitl.mkdir(parents=True)
-    write_json_atomic(hitl / "params.json", {"experiment_id": experiment_id})
+    write_json_atomic(hitl / "params.json", {"experiment_id": experiment_id, **REQUIRED_RULES})
     write_control(hitl / "control.json", ControlState())
     write_json_atomic(
         hitl / "status.json",

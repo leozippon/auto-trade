@@ -2059,22 +2059,34 @@ function fmtPValue(value) {
   return Number.isFinite(value) ? value.toFixed(3) : "—";
 }
 
-/* Whatever evidence the experiment already has, six figures in one block: the
-   validation record so far -- its steps, the residual IR over them, its
-   p-value and the candidate changes -- then the forward lower bound and the
-   Held-out slice's residual IR. A figure not read yet (the replay still to
-   come, or a record the test could not read) is a dash, so every card holds
-   the same six. Never a research-period number: nothing in sample ranks or
-   reads as evidence here. Absent while the experiment has neither a record nor
-   a forward record. */
+/* How far the experiment has walked through its validation period: the steps
+   its validation record holds (none before the first test) out of the steps
+   the period tiles into (`validation_steps`). The one figure the card shows as
+   done over total, because the progress is the figure. */
+function fmtSteps(steps, total) {
+  return `${steps ?? 0} / ${total}`;
+}
+
+/* The experiment's progress and whatever evidence it already has, six figures
+   in one block: the validation record so far -- its steps out of the
+   validation period's, the residual IR over them, its p-value and the
+   candidate changes -- then the forward lower bound and the Held-out slice's
+   residual IR. A figure not read yet (the replay still to come, or a record
+   the test could not read) is a dash, so every card holds the same six; the
+   steps read 0 of the total before the first test. Never a research-period
+   number: nothing in sample ranks or reads as evidence here. */
 function evidenceTiles(item) {
-  if (!item.record && !item.forward) return null;
   const record = item.record || {};
   const forward = item.forward || {};
   const lower = ((forward.readout || {}).forward || {}).lower_bound;
   const heldout = ((forward.slices || {}).heldout || {}).residual_reading || {};
   const tiles = [
-    { label: "已测步数", value: record.steps, fmt: String, title: "验证记录里已记入的步数" },
+    {
+      label: "已测步数",
+      value: fmtSteps(record.steps, item.validation_steps),
+      fmt: String,
+      title: "验证期进度：验证记录里已记入的步数 / 验证期按步长切成的总步数",
+    },
     { label: "记录残差 IR", value: record.residual_information_ratio, fmt: fmtSharpe, signed: true, title: RECORD_IR_TITLE },
     { label: "p 值", value: record.p_value, fmt: fmtPValue, title: P_VALUE_TITLE },
     { label: "换候选", value: record.candidate_changes, fmt: String, title: "相邻两步候选不同的次数；只记录，不作目标" },
@@ -2837,7 +2849,7 @@ function processRows(detail) {
       ? el(
           "span",
           { title: RECORD_IR_TITLE },
-          `${rolling.steps} 步 · 记录残差 IR ${fmtSharpe(rolling.residual_information_ratio)} · p ${fmtPValue(rolling.p_value)}`,
+          `${fmtSteps(rolling.steps, detail.validation_steps)} 步 · 记录残差 IR ${fmtSharpe(rolling.residual_information_ratio)} · p ${fmtPValue(rolling.p_value)}`,
         )
       : record
         ? `验证 ${record.validations.length} 次 · 尚无 test`
@@ -3231,7 +3243,7 @@ function readoutStagePanel(detail) {
     "div",
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.readout, badge),
-    readout ? readoutBlock(readout) : null,
+    readout ? readoutBlock(readout, detail.validation_steps) : null,
     forward ? holderLine("前推", slices.forward) : null,
     forward ? holderLine("Held-out", slices.heldout) : null,
     seedReadingsTable(slices, ["forward", "heldout"]),
@@ -3251,9 +3263,10 @@ function readoutStagePanel(detail) {
 }
 
 /* The readout as the record states it: the validation record's significance
-   test with its threshold and years, the steps and candidate changes, and the forward
-   reading or the strategy error in its place. */
-function readoutBlock(readout) {
+   test with its threshold and years, its steps out of the validation period's
+   `total` and candidate changes, and the forward reading or the strategy error
+   in its place. */
+function readoutBlock(readout, total) {
   const record = readout.record || {};
   const forward = readout.forward || {};
   const error = forward.strategy_error;
@@ -3266,7 +3279,7 @@ function readoutBlock(readout) {
         ? `未读出：${record.unmeasured}`
         : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· p = ${fmtPValue(record.p_value)}`,
     ),
-    kvRow("步数 · 换候选", `${record.steps ?? "—"} 步 · 换候选 ${record.candidate_changes ?? "—"} 次`),
+    kvRow("步数 · 换候选", `${fmtSteps(record.steps, total)} 步 · 换候选 ${record.candidate_changes ?? "—"} 次`),
     kvRow(
       "前推读数",
       error
@@ -3850,7 +3863,7 @@ function recordPanel(detail) {
     { class: "panel section-gap" },
     panelHead(
       "验证记录",
-      el("span", { class: "badge kind" }, `${record.steps} 步 · 测试终点 ${record.test_horizon}`),
+      el("span", { class: "badge kind" }, `${fmtSteps(record.steps, detail.validation_steps)} 步 · 测试终点 ${record.test_horizon}`),
       el("span", { class: "meta-line" }, `${headline} · 换候选 ${record.candidate_changes} 次`),
     ),
     chart,

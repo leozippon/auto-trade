@@ -702,6 +702,23 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertIn('src="/static/app.js"', index.text)
         self.assertNotIn("app.js?v=", index.text)
 
+    def test_the_payload_states_the_validation_steps_before_any_record(self) -> None:
+        """The listing and the experiment page state how many test steps the
+        experiment's validation period tiles into at its own step length, the
+        total its record's steps count up to, before the first step is
+        recorded: the fixture's three validation years make 12 quarterly or 36
+        monthly steps."""
+
+        monthly = self._build_hitl_experiment("exp_monthly") / "hitl/params.json"
+        write_json_atomic(monthly, {**json.loads(monthly.read_text(encoding="utf-8")), "test_step_months": 1})
+        rows = {row["experiment_id"]: row for row in self.client.get("/api/experiments").json()["experiments"]}
+        for experiment_id, total in (("exp_hitl", 12), ("exp_monthly", 36)):
+            with self.subTest(experiment=experiment_id):
+                self.assertIsNone(rows[experiment_id]["record"])
+                self.assertEqual(rows[experiment_id]["validation_steps"], total)
+                detail = self.client.get(f"/api/experiments/{experiment_id}").json()
+                self.assertEqual(detail["validation_steps"], total)
+
     def test_parameter_schema_defaults_track_worker_defaults(self) -> None:
         schema = self.client.get("/api/parameter-schema").json()
         fields = {

@@ -1074,12 +1074,12 @@ def test_the_hero_carries_the_paper_handoff_and_redraws_only_on_a_new_signature(
 
 def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(tmp_path: Path) -> None:
     """A card's evidence is one block of six figures in a fixed order -- the
-    validation record's steps, residual IR, p-value and candidate changes,
-    then the forward lower bound and the Held-out slice's residual IR -- so
-    every card holds the same six: a reading the replay has not produced yet
-    is a dash, never a missing tile. An experiment with neither a record nor a
-    forward record has no block. The listing row carries the Held-out reading
-    as the forward record states it."""
+    validation record's steps out of the validation period's, residual IR,
+    p-value and candidate changes, then the forward lower bound and the
+    Held-out slice's residual IR -- so every card holds the same six: a reading
+    the replay has not produced yet is a dash, never a missing tile. An
+    experiment still before its first test reads 0 of its steps. The listing
+    row carries the Held-out reading as the forward record states it."""
 
     root = tmp_path / "experiments"
     for stage in ("research", "forward", "registered_with_record"):
@@ -1093,7 +1093,7 @@ def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(t
     harness = "\n".join(
         [
             *(_const_block(script, name) for name in ("RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")),
-            *(_fn(script, name) for name in ("fmtPct", "fmtSharpe", "fmtPValue", "signCls", "evidenceTiles")),
+            *(_fn(script, name) for name in ("fmtPct", "fmtSharpe", "fmtPValue", "fmtSteps", "signCls", "evidenceTiles")),
             "const statTilesRow = (tiles) => tiles;",
             f"const rows = {json.dumps(rows)};",
             "console.log(JSON.stringify(Object.fromEntries(",
@@ -1103,13 +1103,14 @@ def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(t
     result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     tiles = json.loads(result.stdout)
-    assert tiles["research"] is None
     labels = ["已测步数", "记录残差 IR", "p 值", "换候选", "前推下界", "Held-out 残差 IR"]
-    for name in ("forward", "registered_with_record"):
+    for name in ("research", "forward", "registered_with_record"):
         assert [tile["label"] for tile in tiles[name]] == labels, name
+    assert rows["research"]["record"] is None
+    assert [tile["value"] for tile in tiles["research"]] == ["0 / 12", "—", "—", "—", "—", "—"]
     record = rows["forward"]["record"]
     assert [tile["value"] for tile in tiles["forward"]] == [
-        str(record["steps"]),
+        f"{record['steps']} / 12",
         f"{record['residual_information_ratio']:.2f}",
         f"{record['p_value']:.3f}",
         str(record["candidate_changes"]),
@@ -1124,10 +1125,12 @@ def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(t
 
 def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     """A card keeps its figures but shows each as one labelled value: no two
-    values joined with a slash, no progress as done over total, no budget
-    against its limit (the bar alone carries the share). The figures stay
-    full on the experiment page, and the card and the research panel name the
-    best candidate's figures alike."""
+    values joined with a slash, no stage progress as done over total, no budget
+    against its limit (the bar alone carries the share). The one exception is
+    the steps tile, whose figure is the progress through the validation
+    period: steps recorded over the period's steps. The figures stay full on
+    the experiment page, and the card and the research panel name the best
+    candidate's figures alike."""
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -1139,6 +1142,7 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     joined = re.compile(r"\$\{[^}]*\} ?/ ?\$\{")
     for name in ("accountTiles", "evidenceTiles", "forwardTiles"):
         assert not joined.search(body(name)), name
+    assert body("evidenceTiles").count("fmtSteps(") == 1
     card = body("experimentCard")
     assert "fraction: false" in card and "{ mini: true }" in card
     assert "evidenceTiles(item)" in card
@@ -1211,7 +1215,7 @@ def test_the_three_replay_stage_views_judge_nothing() -> None:
         for name in ("forwardStagePanel", "heldoutStagePanel", "readoutStagePanel")
     }
     readout = bodies["readoutStagePanel"]
-    assert "readoutBlock(readout)" in readout and "validationWindowBlock(detail.readouts)" in readout
+    assert "readoutBlock(readout, detail.validation_steps)" in readout and "validationWindowBlock(detail.readouts)" in readout
     assert "forwardPoolBlock(detail.readouts)" in readout and "paperHandoff(detail)" in readout
     for name in ("forwardStagePanel", "heldoutStagePanel"):
         assert "只报告，不作判定" in bodies[name]
@@ -1231,8 +1235,12 @@ def test_the_listing_carries_the_registration_and_the_record_so_far(tmp_path: Pa
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
     assert rows["researching"]["registered_session"] is None
     assert rows["registered"]["registered_session"] == "research"
-    # An experiment without a recorded step has no record to read.
+    # An experiment without a recorded step has no record to read, but states
+    # the steps its validation period tiles into: three validation years in
+    # quarters, by the pipeline's own tiling.
     assert rows["fresh"]["record"] is None and rows["researching"]["record"] is None
+    assert {rows[name]["validation_steps"] for name in ("fresh", "researching", "registered", "recorded")} == {12}
+    assert experiment_detail(tmp_path, "researching")["validation_steps"] == 12
     record = rows["recorded"]["record"]
     detail = experiment_detail(tmp_path, "recorded")["record"]
     for field in ("steps", "residual_information_ratio", "p_value", "candidate_changes", "test_horizon", "start", "end"):

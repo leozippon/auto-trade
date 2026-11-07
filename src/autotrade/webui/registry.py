@@ -51,8 +51,13 @@ from autotrade.pipelines.agent_inbox import INBOX_NAME, inbox_public_view
 from autotrade.pipelines.calendar import (
     GEOMETRY_PARAMETERS,
     ResearchGeometry,
+    Slot,
 )
-from autotrade.pipelines.config import acceptance_for, experiment_default
+from autotrade.pipelines.config import (
+    AcceptanceRules,
+    acceptance_for,
+    experiment_default,
+)
 from autotrade.pipelines.experiment import validation_statistics
 from autotrade.pipelines.experiment_params import PARAMETERS, read_param
 from autotrade.pipelines.hitl_state import (
@@ -479,6 +484,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "stage": experiment_stage(records),
                 "registered_session": _registered_session(records),
                 "record": _record_view(records, params),
+                "validation_steps": _validation_steps(params),
                 "research_result": _research_result(records),
                 "research_outcome": next(
                     (row.get("outcome") for row in research_records(records)), None
@@ -961,16 +967,35 @@ def _record_detail(
     return {**view, "rows": rows, "curve": {"dates": dates, "book": book, "baseline": baseline, "steps": steps}}
 
 
+def _validation_years(params: Mapping[str, object]) -> tuple[AcceptanceRules, tuple[Slot, ...]]:
+    """The experiment's stamped rules and its validation years: the research
+    geometry's years after the rules' ``research_years``, split as the pipeline
+    splits them. A geometry date the params leave out is the worker's default
+    (``experiment_params.read_param``)."""
+
+    rules = acceptance_for(params)
+    geometry = ResearchGeometry(**{name: str(read_param(params, name)) for name in GEOMETRY_PARAMETERS})
+    return rules, geometry.split_research(rules.research_years)[1]
+
+
+def _validation_steps(params: Mapping[str, object]) -> int:
+    """How many test steps the experiment's validation years tile into, by the
+    pipeline's own tiling (``validation_record.ValidationSteps``): the total
+    the record's ``steps`` count up to, one per completed ``test`` or host
+    completion, stated before the first step is recorded."""
+
+    rules, validation = _validation_years(params)
+    return validation_record.ValidationSteps.of(validation, rules.test_step_months).count
+
+
 def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
     """How the experiment's record will be read, from its own stamped rules, so the
     console states it before any record exists: the residual statistic's
     level, the research years, the step length and the threshold for the whole
-    validation period. A geometry date the params leave out is the worker's
-    default (``experiment_params.read_param``)."""
+    validation period."""
 
-    rules = acceptance_for(params)
-    geometry = ResearchGeometry(**{name: str(read_param(params, name)) for name in GEOMETRY_PARAMETERS})
-    validation_years = len(geometry.research_years) - rules.research_years
+    rules, validation = _validation_years(params)
+    validation_years = len(validation)
     return {
         "alpha": rules.alpha,
         "research_years": rules.research_years,
