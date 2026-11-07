@@ -1,31 +1,25 @@
 #!/usr/bin/env bash
 # The instance-side half of ops/zgca/zgca.py: one step per call, sent by the
-# workflow as `env ZGCA_REMOTE_ROOT=<root> ZGCA_LOCAL_ROOT=<dir> bash -lc
-# "$(cat remote.sh)" remote.sh <step> [args]` so the platform's login
-# environment (DOCKER_HOST) is present and the script is always the local
-# checkout's, never a stale copy on the instance. Runs as the instance's root;
-# everything persistent lives on /personal_fast_storage except the pretrained
-# store, which is too large for the personal quota and lives on the instance's
-# own disk under ZGCA_LOCAL_ROOT, linked from the root's data/pretrained. The
-# generic host work (base tools, transfers, GPU/disk/tmux report) is
-# ~/zgca-compute's `dev`, which the workflow calls around these steps.
+# workflow as `bash -lc "$(cat remote.sh)" remote.sh <root> <venv> <local dir>
+# <step> [args]` so the platform's login environment (DOCKER_HOST) is present,
+# the script is always the local checkout's, never a stale copy on the
+# instance, and the instance's layout is stated in zgca.py alone. Runs as the
+# instance's root; everything persistent lives on /personal_fast_storage
+# except the pretrained store, which is too large for the personal quota and
+# lives in <local dir>/pretrained on the instance's own disk, linked from the
+# root's data/pretrained. The generic host work (base tools, transfers,
+# GPU/disk/tmux report) is ~/zgca-compute's `dev`, which the workflow calls
+# around these steps.
 set -euo pipefail
 
-ROOT=/personal_fast_storage/auto-trade
-VENV=/personal_fast_storage/envs/quant
-# The workflow passes its root as ZGCA_REMOTE_ROOT on every call. Another root
-# than this default (a validation deploy beside the live tree, which every
-# instance of the zone sees) keeps its venv inside it, so preparing it never
-# repoints the venv the live tree's console and experiments run on.
-if [ "${ZGCA_REMOTE_ROOT:-$ROOT}" != "$ROOT" ]; then
-    ROOT=$ZGCA_REMOTE_ROOT
-    VENV=$ROOT/.venv
-fi
-# This root's directory on the instance's own disk (zgca.py's local_root).
-LOCAL=${ZGCA_LOCAL_ROOT:-}
+die() { echo "ERROR: $*" >&2; exit 1; }
+
+[ $# -ge 4 ] || die "usage: remote.sh <root> <venv> <local dir> <step> [args...]"
+ROOT=$1
+VENV=$2
+LOCAL=$3
+shift 3
 BOX_PYTHON=/root/miniconda3/bin/python
-# The platform's PyPI mirror lacks tushare 1.4.29 (~/zgca-compute/PLATFORM_RECORDS.md).
-EXTRA_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple
 IMAGE=autotrade-sandbox:latest
 # Shipped by the deploy with the digest it pinned; GitHub and its release
 # proxies are not reliably reachable from the instance, so the build reads the
@@ -46,11 +40,7 @@ FILL_SESSION=autotrade-fill
 FILL_INTERVAL=600
 HEALTH="http://127.0.0.1:$PORT/api/health"
 
-die() { echo "ERROR: $*" >&2; exit 1; }
-
 require_venv() { [ -x "$VENV/bin/python" ] || die "no venv at $VENV: run deploy first"; }
-
-require_local() { [ -n "$LOCAL" ] || die "ZGCA_LOCAL_ROOT is not set: zgca.py passes this root's directory on the instance's own disk"; }
 
 health() {
     "$VENV/bin/python" -c 'import sys, urllib.request; sys.stdout.write(urllib.request.urlopen(sys.argv[1], timeout=10).read().decode())' "$HEALTH" 2>/dev/null
@@ -81,7 +71,6 @@ PY
 # and containers bind the link's target, so nothing else knows where it is. A
 # real directory there (a store from before the move) is not touched.
 dirs() {
-    require_local
     mkdir -p "$ROOT/data/research_releases" "$ROOT/experiments" "$ROOT/logs/workers" \
         "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca" "$LOCAL/pretrained"
     local link="$ROOT/data/pretrained"
@@ -100,7 +89,6 @@ dirs() {
 # walking it is cheap). The sum is printed as a float: mawk's %d stops at
 # 2^31 - 1.
 local_disk() {
-    require_local
     [ -d "$LOCAL/pretrained" ] || die "no $LOCAL/pretrained: the dirs step creates it"
     echo "$(find "$LOCAL/pretrained" -type f -printf '%s\n' | awk '{ s += $1 } END { printf "%.0f", s }') $(df -B1 --output=avail "$LOCAL" | tail -n 1 | tr -d ' ')"
 }
@@ -143,10 +131,31 @@ PY
 
 # The experiments whose worker is alive and has not ended -- the console's own
 # notion, hitl_state.running_experiments -- one id per line (none: empty output).
+# A venv that is absent or has no autotrade installed (before the first
+# deploy's install succeeded) runs no console and no worker.
 running_experiments() {
-    "$VENV/bin/python" -c 'import sys
+    [ -x "$VENV/bin/python" ] || return 0
+    "$VENV/bin/python" -c 'import importlib.util, sys
+if importlib.util.find_spec("autotrade") is None:
+    sys.exit()
 from autotrade.pipelines.hitl_state import running_experiments
 sys.stdout.writelines(f"{experiment}\n" for experiment in running_experiments(sys.argv[1]))' "$ROOT/experiments"
+}
+
+# The first remote step of a deploy and of a down ($1), refused while
+# experiments run: a deploy overwrites and prunes the code they import, mirrors
+# the seed, release and store they read with --delete and may rebuild their
+# image; a down kills them. A round launcher or fill loop still in its tmux
+# session could create one meanwhile, so it is refused too (no tmux, as before
+# a first `dev bootstrap`, runs no session).
+idle() {
+    local running session
+    running=$(running_experiments | tr '\n' ' ')
+    [ -z "$running" ] || die "$1 refused: experiments are running (${running% }), and $1 would change or stop what they run on; wait for them to end (status shows them)"
+    for session in "$ROUND_SESSION" "$FILL_SESSION"; do
+        ! tmux has-session -t "$session" 2>/dev/null \
+            || die "$1 refused: a round launcher is running in tmux session $session and could create an experiment meanwhile; wait for it to end or kill the session"
+    done
 }
 
 # The legacy builder on the platform's bridge network (no buildx, no host
@@ -231,12 +240,15 @@ prepare() {
     # The Agent's typed grep tool runs rg on the host; the worker refuses an
     # LLM experiment without it (7fdf506). rsync and tmux come from `dev bootstrap`.
     command -v rg >/dev/null || { echo "installing ripgrep"; apt-get -qq update && apt-get -qq install -y ripgrep; }
-    if ! "$VENV/bin/python" -c 'import autotrade, fastapi, uvicorn, tushare' >/dev/null 2>&1; then
+    if [ ! -x "$VENV/bin/python" ]; then
         [ -x "$BOX_PYTHON" ] || die "no interpreter at $BOX_PYTHON to create the venv from"
-        [ -x "$VENV/bin/python" ] || { echo "creating venv $VENV"; "$BOX_PYTHON" -m venv "$VENV"; }
-        echo "installing the project into $VENV"
-        "$VENV/bin/pip" install -q --extra-index-url "$EXTRA_INDEX" -e '.[webui]' pytest httpx
+        echo "creating venv $VENV"
+        "$BOX_PYTHON" -m venv "$VENV"
     fi
+    # On every deploy, so a changed pin reaches the venv; when every pin is
+    # already satisfied nothing but the editable install itself changes.
+    echo "installing the project into $VENV"
+    "$VENV/bin/pip" install -q -e '.[webui]' pytest httpx
     "$VENV/bin/python" -c "import autotrade, sys; sys.exit(0 if autotrade.__file__.startswith('$ROOT/') else 1)" \
         || die "$VENV imports autotrade from outside $ROOT; remove the venv and deploy again"
     docker info >/dev/null 2>&1 || die "Docker is not reachable (DOCKER_HOST=${DOCKER_HOST:-unset})"
@@ -305,8 +317,10 @@ round() {
     ! tmux has-session -t "$session" 2>/dev/null \
         || die "a round launcher is still running in tmux session $session; wait for it (status shows its log) or kill the session"
     health >/dev/null || die "the console does not answer at $HEALTH"
-    local log command
+    local log qlog command
     log="logs/zgca/$prefix$(basename "$round_file" .py)_$(date -u +%Y%m%dT%H%M%SZ).log"
+    # The log and the command are quoted for the shell tmux runs them in.
+    printf -v qlog %q "$log"
     printf -v command 'AUTOTRADE_GPU_NAME=%q %q %q %q' "$GPU_NAME" "$VENV/bin/python" "$round_file" "$PORT"
     for arg in "$@"; do printf -v arg ' %q' "$arg"; command+=$arg; done
     if [ "$session" = "$FILL_SESSION" ]; then
@@ -314,10 +328,10 @@ round() {
         # leaves nothing pending, or at the first that exits non-zero: a
         # refused creation must reach the operator, not be retried forever.
         tmux new-session -d -s "$session" -c "$ROOT" \
-            "while :; do $command >>$log 2>&1 || { echo round-exit \$? >>$log; break; }; grep '; queue ' $log | tail -n 1 | grep -q ', 0 pending (' && { echo round-exit 0 >>$log; break; }; sleep $FILL_INTERVAL; done"
+            "while :; do $command >>$qlog 2>&1 || { echo round-exit \$? >>$qlog; break; }; grep '; queue ' $qlog | tail -n 1 | grep -q ', 0 pending (' && { echo round-exit 0 >>$qlog; break; }; sleep $FILL_INTERVAL; done"
         echo "fill launcher started in tmux session $session, one pass every $FILL_INTERVAL s until nothing is pending; log $ROOT/$log"
     else
-        tmux new-session -d -s "$session" -c "$ROOT" "$command >$log 2>&1; echo round-exit \$? >>$log"
+        tmux new-session -d -s "$session" -c "$ROOT" "$command >$qlog 2>&1; echo round-exit \$? >>$qlog"
         echo "round launcher started in tmux session $session; log $ROOT/$log"
     fi
 }
@@ -325,6 +339,7 @@ round() {
 # The project's part of `status`; `dev report` has shown GPUs, disks and tmux.
 status() {
     cd "$ROOT" 2>/dev/null || { echo "repository: not deployed at $ROOT"; return 0; }
+    [ ! -f .runtime/zgca/deployed_commit ] || echo "deployed commit: $(cat .runtime/zgca/deployed_commit)"
     local record
     if [ ! -x "$VENV/bin/python" ]; then
         echo "venv: missing at $VENV (run deploy)"
@@ -419,9 +434,10 @@ if experiment in running_experiments(root):
 PY
 }
 
-step=${1:-}
-[ $# -eq 0 ] || shift
+step=$1
+shift
 case "$step" in
+    idle) [ $# -eq 1 ] || die "idle needs the command it guards"; idle "$1" ;;
     dirs) dirs ;;
     tracked) tracked ;;
     local-disk) local_disk ;;

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The ZGCA A100 development instance, end to end: up, deploy, push, run, status, sync, down.
+"""The ZGCA A100 development instance, end to end: up, deploy, run, status, sync, down.
 
 Every step goes through the platform layer in ~/zgca-compute (`instance` to
 show, start and stop the instance as idempotent intents; `dev` to reach it:
@@ -7,25 +7,24 @@ show, start and stop the instance as idempotent intents; `dev` to reach it:
 for an owner-only file, `report` for its GPUs, disks and tmux sessions, and
 plain commands for the steps of ops/zgca/remote.sh; both over `zenith`) and
 verifies its own result. up and down are `instance start` and `instance
-stop`; a deploy carries the tracked files, the model gateways' keys from the
+stop`, down refusing while experiments run on the instance. A deploy refuses
+a working tree that is not its commit and running experiments, then carries
+the tracked files and that commit's id, the model gateways' keys from the
 local .env (only the keys the model profiles name), the named prebuilt view cache
 and the research release that seed was built from (without the text and
 minute datasets its configuration does not read), prunes code the tree no
 longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
 on the instance's GPU driver), and last copies the pretrained-model store every
 new experiment pins and mounts to the instance's own disk, or refuses when it does
-not fit there; push carries ended experiments of this host to the instance; a run
-starts the console (restarting it onto the deployed checkout when no experiment
-runs) and a round launcher in tmux with AUTOTRADE_GPU_NAME set,
-and repeats a `--fill` launcher every ten minutes in a session of its own
-until its round has nothing pending; status and sync read and copy back.
-ZGCA_REMOTE_ROOT moves all of it to another root on the instance's personal
-storage (a validation deploy beside the live tree, on an instance other than
-the default). Beyond that fill loop nothing here schedules, caches an
+not fit there. A run starts the console (restarting it onto the deployed
+checkout when no experiment runs) and a round launcher in tmux with
+AUTOTRADE_GPU_NAME set, and repeats a `--fill` launcher every ten minutes in
+a session of its own until its round has nothing pending; status and sync
+read and copy back. Beyond that fill loop nothing here schedules, caches an
 endpoint, keeps a secret in the repository or changes how the executor
 isolates a strategy container. See ops/zgca/README.md.
 
-usage: zgca.py [--instance <id>] up | deploy <seed dir> | push <experiment id>... |
+usage: zgca.py [--instance <id>] up | deploy <seed dir> |
        run <round file> [launcher args...] | status | sync <experiment id> | down
 """
 
@@ -42,7 +41,7 @@ import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 # auto-trade-dev-a100x2, the default of --instance, in the Volcano zone: one
 # Tesla-A100-80G since 2026-11-02 (the name keeps the two cards it was created
@@ -50,21 +49,17 @@ from pathlib import Path, PurePosixPath
 INSTANCE_ID = "mpo06t71crmmtdsrb98ckwk29"
 # The platform's own shape for an instance id (~/zgca-compute/dev).
 INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
-# The instance's persistent personal storage: the only place code, the .env,
-# seeds and releases go (~/zgca-compute/README.md, 配额、规格与存储).
+# The instance's layout, stated here alone: remote.sh receives it on every
+# call. The repository root is on the instance's persistent personal storage,
+# the only place code, the .env, seeds and releases go (~/zgca-compute/README.md,
+# 配额、规格与存储), and the venv the console and its workers run on sits
+# beside it. The pretrained store lives in <LOCAL_ROOT>/pretrained on the
+# instance's own disk, which also holds its root and Docker's images
+# (~/zgca-compute/README.md, 火山平台 Docker); the root's data/pretrained links to it.
 REMOTE_ROOT = "/personal_fast_storage/auto-trade"
-# Names another root directly below that storage for every transfer and
-# remote step, e.g. a validation deploy beside the live tree, which every
-# instance of the zone sees; remote.sh receives the root on each call and
-# keeps such a root's venv inside it.
-REMOTE_ROOT_ENV = "ZGCA_REMOTE_ROOT"
-REMOTE_ROOT_SHAPE = re.compile(r"^/personal_fast_storage/[A-Za-z0-9][A-Za-z0-9._-]*$")
-# The instance's own disk, which also holds its root and Docker's images
-# (~/zgca-compute/README.md, 火山平台 Docker): the pretrained store lives there,
-# in <LOCAL_DISK>/<name of the remote root>/pretrained, and the root's
-# data/pretrained links to it. remote.sh receives that directory on each call.
+REMOTE_VENV = "/personal_fast_storage/envs/quant"
 LOCAL_DISK = "/ebs"
-LOCAL_ROOT_ENV = "ZGCA_LOCAL_ROOT"
+LOCAL_ROOT = f"{LOCAL_DISK}/auto-trade"
 # Left free on that disk beside the store: the new layers of an image rebuild
 # and the containers' scratch. Filling it would stop Docker.
 LOCAL_DISK_RESERVE = 20 * 2**30
@@ -87,8 +82,8 @@ RELEASE_PROXY_ENV = "ZGCA_GITHUB_PROXY"
 # kernel driver is 535 (CUDA 12.2), and an A100 may run a newer user-mode
 # driver on an older kernel driver; the instance's image build installs it
 # (build arg CUDA_COMPAT_URL), other builds do not. Pinned to the digest of
-# NVIDIA's Debian 12 package index, after a probe on the instance on
-# 2026-10-24 (ops/zgca/README.md).
+# NVIDIA's Debian 12 package index, after a probe on the instance
+# (~/zgca-compute/PLATFORM_RECORDS.md, GPU 驱动).
 CUDA_COMPAT_URL = "https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-compat-13-0_580.196.07-1_amd64.deb"
 CUDA_COMPAT_NAME = "cuda-compat-13-0_580.196.07-1_amd64.deb"
 CUDA_COMPAT_SHA256 = "d2d3262512046b23215ff197fe79a6ca0d44299ed0e665275ac05bb28b79e4e3"
@@ -97,6 +92,8 @@ CUDA_COMPAT_SHA256 = "d2d3262512046b23215ff197fe79a6ca0d44299ed0e665275ac05bb28b
 PRETRAINED = "data/pretrained"
 PRETRAINED_MANIFEST = "MANIFEST.sha256"
 TRACKED_LIST_NAME = "tracked.txt"
+# The commit whose tracked files the last deploy shipped; remote.sh's status shows it.
+DEPLOYED_COMMIT_NAME = "deployed_commit"
 GIB = 2**30
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Every transfer keeps contents, times and modes; the instance's root owns what lands there.
@@ -208,22 +205,8 @@ class Workflow:
     repo_root: Path
     tools: Path
     instance: str = INSTANCE_ID
-    remote_root: str = REMOTE_ROOT
 
     def __post_init__(self) -> None:
-        if not REMOTE_ROOT_SHAPE.fullmatch(self.remote_root):
-            raise WorkflowError(
-                f"{REMOTE_ROOT_ENV}={self.remote_root!r} is not a directory directly below /personal_fast_storage"
-            )
-        # An instance's sandbox image, tmux sessions and console port serve one
-        # root: another root there could rebuild the image the live experiments run on
-        # (its guard sees only its own root's experiments) or launch through the live
-        # console, so the default instance keeps the live tree's.
-        if self.remote_root != REMOTE_ROOT and self.instance == INSTANCE_ID:
-            raise WorkflowError(
-                f"{REMOTE_ROOT_ENV}={self.remote_root} is not the live tree's root, which the default instance "
-                f"{INSTANCE_ID} serves: name the instance this root is for with --instance"
-            )
         for name in ("zenith", "dev", "instance"):
             if not os.access(self.tools / name, os.X_OK):
                 raise WorkflowError(
@@ -234,11 +217,6 @@ class Workflow:
     @property
     def state_dir(self) -> Path:
         return self.repo_root / ".runtime" / "zgca"
-
-    @property
-    def local_root(self) -> str:
-        """This root's directory on the instance's own disk, apart from any other root's."""
-        return f"{LOCAL_DISK}/{PurePosixPath(self.remote_root).name}"
 
     # ----- platform entries -----
 
@@ -268,11 +246,10 @@ class Workflow:
     # ----- instance shell and transfers -----
 
     def remote(self, step: str, *args: str, capture: bool = False) -> str:
-        """Run one step of remote.sh on the instance, in a login shell for the platform's environment, under this workflow's roots; its output when captured."""
+        """Run one step of remote.sh on the instance, in a login shell for the platform's environment, told the instance's layout; its output when captured."""
         script = REMOTE_SCRIPT.read_text(encoding="utf-8")
         completed = self.call(
-            "dev", "env", f"{REMOTE_ROOT_ENV}={self.remote_root}", f"{LOCAL_ROOT_ENV}={self.local_root}",
-            "bash", "-lc", script, "remote.sh", step, *args, capture=capture,
+            "dev", "bash", "-lc", script, "remote.sh", REMOTE_ROOT, REMOTE_VENV, LOCAL_ROOT, step, *args, capture=capture,
         )
         if completed.returncode != 0:
             raise WorkflowError(f"remote step {step} failed (exit {completed.returncode})")
@@ -283,6 +260,13 @@ class Workflow:
         completed = self.call("dev", command, *args, data=data)
         if completed.returncode != 0:
             raise WorkflowError(f"dev {command} failed (exit {completed.returncode})" + (f": {' '.join(args[-2:])}" if args else ""))
+
+    def git(self, *args: str) -> bytes:
+        """The output of one git command in this repository; a git that fails fails the step."""
+        completed = subprocess.run(["git", *args], cwd=self.repo_root, stdin=subprocess.DEVNULL, capture_output=True, check=False)
+        if completed.returncode != 0:
+            raise WorkflowError(f"git {' '.join(args)} failed in {self.repo_root}: {completed.stderr.decode('utf-8', errors='replace').strip()}")
+        return completed.stdout
 
     def release_file(self, url: str, name: str, pinned: str) -> Path:
         """A verified release file the image build needs and the deploy ships, fetched once into the state directory.
@@ -364,10 +348,19 @@ class Workflow:
             raise WorkflowError(
                 f"{PRETRAINED}/{PRETRAINED_MANIFEST} is missing: the instance's experiments pin and mount that store"
             )
-        listed = subprocess.run(
-            ["git", "ls-files", "-z"], cwd=self.repo_root, stdin=subprocess.DEVNULL, capture_output=True, check=False,
-        )
-        if listed.returncode != 0 or not listed.stdout:
+        # The tracked files ship as the working tree has them and the instance
+        # records the commit they are, so the tree must be exactly that commit:
+        # nothing modified or staged, and nothing untracked the tracked code
+        # might import.
+        changes = [line.strip() for line in self.git("status", "--porcelain").decode("utf-8", errors="replace").splitlines()]
+        if changes:
+            raise WorkflowError(
+                "the working tree is not its commit, commit first (deploy records the commit it ships): "
+                + ", ".join(changes[:5]) + (", ..." if len(changes) > 5 else "")
+            )
+        commit = self.git("rev-parse", "HEAD").decode("ascii").strip()
+        listed = self.git("ls-files", "-z")
+        if not listed:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
         store_bytes = _tree_bytes(pretrained)
         duckdb_cli = self.release_file(DUCKDB_CLI_URL, DUCKDB_CLI_NAME, DUCKDB_CLI_SHA256)
@@ -376,17 +369,24 @@ class Workflow:
         # beside the release files, it lets the `tracked` step remove what is no
         # longer tracked (a retired round file would otherwise stay and be read).
         manifest = self.state_dir / TRACKED_LIST_NAME
-        manifest.write_bytes(listed.stdout)
+        manifest.write_bytes(listed)
+        deployed = self.state_dir / DEPLOYED_COMMIT_NAME
+        deployed.write_text(commit + "\n", encoding="utf-8")
         self.require_running()
-        root = self.remote_root
+        root = REMOTE_ROOT
+        # Nothing on the instance changes while experiments run there, or a
+        # round launcher that could create one: the steps below overwrite and
+        # prune the code they import, mirror the seed, release and store they
+        # read with --delete, and may rebuild their image.
+        self.remote("idle", "deploy")
         self.dev("bootstrap")
         self.remote("dirs")
-        say("deploy: tracked files")
+        say(f"deploy: tracked files of commit {commit}")
         self.dev("copy", *PRESERVE, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{root}/")
         say("deploy: .env (the model gateway keys only)")
         self.dev("put", f"{root}/.env", data=gateway_keys)
-        say(f"deploy: {DUCKDB_CLI_NAME}, {CUDA_COMPAT_NAME} and {TRACKED_LIST_NAME}")
-        self.dev("copy", *PRESERVE, str(duckdb_cli), str(cuda_compat), str(manifest), f"dev:{root}/.runtime/zgca/")
+        say(f"deploy: {DUCKDB_CLI_NAME}, {CUDA_COMPAT_NAME}, {TRACKED_LIST_NAME} and {DEPLOYED_COMMIT_NAME}")
+        self.dev("copy", *PRESERVE, str(duckdb_cli), str(cuda_compat), str(manifest), str(deployed), f"dev:{root}/.runtime/zgca/")
         self.remote("tracked")
         say(f"deploy: {seed}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{seed_dir}/", f"dev:{root}/{seed_path.as_posix()}/")
@@ -399,7 +399,7 @@ class Workflow:
         self.remote("prepare", DUCKDB_CLI_SHA256, CUDA_COMPAT_SHA256)
         # The store goes last and only where it fits, so the steps above are
         # done whatever its size; a store that does not fit fails the deploy.
-        store = f"{self.local_root}/pretrained"
+        store = f"{LOCAL_ROOT}/pretrained"
         present, free = (int(field) for field in self.remote("local-disk", capture=True).split()[-2:])
         missing = max(store_bytes - present, 0)
         if missing + LOCAL_DISK_RESERVE > free:
@@ -415,30 +415,6 @@ class Workflow:
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{store}/")
         self.dev("report")
         say("deploy: done")
-
-    def push(self, experiment_ids: Sequence[str]) -> None:
-        """Copy ended experiments of this host to the instance."""
-        # The console's own notion of a running experiment; its module needs the project's environment (numpy).
-        _with_project_src()
-        from autotrade.pipelines.hitl_state import running_experiments
-
-        experiments = self.repo_root / "experiments"
-        for experiment_id in experiment_ids:
-            if not SAFE_ID.fullmatch(experiment_id):
-                raise WorkflowError(f"not an experiment id: {experiment_id!r}")
-            try:
-                created_under = json.loads((experiments / experiment_id / "hitl" / "params.json").read_text(encoding="utf-8")).get("experiments_root")
-            except (OSError, ValueError) as exc:
-                raise WorkflowError(f"experiments/{experiment_id} is not a readable experiment of this host ({exc})") from exc
-            if created_under == f"{self.remote_root}/experiments":
-                raise WorkflowError(f"experiments/{experiment_id} is a copy of an experiment of the instance; its original is there")
-        running = sorted(set(experiment_ids) & set(running_experiments(experiments)))
-        if running:
-            raise WorkflowError(f"{', '.join(running)} still running here: a copy cannot be verified while it changes")
-        self.require_running()
-        for experiment_id in experiment_ids:
-            say(f"push: experiments/{experiment_id} (without pit_views)")
-            self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"{experiments / experiment_id}/", f"dev:{self.remote_root}/experiments/{experiment_id}/")
 
     def run(self, round_file: str, args: Sequence[str]) -> None:
         tracked = subprocess.run(
@@ -466,18 +442,22 @@ class Workflow:
                 created_under = json.loads((local / "hitl" / "params.json").read_text(encoding="utf-8")).get("experiments_root")
             except (OSError, ValueError) as exc:
                 raise WorkflowError(f"experiments/{experiment_id} exists here and its hitl/params.json cannot say where it was created ({exc}); refusing to overwrite it") from exc
-            if created_under != f"{self.remote_root}/experiments":
+            if created_under != f"{REMOTE_ROOT}/experiments":
                 raise WorkflowError(f"experiments/{experiment_id} is an experiment of this host (created under {created_under}), not a copy from the instance; refusing to overwrite it")
         self.require_running()
         self.remote("experiment-state", experiment_id)
         local.parent.mkdir(parents=True, exist_ok=True)
-        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{self.remote_root}/experiments/{experiment_id}/", f"{local}/")
+        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{REMOTE_ROOT}/experiments/{experiment_id}/", f"{local}/")
         logs = self.repo_root / "logs" / "workers"
         logs.mkdir(parents=True, exist_ok=True)
-        self.dev("copy", *PRESERVE, f"dev:{self.remote_root}/logs/workers/{experiment_id}.log", f"{logs / experiment_id}.log")
+        self.dev("copy", *PRESERVE, f"dev:{REMOTE_ROOT}/logs/workers/{experiment_id}.log", f"{logs / experiment_id}.log")
         say(f"synced experiments/{experiment_id} (without pit_views) and logs/workers/{experiment_id}.log")
 
     def down(self) -> None:
+        # Stopping kills every worker and round launcher on the instance; one
+        # that is not RUNNING runs none.
+        if self.lifecycle("state", capture=True) == "RUNNING":
+            self.remote("idle", "down")
         self.lifecycle("stop")
 
 
@@ -494,31 +474,26 @@ def main(
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
-    deploy = commands.add_parser("deploy", help="copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
+    deploy = commands.add_parser("deploy", help="refuse an uncommitted tree or running experiments; copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
     deploy.add_argument("seed", help="prebuilt view cache directory, relative to the repository (data/pit_views_seed_...)")
-    push = commands.add_parser("push", help="copy ended experiments of this host to the instance")
-    push.add_argument("experiment_ids", nargs="+", metavar="experiment_id", help="experiment id")
     run = commands.add_parser("run", help="start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
     run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, experiment ids)")
-    commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, console, experiments, image, round log")
+    commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, deployed commit, console, experiments, image, round log")
     sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here")
     sync.add_argument("experiment_id", help="experiment id")
-    commands.add_parser("down", help="instance stop: wait for STOPPED")
+    commands.add_parser("down", help="instance stop, refused while experiments run: wait for STOPPED")
     options = parser.parse_args(argv)
     try:
         workflow = Workflow(
             repo_root=repo_root,
             tools=tools or Path(os.environ.get("ZGCA_COMPUTE") or "~/zgca-compute").expanduser(),
             instance=options.instance,
-            remote_root=os.environ.get(REMOTE_ROOT_ENV, REMOTE_ROOT),
         )
         if options.command == "up":
             workflow.up()
         elif options.command == "deploy":
             workflow.deploy(options.seed)
-        elif options.command == "push":
-            workflow.push(options.experiment_ids)
         elif options.command == "run":
             workflow.run(options.round_file, options.args)
         elif options.command == "status":

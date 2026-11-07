@@ -5,8 +5,9 @@ copy, put, bootstrap and report primitives verify their own results) record
 their arguments and the instance they were pointed at, and answer from the
 environment; both are tested for real in ~/zgca-compute. The mock `zenith`
 only records, since the workflow reaches the API through those two. The
-remote script's `tracked`, `experiment-state` and `status` steps run for real
-against a temporary root, `status` with a stub `docker` so no daemon is asked.
+remote script's steps run for real against a temporary layout (a root with its
+venv inside, a local directory beside it), with stubs for the venv's python,
+docker, tmux and sleep where a step would reach them.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ import importlib.util
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -56,8 +58,8 @@ if args[:1] == ["put"]:  # stdin is the file
     record["stdin"] = sys.stdin.buffer.read().decode()
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps(record) + "\n")
-if "remote.sh" in args:  # env ZGCA_REMOTE_ROOT=<root> ZGCA_LOCAL_ROOT=<dir> bash -lc <script> remote.sh <step> ...
-    step = args[args.index("remote.sh") + 1]
+if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir> <step> ...
+    step = args[args.index("remote.sh") + 4]
     if step == "local-disk":  # bytes already in the store's directory, bytes free on its disk
         print(os.environ.get("MOCK_LOCAL_DISK", "0 100000000000000"))
     sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + step.replace("-", "_").upper(), "0")))
@@ -114,9 +116,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
 
     @staticmethod
     def remote(call: dict[str, object]) -> list[str] | None:
-        """The remote.sh step and its arguments of a `dev env ZGCA_REMOTE_ROOT=<root> bash -lc <script> remote.sh ...` call, else None."""
+        """The remote.sh step and its arguments of a `dev bash -lc <script> remote.sh <layout> ...` call, else None."""
         args = call["args"]
-        return args[args.index("remote.sh") + 1:] if "remote.sh" in args else None
+        return args[args.index("remote.sh") + 4:] if "remote.sh" in args else None
+
+    @staticmethod
+    def remote_step(root: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
+        """remote.sh run for real against a temporary layout: ``root``, its venv in root/.venv, the local directory root/../ebs."""
+        return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), str(root), str(root / ".venv"), str(root.parent / "ebs"), *args],
+                              env=env, capture_output=True, text=True, check=False)
 
     def step(self, call: dict[str, object]) -> str:
         """A call's command: the remote.sh step for a remote step, else the entry's subcommand."""
@@ -140,16 +148,30 @@ class ZgcaWorkflowTest(unittest.TestCase):
     # ----- instance lifecycle -----
 
     def test_up_and_down_are_the_shared_entry_for_the_pinned_instance(self) -> None:
-        for command, action in (("up", "start"), ("down", "stop")):
+        # A down first asks the instance's state: a stopped one runs no experiment to guard.
+        for command, action, before in (("up", "start", []), ("down", "stop", [["state", INSTANCE]])):
             with self.subTest(command=command):
                 self.log.unlink(missing_ok=True)
-                code, err = self.run_main(command)
+                code, err = self.run_main(command, MOCK_STATE="STOPPED")
                 self.assertEqual(code, 0, err)
-                self.assertEqual(self.calls(), [{"tool": "instance", "args": [action, INSTANCE], "instance": INSTANCE}])
+                self.assertEqual([call["args"] for call in self.calls()], [*before, [action, INSTANCE]])
+                self.assertTrue(all(call["tool"] == "instance" and call["instance"] == INSTANCE for call in self.calls()))
                 # Its unverified result (a refused request, a timeout, no SSH) is this command's failure.
-                code, err = self.run_main(command, **{f"MOCK_INSTANCE_EXIT_{action.upper()}": "1"})
+                code, err = self.run_main(command, MOCK_STATE="STOPPED", **{f"MOCK_INSTANCE_EXIT_{action.upper()}": "1"})
                 self.assertEqual(code, 1)
                 self.assertIn(f"instance {action} {INSTANCE} failed", err)
+
+    def test_down_stops_a_running_instance_only_when_no_experiment_runs(self) -> None:
+        code, err = self.run_main("down")
+        self.assertEqual(code, 0, err)
+        self.assertEqual([(call["tool"], self.step(call)) for call in self.calls()],
+                         [("instance", "state"), ("dev", "idle"), ("instance", "stop")])
+        self.assertEqual(self.remote(self.calls("dev")[0]), ["idle", "down"])
+        self.log.unlink()
+        code, err = self.run_main("down", MOCK_STEP_EXIT_IDLE="1")
+        self.assertEqual(code, 1)
+        self.assertIn("remote step idle failed", err)
+        self.assertEqual([self.step(call) for call in self.calls()], ["state", "idle"])
 
     def test_status_shows_the_instance_and_logs_in_only_when_it_is_running(self) -> None:
         self.assertEqual(self.run_main("status", MOCK_STATE="STOPPED")[0], 0)
@@ -179,58 +201,13 @@ class ZgcaWorkflowTest(unittest.TestCase):
             self.assertEqual(caught.exception.code, 2)
         self.assertEqual(len(self.calls()), 4)
 
-    def test_another_remote_root_takes_every_transfer_and_remote_step(self) -> None:
-        """ZGCA_REMOTE_ROOT, e.g. a validation deploy beside the live tree on the zone's shared storage."""
-        other, instance = "/personal_fast_storage/auto-trade-validate", "validationinstance01"
-        self._tracked_repo()
-        self._seed()
-        self._pretrained()
-        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
-        self._experiment("experiment_here")
-        for argv in (("deploy", "data/pit_views_seed_test"), ("push", "experiment_here"), ("sync", "experiment_there")):
-            code, err = self.run_main("--instance", instance, *argv, ZGCA_REMOTE_ROOT=other)
-            self.assertEqual(code, 0, err)
-        dev = self.calls("dev")
-        self.assertEqual({self.step(call) for call in dev},
-                         {"bootstrap", "dirs", "copy", "put", "tracked", "prepare", "local-disk", "report", "experiment-state"})
-        # Its directory on the instance's own disk is its own too.
-        local = "/ebs/auto-trade-validate"
-        for call in dev:
-            args = call["args"]
-            if self.remote(call) is not None:
-                self.assertEqual(args[:3], ["env", f"ZGCA_REMOTE_ROOT={other}", f"ZGCA_LOCAL_ROOT={local}"])
-            elif args[0] == "copy":
-                (remote,) = [arg for arg in args if arg.startswith("dev:")]
-                self.assertTrue(remote.startswith((f"dev:{other}/", f"dev:{local}/")), remote)
-            elif args[0] == "put":
-                self.assertEqual(args[1], f"{other}/.env")
-        # Unset is the default root; anything but a directory directly below
-        # personal storage is refused before any call, an empty value included,
-        # and so is another root on the default instance, whose image, tmux
-        # sessions and console serve the live tree.
-        self.log.unlink()
-        for bad in ("", "auto-trade-validate", "/tmp/auto-trade", "/personal_fast_storage", "/personal_fast_storage/",
-                    "/personal_fast_storage/../auto-trade", "/personal_fast_storage/a/b", "/personal_fast_storage/a b"):
-            with self.subTest(root=bad):
-                code, err = self.run_main("--instance", instance, "status", ZGCA_REMOTE_ROOT=bad)
-                self.assertEqual(code, 1)
-                self.assertIn("ZGCA_REMOTE_ROOT=", err)
-        for argv in (("status",), ("--instance", INSTANCE, "deploy", "data/pit_views_seed_test")):
-            with self.subTest(argv=argv):
-                code, err = self.run_main(*argv, ZGCA_REMOTE_ROOT=other)
-                self.assertEqual(code, 1)
-                self.assertIn(f"not the live tree's root, which the default instance {INSTANCE} serves", err)
-        self.assertEqual(self.run_main("status", ZGCA_REMOTE_ROOT=zgca.REMOTE_ROOT)[0], 0)
-        self.assertTrue(all(call["instance"] == INSTANCE for call in self.calls()))
-
     def test_deploy_run_and_sync_refuse_an_instance_that_is_not_running_before_any_transfer(self) -> None:
         self._tracked_repo()
         self._seed()
         self._pretrained()
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
-        self._experiment("experiment_here")
         for argv in (("deploy", "data/pit_views_seed_test"), ("run", "scripts/experiments/create_round_test.py"),
-                     ("sync", "experiment_new"), ("push", "experiment_here")):
+                     ("sync", "experiment_new")):
             for env, reason in (({"MOCK_STATE": "STOPPING"}, "is STOPPING, not RUNNING"), ({"MOCK_INSTANCE_EXIT_STATE": "1"}, "instance state")):
                 with self.subTest(command=argv[0], reason=reason):
                     code, err = self.run_main(*argv, **env)
@@ -247,6 +224,8 @@ class ZgcaWorkflowTest(unittest.TestCase):
         (self.repo / "untracked.py").write_text("", encoding="utf-8")
         git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
         subprocess.run([*git, "init", "-q"], cwd=self.repo, check=True)
+        # As the repository's .gitignore does: the runtime trees and the .env are not the tree a deploy ships.
+        (self.repo / ".git" / "info" / "exclude").write_text("/.env\n/.runtime/\n/data/\n/experiments/\n/logs/\n/untracked.py\n", encoding="utf-8")
         subprocess.run([*git, "add", "scripts"], cwd=self.repo, check=True)
         subprocess.run([*git, "commit", "-q", "-m", "fixture"], cwd=self.repo, check=True)
 
@@ -269,13 +248,6 @@ class ZgcaWorkflowTest(unittest.TestCase):
             release_dir = self.repo / zgca.RELEASES / generation
             release_dir.mkdir(parents=True, exist_ok=True)
             (release_dir / "manifest.json").write_text("{}", encoding="utf-8")
-
-    def _experiment(self, experiment: str, *, created_under: str | None = None, **status: object) -> None:
-        hitl = self.repo / "experiments" / experiment / "hitl"
-        hitl.mkdir(parents=True)
-        root = created_under or str(self.repo / "experiments")
-        (hitl / "params.json").write_text(json.dumps({"experiments_root": root}), encoding="utf-8")
-        (hitl / "status.json").write_text(json.dumps(status or {"state": "completed", "pid": None}), encoding="utf-8")
 
     def _pretrained(self) -> None:
         store = self.repo / zgca.PRETRAINED
@@ -302,6 +274,13 @@ class ZgcaWorkflowTest(unittest.TestCase):
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "data/pretrained/MANIFEST.sha256 is missing"))
         self._pretrained()
+        # The working tree must be its commit: neither a file not yet added nor a modified one ships.
+        (self.repo / "scripts" / "new_module.py").write_text("", encoding="utf-8")
+        refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "commit first (deploy records the commit it ships): ?? scripts/new_module.py"))
+        (self.repo / "scripts" / "new_module.py").unlink()
+        (self.repo / "scripts" / "experiments" / "create_round_test.py").write_text("ROUND = 1\n", encoding="utf-8")
+        refusals.append((self.run_main("deploy", "data/pit_views_seed_test"), "commit first (deploy records the commit it ships): M scripts/experiments/create_round_test.py"))
+        subprocess.run(["git", "checkout", "-q", "--", "scripts"], cwd=self.repo, check=True)
         refusals.append((self.run_main("deploy", "/etc/passwd"), "below data/"))
         refusals.append((self.run_main("deploy", "scripts/experiments"), "below data/"))
         # A shipped release file that is not the pinned release is refused, not refetched.
@@ -326,21 +305,22 @@ class ZgcaWorkflowTest(unittest.TestCase):
         dev = self.calls("dev")
         self.assertTrue(all(call["instance"] == INSTANCE for call in dev))
         # Each remote step is this checkout's script in a login shell, told the
-        # root and the root's directory on the instance's own disk.
+        # instance's layout: the root, its venv, and the root's directory on
+        # the instance's own disk.
         remote, local = zgca.REMOTE_ROOT, "/ebs/auto-trade"
         script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
         for call in dev:
             if self.remote(call) is not None:
-                self.assertEqual(call["args"][:7], ["env", f"ZGCA_REMOTE_ROOT={remote}", f"ZGCA_LOCAL_ROOT={local}",
-                                                    "bash", "-lc", script, "remote.sh"])
-        # The base tools first; then transfers (by destination) and remote steps
-        # in the order they ran: the tracked list lands before the `tracked`
-        # step prunes by it, and both come before the seed and the release;
-        # then the image, and only then the pretrained store, to the
-        # instance's own disk once it is known to fit; the host report last.
+                self.assertEqual(call["args"][:7], ["bash", "-lc", script, "remote.sh", remote, "/personal_fast_storage/envs/quant", local])
+        # No experiment runs, then the base tools; then transfers (by
+        # destination) and remote steps in the order they ran: the tracked
+        # list lands before the `tracked` step prunes by it, and both come
+        # before the seed and the release; then the image, and only then the
+        # pretrained store, to the instance's own disk once it is known to
+        # fit; the host report last.
         ran = [self.remote(call) or call["args"][:1] + call["args"][1:][-1:] for call in dev]
         self.assertEqual(ran, [
-            ["bootstrap"], ["dirs"], ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
+            ["idle", "deploy"], ["bootstrap"], ["dirs"], ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
             ["copy", f"dev:{remote}/.runtime/zgca/"], ["tracked"],
             ["copy", f"dev:{remote}/data/pit_views_seed_test/"], ["copy", f"dev:{remote}/data/research_releases/gen_test/"],
             ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256], ["local-disk"],
@@ -356,9 +336,13 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(manifest.read_bytes(), b"scripts/experiments/create_round_test.py\0")
         self.assertIn(f"--files-from={manifest}", transfers[0]["args"])
         self.assertIn("--from0", transfers[0]["args"])
+        # The commit those files are travels beside the list.
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+        commit = state / zgca.DEPLOYED_COMMIT_NAME
+        self.assertEqual(commit.read_text(encoding="utf-8"), head)
         self.assertEqual(
-            transfers[1]["args"][-4:-1],
-            [str(state / zgca.DUCKDB_CLI_NAME), str(state / zgca.CUDA_COMPAT_NAME), str(manifest)],
+            transfers[1]["args"][-5:-1],
+            [str(state / zgca.DUCKDB_CLI_NAME), str(state / zgca.CUDA_COMPAT_NAME), str(manifest), str(commit)],
         )
         # The seed, the release and the store are mirrored, hard links kept.
         for transfer in transfers[2:5]:
@@ -439,7 +423,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
                                           ZGCA_GITHUB_PROXY=PROXY, MOCK_PROXY_ANSWER=answer)
                 self.assertIn("not RUNNING", err)
                 self.assertEqual([call["args"][-1] for call in self.calls("curl")], sources)
-                self.assertEqual({path.name for path in state.iterdir()} - {zgca.TRACKED_LIST_NAME},
+                self.assertEqual({path.name for path in state.iterdir()} - {zgca.TRACKED_LIST_NAME, zgca.DEPLOYED_COMMIT_NAME},
                                  {zgca.DUCKDB_CLI_NAME, zgca.CUDA_COMPAT_NAME})
                 (state / zgca.DUCKDB_CLI_NAME).unlink()
                 (state / zgca.CUDA_COMPAT_NAME).unlink()
@@ -449,29 +433,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
                                   MOCK_PROXY_ANSWER="wrong", MOCK_CURL_BODY="truncated\n")
         self.assertEqual(code, 1)
         self.assertIn(f"no source gave {zgca.DUCKDB_CLI_NAME} with the pinned digest", err)
-        self.assertEqual([path.name for path in state.iterdir()], [zgca.TRACKED_LIST_NAME])
+        self.assertEqual({path.name for path in state.iterdir()}, {zgca.TRACKED_LIST_NAME, zgca.DEPLOYED_COMMIT_NAME})
         self.assertFalse(self.calls("dev"))
-
-    def test_the_remote_root_is_the_workflows_and_another_root_keeps_its_own_venv(self) -> None:
-        script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
-        self.assertEqual(script.count(f"ROOT={zgca.REMOTE_ROOT}\n"), 1)
-        probe = script.replace("\nstep=${1:-}\n", '\necho "$ROOT $VENV"; exit 0\n')
-        self.assertNotEqual(probe, script)
-        other = "/personal_fast_storage/auto-trade-validate"
-        live = f"{zgca.REMOTE_ROOT} /personal_fast_storage/envs/quant"
-        for given, expected in ((None, live), (zgca.REMOTE_ROOT, live), (other, f"{other} {other}/.venv")):
-            with self.subTest(root=given):
-                env = {name: value for name, value in os.environ.items() if name != "ZGCA_REMOTE_ROOT"}
-                shown = subprocess.run(["bash", "-c", probe, "remote.sh"], env=env | ({"ZGCA_REMOTE_ROOT": given} if given else {}),
-                                       capture_output=True, text=True, check=False)
-                self.assertEqual((shown.returncode, shown.stdout.strip()), (0, expected), shown.stderr)
 
     def test_the_tracked_step_removes_only_untracked_files_below_tracked_directories(self) -> None:
         root = Path(self.temp.name) / "instance"
-        env = {**os.environ, "ZGCA_REMOTE_ROOT": str(root)}
         files = {  # path on the instance: whether the shipped list names it
             "README.md": True,
             ".env": False,
+            "configs/skills/kept/SKILL.md": True,
             "scripts/experiments/create_round_kept.py": True,
             "scripts/experiments/create_round_retired.py": False,
             "src/pkg/mod.py": True,
@@ -487,22 +457,26 @@ class ZgcaWorkflowTest(unittest.TestCase):
             (root / name).write_text("", encoding="utf-8")
         (root / "scripts" / "alias.py").symlink_to("experiments/create_round_kept.py")
         (root / "scripts" / "data_link").symlink_to("../data")
+        # A removed skill item left as empty directories, which the library
+        # would refuse; empty directories in a runtime tree are not entered.
+        (root / "configs" / "skills" / "removed" / "references").mkdir(parents=True)
+        (root / "experiments" / "empty").mkdir()
 
-        def step() -> subprocess.CompletedProcess[str]:
-            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "tracked"], env=env, capture_output=True, text=True, check=False)
-
-        missing = step()
+        missing = self.remote_step(root, "tracked")
         self.assertEqual(missing.returncode, 1)
         self.assertIn("no tracked file list", missing.stderr)
         listed = root / ".runtime" / "zgca" / zgca.TRACKED_LIST_NAME
         listed.parent.mkdir(parents=True)
         listed.write_bytes(b"".join(name.encode() + b"\0" for name, named in files.items() if named))
-        pruned = step()
+        pruned = self.remote_step(root, "tracked")
         self.assertEqual(pruned.returncode, 0, pruned.stderr)
-        self.assertIn("1 stale removed under scripts, src: scripts/experiments/create_round_retired.py", pruned.stdout)
+        self.assertIn("1 stale removed, 2 empty directories pruned under configs, scripts, src: "
+                      "scripts/experiments/create_round_retired.py", pruned.stdout)
         left = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_symlink() or path.is_file()}
         self.assertEqual(left, set(files) - {"scripts/experiments/create_round_retired.py"}
                          | {"scripts/alias.py", "scripts/data_link", f".runtime/zgca/{zgca.TRACKED_LIST_NAME}"})
+        self.assertFalse((root / "configs" / "skills" / "removed").exists())
+        self.assertTrue((root / "experiments" / "empty").is_dir())
 
     def test_the_image_build_and_the_instance_name_the_files_the_deploy_ships(self) -> None:
         """Three places name each file: the Dockerfile fetches the DuckDB CLI
@@ -520,11 +494,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
     def test_the_dirs_step_links_the_store_to_the_instance_disk_and_refuses_anything_else(self) -> None:
         """Run for real against temporary roots: the link, its idempotence, and the refusals."""
         base = Path(self.temp.name)
-        root, local = base / "instance", base / "ebs" / "instance"
-        env = {**os.environ, "ZGCA_REMOTE_ROOT": str(root), "ZGCA_LOCAL_ROOT": str(local)}
+        root, local = base / "instance", base / "ebs"
 
-        def step(name: str, environ: dict[str, str] = env) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), name], env=environ, capture_output=True, text=True, check=False)
+        def step(name: str) -> subprocess.CompletedProcess[str]:
+            return self.remote_step(root, name)
 
         link = root / "data" / "pretrained"
         for _ in range(2):
@@ -552,12 +525,6 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(refused.returncode, 1)
         self.assertIn("is a directory, but the store lives in", refused.stderr)
         self.assertTrue(link.is_dir() and not link.is_symlink())
-        unset = {name: value for name, value in env.items() if name != "ZGCA_LOCAL_ROOT"}
-        for name in ("dirs", "local-disk"):
-            with self.subTest(step=name):
-                refused = step(name, unset)
-                self.assertEqual(refused.returncode, 1)
-                self.assertIn("ZGCA_LOCAL_ROOT is not set", refused.stderr)
 
     def test_deploy_stops_at_the_first_primitive_that_fails(self) -> None:
         self._tracked_repo()
@@ -566,9 +533,11 @@ class ZgcaWorkflowTest(unittest.TestCase):
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         remote = zgca.REMOTE_ROOT
         for env, reason, ran in (
-            ({"MOCK_DEV_EXIT_BOOTSTRAP": "100"}, "dev bootstrap failed (exit 100)", ["bootstrap"]),
-            ({"MOCK_DEV_EXIT_COPY": "1"}, f"dev copy failed (exit 1): {self.repo}/ dev:{remote}/", ["bootstrap", "dirs", "copy"]),
-            ({"MOCK_DEV_EXIT_PUT": "1"}, f"dev put failed (exit 1): {remote}/.env", ["bootstrap", "dirs", "copy", "put"]),
+            # Running experiments: nothing on the instance changes.
+            ({"MOCK_STEP_EXIT_IDLE": "1"}, "remote step idle failed (exit 1)", ["idle"]),
+            ({"MOCK_DEV_EXIT_BOOTSTRAP": "100"}, "dev bootstrap failed (exit 100)", ["idle", "bootstrap"]),
+            ({"MOCK_DEV_EXIT_COPY": "1"}, f"dev copy failed (exit 1): {self.repo}/ dev:{remote}/", ["idle", "bootstrap", "dirs", "copy"]),
+            ({"MOCK_DEV_EXIT_PUT": "1"}, f"dev put failed (exit 1): {remote}/.env", ["idle", "bootstrap", "dirs", "copy", "put"]),
         ):
             with self.subTest(reason=reason):
                 self.log.unlink(missing_ok=True)
@@ -625,45 +594,16 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(dev[2]["args"][-2:], [f"dev:{zgca.REMOTE_ROOT}/logs/workers/{experiment}.log", f"{self.repo / 'logs' / 'workers' / experiment}.log"])
                 self.log.unlink()
 
-    def test_push_ships_ended_experiments_of_this_host_and_refuses_the_rest_before_any_call(self) -> None:
-        """The way lineage experiments reach the instance: the reverse of sync, under the same rules."""
-        from autotrade.pipelines.hitl_state import proc_start_ticks
-
-        self._experiment("experiment_one")
-        self._experiment("experiment_two", state="stopped", pid=None)
-        self._experiment("experiment_copy", created_under=f"{zgca.REMOTE_ROOT}/experiments")
-        self._experiment("experiment_live", state="running_session", pid=os.getpid(), pid_start_ticks=proc_start_ticks(os.getpid()))
-        (self.repo / "experiments" / "experiment_bare").mkdir()
-        for experiments, reason in ((("experiment_one", "../escape"), "not an experiment id"),
-                             (("experiment_bare",), "not a readable experiment of this host"),
-                             (("experiment_one", "experiment_copy"), "copy of an experiment of the instance"),
-                             (("experiment_live", "experiment_one"), "experiment_live still running here")):
-            with self.subTest(reason=reason):
-                code, err = self.run_main("push", *experiments)
-                self.assertEqual(code, 1)
-                self.assertIn(reason, err)
-        self.assertFalse(self.calls())
-        code, err = self.run_main("push", "experiment_one", "experiment_two")
-        self.assertEqual(code, 0, err)
-        self.assertEqual([(call["tool"], self.step(call)) for call in self.calls()],
-                         [("instance", "state"), ("dev", "copy"), ("dev", "copy")])
-        for experiment, call in zip(("experiment_one", "experiment_two"), self.calls("dev"), strict=True):
-            args = call["args"]
-            self.assertEqual(args[-2:], [f"{self.repo / 'experiments' / experiment}/", f"dev:{zgca.REMOTE_ROOT}/experiments/{experiment}/"])
-            self.assertEqual(args[args.index("--exclude") + 1], "/pit_views/")
-            self.assertNotIn("--delete", args)
-
     def test_sync_stops_before_any_transfer_when_the_experiment_state_step_refuses(self) -> None:
         code, err = self.run_main("sync", "experiment_running", MOCK_STEP_EXIT_EXPERIMENT_STATE="1")
         self.assertEqual(code, 1)
         self.assertIn("remote step experiment-state failed", err)
         self.assertEqual([self.step(call) for call in self.calls("dev")], ["experiment-state"])
 
-    def test_the_experiment_state_step_refuses_an_experiment_whose_worker_runs(self) -> None:
+    def test_the_experiment_state_and_idle_steps_refuse_while_a_worker_runs(self) -> None:
         """The console's own notion of a running experiment decides, run for real against a temporary root."""
         from autotrade.pipelines.hitl_state import proc_start_ticks
 
-        # Another root than the default keeps its venv inside it.
         root = Path(self.temp.name) / "instance"
         venv = root / ".venv"
         (venv / "bin").mkdir(parents=True)
@@ -679,10 +619,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
         for experiment, record in experiments.items():
             (root / "experiments" / experiment / "hitl").mkdir(parents=True)
             (root / "experiments" / experiment / "hitl" / "status.json").write_text(json.dumps(record), encoding="utf-8")
-        env = {**os.environ, "ZGCA_REMOTE_ROOT": str(root)}
 
         def step(experiment: str) -> subprocess.CompletedProcess[str]:
-            return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "experiment-state", experiment], env=env, capture_output=True, text=True, check=False)
+            return self.remote_step(root, "experiment-state", experiment)
 
         refused = step("experiment_live")
         self.assertEqual(refused.returncode, 1)
@@ -696,6 +635,33 @@ class ZgcaWorkflowTest(unittest.TestCase):
         missing = step("experiment_absent")
         self.assertEqual(missing.returncode, 1)
         self.assertIn("no experiment experiment_absent", missing.stderr)
+        # The first step of deploy and down refuses while one runs, naming it.
+        # A stub tmux answers has-session for $SESSION alone, so no session of
+        # this host's tmux server is asked.
+        stubs = Path(self.temp.name) / "stubs"
+        stubs.mkdir()
+        (stubs / "tmux").write_text('#!/bin/sh\n[ "$1" = has-session ] && [ "$3" = "$SESSION" ]\n', encoding="utf-8")
+        (stubs / "tmux").chmod(0o700)
+        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"}
+        refused = self.remote_step(root, "idle", "deploy", env=env)
+        self.assertEqual(refused.returncode, 1)
+        self.assertIn("deploy refused: experiments are running (experiment_live)", refused.stderr)
+        # A venv without autotrade (a first install that failed) and no venv at
+        # all run no worker, so a deploy can proceed to the install.
+        (venv / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" -I -S "$@"\n', encoding="utf-8")
+        idle = [self.remote_step(root, "idle", "down", env=env)]
+        shutil.rmtree(venv)
+        idle.append(self.remote_step(root, "idle", "down", env=env))
+        for case, shown in zip(("no autotrade", "no venv"), idle, strict=True):
+            with self.subTest(venv=case):
+                self.assertEqual((shown.returncode, shown.stdout, shown.stderr), (0, "", ""))
+        # With no experiment running, a round launcher or fill loop that could
+        # create one meanwhile is refused too.
+        for session in ("autotrade-round", "autotrade-fill"):
+            with self.subTest(session=session):
+                refused = self.remote_step(root, "idle", "deploy", env=env | {"SESSION": session})
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn(f"deploy refused: a round launcher is running in tmux session {session}", refused.stderr)
 
     def test_the_status_step_shows_the_newest_round_log_not_an_image_build_log(self) -> None:
         root = Path(self.temp.name) / "instance"
@@ -710,9 +676,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
         stubs.mkdir()
         (stubs / "docker").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
         (stubs / "docker").chmod(0o700)
-        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root)}
-        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env=env, capture_output=True, text=True, check=False)
+        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}"}
+        shown = self.remote_step(root, "status", env=env)
         self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertNotIn("deployed commit", shown.stdout)
         self.assertIn("image: docker unavailable\n", shown.stdout)
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log\n  smoke\n  experiments created\n  round-exit 0", shown.stdout)
         self.assertNotIn(build.name, shown.stdout)
@@ -721,8 +688,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
         fill = logs / "fill_create_round_test_20261019T210000Z.log"
         fill.write_text("fill create_round_test: slots; queue 1: 0 created, 1 pending (...)\n"
                         "fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\nround-exit 0\n", encoding="utf-8")
-        shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], env=env, capture_output=True, text=True, check=False)
+        # The commit the last deploy shipped is shown once it is recorded.
+        (root / ".runtime" / "zgca").mkdir(parents=True)
+        (root / ".runtime" / "zgca" / zgca.DEPLOYED_COMMIT_NAME).write_text("0123abcd\n", encoding="utf-8")
+        shown = self.remote_step(root, "status", env=env)
         self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("deployed commit: 0123abcd\n", shown.stdout)
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log", shown.stdout)
         self.assertIn(f"fill: no session; last log logs/zgca/{fill.name}\n  fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\n  round-exit 0", shown.stdout)
 
@@ -751,7 +722,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
             script.chmod(0o700)
         held = "fill create_round_test: slots; queue 1: 0 skipped (created already), 0 created, 0 refused, 1 pending (1 by the free GPUs)"
         done = held.replace("0 created", "1 created").replace("1 pending", "0 pending")
-        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root),
+        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}",
                "PLAN": str(temp / "plan"), "PASSES": str(temp / "passes"), "SLEPT": str(temp / "slept")}
         for plan, ending in (([f"0|{held}", f"0|{held}", f"0|{done}"], "round-exit 0"),
                              ([f"0|{held}", "1|experiment_one: refused, HTTP 400"], "round-exit 1")):
@@ -759,8 +730,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 for leftover in (temp / "passes", temp / "slept", *(root / "logs" / "zgca").glob("*.log")):
                     leftover.unlink(missing_ok=True)
                 (temp / "plan").write_text("\n".join(plan) + "\n", encoding="utf-8")
-                shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "round", "scripts/experiments/create_round_test.py", "--fill"],
-                                       env=env, capture_output=True, text=True, check=False)
+                shown = self.remote_step(root, "round", "scripts/experiments/create_round_test.py", "--fill", env=env)
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertIn("fill launcher started in tmux session autotrade-fill", shown.stdout)
                 (log,) = (root / "logs" / "zgca").glob("fill_create_round_test_*.log")
@@ -800,9 +770,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 (temp / "up").unlink(missing_ok=True)
                 if has == "0":  # an existing console answers
                     (temp / "up").touch()
-                env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "ZGCA_REMOTE_ROOT": str(root), "HAS": has,
+                env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "HAS": has,
                        "EXPERIMENTS": str(temp / "experiments"), "UP": str(temp / "up"), "CALLS": str(temp / "calls")}
-                shown = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "console-up"], env=env, capture_output=True, text=True, check=False)
+                shown = self.remote_step(root, "console-up", env=env)
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertIn(said, shown.stdout)
                 self.assertIn("console health: {}", shown.stdout)
@@ -821,11 +791,16 @@ class ZgcaWorkflowTest(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             zgca.main([], repo_root=self.repo, tools=self.tools)
         self.assertEqual(caught.exception.code, 2)
-        remote = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "bogus"], capture_output=True, text=True, check=False)
+        root = Path(self.temp.name) / "instance"
+        remote = self.remote_step(root, "bogus")
         self.assertEqual(remote.returncode, 1)
         self.assertIn("unknown remote step", remote.stderr)
+        # The layout comes from zgca.py on every call; a step without it is refused.
+        bare = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], capture_output=True, text=True, check=False)
+        self.assertEqual(bare.returncode, 1)
+        self.assertIn("usage: remote.sh <root> <venv> <local dir> <step>", bare.stderr)
         # The build verifies and serves the shipped release files, so prepare takes their digests.
-        prepare = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "prepare", "0" * 64], capture_output=True, text=True, check=False)
+        prepare = self.remote_step(root, "prepare", "0" * 64)
         self.assertEqual(prepare.returncode, 1)
         self.assertIn("pinned DuckDB CLI and CUDA compatibility package digests", prepare.stderr)
         self.assertEqual(subprocess.run(["bash", "-n", str(zgca.REMOTE_SCRIPT)], check=False).returncode, 0)
