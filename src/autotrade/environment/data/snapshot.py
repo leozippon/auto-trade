@@ -463,7 +463,7 @@ DEFAULT_DATASETS: dict[str, tuple[str, ...]] = {
 
 
 @dataclass(frozen=True)
-class SnapshotConfig:
+    # The snapshot's own default history window; the research calendar (ExperimentConfig) uses 132 months and sets this explicitly.
     # Same base window the research calendar uses (ExperimentConfig).
     window_months: int = 24
     daily_window_months: int | None = None
