@@ -103,18 +103,11 @@ def cache_write_tokens(usage: Mapping[str, object]) -> int:
     """Prompt tokens the call wrote to the provider's cache.
 
     Writes are part of ``prompt_tokens`` and not of the cached count. The
-    relay reports them for its Claude ids as Anthropic's own counter,
-    ``billing_usage.claude_usage.cache_creation_input_tokens``, and for its
-    responses dialect as ``input_tokens_details.cache_write_tokens``.
-    DeepSeek, MiMo and vLLM report no write.
+    relay reports them for its responses dialect as
+    ``input_tokens_details.cache_write_tokens``; its chat ids, DeepSeek, MiMo
+    and vLLM report no write.
     """
 
-    billing = usage.get("billing_usage")
-    claude = billing.get("claude_usage") if isinstance(billing, Mapping) else None
-    if isinstance(claude, Mapping):
-        written = _count(claude.get("cache_creation_input_tokens"))
-        if written is not None:
-            return written
     details = usage.get("input_tokens_details")
     if isinstance(details, Mapping):
         written = _count(details.get("cache_write_tokens"))

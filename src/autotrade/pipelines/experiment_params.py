@@ -121,7 +121,7 @@ class PackParams:
 
     research_directive: str = _param(experiment_default("research_directive"))
     workspace_reference: str = _param(experiment_default("workspace_reference"))
-    operating_memory: str = _param(experiment_default("operating_memory"))
+    skill_library: str = _param(experiment_default("skill_library"))
 
 
 @dataclass(frozen=True, kw_only=True)

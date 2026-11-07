@@ -186,7 +186,7 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # Derived from SandboxConfig.fit_timeout_seconds; reference workspaces promise the Agent a
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
-    "operating_memory": "curated",
+    "skill_library": "curated",
     "initial_control_mode": "auto",
     "reasoning_effort": "xhigh",
     "inference_time": "08:00",
@@ -255,7 +255,7 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "include_text",
     "text_datasets",
     "include_intraday",
-    "operating_memory",
+    "skill_library",
     "max_research_minutes",
     "max_llm_calls",
     "max_null_controls",

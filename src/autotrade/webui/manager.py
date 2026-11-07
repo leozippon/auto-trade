@@ -53,7 +53,7 @@ from autotrade.pipelines.hitl_state import (
     write_gpu_claim,
 )
 from autotrade.pipelines.ledger import research_over
-from autotrade.pipelines.skills import create_operating_memory_snapshot
+from autotrade.pipelines.skills import create_skill_library_snapshot
 
 from .public_identity import PublicIdentity
 from .registry import experiment_state, read_ledger_records, worker_log_ref
@@ -397,9 +397,9 @@ class ExperimentManager:
             # Every session then mounts that snapshot, so a library change
             # reaches the next experiment instead of the middle of this one.
             try:
-                create_operating_memory_snapshot(
+                create_skill_library_snapshot(
                     directory,
-                    mode=str(merged.get("operating_memory") or ""),
+                    mode=str(merged.get("skill_library") or ""),
                     repo_root=self.repo_root,
                 )
             except Exception:

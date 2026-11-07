@@ -215,7 +215,8 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
 
     prompt = _full_prompt()
     stable = prompt.split("# 环境")[0]
-    process = stable[stable.index("# 研究与回测流程") : stable.index("# 读数")]
+    process = stable[stable.index("# 研究与回测流程") : stable.index("# 研究取向")]
+    orientation = stable[stable.index("# 研究取向") : stable.index("# 读数")]
     readings = stable[stable.index("# 读数") : stable.index("# 策略")]
     assert "AI 首席量化研究官（AI Chief Quantitative Research Officer）" in stable
     # Research on the visible years, whose data view never moves; each test
@@ -247,6 +248,17 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "是读数，不是判决",
     ):
         assert clause in readings, clause
+    # The owner's orientation: innovative, deep strategies over textbook style
+    # factors, with rule scoring as the baseline, and the budget spent on
+    # comparing directions in the research years before testing.
+    for clause in (
+        "有创新性、有深度的策略，而不是教科书式的风格因子组合",
+        "学习型模型、预训练模型与嵌入",
+        "简单的规则打分只作基线对照，不作为目标",
+        "不以提前结束为目标",
+        "在研究年里充分比较多个方向、迭代改进之后再开始测试",
+    ):
+        assert clause in orientation, clause
     assert "参考工作区、研究方向与研究者指令都不能放宽它们" in stable
     assert "读取研究年末之后的数据" in stable and "模型自身的知识" in stable
     assert "验证期只通过 `test` 的结果了解" in stable
@@ -292,9 +304,10 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     ):
         for surface in (prompt, prompts.WRAP_UP_PROMPT):
             assert retired not in surface, retired
-    # How to research is the Agent's own call, which a reference workspace may
-    # suggest: the stable prompt carries no research protocol, evidence
-    # recipe, process quota, delegation style or compute advice.
+    # Beyond the orientation's ambition, how to research is the Agent's own
+    # call, which a reference workspace may suggest: the stable prompt carries
+    # no research protocol, evidence recipe, process quota, delegation style
+    # or compute advice.
     for retired in (
         "# 研究协议",
         "# 证据标准",
@@ -374,9 +387,9 @@ ROW_BLOCKS = ("residual_reading", "raw_readings")
 
 
 def _contract_texts() -> dict[str, str]:
-    from autotrade.pipelines.skills import OPERATING_MEMORY_LIBRARY
+    from autotrade.pipelines.skills import SKILL_LIBRARY_PATH
 
-    library = Path(__file__).resolve().parents[2] / OPERATING_MEMORY_LIBRARY
+    library = Path(__file__).resolve().parents[2] / SKILL_LIBRARY_PATH
     return {
         "system_prompt": prompts.PROTOCOL_INSTRUCTION,
         "default_instruction": prompts.SESSION_DEFAULT_INSTRUCTION,

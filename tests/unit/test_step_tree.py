@@ -427,11 +427,12 @@ class PromptCompositionTest(unittest.TestCase):
         second_prefix, second_context = second.split(self.MARKER, 1)
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
-        # Opening paragraph, process, readings, strategy, prohibitions, how
-        # to work -- then the environment.
+        # Opening paragraph, process, research orientation, readings,
+        # strategy, prohibitions, how to work -- then the environment.
         order = [
             first.index("你是本研究框架的 AI 首席量化研究官"),
             first.index("# 研究与回测流程"),
+            first.index("# 研究取向"),
             first.index("# 读数"),
             first.index("# 策略"),
             first.index("# 禁止事项"),

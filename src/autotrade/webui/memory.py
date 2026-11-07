@@ -1,7 +1,7 @@
 """Skill-library model for the console: the read view and the curated writes.
 
 Both halves stand on the two places the pipeline already treats as
-authoritative: the curated library committed under ``configs/operating_memory/``
+authoritative: the curated library committed under ``configs/skill_library/``
 and the experiment trees under ``experiments/``, each holding the snapshot of
 the library it froze at creation, which is what its sessions mount.
 
@@ -25,17 +25,17 @@ from autotrade.environment.runtime import chmod_tree
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.skills import (
     CURATED_MEMORY_SOURCE,
-    DEFAULT_OPERATING_MEMORY,
+    DEFAULT_SKILL_LIBRARY,
     MAX_SKILLS,
     MAX_SKILLS_BYTES,
     MAX_SKILLS_FILES,
-    OPERATING_MEMORY_LIBRARY,
     SKILL_FILENAME,
+    SKILL_LIBRARY_PATH,
     SkillsStats,
     build_skills_index,
-    operating_memory_snapshot_root,
-    read_operating_memory_snapshot,
-    resolve_operating_memory,
+    read_skill_library_snapshot,
+    resolve_skill_library,
+    skill_library_snapshot_root,
     snapshot_memory_sources,
     validate_memory_entry_ref,
     validate_skill_name,
@@ -64,10 +64,10 @@ def _error(exc: Exception, phrase: str) -> str:
 def curated_library(repo_root: Path) -> dict[str, object]:
     """The human-curated tier as the mount would read it right now."""
 
-    library = Path(repo_root) / OPERATING_MEMORY_LIBRARY
+    library = Path(repo_root) / SKILL_LIBRARY_PATH
     payload: dict[str, object] = {
         "source": CURATED_MEMORY_SOURCE,
-        "library": OPERATING_MEMORY_LIBRARY,
+        "library": SKILL_LIBRARY_PATH,
         "entries": [],
     }
     if not library.is_dir():
@@ -107,7 +107,7 @@ def curated_entry(repo_root: Path, name: str) -> dict[str, object]:
     """
 
     entry_name = validate_skill_name(name)
-    path = Path(repo_root) / OPERATING_MEMORY_LIBRARY / entry_name / SKILL_FILENAME
+    path = Path(repo_root) / SKILL_LIBRARY_PATH / entry_name / SKILL_FILENAME
     if not path.is_file():
         raise KeyError(f"unknown curated memory entry: {entry_name}")
     content = path.read_text(encoding="utf-8")
@@ -138,8 +138,8 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
     params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
     payload: dict[str, object] = {
         "experiment_id": experiment_id,
-        "mode": resolve_operating_memory(params.get("operating_memory")),
-        "default_mode": DEFAULT_OPERATING_MEMORY,
+        "mode": resolve_skill_library(params.get("skill_library")),
+        "default_mode": DEFAULT_SKILL_LIBRARY,
         # A count, not a projection: the collected runs no longer answer what was
         # mounted, they only say how many sessions have run against the snapshot.
         "sessions_seen": len(
@@ -148,7 +148,7 @@ def experiment_memory(experiments_root: Path, experiment_id: str) -> dict[str, o
         "snapshot": None,
     }
     try:
-        record = read_operating_memory_snapshot(directory)
+        record = read_skill_library_snapshot(directory)
         if record is not None:
             payload["snapshot"] = {
                 "created_at": str(record.get("created_at") or ""),
@@ -179,10 +179,10 @@ def experiment_memory_entry(
 
     directory = resolve_experiment_dir(Path(experiments_root), experiment_id)
     mount_source, entry_name = validate_memory_entry_ref(f"{source}/{name}")
-    record = read_operating_memory_snapshot(directory)
+    record = read_skill_library_snapshot(directory)
     if record is None:
         raise KeyError(f"{experiment_id} has no skill library snapshot")
-    item = operating_memory_snapshot_root(directory) / mount_source / entry_name
+    item = skill_library_snapshot_root(directory) / mount_source / entry_name
     if not (item / SKILL_FILENAME).is_file():
         raise KeyError(f"{experiment_id} did not mount {mount_source}/{entry_name}")
     # The generation's own index, so the snapshot is described exactly as the
@@ -214,7 +214,7 @@ def experiment_memory_entry(
 
 
 def _library_dir(repo_root: Path) -> Path:
-    return Path(repo_root) / OPERATING_MEMORY_LIBRARY
+    return Path(repo_root) / SKILL_LIBRARY_PATH
 
 
 def _entry_name(name: str) -> str:
@@ -380,7 +380,7 @@ def memory_overview(repo_root: Path, experiments_root: Path) -> dict[str, object
     the experiments the page's two inboxes can be narrowed to."""
 
     return {
-        "default_mode": DEFAULT_OPERATING_MEMORY,
+        "default_mode": DEFAULT_SKILL_LIBRARY,
         "curated": curated_library(repo_root),
         "experiments": [directory.name for directory in experiment_directories(experiments_root)],
     }

@@ -45,7 +45,7 @@ from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import DEFAULT_IMAGE
 from autotrade.pipelines import ExperimentLedger
-from autotrade.pipelines.skills import OPERATING_MEMORY_MODES
+from autotrade.pipelines.skills import SKILL_LIBRARY_MODES
 from autotrade.pipelines.worker import build_experiment_pipeline
 
 
@@ -71,8 +71,8 @@ def main() -> int:
         ),
     )
     parser.add_argument(
-        "--operating-memory",
-        choices=OPERATING_MEMORY_MODES,
+        "--skill-library",
+        choices=SKILL_LIBRARY_MODES,
         help="Skill-library mode for this session; the console default when omitted.",
     )
     parser.add_argument(
@@ -101,8 +101,8 @@ def main() -> int:
     # does not carry; the worker's loader validates both.
     if args.workspace_reference:
         overrides["workspace_reference"] = args.workspace_reference
-    if args.operating_memory:
-        overrides["operating_memory"] = args.operating_memory
+    if args.skill_library:
+        overrides["skill_library"] = args.skill_library
     options = build_worker_options(
         args,
         repo_root=repo_root,

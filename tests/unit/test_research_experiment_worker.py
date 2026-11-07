@@ -498,8 +498,8 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     spec = host_manifest["sandbox_spec"]
     assert (spec["gpu_count"], spec["gpu"], spec["gpu_name_filter"]) == (3, "auto", "L20")
     agent_manifest_text = Path(research_row["run_manifest_ref"]).read_text(encoding="utf-8")
-    assert json.loads(agent_manifest_text)["operating_memory"]["sources"] == []
-    assert "operating_memory_refused" not in host_manifest
+    assert json.loads(agent_manifest_text)["skill_library"]["sources"] == []
+    assert "skill_library_refused" not in host_manifest
     workspace = options.work_root / options.experiment_id / "research" / "agent" / "workspace"
     assert not (workspace / "memory").exists()
     assert read_control(experiment / "hitl" / "control.json").gpu_counts == {}
@@ -854,8 +854,8 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     """The real worker, twice, on a gateway priced as the relay's
-    claude-opus-5-5: each scripted reply bills 5,000 uncached and 5,000 cached
-    prompt tokens and 1,000 completion tokens, $0.041. The first attempt
+    gemini-4-argon: each scripted reply bills 10,000 uncached and 10,000 cached
+    prompt tokens and 2,000 completion tokens, $0.041. The first attempt
     spends one reply and loses its model; the resumed attempt continues from
     that spend, its next reply reaches the $0.08 cap, and the call after it is
     never made: the session ends on the spend cap, the host registers the one
@@ -872,12 +872,12 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
 
     class HostedLLM(_NominatingLLM):
         provider = "lighting"
-        model = "claude-opus-5-5"
+        model = "gemini-4-argon"
 
     usage = {
-        "prompt_tokens": 10_000,
-        "completion_tokens": 1_000,
-        "prompt_tokens_details": {"cached_tokens": 5_000},
+        "prompt_tokens": 20_000,
+        "completion_tokens": 2_000,
+        "prompt_tokens_details": {"cached_tokens": 10_000},
     }
     repo, experiment = make_experiment(
         tmp_path,

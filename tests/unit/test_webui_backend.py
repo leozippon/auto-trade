@@ -156,6 +156,17 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "compact_max_calls",
     ]
     assert fields["model"]["choices"] == list(MODEL_CHOICES)
+    # The whole catalogue: the local Qwen, the direct DeepSeek and MiMo ids,
+    # and the relay's gpt-6-astra, gemini-4-argon and DeepSeek-V4.1-Flash.
+    assert MODEL_CHOICES == (
+        "qwen-3.8-27b-fp8",
+        "deepseek-flash",
+        "mimo-v2.6-flash",
+        "mimo-v2.6-pro",
+        "gpt-6-astra",
+        "gemini-4-argon",
+        "DeepSeek-V4.1-Flash",
+    )
     # The main conversation defaults to the relay's gpt-6-astra, the
     # sub-agents and compaction to its DeepSeek-V4.1-Flash.
     assert [fields[role]["default"] for role in ("model", "subagent_model", "compact_model")] == [

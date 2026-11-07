@@ -28,7 +28,7 @@ from autotrade.environment.strategy import StrategySchedule
 from . import verdict
 from .calendar import FULL_SPAN, ResearchGeometry, step_windows
 from .ledger import ENVIRONMENT_BLOCKED, SessionKind
-from .skills import DEFAULT_OPERATING_MEMORY
+from .skills import DEFAULT_SKILL_LIBRARY
 
 ExecutionMode = Literal["sandbox", "trusted"]
 
@@ -612,7 +612,7 @@ class ExperimentConfig:
     workspace_reference: str = ""
     # Whether the curated repository library mounts read-only into every
     # session (``curated``) or nothing does (``none``).
-    operating_memory: str = DEFAULT_OPERATING_MEMORY
+    skill_library: str = DEFAULT_SKILL_LIBRARY
     # Also record failed validation attempts as lightweight dead-end nodes
     # (no output snapshot) so later sessions can see what was already tried.
     record_failed_attempts: bool = True

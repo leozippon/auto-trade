@@ -9,7 +9,8 @@ directive, geometry, budgets and card, and differs only by the harness changes
 of 2026-11-07: a candidate that defines `fit` registers without a seed
 replicate, `validate` describes its candidates and controls in neutral terms,
 the curated skills on parameter grids and artifact hygiene are gone, `shell`
-allows detached jobs, and the experiment gets 900 s per `generate_orders`,
+allows detached jobs, the system prompt carries the research-orientation
+block, and the experiment gets 900 s per `generate_orders`,
 7,200 s per `fit` and a 64 GiB container (the session's included). Round
 20261107b runs the new condition on the local console as a second replicate
 and a model contrast.

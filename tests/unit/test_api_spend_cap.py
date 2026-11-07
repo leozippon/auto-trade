@@ -67,55 +67,28 @@ def test_every_cached_usage_shape_bills_the_same_split(usage):
     assert billed_tokens(_response(usage), messages=MESSAGES) == (400, 600, 300, 0)
 
 
-# The two shapes that report writes, each part of ``prompt_tokens`` beside the
-# read: 100 uncached + 600 read + 300 written.
-CACHE_WRITE_USAGES = {
-    # The relay's Claude ids: the OpenAI fields plus Anthropic's own counters.
-    "claude-opus-5-5": {
-        "prompt_tokens": 1_000,
-        "completion_tokens": 300,
-        "prompt_tokens_details": {"cached_tokens": 600},
-        "billing_usage": {
-            "claude_usage": {
-                "cache_creation_input_tokens": 300,
-                "cache_read_input_tokens": 600,
-                "input_tokens": 100,
-                "output_tokens": 300,
-            }
-        },
-    },
-    # The relay's responses dialect, after its parse adds the shared names.
-    "gpt-6-astra": {
+def test_cache_writes_are_billed_apart_at_the_write_price():
+    # The relay's responses dialect (after its parse adds the shared names) is
+    # the one shape that reports writes, part of ``prompt_tokens`` beside the
+    # read: 100 uncached + 600 read + 300 written.
+    usage = {
         "input_tokens": 1_000,
         "output_tokens": 300,
         "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
         "prompt_tokens": 1_000,
         "completion_tokens": 300,
-    },
-}
-
-
-@pytest.mark.parametrize(
-    ("model", "spend"),
-    [
-        # 100 x 4 + 600 x 0.2 + 300 x 20 + 300 x 5.0 (1.25 x 4), per million.
-        ("claude-opus-5-5", 0.008020),
-        # 100 x 10 + 600 x 1 + 300 x 50 + 300 x 12.5, per million.
-        ("gpt-6-astra", 0.020350),
-    ],
-)
-def test_cache_writes_are_billed_apart_at_the_write_price(model, spend):
-    usage = CACHE_WRITE_USAGES[model]
+    }
     assert billed_tokens(_response(usage), messages=MESSAGES) == (100, 600, 300, 300)
 
     budget = SessionCallBudget(
         max_calls=4, max_api_spend_usd=1.0, deadline=time.monotonic() + 60
     )
     SessionBudgetLLM(
-        _priced(model, "lighting", [_response(usage)]), budget=budget
+        _priced("gpt-6-astra", "lighting", [_response(usage)]), budget=budget
     ).complete(MESSAGES)
 
-    assert budget.api_spend_usd == pytest.approx(spend)
+    # 100 x 10 + 600 x 1 + 300 x 50 + 300 x 12.5, per million.
+    assert budget.api_spend_usd == pytest.approx(0.020350)
 
 
 def test_plain_usage_bills_the_whole_prompt_uncached():

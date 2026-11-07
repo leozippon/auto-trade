@@ -41,7 +41,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             strategy_cpus=8.0,
             strategy_memory="32g",
             workspace_reference="configs/workspace_refs/pack",
-            operating_memory="curated",
+            skill_library="curated",
             benchmark_index=DEFAULT_BENCHMARK_INDEX,
         ),
         experiment_dir=tmp_path / "experiments" / "audit",
@@ -254,7 +254,7 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
     assert developer["sandbox_spec"] is options.agent_sandbox
     assert developer["evaluator"] is build.pipeline.evaluator
     assert developer["workspace_reference"] == "configs/workspace_refs/pack"
-    assert developer["operating_memory"] == "curated"
+    assert developer["skill_library"] == "curated"
     assert developer["repo_root"] == tmp_path
 
 

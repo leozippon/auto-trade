@@ -455,7 +455,7 @@ def _agent_visible_manifest(
             "per_call_timeout_seconds",
             "sandbox_spec",
             "sandbox_runtime",
-            "operating_memory",
+            "skill_library",
             "skills",
             "exploration_directive",
             "created_at",

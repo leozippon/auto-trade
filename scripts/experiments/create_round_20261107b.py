@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The 2026-11-07b round: round 20261107's open pack and geometry under the harness changes of 2026-11-07, gpt-6-astra and claude-opus-5-5 on the local console.
+"""The 2026-11-07b round: round 20261107's open pack and geometry under the harness changes of 2026-11-07, gpt-6-astra and gemini-4-argon on the local console.
 
 It asks whether the harness, not the model, made round 20261107's session
 settle early. That round's one experiment, `open_200k_10y_astra_zgca_20261107`,
@@ -9,18 +9,21 @@ round runs the same pack, directive and geometry after the harness changes of
 2026-11-07: a candidate that defines `fit` registers without a seed replicate,
 `validate` describes its candidates and controls in neutral terms, the curated
 skills on parameter grids and artifact hygiene are gone, `shell` allows
-detached jobs, and every experiment here gets 900 s per `generate_orders`,
-7,200 s per `fit` and a 64 GiB container (the session's included).
+detached jobs, the system prompt's research-orientation block asks for
+innovative, deep strategies and for the budget to go to comparing directions
+before testing, and every experiment here gets 900 s per `generate_orders`,
+7,200 s per `fit` and a 64 GiB container (the session's included). All three
+experiments of rounds 20261107b and 20261107c run under that prompt.
 
 `open_200k_10y_astra_local_20261107b` replicates the new condition on two
 local L20 cards with two replays at a time in `validate`, beside round
 20261107c, which runs it on the ZGCA A100 as the paired contrast with round
-20261107's experiment; `open_200k_10y_opus_local_20261107b` is the same local
-experiment on claude-opus-5-5, a model contrast (the relay's Claude ids take no
-`reasoning_effort`). Every session's sub-agents and compaction run
-DeepSeek-V4.1-Flash, compacting at 221,184 tokens, below the relay's
-272,000-token prompt tier for gpt-6-astra and the same for every experiment so
-the contrasts share it.
+20261107's experiment; `open_200k_10y_argon_local_20261107b` is the same local
+experiment on gemini-4-argon, a model contrast (the relay sends gemini-4-argon
+no `reasoning_effort` and no temperature: it thinks at Google's default).
+Every session's sub-agents and compaction run DeepSeek-V4.1-Flash, compacting
+at 221,184 tokens, below the relay's 272,000-token prompt tier for gpt-6-astra
+and the same for every experiment so the contrasts share it.
 
 The rest is round 20261107's: ten August-July research years
 2015-08-01..2025-07-31, of which `research_years` 7 are the session's and the
@@ -62,7 +65,7 @@ from scripts.experiments._round import Round
 
 PACK = "configs/workspace_refs/open_200k_20261107"
 ASTRA = "gpt-6-astra"
-OPUS = "claude-opus-5-5"
+ARGON = "gemini-4-argon"
 FLASH = "DeepSeek-V4.1-Flash"
 # Below the relay's 272,000-token prompt tier for gpt-6-astra (see the docstring).
 COMPACT_TOKEN_THRESHOLD = 221_184
@@ -92,7 +95,7 @@ def _experiment(model: str, *, gpus: int) -> dict[str, object]:
 
 EXPERIMENTS: dict[str, dict[str, object]] = {
     "open_200k_10y_astra_local_20261107b": _experiment(ASTRA, gpus=2),
-    "open_200k_10y_opus_local_20261107b": _experiment(OPUS, gpus=2),
+    "open_200k_10y_argon_local_20261107b": _experiment(ARGON, gpus=2),
 }
 
 ROUND = Round(

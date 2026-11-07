@@ -38,7 +38,7 @@ from autotrade.environment.llm.openai_compatible import load_env_value
 from autotrade.environment.tools.base import validate_arguments
 
 MODEL = "gpt-6-astra"
-CLAUDE_MODEL = "claude-sonnet-5-5"
+GEMINI_MODEL = "gemini-4-argon"
 RELAY_DEEPSEEK_MODEL = "DeepSeek-V4.1-Flash"
 
 TOOLS = (
@@ -276,7 +276,11 @@ def _streamed_text(text: str = "OK") -> bytes:
 
 
 def test_catalog_registers_every_relay_id_with_its_dialect_and_window():
-    assert len(MODEL_PROFILES) == 6
+    assert tuple(profile[0] for profile in MODEL_PROFILES) == (
+        MODEL,
+        GEMINI_MODEL,
+        RELAY_DEEPSEEK_MODEL,
+    )
     for model, dialect, window, output, prices in MODEL_PROFILES:
         assert model in MODEL_CHOICES
         profile = model_profile(model)
@@ -463,12 +467,12 @@ def test_responses_tools_send_optional_parameters_nullable(tmp_path: Path):
         [
             json.dumps(
                 {
-                    "model": CLAUDE_MODEL,
+                    "model": GEMINI_MODEL,
                     "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
                 }
             ).encode()
         ],
-        model=CLAUDE_MODEL,
+        model=GEMINI_MODEL,
     )
     chat.complete([ChatMessage("user", "delegate")], tools=(agent,))
     assert chat_transport.bodies[0]["tools"] == [agent]
@@ -954,20 +958,22 @@ def test_other_failures_never_move_to_the_alternate_key(
     assert set(_authorization(transport)) == {"Bearer relay-primary"}
 
 
-def test_hosted_claude_ids_reuse_the_chat_completions_contract(tmp_path: Path):
+def test_gemini_reuses_the_chat_completions_contract_without_a_reasoning_level(
+    tmp_path: Path,
+):
     proxy, transport = _proxy(
         tmp_path,
         [
             json.dumps(
                 {
-                    "model": CLAUDE_MODEL,
+                    "model": GEMINI_MODEL,
                     "choices": [
                         {
                             "message": {
                                 "content": None,
                                 "tool_calls": [
                                     {
-                                        "id": "toolu_1",
+                                        "id": "call_1",
                                         "type": "function",
                                         "function": {
                                             "name": "get_quote",
@@ -983,7 +989,7 @@ def test_hosted_claude_ids_reuse_the_chat_completions_contract(tmp_path: Path):
                 }
             ).encode()
         ],
-        model=CLAUDE_MODEL,
+        model=GEMINI_MODEL,
         thinking_enabled=True,
         reasoning_effort="xhigh",
     )
@@ -994,29 +1000,17 @@ def test_hosted_claude_ids_reuse_the_chat_completions_contract(tmp_path: Path):
     assert transport.urls[0] == f"{DEFAULT_BASE_URL}/chat/completions"
     assert body["messages"] == [{"role": "user", "content": "quote"}]
     assert body["tools"] == [dict(TOOLS[0])]
-    # No thinking control for these ids: the level is never sent.
+    # Gemini thinks at its upstream default: the level is never sent.
     assert proxy.config.reasoning_effort is None
-    assert not {"input", "reasoning", "thinking", "max_output_tokens"} & body.keys()
+    assert not {
+        "input",
+        "reasoning",
+        "reasoning_effort",
+        "thinking",
+        "max_output_tokens",
+    } & body.keys()
     assert response.tool_calls[0].name == "get_quote"
     assert response.usage == {"total_tokens": 442}
-
-
-def _tool_loop(*, notice: bool) -> list[ChatMessage]:
-    """An Agent-shaped conversation: two tool rounds, optionally a notice."""
-
-    messages = [
-        ChatMessage("system", "fixed system prompt"),
-        ChatMessage("user", "go"),
-    ]
-    for index, symbol in enumerate(("600519.SH", "600036.SH"), start=1):
-        call = ToolCall(f"toolu_{index}", "get_quote", {"symbol": symbol})
-        messages += [
-            ChatMessage("assistant", None, tool_calls=(call,)),
-            ChatMessage("tool", f'{{"close": {index}}}', tool_call_id=call.id),
-        ]
-    if notice:
-        messages.append(ChatMessage("user", '{"observation": "time_budget_notice"}'))
-    return messages
 
 
 def _chat_json(model: str) -> bytes:
@@ -1029,73 +1023,14 @@ def _chat_json(model: str) -> bytes:
     ).encode()
 
 
-@pytest.mark.parametrize("notice", [False, True])
-def test_claude_ids_mark_only_the_latest_tool_result_for_the_prompt_cache(
-    tmp_path: Path, notice: bool
-):
-    proxy, transport = _proxy(
-        tmp_path, [_chat_json("claude-opus-5-5")], model="claude-opus-5-5"
-    )
-    messages = _tool_loop(notice=notice)
-
-    proxy.complete(messages)
-
-    body = transport.bodies[0]
-    expected = [message.to_record() for message in messages]
-    # The relay forwards the marker only from a tool message; the system
-    # prompt and every other message keep their plain string content.
-    expected[5]["content"] = [
-        {
-            "type": "text",
-            "text": '{"close": 2}',
-            "cache_control": {"type": "ephemeral"},
-        }
-    ]
-    assert body["messages"] == expected
-    assert body["messages"][0] == {"role": "system", "content": "fixed system prompt"}
-    assert json.dumps(body).count("cache_control") == 1
-
-
-def test_claude_conversation_without_a_tool_result_carries_no_marker(tmp_path: Path):
-    proxy, transport = _proxy(
-        tmp_path, [_chat_json("claude-opus-5-5")], model="claude-opus-5-5"
-    )
-    messages = _tool_loop(notice=False)[:2]
-
-    proxy.complete(messages)
-
-    assert transport.bodies[0]["messages"] == [m.to_record() for m in messages]
-
-
-@pytest.mark.parametrize(
-    ("model", "reply"),
-    [
-        (RELAY_DEEPSEEK_MODEL, _chat_json(RELAY_DEEPSEEK_MODEL)),
-        (MODEL, _responses_json(content="done")),
-    ],
-    ids=["relay-deepseek", "gpt-6-responses"],
-)
-def test_other_relay_ids_send_no_cache_marker(tmp_path: Path, model: str, reply: bytes):
-    proxy, transport = _proxy(tmp_path, [reply], model=model)
-    messages = _tool_loop(notice=False)
-
-    proxy.complete(messages)
-
-    body = transport.bodies[0]
-    assert "cache_control" not in json.dumps(body)
-    if model == RELAY_DEEPSEEK_MODEL:
-        assert body["messages"] == [message.to_record() for message in messages]
-
-
 @pytest.mark.parametrize(
     ("model", "reply", "temperature"),
     [
-        ("gemini-4-argon", _chat_json("gemini-4-argon"), None),
-        ("claude-opus-5-5", _chat_json("claude-opus-5-5"), 0.0),
+        (GEMINI_MODEL, _chat_json(GEMINI_MODEL), None),
         (RELAY_DEEPSEEK_MODEL, _chat_json(RELAY_DEEPSEEK_MODEL), 0.0),
         (MODEL, _responses_json(content="done"), None),
     ],
-    ids=["gemini", "claude", "relay-deepseek", "gpt-6-responses"],
+    ids=["gemini", "relay-deepseek", "gpt-6-responses"],
 )
 def test_only_gemini_leaves_the_temperature_to_the_provider(
     tmp_path: Path, model: str, reply: bytes, temperature: float | None

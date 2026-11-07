@@ -28,23 +28,23 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.experiment_params import Surface, parameters
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
-    OPERATING_MEMORY_LIBRARY,
-    OPERATING_MEMORY_MODES,
+    SKILL_LIBRARY_MODES,
+    SKILL_LIBRARY_PATH,
     build_skills_index,
 )
 
 _SCHEDULE_REGISTRY = Path(__file__).resolve().parents[3] / "configs" / "tushare_update_schedule.json"
-_OPERATING_MEMORY_LIBRARY = Path(__file__).resolve().parents[3] / OPERATING_MEMORY_LIBRARY
+_SKILL_LIBRARY_PATH = Path(__file__).resolve().parents[3] / SKILL_LIBRARY_PATH
 
 
-def _operating_memory_entries() -> list[dict[str, str]]:
+def _skill_library_entries() -> list[dict[str, str]]:
     """Curated skill-library entries, used only to describe the mode field.
 
     A missing or malformed library degrades to an empty list (display-only
     concern); what actually mounts is decided by the session at run time."""
 
     try:
-        index = build_skills_index(_OPERATING_MEMORY_LIBRARY)
+        index = build_skills_index(_SKILL_LIBRARY_PATH)
     except (OSError, ValueError):
         return []
     return [
@@ -75,7 +75,7 @@ def _dataset_labels() -> dict[str, str]:
 
 
 _DATASET_LABELS = _dataset_labels()
-_OPERATING_MEMORY_ENTRIES = _operating_memory_entries()
+_SKILL_LIBRARY_ENTRIES = _skill_library_entries()
 
 _FIELDS: list[dict[str, object]] = [
     # 基本与排程
@@ -537,18 +537,18 @@ _FIELDS: list[dict[str, object]] = [
      "help": "市价 taker 成交滑点；限价/竞价成交不计滑点。"},
     # 运行控制
     {
-        "key": "operating_memory",
+        "key": "skill_library",
         "group": "运行控制",
         "label": "跨实验技能库",
         "type": "choice",
-        "choices": list(OPERATING_MEMORY_MODES),
+        "choices": list(SKILL_LIBRARY_MODES),
         "choice_labels": {
             "none": "不挂载",
             "curated": "挂载精选条目",
         },
         "help": (
             "把精选库只读挂载进每个研究会话工作区："
-            f"精选库是仓库里人工维护的 {len(_OPERATING_MEMORY_ENTRIES)} 条运行经验，"
+            f"精选库是仓库里人工维护的 {len(_SKILL_LIBRARY_ENTRIES)} 条运行经验，"
             "在实验创建时冻结为本实验的快照。会话不能改写或删除挂载内容。"
         ),
     },

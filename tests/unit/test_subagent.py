@@ -2330,16 +2330,16 @@ def test_unfinished_session_end_still_reports_token_usage() -> None:
 
 
 def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() -> None:
-    """Each usage shape adds its own counters: the relay's Claude chat shape
-    and its responses dialect report reads, writes and reasoning in different
-    places, and a usage with no cache count (vLLM) adds no hit and no miss."""
+    """Each usage shape adds its own counters: the Chat Completions shape and
+    the relay's responses dialect report reads and reasoning in different
+    places, only the responses dialect reports writes, and a usage with no
+    cache count (vLLM) adds no hit and no miss."""
 
-    claude = {
+    chat = {
         "prompt_tokens": 1_000,
         "completion_tokens": 50,
         "prompt_tokens_details": {"cached_tokens": 0},
         "completion_tokens_details": {"reasoning_tokens": 0},
-        "billing_usage": {"claude_usage": {"cache_creation_input_tokens": 900}},
     }
     responses = {
         "input_tokens": 1_000,
@@ -2354,7 +2354,7 @@ def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() ->
         llm=ScriptedLLM(
             [
                 ProviderResponse(content="thinking aloud", usage=usage)
-                for usage in (claude, responses, vllm)
+                for usage in (chat, responses, vllm)
             ]
         ),
         tools=ToolRegistry([_FinishStub("test")]),
@@ -2383,10 +2383,10 @@ def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() ->
         "completion_tokens": 450,
         "reasoning_tokens": 200,
         "cache_hit_tokens": 600,
-        # 1,000 unread on the Claude call, 400 on the responses one; none
+        # 1,000 unread on the chat call, 400 on the responses one; none
         # counted for vLLM, whose usage says nothing about its cache.
         "cache_miss_tokens": 1_400,
-        "cache_write_tokens": 1_200,
+        "cache_write_tokens": 300,
     }
     assert usage["cache_hit_ratio"] == 0.2
 
@@ -2394,7 +2394,7 @@ def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() ->
 @pytest.mark.parametrize(
     ("child_usages", "hits", "ratio"),
     [
-        # DeepSeek's hit field and a Claude call that read nothing: a reported
+        # DeepSeek's hit field and a chat call that read nothing: a reported
         # zero is a real zero and stays in the ratio.
         (
             (

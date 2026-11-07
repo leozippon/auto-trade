@@ -130,14 +130,14 @@ from .session_tools import (
     batch_candidate_stats,
 )
 from .skills import (
-    OPERATING_MEMORY_DIRNAME,
+    SKILL_LIBRARY_DIRNAME,
     SKILLS_DIRNAME,
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
     MemorySource,
     WriteSkillTool,
-    ensure_operating_memory_snapshot,
-    install_operating_memory,
+    ensure_skill_library_snapshot,
+    install_skill_library,
     install_workspace_skills,
     mounted_skill_refs,
     write_skills_index,
@@ -453,7 +453,7 @@ class LLMResearchDeveloper:
         max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
         research_directive: str = "",
         workspace_reference: str = "",
-        operating_memory: str = "none",
+        skill_library: str = "none",
         repo_root: str | Path | None = None,
     ) -> None:
         self.llm = llm
@@ -475,7 +475,7 @@ class LLMResearchDeveloper:
         self.max_response_tokens = max_response_tokens
         self.research_directive = research_directive
         self.workspace_reference = workspace_reference
-        self.operating_memory = str(operating_memory)
+        self.skill_library = str(skill_library)
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
         validate_strategy_package(self.baseline_strategy)
 
@@ -935,17 +935,17 @@ class LLMResearchDeveloper:
         # Fixed at creation: a session mounts this experiment's snapshot and
         # never re-resolves the library. An experiment not created through the
         # console gets its snapshot here, once.
-        memory_snapshot = ensure_operating_memory_snapshot(
+        memory_snapshot = ensure_skill_library_snapshot(
             self.experiment_dir,
-            mode=self.operating_memory,
+            mode=self.skill_library,
             repo_root=self.repo_root,
         )
         # The mounted memory and refs are re-copied on a resume (their content
         # is fixed); the skills tree is the Agent's own work and stays.
-        _remove_mounted_tree(workspace_root / OPERATING_MEMORY_DIRNAME)
-        mounted_memory = install_operating_memory(workspace_root, self.experiment_dir)
+        _remove_mounted_tree(workspace_root / SKILL_LIBRARY_DIRNAME)
+        mounted_memory = install_skill_library(workspace_root, self.experiment_dir)
         manifest.update(
-            operating_memory=_operating_memory_record(memory_snapshot, mounted_memory)
+            skill_library=_skill_library_record(memory_snapshot, mounted_memory)
         )
         if resume is None:
             skills_stats = install_workspace_skills(
@@ -1640,7 +1640,7 @@ def session_workspace_map(workspace: str | Path) -> dict[str, str]:
     return mapping
 
 
-def _operating_memory_record(
+def _skill_library_record(
     snapshot: Mapping[str, object], sources: Sequence[MemorySource]
 ) -> dict[str, object]:
     """What the run manifest records about mounted cross-experiment memory.

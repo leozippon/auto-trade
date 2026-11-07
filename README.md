@@ -42,7 +42,7 @@ Build the sandbox image before running anything that executes strategy code or s
 docker build -t autotrade-sandbox:latest -f ops/docker/sandbox.Dockerfile .
 ```
 
-Copy `.env.example` to `.env` and fill in the credentials you need: a TuShare token for data, and a model endpoint. Model serving is external to this repository — by default the main conversation runs on `gpt-6-astra` and sub-agents and compaction on `DeepSeek-V4.1-Flash`, both through the LightingTheWord relay; DeepSeek, Xiaomi MiMo, the relay's Claude and Gemini ids and a local Qwen model behind a gateway at `VLLM_BASE_URL` can be selected per experiment and per role. The console fails to start a session rather than silently falling back when a selected model has no key.
+Copy `.env.example` to `.env` and fill in the credentials you need: a TuShare token for data, and a model endpoint. Model serving is external to this repository — by default the main conversation runs on `gpt-6-astra` and sub-agents and compaction on `DeepSeek-V4.1-Flash`, both through the LightingTheWord relay; DeepSeek, Xiaomi MiMo, the relay's `gemini-4-argon` and a local Qwen model behind a gateway at `VLLM_BASE_URL` can be selected per experiment and per role. The console fails to start a session rather than silently falling back when a selected model has no key.
 
 Data is not bundled. The lake is populated by the TuShare download and audit scripts under `scripts/data/`, normally installed as a nightly cron job via `ops/cron/`.
 

@@ -5,7 +5,7 @@ ledger is the only current-pointer mechanism: immutable generations without a
 remaining successful research-session row are deliberately unreachable orphans.
 
 ``memory/`` is the second source of session knowledge: entries the researcher
-curated into ``configs/operating_memory/`` and mounted read-only for this run.
+curated into ``configs/skill_library/`` and mounted read-only for this run.
 Both reach the Agent through one ``inputs/skills_index.json``, tagged by origin,
 and only the writable ``skills/`` tree is ever published as a generation.
 """
@@ -30,21 +30,21 @@ from autotrade.environment.tools.skills_policy import (
 from autotrade.environment.tools.workspace import SafeWorkspace
 
 SKILLS_DIRNAME = "skills"
-OPERATING_MEMORY_DIRNAME = "memory"
+SKILL_LIBRARY_DIRNAME = "memory"
 # Repository-relative library of human-curated cross-experiment entries, in
 # the same format ``write_skill`` produces so a promoted skill copies verbatim.
-OPERATING_MEMORY_LIBRARY = "configs/operating_memory"
+SKILL_LIBRARY_PATH = "configs/skill_library"
 # The mount name of the curated library: ``memory/curated/<name>/`` in a
 # session workspace and in an experiment's snapshot.
 CURATED_MEMORY_SOURCE = "curated"
 # One experiment's frozen skill library, resolved once when the experiment is
 # created and mounted unchanged by every session it runs. The library keeps
 # moving; an experiment does not, so its sessions are comparable to each other.
-OPERATING_MEMORY_SNAPSHOT_DIRNAME = "memory"
-OPERATING_MEMORY_SNAPSHOT_NAME = "memory_snapshot.json"
-OPERATING_MEMORY_SNAPSHOT_SCHEMA = 1
-OPERATING_MEMORY_MODES = ("none", "curated")
-DEFAULT_OPERATING_MEMORY = "curated"
+SKILL_LIBRARY_SNAPSHOT_DIRNAME = "memory"
+SKILL_LIBRARY_SNAPSHOT_NAME = "memory_snapshot.json"
+SKILL_LIBRARY_SNAPSHOT_SCHEMA = 1
+SKILL_LIBRARY_MODES = ("none", "curated")
+DEFAULT_SKILL_LIBRARY = "curated"
 SKILL_FILENAME = "SKILL.md"
 SKILLS_INDEX_PATH = "inputs/skills_index.json"
 MAX_SKILL_NAME_CHARS = 64
@@ -299,7 +299,7 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
 
     tree = Path(root)
     stats = validate_skills_tree(tree, require_writable=False)
-    memory_root = tree.parent / OPERATING_MEMORY_DIRNAME
+    memory_root = tree.parent / SKILL_LIBRARY_DIRNAME
     memory: list[dict[str, object]] = []
     if memory_root.is_dir():
         for source in sorted(memory_root.iterdir(), key=lambda path: path.name):
@@ -308,14 +308,14 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
             validate_skills_tree(source, require_writable=False)
             for entry in _index_entries(
                 source,
-                directory=f"{OPERATING_MEMORY_DIRNAME}/{source.name}",
+                directory=f"{SKILL_LIBRARY_DIRNAME}/{source.name}",
                 origin="curated",
             ):
                 entry["source"] = source.name
                 memory.append(entry)
     return {
         "skills": _index_entries(tree, directory=SKILLS_DIRNAME, origin="session"),
-        "operating_memory": memory,
+        "skill_library": memory,
         "count": stats.count,
         "files": stats.files,
         "bytes": stats.bytes,
@@ -392,23 +392,23 @@ def mounted_skill_refs(
     }
 
 
-def operating_memory_entries(library: str | Path) -> tuple[str, ...]:
+def skill_library_entries(library: str | Path) -> tuple[str, ...]:
     """Entry names of one memory tree, validated in the shared skill format."""
 
     root = Path(library)
     if not root.is_dir():
-        raise FileNotFoundError(f"skill library library does not exist: {root}")
+        raise FileNotFoundError(f"skill library does not exist: {root}")
     validate_skills_tree(root, require_writable=False)
     return tuple(sorted(item.name for item in root.iterdir()))
 
 
-def resolve_operating_memory(value: object) -> str:
+def resolve_skill_library(value: object) -> str:
     """An experiment's mode: ``none`` or ``curated``, the default."""
 
-    text = str(value).strip() if value not in (None, "") else DEFAULT_OPERATING_MEMORY
-    if text not in OPERATING_MEMORY_MODES:
+    text = str(value).strip() if value not in (None, "") else DEFAULT_SKILL_LIBRARY
+    if text not in SKILL_LIBRARY_MODES:
         raise ValueError(
-            "operating_memory must be one of " + ", ".join(OPERATING_MEMORY_MODES)
+            "skill_library must be one of " + ", ".join(SKILL_LIBRARY_MODES)
         )
     return text
 
@@ -418,26 +418,26 @@ def curated_memory_source(repo_root: str | Path | None) -> MemorySource | None:
 
     if repo_root is None:
         return None
-    library = Path(repo_root) / OPERATING_MEMORY_LIBRARY
+    library = Path(repo_root) / SKILL_LIBRARY_PATH
     if not library.is_dir():
         return None
-    entries = operating_memory_entries(library)
+    entries = skill_library_entries(library)
     if not entries:
         return None
     return MemorySource(CURATED_MEMORY_SOURCE, "curated", library, entries)
 
 
-def operating_memory_snapshot_root(experiment_dir: str | Path) -> Path:
+def skill_library_snapshot_root(experiment_dir: str | Path) -> Path:
     return (
-        Path(experiment_dir) / "artifacts" / OPERATING_MEMORY_SNAPSHOT_DIRNAME
+        Path(experiment_dir) / "artifacts" / SKILL_LIBRARY_SNAPSHOT_DIRNAME
     )
 
 
-def operating_memory_snapshot_path(experiment_dir: str | Path) -> Path:
-    return Path(experiment_dir) / "artifacts" / OPERATING_MEMORY_SNAPSHOT_NAME
+def skill_library_snapshot_path(experiment_dir: str | Path) -> Path:
+    return Path(experiment_dir) / "artifacts" / SKILL_LIBRARY_SNAPSHOT_NAME
 
 
-def create_operating_memory_snapshot(
+def create_skill_library_snapshot(
     experiment_dir: str | Path,
     *,
     mode: str,
@@ -456,9 +456,9 @@ def create_operating_memory_snapshot(
     experiment does.
     """
 
-    resolved = resolve_operating_memory(mode)
-    root = operating_memory_snapshot_root(experiment_dir)
-    record_path = operating_memory_snapshot_path(experiment_dir)
+    resolved = resolve_skill_library(mode)
+    root = skill_library_snapshot_root(experiment_dir)
+    record_path = skill_library_snapshot_path(experiment_dir)
     if record_path.exists() or root.exists():
         raise FileExistsError(
             f"skill library snapshot already exists: {record_path}"
@@ -466,13 +466,13 @@ def create_operating_memory_snapshot(
     if resolved == "none":
         sources: tuple[MemorySource, ...] = ()
     elif repo_root is None:
-        raise ValueError("operating_memory needs a repository root to resolve")
+        raise ValueError("skill_library needs a repository root to resolve")
     else:
         curated = curated_memory_source(repo_root)
         sources = () if curated is None else (curated,)
     root.parent.mkdir(parents=True, exist_ok=True)
     staging = root.parent / (
-        f".{OPERATING_MEMORY_SNAPSHOT_DIRNAME}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+        f".{SKILL_LIBRARY_SNAPSHOT_DIRNAME}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
     )
     try:
         staging.mkdir()
@@ -492,7 +492,7 @@ def create_operating_memory_snapshot(
             chmod_tree(staging, file_mode=0o644, dir_mode=0o755)
             shutil.rmtree(staging, ignore_errors=True)
     record: dict[str, object] = {
-        "schema_version": OPERATING_MEMORY_SNAPSHOT_SCHEMA,
+        "schema_version": SKILL_LIBRARY_SNAPSHOT_SCHEMA,
         "snapshot_id": uuid.uuid4().hex,
         "mode": resolved,
         "created_at": utc_now_iso(),
@@ -507,21 +507,21 @@ def create_operating_memory_snapshot(
     return record
 
 
-def read_operating_memory_snapshot(
+def read_skill_library_snapshot(
     experiment_dir: str | Path,
 ) -> dict[str, object] | None:
     """This experiment's frozen record, or ``None`` before it has one."""
 
-    path = operating_memory_snapshot_path(experiment_dir)
+    path = skill_library_snapshot_path(experiment_dir)
     if not path.is_file():
         return None
     record = read_json_object(path)
-    if int(record.get("schema_version") or 0) != OPERATING_MEMORY_SNAPSHOT_SCHEMA:
+    if int(record.get("schema_version") or 0) != SKILL_LIBRARY_SNAPSHOT_SCHEMA:
         raise ValueError("skill library snapshot has an unknown schema_version")
     return record
 
 
-def ensure_operating_memory_snapshot(
+def ensure_skill_library_snapshot(
     experiment_dir: str | Path,
     *,
     mode: str,
@@ -535,10 +535,10 @@ def ensure_operating_memory_snapshot(
     from a session.
     """
 
-    existing = read_operating_memory_snapshot(experiment_dir)
+    existing = read_skill_library_snapshot(experiment_dir)
     if existing is not None:
         return existing
-    return create_operating_memory_snapshot(
+    return create_skill_library_snapshot(
         experiment_dir,
         mode=mode,
         repo_root=repo_root,
@@ -563,11 +563,11 @@ def snapshot_memory_sources(
         names.append(name)
     if not names:
         return ()
-    root = operating_memory_snapshot_root(experiment_dir) / CURATED_MEMORY_SOURCE
+    root = skill_library_snapshot_root(experiment_dir) / CURATED_MEMORY_SOURCE
     return (MemorySource(CURATED_MEMORY_SOURCE, "curated", root, tuple(sorted(names))),)
 
 
-def install_operating_memory(
+def install_skill_library(
     workspace: str | Path, experiment_dir: str | Path
 ) -> tuple[MemorySource, ...]:
     """Mount this experiment's frozen snapshot read-only beside its skills.
@@ -582,13 +582,13 @@ def install_operating_memory(
     generation. Returns the sources mounted.
     """
 
-    record = read_operating_memory_snapshot(experiment_dir)
+    record = read_skill_library_snapshot(experiment_dir)
     if record is None:
         raise FileNotFoundError(
             "experiment has no skill library snapshot to mount: "
-            f"{operating_memory_snapshot_path(experiment_dir)}"
+            f"{skill_library_snapshot_path(experiment_dir)}"
         )
-    destination = Path(workspace) / OPERATING_MEMORY_DIRNAME
+    destination = Path(workspace) / SKILL_LIBRARY_DIRNAME
     if destination.exists():
         raise FileExistsError(f"workspace memory directory already exists: {destination}")
     mounted = snapshot_memory_sources(record, experiment_dir)
@@ -605,10 +605,10 @@ def install_operating_memory(
     return mounted
 
 
-def _reject_operating_memory_name(workspace_root: Path, name: str) -> None:
+def _reject_skill_library_name(workspace_root: Path, name: str) -> None:
     """Mounted memory is read-only; a session may not shadow it under its own name."""
 
-    memory = workspace_root / OPERATING_MEMORY_DIRNAME
+    memory = workspace_root / SKILL_LIBRARY_DIRNAME
     if not memory.is_dir():
         return
     for source in sorted(memory.iterdir(), key=lambda path: path.name):
@@ -856,7 +856,7 @@ class WriteSkillTool:
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         try:
             name = validate_skill_name(str(arguments["name"]))
-            _reject_operating_memory_name(self.workspace.root, name)
+            _reject_skill_library_name(self.workspace.root, name)
             relative = validate_skill_path(str(arguments["path"]))
             content = str(arguments["content"])
             payload = content.encode("utf-8")
@@ -928,7 +928,7 @@ class DeleteSkillTool:
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
         try:
             name = validate_skill_name(str(arguments["name"]))
-            _reject_operating_memory_name(self.workspace.root, name)
+            _reject_skill_library_name(self.workspace.root, name)
             validate_skills_tree(self.root, require_writable=True)
             item = self.root / name
             if item.is_symlink() or not item.is_dir():
@@ -954,18 +954,18 @@ class DeleteSkillTool:
 __all__ = [
     "ALLOWED_SKILL_SUFFIXES",
     "CURATED_MEMORY_SOURCE",
-    "DEFAULT_OPERATING_MEMORY",
+    "DEFAULT_SKILL_LIBRARY",
     "MAX_SKILLS",
     "MAX_SKILLS_BYTES",
     "MAX_SKILLS_FILES",
     "MAX_SKILL_CHARS",
     "MAX_SKILL_FILE_BYTES",
     "MAX_SKILL_NAME_CHARS",
-    "OPERATING_MEMORY_DIRNAME",
-    "OPERATING_MEMORY_LIBRARY",
-    "OPERATING_MEMORY_MODES",
-    "OPERATING_MEMORY_SNAPSHOT_NAME",
     "SKILLS_INDEX_PATH",
+    "SKILL_LIBRARY_DIRNAME",
+    "SKILL_LIBRARY_MODES",
+    "SKILL_LIBRARY_PATH",
+    "SKILL_LIBRARY_SNAPSHOT_NAME",
     "DeleteSkillTool",
     "ExperimentSkillsStore",
     "MemorySource",
@@ -974,19 +974,19 @@ __all__ = [
     "SkillsStats",
     "WriteSkillTool",
     "build_skills_index",
-    "create_operating_memory_snapshot",
+    "create_skill_library_snapshot",
     "curated_memory_source",
-    "ensure_operating_memory_snapshot",
-    "install_operating_memory",
+    "ensure_skill_library_snapshot",
+    "install_skill_library",
     "install_workspace_skills",
     "latest_skills_snapshot",
     "mounted_skill_refs",
-    "operating_memory_entries",
-    "operating_memory_snapshot_path",
-    "operating_memory_snapshot_root",
-    "read_operating_memory_snapshot",
+    "read_skill_library_snapshot",
     "resolve_collected_skills_source",
-    "resolve_operating_memory",
+    "resolve_skill_library",
+    "skill_library_entries",
+    "skill_library_snapshot_path",
+    "skill_library_snapshot_root",
     "skills_snapshot_from_ref",
     "skills_trees_equal",
     "snapshot_memory_sources",

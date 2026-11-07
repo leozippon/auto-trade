@@ -6131,7 +6131,7 @@ function fmtBytes(value) {
 
 function memoryLibraryPath() {
   const curated = (memoryView && memoryView.payload.curated) || {};
-  return curated.library || "configs/operating_memory";
+  return curated.library || "configs/skill_library";
 }
 
 function sameSelection(left, right) {

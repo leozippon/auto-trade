@@ -9,7 +9,7 @@ The curated writes add two of their own: an entry a session would refuse never
 reaches the library, and the library is never left half-written.
 
 Every fixture is synthesized in a tempfile repo root exactly as the pipeline
-writes it: a curated library under ``configs/operating_memory/``, experiment
+writes it: a curated library under ``configs/skill_library/``, experiment
 directories with their ledger and console state, and a collected session's
 ``host_run_manifest.json``.
 """
@@ -32,11 +32,11 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.skills import (
     MAX_SKILL_CHARS,
-    OPERATING_MEMORY_LIBRARY,
+    SKILL_LIBRARY_PATH,
     build_skills_index,
-    create_operating_memory_snapshot,
-    operating_memory_snapshot_path,
-    read_operating_memory_snapshot,
+    create_skill_library_snapshot,
+    read_skill_library_snapshot,
+    skill_library_snapshot_path,
     validate_skills_tree,
 )
 from autotrade.webui import memory
@@ -49,7 +49,7 @@ RUN_ID = "run_5b1d0a9c8e7f46329d1c4b7a2e6f8d03"
 
 
 def _curated(repo_root: Path, name: str, body: str) -> Path:
-    item = repo_root / OPERATING_MEMORY_LIBRARY / name
+    item = repo_root / SKILL_LIBRARY_PATH / name
     item.mkdir(parents=True)
     (item / "SKILL.md").write_text(body, encoding="utf-8")
     return item
@@ -66,7 +66,7 @@ def _library(repo_root: Path) -> Path:
         "output-dir-hygiene",
         "# 产物目录卫生\n\n只把正式代码写进 output/。\n",
     )
-    return repo_root / OPERATING_MEMORY_LIBRARY
+    return repo_root / SKILL_LIBRARY_PATH
 
 
 def _experiment(experiments_root: Path, name: str) -> Path:
@@ -101,7 +101,7 @@ def _mounted_run(directory: Path, *, run_dir: str = RUN_ID, **overrides: object)
         "run_id": run_dir,
         "kind": "fold",
         "session_key": SESSION_KEY,
-        "operating_memory": {
+        "skill_library": {
             "mode": "curated",
             "sources": [
                 {
@@ -134,7 +134,7 @@ def test_the_curated_view_is_the_index_the_session_reads(tmp_path: Path) -> None
     payload = memory.curated_library(tmp_path)
     indexed = {entry["name"]: entry for entry in build_skills_index(library)["skills"]}
     assert [entry["name"] for entry in payload["entries"]] == sorted(indexed)
-    assert payload["library"] == OPERATING_MEMORY_LIBRARY
+    assert payload["library"] == SKILL_LIBRARY_PATH
     assert payload["source"] == "curated"
     assert "error" not in payload
     for entry in payload["entries"]:
@@ -157,7 +157,7 @@ def test_a_malformed_library_reports_an_error_instead_of_an_empty_shelf(
     """An entry the mount would refuse must not read as "nothing curated"."""
 
     _library(tmp_path)
-    (tmp_path / OPERATING_MEMORY_LIBRARY / "no-skill-md").mkdir()
+    (tmp_path / SKILL_LIBRARY_PATH / "no-skill-md").mkdir()
     payload = memory.curated_library(tmp_path)
     assert payload["entries"] == []
     assert payload["error"].endswith("curated memory library is unreadable")
@@ -191,7 +191,7 @@ def test_a_curated_body_is_served_verbatim_so_an_edit_round_trips(
     assert memory.curated_entry(tmp_path, "workspace-path-rules")["content"] == body
     memory.update_curated_entry(tmp_path, "workspace-path-rules", body)
     assert (
-        tmp_path / OPERATING_MEMORY_LIBRARY / "workspace-path-rules" / "SKILL.md"
+        tmp_path / SKILL_LIBRARY_PATH / "workspace-path-rules" / "SKILL.md"
     ).read_text(encoding="utf-8") == body
 
 
@@ -211,7 +211,7 @@ def _snapshot(
 ) -> dict:
     directory = experiments / experiment_id
     directory.mkdir(parents=True, exist_ok=True)
-    return create_operating_memory_snapshot(directory, mode=mode, repo_root=repo_root)
+    return create_skill_library_snapshot(directory, mode=mode, repo_root=repo_root)
 
 
 def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> None:
@@ -219,7 +219,7 @@ def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> N
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     directory = _experiment(experiments, "current")
-    _params(directory, operating_memory="curated")
+    _params(directory, skill_library="curated")
     _snapshot(tmp_path, experiments, "current")
     _mounted_run(directory)
 
@@ -240,7 +240,7 @@ def test_the_block_lists_the_snapshot_this_experiment_froze(tmp_path: Path) -> N
     assert RUN_ID not in json.dumps(payload, ensure_ascii=False)
 
 
-def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> None:
+def test_creating_an_experiment_freezes_its_skill_library(tmp_path: Path) -> None:
     """The snapshot is taken at creation, beside the inherited parent copy, and
     a failure there leaves no half-created experiment behind."""
 
@@ -261,7 +261,7 @@ def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> 
         patch.object(manager, "start_worker", return_value={"spawned": False}),
     ):
         manager.create_experiment(dict(params))
-    record = read_operating_memory_snapshot(experiments / "exp_frozen")
+    record = read_skill_library_snapshot(experiments / "exp_frozen")
     assert record["created_from"] == "creation"
     assert [entry["name"] for entry in record["entries"]] == [
         "output-dir-hygiene",
@@ -277,7 +277,7 @@ def test_creating_an_experiment_freezes_its_operating_memory(tmp_path: Path) -> 
         patch.object(manager, "_preflight"),
         patch.object(manager, "start_worker", return_value={"spawned": False}),
         patch(
-            "autotrade.webui.manager.create_operating_memory_snapshot",
+            "autotrade.webui.manager.create_skill_library_snapshot",
             side_effect=OSError("no space"),
         ),
         pytest.raises(OSError),
@@ -293,7 +293,7 @@ def test_a_later_library_change_does_not_move_a_frozen_experiment(
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     directory = _experiment(experiments, "current")
-    _params(directory, operating_memory="curated")
+    _params(directory, skill_library="curated")
     _snapshot(tmp_path, experiments, "current", mode="curated")
     _curated(tmp_path, "added-later", "# 后加的\n\n正文\n")
 
@@ -311,7 +311,7 @@ def test_an_experiment_without_a_snapshot_says_so(tmp_path: Path) -> None:
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     directory = _experiment(experiments, "legacy")
-    _params(directory, operating_memory="curated")
+    _params(directory, skill_library="curated")
     payload = memory.experiment_memory(experiments, "legacy")
     assert payload["snapshot"] is None and payload["sessions_seen"] == 0
     assert "error" not in payload
@@ -323,7 +323,7 @@ def test_an_unreadable_snapshot_is_reported_not_hidden(tmp_path: Path) -> None:
     experiments.mkdir()
     directory = _experiment(experiments, "current")
     _snapshot(tmp_path, experiments, "current", mode="curated")
-    operating_memory_snapshot_path(directory).write_text("{truncated", encoding="utf-8")
+    skill_library_snapshot_path(directory).write_text("{truncated", encoding="utf-8")
     payload = memory.experiment_memory(experiments, "current")
     assert payload["snapshot"] is None
     assert payload["error"].endswith("skill library snapshot is unreadable")
@@ -352,7 +352,7 @@ def test_the_snapshot_entry_route_serves_what_this_experiment_holds(
     experiments.mkdir()
     _experiment(experiments, "adopted")
     directory = _experiment(experiments, "current")
-    _params(directory, operating_memory="curated")
+    _params(directory, skill_library="curated")
     _snapshot(tmp_path, experiments, "current")
     client = TestClient(create_app(tmp_path, experiments))
 
@@ -410,7 +410,7 @@ def test_the_console_routes_serve_the_keys_the_page_reads(tmp_path: Path) -> Non
     experiments = tmp_path / "experiments"
     experiments.mkdir()
     directory = _experiment(experiments, "adopted")
-    _params(directory, operating_memory="curated")
+    _params(directory, skill_library="curated")
     _mounted_run(directory)
     (experiments / ".staging").mkdir()
     client = TestClient(create_app(tmp_path, experiments))
@@ -461,7 +461,7 @@ def _staging_leftovers(repo_root: Path) -> list[str]:
 
     return sorted(
         item.name
-        for item in (repo_root / OPERATING_MEMORY_LIBRARY).parent.iterdir()
+        for item in (repo_root / SKILL_LIBRARY_PATH).parent.iterdir()
         if item.name.startswith(".")
     )
 
@@ -482,7 +482,7 @@ def test_a_created_entry_is_readable_by_the_mount_and_listed_back(
         "output-dir-hygiene",
         "pit-read-budget",
     ]
-    library = tmp_path / OPERATING_MEMORY_LIBRARY
+    library = tmp_path / SKILL_LIBRARY_PATH
     # The mount's own validator, and the index the Agent reads, both accept it.
     assert validate_skills_tree(library, require_writable=False).count == 3
     indexed = {entry["name"]: entry for entry in build_skills_index(library)["skills"]}
@@ -506,7 +506,7 @@ def test_a_name_the_mount_layout_refuses_never_reaches_the_library(
     with pytest.raises(ValueError):
         memory.create_curated_entry(tmp_path, name, "# x\n")
     assert sorted(
-        item.name for item in (tmp_path / OPERATING_MEMORY_LIBRARY).iterdir()
+        item.name for item in (tmp_path / SKILL_LIBRARY_PATH).iterdir()
     ) == ["output-dir-hygiene", "pit-read-budget"]
     assert _staging_leftovers(tmp_path) == []
 
@@ -518,7 +518,7 @@ def test_a_body_the_skill_format_refuses_leaves_the_library_untouched(
     before = memory.curated_library(tmp_path)["entries"]
     with pytest.raises(ValueError):
         memory.create_curated_entry(tmp_path, "too-long", "x" * (MAX_SKILL_CHARS + 1))
-    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "too-long").exists()
+    assert not (tmp_path / SKILL_LIBRARY_PATH / "too-long").exists()
     assert memory.curated_library(tmp_path)["entries"] == before
     assert _staging_leftovers(tmp_path) == []
 
@@ -538,7 +538,7 @@ def test_an_edit_replaces_the_body_and_keeps_the_entry_s_other_files(
     tmp_path: Path,
 ) -> None:
     _library(tmp_path)
-    item = tmp_path / OPERATING_MEMORY_LIBRARY / "pit-read-budget"
+    item = tmp_path / SKILL_LIBRARY_PATH / "pit-read-budget"
     (item / "references").mkdir()
     (item / "references" / "notes.md").write_text("附注\n", encoding="utf-8")
     result = memory.update_curated_entry(tmp_path, "pit-read-budget", "# 新正文\n\n改过。\n")
@@ -547,7 +547,7 @@ def test_an_edit_replaces_the_body_and_keeps_the_entry_s_other_files(
     assert (item / "references" / "notes.md").read_text(encoding="utf-8") == "附注\n"
     # Two entries, three files: the edit replaced one body, not the item.
     assert validate_skills_tree(
-        tmp_path / OPERATING_MEMORY_LIBRARY, require_writable=False
+        tmp_path / SKILL_LIBRARY_PATH, require_writable=False
     ).files == 3
 
 
@@ -557,7 +557,7 @@ def test_editing_an_absent_entry_is_a_missing_entry_not_a_create(
     _library(tmp_path)
     with pytest.raises(KeyError):
         memory.update_curated_entry(tmp_path, "not-curated", "# x\n")
-    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "not-curated").exists()
+    assert not (tmp_path / SKILL_LIBRARY_PATH / "not-curated").exists()
 
 
 def test_a_delete_removes_the_whole_item_and_leaves_running_sessions_alone(
@@ -570,7 +570,7 @@ def test_a_delete_removes_the_whole_item_and_leaves_running_sessions_alone(
     result = memory.delete_curated_entry(tmp_path, "pit-read-budget")
     assert result["action"] == "deleted"
     assert _entry_names(result) == ["output-dir-hygiene"]
-    assert not (tmp_path / OPERATING_MEMORY_LIBRARY / "pit-read-budget").exists()
+    assert not (tmp_path / SKILL_LIBRARY_PATH / "pit-read-budget").exists()
     assert _staging_leftovers(tmp_path) == []
     with pytest.raises(KeyError):
         memory.delete_curated_entry(tmp_path, "pit-read-budget")
@@ -583,7 +583,7 @@ def test_a_library_the_mount_refuses_blocks_new_entries_but_can_be_repaired(
     and deleting the offending item is how the console repairs it."""
 
     _library(tmp_path)
-    (tmp_path / OPERATING_MEMORY_LIBRARY / "no-skill-md").mkdir()
+    (tmp_path / SKILL_LIBRARY_PATH / "no-skill-md").mkdir()
     with pytest.raises(ValueError):
         memory.create_curated_entry(tmp_path, "cash-buffer-rule", "# 现金缓冲\n")
     result = memory.delete_curated_entry(tmp_path, "no-skill-md")

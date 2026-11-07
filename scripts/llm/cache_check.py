@@ -2,14 +2,13 @@
 """Check that a hosted model's prompt cache works today, before an experiment uses it.
 
 Sends one production-shaped request (system prompt, user task, a tool call
-and its ~3,000-token result, so a Claude id carries its cache marker on the
-tool result as in production) through the project's role gateway, then the
+and its ~3,000-token result) through the project's role gateway, then the
 same request again about 20 seconds later. A fresh nonce leads the system
 prompt, so the first call cannot read an earlier run's cache. Prints each
 call's prompt, cached, write and output tokens, its list price and the
 model id the upstream reported.
 
-    <quant python> scripts/llm/cache_check.py claude-opus-5-5
+    <quant python> scripts/llm/cache_check.py gemini-4-argon
     <quant python> scripts/llm/cache_check.py DeepSeek-V4.1-Flash --calls 3
 
 Exit status 1 when no call after the first shows a cache read or write. The

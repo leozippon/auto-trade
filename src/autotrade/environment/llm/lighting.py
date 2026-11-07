@@ -1,15 +1,12 @@
 """LightingTheWord (New API relay) gateway.
 
 The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
-function tools on Chat Completions — and its Anthropic ids, gemini-4-argon and
-DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
-and an alternate one: an experiment's ``llm_key`` chooses which its calls start on,
-and the other is the fallback. The Anthropic ids' requests also mark a
-prompt-cache breakpoint, which the relay forwards to the upstream Messages
-API. The Claude ids and gemini-4-argon are sent no reasoning level, so an
-experiment's ``reasoning_effort`` does not reach them: the Claude ids accept none,
-and gemini-4-argon thinks at Google's default and keeps the provider's
-default temperature as well.
+function tools on Chat Completions — and gemini-4-argon and DeepSeek-V4.1-Flash
+over ``/v1/chat/completions``, with a primary credential and an alternate one:
+an experiment's ``llm_key`` chooses which its calls start on, and the other is
+the fallback. gemini-4-argon is sent no reasoning level, so an experiment's
+``reasoning_effort`` does not reach it: it thinks at Google's default and keeps
+the provider's default temperature as well.
 """
 
 from __future__ import annotations
@@ -79,10 +76,8 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # gemini-4-argon bills one tier at any length. DeepSeek-V4.1-Flash is listed
 # at its weekday-peak rate (off-peak bills half).
 # Cache writes: gpt-6-astra's at the relay's own (1.25 times the uncached
-# prompt); the Claude ids' at 1.25 times the uncached prompt, Anthropic's rate
-# for the 5-minute TTL their breakpoint asks for; gemini-4-argon's price lists
-# no cache-write term, so it stays at the uncached prompt; DeepSeek reports
-# none.
+# prompt); gemini-4-argon's price lists no cache-write term, so it stays at the
+# uncached prompt; DeepSeek reports none.
 # The relay's ``billing_expr`` for its gpt-6 ids: ``len <= 272000`` bills the
 # short-context tier, a longer prompt bills the whole request at twice every
 # prompt price (uncached, cached and cache write) and 1.5 times the
@@ -98,9 +93,6 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
         128_000,
         TokenPrices(10.0, 1.0, 50.0, 12.5, GPT_LONG_CONTEXT_TIER),
     ),
-    ("claude-fable-5-1", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(10.0, 0.25, 50.0, 12.5)),
-    ("claude-sonnet-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(2.0, 0.2, 10.0, 2.5)),
-    ("claude-opus-5-5", CHAT_DIALECT, 1_000_000, 128_000, TokenPrices(4.0, 0.2, 20.0, 5.0)),
     ("gemini-4-argon", CHAT_DIALECT, 1_000_000, 1_000_000, TokenPrices(2.0, 0.1, 10.0, 2.0)),
     (
         DEEPSEEK_FLASH_MODEL,
@@ -111,12 +103,6 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ),
 )
 MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)
-# The Anthropic ids. Their upstream caches only a prefix that ends at an
-# explicit ``cache_control`` breakpoint (the relay's other ids cache on their
-# own), so their requests mark one (see ``_mark_cache_breakpoint``).
-PROMPT_CACHE_MARKER_MODELS = tuple(
-    model for model in MODEL_CHOICES if model.startswith("claude-")
-)
 # No temperature: Google's Gemini 3 guide keeps the default 1.0 (lower can loop).
 PROVIDER_TEMPERATURE_MODELS = ("gemini-4-argon",)
 
@@ -198,8 +184,7 @@ def build_gateway(
                 max_output_tokens=profile.max_output_tokens,
                 temperature=temperature,
                 thinking_enabled=thinking_enabled,
-                # Only the relay's two dialects that carry a level get one: the
-                # hosted Claude ids accept no reasoning control at all,
+                # Only the relay's two dialects that carry a level get one:
                 # gemini-4-argon thinks at its upstream default, and the
                 # responses dialect sends no field when thinking is off (the
                 # relay's gpt-6-astra has no "none" tier).
@@ -221,10 +206,9 @@ def build_gateway(
 
 
 class LightingProxy(OpenAICompatibleProxy):
-    """The relay's own dialect, cache breakpoint and credential fallback.
+    """The relay's own dialect and credential fallback.
 
-    Its Anthropic, Gemini and DeepSeek ids use the shared Chat Completions
-    dialects, the Anthropic ids with a cache breakpoint added to the payload;
+    Its Gemini and DeepSeek ids use the shared Chat Completions dialects;
     only the gpt-6 family replaces the request payload and the response parser
     with the responses contract.
     """
@@ -331,8 +315,6 @@ class LightingProxy(OpenAICompatibleProxy):
                 stream=stream,
                 max_tokens=max_tokens,
             )
-            if self.config.model in PROMPT_CACHE_MARKER_MODELS:
-                _mark_cache_breakpoint(body)
             if self.config.model in PROVIDER_TEMPERATURE_MODELS:
                 del body["temperature"]
             return body
@@ -365,34 +347,6 @@ def _log_credential_switch(
         f"(HTTP {error.status_code}); retrying with {fallback_key_env}",
         file=sys.stderr,
     )
-
-
-def _mark_cache_breakpoint(body: dict[str, object]) -> None:
-    """Mark the latest tool result as the Anthropic prompt-cache breakpoint.
-
-    The upstream renders tools, then system, then the conversation, and
-    caches the prefix up to a marked block; a later call that repeats the
-    prefix reads it from the cache. The relay forwards the marker only from a
-    tool message's content part and drops it from a system or user message
-    (probed 2026-10-23), so it goes on the latest tool result: the tail of a
-    tool-loop call, or the last block before the notices appended after it.
-    That one moving breakpoint also covers the fixed tools and system prompt;
-    a conversation with no tool result yet is not cached. The relay appears
-    to spread calls over upstream accounts with separate caches: in the probe
-    two of six repeats wrote the prefix again instead of reading it.
-    """
-
-    records = cast(list[dict[str, object]], body["messages"])
-    for record in reversed(records):
-        if record["role"] == "tool":
-            record["content"] = [
-                {
-                    "type": "text",
-                    "text": record["content"],
-                    "cache_control": {"type": "ephemeral"},
-                }
-            ]
-            return
 
 
 def _responses_body(

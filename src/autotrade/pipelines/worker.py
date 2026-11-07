@@ -106,7 +106,7 @@ from .pit_views_seed import (
     assert_seed_timing_contract,
 )
 from .research_session import LLMResearchDeveloper
-from .skills import latest_skills_snapshot, resolve_operating_memory
+from .skills import latest_skills_snapshot, resolve_skill_library
 
 # The experiment-level ``reasoning_effort`` offers exactly the levels that are
 # distinct on the wire for the local Qwen profile (its chat template knows
@@ -525,7 +525,7 @@ def resolve_worker_options(
         workspace_reference=_optional_workspace_reference(
             read_param(params, "workspace_reference"), repository
         ),
-        operating_memory=resolve_operating_memory(read_param(params, "operating_memory")),
+        skill_library=resolve_skill_library(read_param(params, "skill_library")),
         record_failed_attempts=_strict_bool(
             read_param(params, "record_failed_attempts"), "record_failed_attempts"
         ),
@@ -773,7 +773,7 @@ def build_experiment_pipeline(
             max_response_tokens=options.llm.max_tokens_for("main"),
             research_directive=options.experiment.research_directive,
             workspace_reference=options.experiment.workspace_reference,
-            operating_memory=options.experiment.operating_memory,
+            skill_library=options.experiment.skill_library,
             repo_root=options.repo_root,
         )
         developer_label = "llm_research_agent"

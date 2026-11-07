@@ -7,12 +7,14 @@ the shared prefix stays byte-stable across sessions.
 
 The static part follows the layout of minimal agent-harness prompts: an
 untitled opening paragraph (who the Agent is, what the harness does), the
-research-and-backtesting process, how the work is read, the strategy contract
-pointer, the prohibitions and how to work in the harness, each rule stated
-once. It carries only what the harness enforces or the Agent cannot find out
-itself; what a tool's parameter, limit or returned field means is the tool's
-description and schema, the strategy contract is ``output/README.md``, and how
-to research is the Agent's own call. The dynamic part is the environment
+research-and-backtesting process, the research orientation, how the work is
+read, the strategy contract pointer, the prohibitions and how to work in the
+harness, each rule stated once. It carries what the harness enforces, what the
+Agent cannot find out itself, and the owner's research orientation (the
+ambition and depth expected, not a method); what a tool's parameter, limit or
+returned field means is the tool's description and schema, the strategy
+contract is ``output/README.md``, and how to research within that orientation
+is the Agent's own call. The dynamic part is the environment
 block: the run's dates, steps, threshold and validate allowance generated from the
 run facts (:func:`build_run_section`), the facts themselves behind an index of
 their keys, then the experiment's direction and the researcher's directive.
@@ -38,6 +40,12 @@ SESSION_PROCESS_SECTION = """\
 2. 测试：`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的验证记录，测试终点推进一步。两步之间可以继续研究、换候选；已记入验证记录的条目不会改写。
 3. 结束：验证期最后一步测试完，会话结束，最后测试的候选定版。会话不能主动结束；预算耗尽时，宿主用最后测试的候选跑完剩下的步。
 4. 之后：宿主在会话从未见过的数据上运行 Forward 与 Held-out 两个阶段，读数不回到会话；是否进入 Paper（每日出单、人工交易）由运营者决定。定版后再没有 Agent 改它，需要随时间调整的部分要写进策略自己的 `fit` 与 `REFIT_PERIOD`。\
+"""
+
+SESSION_ORIENTATION_SECTION = """\
+# 研究取向
+- 目标是有创新性、有深度的策略，而不是教科书式的风格因子组合：优先探索学习型模型、预训练模型与嵌入、财务与公告标题等多个数据域、自适应重训与组合构建等复杂方法；简单的规则打分只作基线对照，不作为目标。
+- 预算是为深入研究准备的，不以提前结束为目标：在研究年里充分比较多个方向、迭代改进之后再开始测试。\
 """
 
 SESSION_READINGS_SECTION = """\
@@ -92,6 +100,7 @@ TOOL_READ_ONLY_SCREEN_NOTE = """\
 SESSION_STATIC_SECTIONS = (
     SESSION_PREAMBLE,
     SESSION_PROCESS_SECTION,
+    SESSION_ORIENTATION_SECTION,
     SESSION_READINGS_SECTION,
     SESSION_STRATEGY_SECTION,
     SESSION_PROHIBITIONS,
