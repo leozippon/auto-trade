@@ -83,6 +83,29 @@ def strategy_container_note(cpus: float, memory_bytes: int) -> str:
     )
 
 
+# ``runtime_tools.sandbox_gpus`` of a Sandbox without cards; the prompt's
+# orientation reads the same fact (``prompts.build_system_prompt``).
+NO_SANDBOX_GPUS = "none"
+
+
+def _sandbox_gpus(spec: Mapping[str, object]) -> str | None:
+    """The session Sandbox's cards as one fact: ``"1 × A100"``, or ``NO_SANDBOX_GPUS``.
+
+    Read off the session's own ``SandboxSpec`` record, not nvidia-smi: the
+    count is the cards its container attaches (a per-session override
+    included) and the model is ``gpu_name_filter``, the host's device name
+    every one of them was selected by (``environment.gpu.host_gpu_name``).
+    ``None`` for a record that states no count, rather than a guess.
+    """
+
+    if "gpu_count" not in spec:
+        return None
+    count = int(spec["gpu_count"])  # type: ignore[call-overload]
+    if count == 0:
+        return NO_SANDBOX_GPUS
+    return f"{count} × {spec.get('gpu_name_filter') or 'GPU'}"
+
+
 # Where the read roots are in the Sandbox filesystem. The root names are a
 # file-tool convention, not paths: two experiments read `steps` as a shell path,
 # failed, and concluded the tree was invisible to `shell`.
@@ -550,6 +573,7 @@ def _runtime_tool_facts(
             "cli_tools_available": available,
             "cli_tools_missing": missing,
             "network_mode": network,
+            "sandbox_gpus": _sandbox_gpus(sandbox_spec),
             "network_install_policy": {
                 "session": "no_network_prebuilt_dependencies_only",
             },

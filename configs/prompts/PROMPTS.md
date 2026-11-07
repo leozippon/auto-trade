@@ -6,7 +6,7 @@
 - `src/autotrade/agent/subagent.py`
 - `src/autotrade/agent/compact.py`
 
-系统提示词先放静态内容，再放本次运行的动态事实，使跨会话的共享前缀字节稳定。工具名、参数和可用性由每轮原生 function schema 注入；动态示例只说明结构，不替代当前 run 的事实制品。宿主 `AGENTS.md` 不注入。
+系统提示词先放静态内容，再放本次运行的动态事实，使跨会话的共享前缀字节稳定；静态部分里唯一随运行事实变化的是研究取向末尾的 GPU 一条（1.3），卡相同的会话仍共享整个前缀。工具名、参数和可用性由每轮原生 function schema 注入；动态示例只说明结构，不替代当前 run 的事实制品。宿主 `AGENTS.md` 不注入。
 
 ## 导航
 
@@ -18,7 +18,7 @@
 
 ## 1. 研究会话系统提示词
 
-无标题的开场段与六个区块按「开场 → 研究与回测流程 → 研究取向 → 读数 → 策略 → 禁止事项 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里；研究取向只定目标的创新性与深度，不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。
+无标题的开场段与六个区块按「开场 → 研究与回测流程 → 研究取向 → 读数 → 策略 → 禁止事项 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里；研究取向定目标的创新性与深度，Sandbox 挂有 GPU 时再要求优先选择能用上 GPU 加速的研究方法，不规定具体做法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。
 
 ### 1.1 开场段
 
@@ -43,6 +43,12 @@
 # 研究取向
 - 目标是有创新性、有深度的策略，而不是教科书式的风格因子组合：优先探索学习型模型、预训练模型与嵌入、财务与公告标题等多个数据域、自适应重训与组合构建等复杂方法；简单的规则打分只作基线对照，不作为目标。
 - 预算是为深入研究准备的，不以提前结束为目标：在研究年里充分比较多个方向、迭代改进之后再开始测试。
+```
+
+Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`），本区块末尾再加一条，`{gpus}` 即该事实，如 `1 × A100`：
+
+```text
+- Sandbox 挂有 {gpus}：优先选择能从 GPU 加速中受益的研究方法，如深度序列与截面模型、预训练嵌入与微调、大规模表示学习、频繁重训；CPU 上的树模型与线性模型只作基线对照，不作为目标。
 ```
 
 ### 1.4 读数
@@ -191,7 +197,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 - `budgets`：推理时间、模型调用与花费上限、随机对照次数、策略容器的超时与资源。
 - `artifact_contract`：起点，以及 `acceptance_rules` 里主动序列、统计量与登记条件的定义。
 - `broker_replay`：资金、费用、手数、T+1 与调度。
-- `runtime_tools` 与 `source_refs`：已装依赖、各读文件根在 shell 里的路径、数据摘要与单位引用。
+- `runtime_tools` 与 `source_refs`：已装依赖、Sandbox 的 GPU、各读文件根在 shell 里的路径、数据摘要与单位引用。
 
 {experiment_facts JSON，含 inputs/skills_index.json 引用}
 
@@ -220,7 +226,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 | `budgets` | 推理时间、模型调用、API 花费、随机对照与 `validate` 次数，策略容器超时与资源，压缩预算 |
 | `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量与登记条件 |
 | `broker_replay` | 资金、费用、手数、T+1、调度（`schedule`）与精确执行价格来源 |
-| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略，以及各读文件根在 `shell` 里的挂载路径 |
+| `runtime_tools` | Python、已装依赖、可用本地工具、网络模式和安装策略、Sandbox 的 GPU（`sandbox_gpus`：卡数 × 卡型，如 `1 × A100`；没有卡时为 `none`），以及各读文件根在 `shell` 里的挂载路径 |
 | `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |
 
 动态事实只作为常用索引。Agent 不能把其中的日期、period、会话标识或资源元数据用作交易信号，也不能据此推断研究年末之后的行情。

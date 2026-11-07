@@ -3,7 +3,10 @@
 These are the only prompts the main-conversation LLM sees. They are written
 in Chinese (the market, rules, and evidence are Chinese) with English JSON
 keys for stable parsing. Static content comes first and per-run facts last so
-the shared prefix stays byte-stable across sessions.
+the shared prefix stays byte-stable across sessions; the one fact-dependent
+line above the environment block is the orientation's GPU bullet, which closes
+that section only when the Sandbox has cards, so sessions on the same cards
+still share the whole prefix.
 
 The static part follows the layout of minimal agent-harness prompts: an
 untitled opening paragraph (who the Agent is, what the harness does), the
@@ -11,13 +14,14 @@ research-and-backtesting process, the research orientation, how the work is
 read, the strategy contract pointer, the prohibitions and how to work in the
 harness, each rule stated once. It carries what the harness enforces, what the
 Agent cannot find out itself, and the owner's research orientation (the
-ambition and depth expected, not a method); what a tool's parameter, limit or
-returned field means is the tool's description and schema, the strategy
-contract is ``output/README.md``, and how to research within that orientation
-is the Agent's own call. The dynamic part is the environment
-block: the run's dates, steps, threshold and validate allowance generated from the
-run facts (:func:`build_run_section`), the facts themselves behind an index of
-their keys, then the experiment's direction and the researcher's directive.
+ambition and depth expected and, on a Sandbox with cards, work that uses them;
+not a method); what a tool's parameter, limit or returned field means is the
+tool's description and schema, the strategy contract is ``output/README.md``,
+and how to research within that orientation is the Agent's own call. The
+dynamic part is the environment block: the run's dates, steps, threshold and
+validate allowance generated from the run facts (:func:`build_run_section`),
+the facts themselves behind an index of their keys, then the experiment's
+direction and the researcher's directive.
 Rendered copies for human audit are exported by ``scripts/dev/export_prompts.py``
 into ``configs/prompts/PROMPTS.md``.
 """
@@ -27,7 +31,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 
-from .experiment_facts import compact_mapping
+from .experiment_facts import NO_SANDBOX_GPUS, compact_mapping
 
 SESSION_PREAMBLE = """\
 你是本研究框架的 AI 首席量化研究官（AI Chief Quantitative Research Officer），在断网的 Sandbox 里独立研究 A 股选股策略，并决定测试哪个候选。宿主掌管数据、回测与记录并执行下面的规则，不替你选策略。本次运行的日期、步数与门槛在末尾的「环境」里。\
@@ -46,6 +50,13 @@ SESSION_ORIENTATION_SECTION = """\
 # 研究取向
 - 目标是有创新性、有深度的策略，而不是教科书式的风格因子组合：优先探索学习型模型、预训练模型与嵌入、财务与公告标题等多个数据域、自适应重训与组合构建等复杂方法；简单的规则打分只作基线对照，不作为目标。
 - 预算是为深入研究准备的，不以提前结束为目标：在研究年里充分比较多个方向、迭代改进之后再开始测试。\
+"""
+
+# The orientation's closing bullet when the Sandbox has cards, ``{gpus}`` being
+# the run facts' ``runtime_tools.sandbox_gpus`` (``"1 × A100"``); a Sandbox
+# without cards reads the orientation above unchanged (``build_system_prompt``).
+SESSION_GPU_ORIENTATION_BULLET = """\
+- Sandbox 挂有 {gpus}：优先选择能从 GPU 加速中受益的研究方法，如深度序列与截面模型、预训练嵌入与微调、大规模表示学习、频繁重训；CPU 上的树模型与线性模型只作基线对照，不作为目标。\
 """
 
 SESSION_READINGS_SECTION = """\
@@ -126,7 +137,7 @@ EXPERIMENT_FACTS_HEADER = """\
 - `budgets`：推理时间、模型调用与花费上限、随机对照次数、策略容器的超时与资源。
 - `artifact_contract`：起点，以及 `acceptance_rules` 里主动序列、统计量与登记条件的定义。
 - `broker_replay`：资金、费用、手数、T+1 与调度。
-- `runtime_tools` 与 `source_refs`：已装依赖、各读文件根在 shell 里的路径、数据摘要与单位引用。\
+- `runtime_tools` 与 `source_refs`：已装依赖、Sandbox 的 GPU、各读文件根在 shell 里的路径、数据摘要与单位引用。\
 """
 
 RESUME_INSTRUCTION = """\
@@ -239,6 +250,17 @@ def build_system_prompt(
     exploration_directive: str = "",
     session_directive: str = "",
 ) -> str:
+    # The orientation's GPU bullet closes that section, read off the same
+    # ``runtime_tools.sandbox_gpus`` the facts JSON below carries.
+    protocol = PROTOCOL_INSTRUCTION
+    runtime_tools = (experiment_facts or {}).get("runtime_tools")
+    gpus = runtime_tools.get("sandbox_gpus") if isinstance(runtime_tools, Mapping) else None
+    if gpus and gpus != NO_SANDBOX_GPUS:
+        protocol = protocol.replace(
+            SESSION_ORIENTATION_SECTION,
+            f"{SESSION_ORIENTATION_SECTION}\n{SESSION_GPU_ORIENTATION_BULLET.format(gpus=gpus)}",
+            1,
+        )
     context_parts: list[str] = []
     if experiment_facts:
         run = build_run_section(experiment_facts)
@@ -253,7 +275,7 @@ def build_system_prompt(
             context_parts.append(section)
     return "\n\n".join(
         (
-            PROTOCOL_INSTRUCTION,
+            protocol,
             SESSION_DYNAMIC_CONTEXT_HEADER,
             *context_parts,
         )
