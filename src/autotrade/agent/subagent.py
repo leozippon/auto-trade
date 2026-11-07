@@ -39,6 +39,7 @@ from autotrade.environment.llm import (
     context_request_fits,
     is_context_overflow_error,
     malformed_tool_call_messages,
+    output_shares_context_window,
 )
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
@@ -1340,6 +1341,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             requested_max_tokens=requested,
             estimated_prompt_tokens=max(prompt_tokens, 1),
             context_window=resolved_window,
+            output_shares_window=output_shares_context_window(llm),
         )
         return clamped
 

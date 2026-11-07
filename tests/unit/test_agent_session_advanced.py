@@ -22,6 +22,7 @@ from autotrade.agent.prompts import (
     SESSION_STATIC_SECTIONS,
     build_system_prompt,
 )
+from autotrade.agent.runner import COMPACT_ADVISORY_FRACTION
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import AgentRefStore
@@ -371,7 +372,7 @@ def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
     shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
     # A threshold the runtime compactor never reaches (its message floor is
-    # high) while three shell turns cross 75% of it.
+    # high) while three shell turns cross the advisory fraction of it.
     runner = AgentSessionRunner(
         llm=SessionBudgetLLM(llm, budget=shared, role="main"),
         tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
@@ -393,7 +394,8 @@ def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_
     assert len(notices) == 2 and len(compactions) == 1
     assert notices[0] < compactions[0] < notices[1]
     notice = events[notices[0]][1]
-    assert notice["token_threshold"] == 260 and notice["estimated_tokens"] >= 195
+    assert notice["token_threshold"] == 260
+    assert notice["estimated_tokens"] >= COMPACT_ADVISORY_FRACTION * 260
     observation = next(
         json.loads(message.content)
         for call in llm.calls
@@ -1590,6 +1592,7 @@ def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_outp
         requested_max_tokens=5_000,
         estimated_prompt_tokens=prompt_tokens,
         context_window=window,
+        output_shares_window=True,
     )
     assert prompt_fits and clamped == window - prompt_tokens - CONTEXT_OUTPUT_TOKEN_MARGIN
     assert payload == {

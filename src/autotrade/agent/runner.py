@@ -48,6 +48,7 @@ from autotrade.environment.llm import (
     estimate_chat_request_tokens,
     is_context_overflow_error,
     malformed_tool_call_messages,
+    output_shares_context_window,
 )
 from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
 from autotrade.environment.time_budget import (
@@ -140,9 +141,11 @@ _TERMINAL_TOOLS = frozenset({"test"})
 # rebuilds the conversation once the turn's tool results are in.
 _COMPACT_TOOL = "compact"
 # The estimated request size, as a share of the runtime compaction threshold,
-# at which the Agent is told once to compact itself; re-armed by every
-# compaction, so a long session hears it once per context window.
-COMPACT_ADVISORY_FRACTION = 0.75
+# at which the Agent is told once to compact itself: close to the threshold, so
+# a session compacts only once its window is nearly spent, with the host's own
+# compaction at the threshold as the backstop. Re-armed by every compaction, so
+# a long session hears it once per context window.
+COMPACT_ADVISORY_FRACTION = 0.9
 # The tool that produces complete Validation nodes: one per finished candidate.
 _VALIDATION_TOOLS = frozenset({"validate"})
 # A batch runs in order whatever its spec declares, so its rows are recorded
@@ -1834,6 +1837,7 @@ class AgentSessionRunner:
             requested_max_tokens=self.config.max_response_tokens,
             estimated_prompt_tokens=prompt_tokens,
             context_window=context_window,
+            output_shares_window=output_shares_context_window(self.llm),
         )
         if prompt_fits and available >= CONTEXT_OUTPUT_MIN_TOKENS:
             self._emit(

@@ -42,6 +42,12 @@ class ModelProfile:
     prices: TokenPrices
     context_window_tokens: int | None = None
     max_output_tokens: int | None = None
+    # Whether the output counts against ``context_window_tokens``: True where
+    # the engine bounds prompt plus output by the window (the OpenAI-style
+    # Responses and Chat models, DeepSeek, MiMo, the local vLLM), False where
+    # the window bounds the prompt alone and ``max_output_tokens`` the output
+    # (Gemini). Compaction thresholds and request pre-flight both read it.
+    output_shares_context_window: bool = True
 
 
 _DEEPSEEK_PROFILE = ModelProfile(
@@ -103,6 +109,7 @@ _LIGHTING_PROFILES = {
         prices=prices,
         context_window_tokens=context_window,
         max_output_tokens=max_output,
+        output_shares_context_window=model not in _lighting.INPUT_ONLY_WINDOW_MODELS,
     )
     for model, dialect, context_window, max_output, prices in _lighting.MODEL_PROFILES
 }
@@ -328,6 +335,7 @@ def build_model_gateway(
                 user_id="",
                 conversation_log_dir=conversation_log_dir,
                 context_window_tokens=profile.context_window_tokens,
+                output_shares_context_window=profile.output_shares_context_window,
             )
         ),
     )

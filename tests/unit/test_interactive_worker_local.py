@@ -543,6 +543,46 @@ def test_a_console_default_experiment_compacts_gpt6_astra_at_its_maximum(
     assert load(compact_token_threshold=None, disable_context_compact=True).compact_enabled is False
 
 
+def test_an_input_only_window_bounds_the_prompt_alone_and_the_compaction_model_still_caps_it(
+    tmp_path: Path,
+    monkeypatch,
+):
+    """gemini-4-argon's window bounds the prompt alone, its output having its
+    own ceiling, so its bound is window − margin; a compaction model whose
+    output shares its window still caps every conversation at its own bound,
+    and a stated threshold above that is refused."""
+    from autotrade.environment.llm import model_profile
+    from autotrade.pipelines.worker import COMPACTION_SAFETY_MARGIN_TOKENS
+
+    gemini = "gemini-4-argon"
+    assert model_profile(gemini).output_shares_context_window is False
+    assert model_profile("DeepSeek-V4.1-Flash").output_shares_context_window is True
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    path = experiment / "hitl/params.json"
+    params = json.loads(path.read_text(encoding="utf-8"))
+    params["compact_token_threshold"] = None
+    monkeypatch.setenv("LIGHTING_API_KEY", "relay-test-key")
+
+    def load(**overrides: object):
+        params.update(overrides)
+        path.write_text(json.dumps(params), encoding="utf-8")
+        return load_worker_options(experiment, repo_root=repo).llm
+
+    settings = load(model=gemini, subagent_model=gemini, compact_model=gemini)
+    assert settings.compaction.token_threshold == 1_000_000 - COMPACTION_SAFETY_MARGIN_TOKENS
+    assert settings.compaction.token_threshold == 991_808
+    assert settings.compaction_for("subagent").token_threshold == 991_808
+    # The relay's DeepSeek reserves its 10,000-token compaction output inside
+    # its window: 1,000,000 − 10,000 − 8,192.
+    settings = load(compact_model="DeepSeek-V4.1-Flash")
+    assert settings.compaction.token_threshold == 981_808
+    assert settings.compaction_for("subagent").token_threshold == 981_808
+    with pytest.raises(
+        ValueError, match=r"compact_token_threshold 981,809 exceeds the \w+ conversation's bound 981,808"
+    ):
+        load(compact_token_threshold=981_809)
+
+
 def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     tmp_path: Path,
     monkeypatch,

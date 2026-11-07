@@ -46,6 +46,7 @@ from autotrade.environment.llm.model_profiles import (
     token_prices,
 )
 from autotrade.environment.llm.pricing import FREE, ApiSpendExhausted, billed_tokens
+from autotrade.environment.llm.proxy import output_shares_context_window
 from autotrade.environment.runtime import (
     RunManifest,
     chmod_tree,
@@ -303,6 +304,7 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         self.context_window_tokens = (
             window if isinstance(window, int) and not isinstance(window, bool) else None
         )
+        self.output_shares_context_window = output_shares_context_window(delegate)
 
     @property
     def calls(self) -> int:

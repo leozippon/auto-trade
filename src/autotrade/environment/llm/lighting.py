@@ -62,8 +62,8 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # ceilings; for gpt-6-astra that is the project owner's figure (2026-10-14),
 # backed by the relay pricing a tier past 272k but, as of that date, not probed
 # with such a request, and gemini-4-argon's upstream refuses a maxOutputTokens
-# above 1,048,576 (probed 2026-10-26), more than the window, which bounds it
-# instead.
+# above 1,048,576 (probed 2026-10-26), so its ceiling is kept at 1M, under
+# that limit.
 # Prices are USD per million uncached prompt / cached prompt / completion /
 # cache-write tokens from the relay's public
 # ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
@@ -103,6 +103,11 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
     ),
 )
 MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)
+# Relay ids whose window bounds the prompt alone, the output having its own
+# ceiling (``ModelProfile.output_shares_context_window``): Google documents a
+# Gemini model's input and output token limits separately. The other relay ids
+# share their window between prompt and output, as OpenAI and DeepSeek document.
+INPUT_ONLY_WINDOW_MODELS = ("gemini-4-argon",)
 # No temperature: Google's Gemini 3 guide keeps the default 1.0 (lower can loop).
 PROVIDER_TEMPERATURE_MODELS = ("gemini-4-argon",)
 
@@ -198,6 +203,7 @@ def build_gateway(
                 user_id="",
                 conversation_log_dir=conversation_log_dir,
                 context_window_tokens=profile.context_window_tokens,
+                output_shares_context_window=profile.output_shares_context_window,
             ),
             fallback_api_key=load_env_value(fallback_key_env, env_file),
             fallback_key_env=fallback_key_env,
@@ -782,6 +788,7 @@ __all__ = [
     "DEFAULT_BASE_URL",
     "GPT_ASTRA_MODEL",
     "GPT_LONG_CONTEXT_TIER",
+    "INPUT_ONLY_WINDOW_MODELS",
     "LLM_KEY_ENVS",
     "MODEL_CHOICES",
     "MODEL_PROFILES",

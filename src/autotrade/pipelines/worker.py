@@ -204,27 +204,33 @@ class LLMWorkerSettings:
     def compaction_for(self, role: str) -> ContextCompactionConfig:
         """One conversation role's compaction budget (main or subagent).
 
-        Its bound is ``window − that role's output budget −
-        COMPACTION_SAFETY_MARGIN_TOKENS`` for the role's own model, so prompt
-        plus output never exceeds the window, and the same bound for the
-        compaction model, which must read the whole conversation. The
-        threshold is that bound unless the experiment's ``compact_token_threshold``
-        names a lower one; a higher one is refused, as is a window with no
-        room for the output budget at all. The value reaches the run facts
-        (parents) and the compaction events (children).
+        Its bound is the role's own model's window less
+        ``COMPACTION_SAFETY_MARGIN_TOKENS`` and, where the output shares that
+        window (``ModelProfile.output_shares_context_window``), less that
+        role's output budget, so prompt plus output never exceeds what the
+        model accepts; the compaction model, which must read the whole
+        conversation, bounds it the same way with its own output budget. The
+        threshold is the smaller bound unless the experiment's
+        ``compact_token_threshold`` names a lower one; a higher one is
+        refused, as is a window with no room for the output budget at all.
+        The value reaches the run facts (parents) and the compaction events
+        (children).
         """
 
         if role not in {"main", "subagent"}:
             raise ValueError(f"unknown conversation role: {role}")
         bounds: list[int] = []
         for bound_role in (role, "compact") if self.compact_enabled else (role,):
-            window = model_profile(self.model_for(bound_role)).context_window_tokens
-            if window is None:
+            profile = model_profile(self.model_for(bound_role))
+            if profile.context_window_tokens is None:
                 continue
+            output = (
+                self.max_tokens_for(bound_role)
+                if profile.output_shares_context_window
+                else 0
+            )
             bound = (
-                window
-                - self.max_tokens_for(bound_role)
-                - COMPACTION_SAFETY_MARGIN_TOKENS
+                profile.context_window_tokens - output - COMPACTION_SAFETY_MARGIN_TOKENS
             )
             if bound <= 0:
                 raise ValueError(
@@ -242,8 +248,8 @@ class LLMWorkerSettings:
             raise ValueError(
                 f"compact_token_threshold {threshold:,} exceeds the {role} conversation's "
                 f"bound {bound:,}: the context window of its model and of the compaction "
-                f"model, less each one's output budget and "
-                f"{COMPACTION_SAFETY_MARGIN_TOKENS:,} tokens"
+                f"model, less {COMPACTION_SAFETY_MARGIN_TOKENS:,} tokens and each "
+                f"one's output budget where the output shares the window"
             )
         return replace(self.compaction, token_threshold=threshold)
 
@@ -1268,11 +1274,12 @@ def _llm_settings(
     return settings, sandbox
 
 
-# Tokens the compaction threshold leaves below "window − output budget". The
-# threshold is checked before the sub-agent completion observations (≤6,000
-# chars each), inbox messages and budget notices of that turn are appended,
-# so the margin lets one such addition ride along without a forced
-# compaction; the gateway keeps its own 2,048-token tokenizer slack on top.
+# Tokens the compaction threshold leaves below what the window holds beside
+# the output budget it shares (``compaction_for``). The threshold is checked
+# before the sub-agent completion observations (≤6,000 chars each), inbox
+# messages and budget notices of that turn are appended, so the margin lets
+# one such addition ride along without a forced compaction; the gateway keeps
+# its own 2,048-token tokenizer slack on top.
 COMPACTION_SAFETY_MARGIN_TOKENS = 8_192
 
 

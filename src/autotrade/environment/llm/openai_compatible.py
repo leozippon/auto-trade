@@ -305,6 +305,8 @@ class OpenAICompatibleConfig:
     user_id: str = "autotrade-hl"
     conversation_log_dir: str | Path | None = "data/llm_conversations"
     context_window_tokens: int | None = None
+    # The profile's ``output_shares_context_window``.
+    output_shares_context_window: bool = True
 
     def __post_init__(self) -> None:
         if not self.api_key or "\r" in self.api_key or "\n" in self.api_key:
@@ -428,6 +430,10 @@ class OpenAICompatibleProxy:
     @property
     def context_window_tokens(self) -> int | None:
         return self.config.context_window_tokens
+
+    @property
+    def output_shares_context_window(self) -> bool:
+        return self.config.output_shares_context_window
 
     def with_thinking(
         self, *, enabled: bool, reasoning_effort: str | None
@@ -572,6 +578,7 @@ class OpenAICompatibleProxy:
             requested_max_tokens=requested_max_tokens,
             estimated_prompt_tokens=estimated_prompt_tokens,
             context_window=context_window,
+            output_shares_window=self.output_shares_context_window,
         )
         body = self._build_request_body(
             messages,

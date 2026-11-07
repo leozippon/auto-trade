@@ -5,11 +5,16 @@
 which ran the 2026-11-07 harness on the instance and spent its research years
 on LightGBM-and-ridge ensembles trained on the CPU while the A100 idled: the
 system prompt said nothing about the card, so the session only met it through
-`nvidia-smi`. This round differs from 20261107c by one harness change: the run
-facts state the sandbox GPU (count and device name) and, when the experiment
-has a card, the research-orientation block asks for approaches that benefit
-from GPU acceleration and treats CPU tree and linear models as controls. Model,
-pack, directive, geometry, budgets and card are 20261107c's.
+`nvidia-smi`. This round differs from 20261107c in the harness and in when it
+compacts. The run facts state the sandbox GPU (count and device name) and,
+when the experiment has a card, the research-orientation block asks for
+approaches that benefit from GPU acceleration and treats CPU tree and linear
+models as controls. No compaction threshold is pinned, so every conversation
+compacts at its derived bound: 959,040 tokens for gpt-6-astra with
+DeepSeek-V4.1-Flash compaction (the 1,000,000-token window less the
+32,768-token output budget and the 8,192-token safety margin), the sub-agents
+at the same figure, and the Agent is asked to compact itself at 90% of it.
+Model, pack, directive, geometry, budgets and card are 20261107c's.
 
 The rest is round 20261107's: ten August-July research years
 2015-08-01..2025-07-31, of which `research_years` 7 are the session's and the
@@ -17,9 +22,8 @@ validation period 2022-08..2025-07 is tested in twelve quarterly steps; the
 ten-year profile and seed (`_profiles.FUND_TITLE_TEN_YEAR_CSI1000` on
 `FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED`, CSI 1000, the 0.55 / 0.30 drawdown limits,
 alpha 0.05); a CNY 200k account on the main board and ChiNext; gpt-6-astra at
-reasoning effort xhigh with sub-agents and compaction on DeepSeek-V4.1-Flash,
-compacting at 221,184 tokens, below the relay's 272,000-token prompt tier; the
-instance's one A100 with one replay at a time in `validate`; and the budgets of
+reasoning effort xhigh with sub-agents and compaction on DeepSeek-V4.1-Flash;
+the instance's one A100 with one replay at a time in `validate`; and the budgets of
 7,200 minutes, 19,200 model calls, USD 150 and 36 null controls.
 
 It runs on the instance, whose fill loop creates it once the card is free:
@@ -53,8 +57,6 @@ from scripts.experiments._round import Round
 PACK = "configs/workspace_refs/open_200k_20261107"
 ASTRA = "gpt-6-astra"
 FLASH = "DeepSeek-V4.1-Flash"
-# Below the relay's 272,000-token prompt tier for gpt-6-astra (see the docstring).
-COMPACT_TOKEN_THRESHOLD = 221_184
 
 # Round 20261107's directive, unchanged so the harness is the only difference.
 DIRECTIVE = (
@@ -71,7 +73,6 @@ def _experiment(model: str, *, gpus: int) -> dict[str, object]:
         "model": model,
         "subagent_model": FLASH,
         "compact_model": FLASH,
-        "compact_token_threshold": COMPACT_TOKEN_THRESHOLD,
         "workspace_reference": PACK,
         "research_directive": DIRECTIVE,
         "gpu_count": gpus,

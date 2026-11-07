@@ -370,6 +370,20 @@ def context_window_tokens(proxy: object) -> int | None:
     return value
 
 
+def output_shares_context_window(proxy: object) -> bool:
+    """Whether the model's output counts against its context window.
+
+    True where the engine bounds prompt plus output by the window, and for a
+    proxy that does not say; False where the window bounds the prompt alone
+    and the output has its own ceiling (``ModelProfile``).
+    """
+
+    value = getattr(proxy, "output_shares_context_window", True)
+    if not isinstance(value, bool):
+        raise ValueError("LLM output_shares_context_window must be a bool")
+    return value
+
+
 def context_request_fits(
     proxy: object,
     messages: Sequence[ChatMessage],
@@ -377,14 +391,19 @@ def context_request_fits(
     tools: Sequence[Mapping[str, object]] = (),
     max_tokens: int,
 ) -> tuple[bool, int, int | None]:
-    """Return whether prompt estimate plus requested output fits the model."""
+    """Return whether prompt estimate plus requested output fits the model.
+
+    An output that does not share the window has its own ceiling, so only the
+    prompt is measured against the window.
+    """
 
     if isinstance(max_tokens, bool) or not isinstance(max_tokens, int) or max_tokens <= 0:
         raise ValueError("max_tokens must be a positive integer")
     prompt_tokens = estimate_chat_request_tokens(messages, tools=tools)
     window = context_window_tokens(proxy)
+    output_tokens = max_tokens if output_shares_context_window(proxy) else 0
     return (
-        window is None or prompt_tokens + max_tokens <= window,
+        window is None or prompt_tokens + output_tokens <= window,
         prompt_tokens,
         window,
     )
@@ -395,13 +414,16 @@ def clamp_requested_max_tokens(
     requested_max_tokens: int,
     estimated_prompt_tokens: int,
     context_window: int | None,
+    output_shares_window: bool,
     margin: int = CONTEXT_OUTPUT_TOKEN_MARGIN,
 ) -> tuple[int, bool]:
     """Fit the output budget into the remaining context window.
 
     Returns ``(max_tokens, prompt_fits)``. Unknown windows leave the requested
-    budget unchanged. The margin covers host-estimate undercount so a request
-    that the estimator calls an exact fit cannot 400 the provider by one token.
+    budget unchanged, and so does a window the output does not share
+    (``output_shares_context_window``), whose prompt must still leave the
+    margin. The margin covers host-estimate undercount so a request that the
+    estimator calls an exact fit cannot 400 the provider by one token.
     """
 
     if (
@@ -423,6 +445,8 @@ def clamp_requested_max_tokens(
     remaining = context_window - estimated_prompt_tokens - margin
     if remaining < 1:
         return requested_max_tokens, False
+    if not output_shares_window:
+        return requested_max_tokens, True
     return min(requested_max_tokens, remaining), True
 
 

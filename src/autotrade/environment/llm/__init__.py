@@ -45,6 +45,7 @@ from .proxy import (
     estimate_chat_request_tokens,
     is_context_overflow_error,
     malformed_tool_call_messages,
+    output_shares_context_window,
 )
 
 __all__ = [
@@ -88,5 +89,6 @@ __all__ = [
     "load_env_value",
     "malformed_tool_call_messages",
     "model_profile",
+    "output_shares_context_window",
     "token_prices",
 ]

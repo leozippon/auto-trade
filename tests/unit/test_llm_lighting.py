@@ -9,6 +9,7 @@ event sequence ``output_item.added`` / ``function_call_arguments.delta`` /
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import pytest
 
 from autotrade.agent.subagent import AGENT_TOOL_SPEC
 from autotrade.environment.llm import (
+    CONTEXT_OUTPUT_TOKEN_MARGIN,
     MODEL_CHOICES,
     ChatMessage,
     LLMProxyError,
@@ -23,6 +25,8 @@ from autotrade.environment.llm import (
     ProviderRefusalError,
     ToolCall,
     build_model_gateway,
+    context_request_fits,
+    estimate_chat_request_tokens,
     is_context_overflow_error,
     model_profile,
 )
@@ -36,6 +40,7 @@ from autotrade.environment.llm.lighting import (
 )
 from autotrade.environment.llm.openai_compatible import load_env_value
 from autotrade.environment.tools.base import validate_arguments
+from autotrade.pipelines.research_session import SessionBudgetLLM
 
 MODEL = "gpt-6-astra"
 GEMINI_MODEL = "gemini-4-argon"
@@ -338,6 +343,30 @@ def test_gateway_clamps_the_output_budget_to_the_relay_ceiling(tmp_path: Path):
     assert isinstance(relay_deepseek, LightingProxy)
     assert responses_model.config.max_tokens == 128_000
     assert relay_deepseek.config.max_tokens == 384_000
+
+
+def test_gemini_sends_its_whole_output_budget_beside_a_prompt_near_its_window(
+    tmp_path: Path,
+):
+    """gemini-4-argon's window bounds the prompt alone: a prompt that leaves
+    less than the output budget inside the window still sends the whole
+    budget, the session wrapper's pre-flight agrees, and only a prompt past
+    the window (less the tokenizer slack) is refused before the request."""
+    proxy, transport = _proxy(
+        tmp_path, [_chat_json(GEMINI_MODEL)], model=GEMINI_MODEL, max_tokens=32_768
+    )
+    window = model_profile(GEMINI_MODEL).context_window_tokens
+    assert window == 1_000_000
+    near = [ChatMessage("user", "研" * (window - 20_000))]
+    prompt = estimate_chat_request_tokens(near)
+    assert window - 32_768 < prompt < window - CONTEXT_OUTPUT_TOKEN_MARGIN
+    budgeted = SessionBudgetLLM(proxy, max_calls=1, deadline=time.monotonic() + 600)
+    assert context_request_fits(budgeted, near, max_tokens=32_768)[0]
+    proxy.complete(near)
+    assert transport.bodies[0]["max_tokens"] == 32_768
+    with pytest.raises(LLMProxyError, match="before provider request"):
+        proxy.complete([ChatMessage("user", "研" * window)])
+    assert len(transport.bodies) == 1
 
 
 def test_missing_primary_key_fails_naming_the_variable(tmp_path: Path):
