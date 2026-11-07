@@ -5,8 +5,8 @@ in Chinese (the market, rules, and evidence are Chinese) with English JSON
 keys for stable parsing. Static content comes first and per-run facts last so
 the shared prefix stays byte-stable across sessions; the one fact-dependent
 line above the environment block is the orientation's GPU bullet, which closes
-that section only when the Sandbox has cards, so sessions on the same cards
-still share the whole prefix.
+that section only when the Sandbox has cards and names none of them, so every
+session with cards shares the whole prefix.
 
 The static part follows the layout of minimal agent-harness prompts: an
 untitled opening paragraph (who the Agent is, what the harness does), the
@@ -14,7 +14,7 @@ research-and-backtesting process, the research orientation, how the work is
 read, the strategy contract pointer, the prohibitions and how to work in the
 harness, each rule stated once. It carries what the harness enforces, what the
 Agent cannot find out itself, and the owner's research orientation (the
-ambition and depth expected and, on a Sandbox with cards, work that uses them;
+ambition and depth expected and, on a Sandbox with cards, full use of them;
 not a method); what a tool's parameter, limit or returned field means is the
 tool's description and schema, the strategy contract is ``output/README.md``,
 and how to research within that orientation is the Agent's own call. The
@@ -52,12 +52,11 @@ SESSION_ORIENTATION_SECTION = """\
 - 预算是为深入研究准备的，不以提前结束为目标：在研究年里充分比较多个方向、迭代改进之后再开始测试。\
 """
 
-# The orientation's closing bullet when the Sandbox has cards, ``{gpus}`` being
-# the run facts' ``runtime_tools.sandbox_gpus`` (``"1 × A100"``); a Sandbox
-# without cards reads the orientation above unchanged (``build_system_prompt``).
-SESSION_GPU_ORIENTATION_BULLET = """\
-- Sandbox 挂有 {gpus}：优先选择能从 GPU 加速中受益的研究方法，如深度序列与截面模型、预训练嵌入与微调、大规模表示学习、频繁重训；CPU 上的树模型与线性模型只作基线对照，不作为目标。\
-"""
+# The orientation's closing bullet when the run facts' ``runtime_tools.sandbox_gpus``
+# names cards; it names no card and no method (the facts state the hardware), and
+# a Sandbox without cards reads the orientation above unchanged
+# (``build_system_prompt``).
+SESSION_GPU_ORIENTATION_BULLET = "- 充分利用 Sandbox 可用的 GPU 算力。"
 
 SESSION_READINGS_SECTION = """\
 # 读数
@@ -250,15 +249,15 @@ def build_system_prompt(
     exploration_directive: str = "",
     session_directive: str = "",
 ) -> str:
-    # The orientation's GPU bullet closes that section, read off the same
-    # ``runtime_tools.sandbox_gpus`` the facts JSON below carries.
+    # The orientation's GPU bullet closes that section when the same
+    # ``runtime_tools.sandbox_gpus`` the facts JSON below carries names cards.
     protocol = PROTOCOL_INSTRUCTION
     runtime_tools = (experiment_facts or {}).get("runtime_tools")
     gpus = runtime_tools.get("sandbox_gpus") if isinstance(runtime_tools, Mapping) else None
     if gpus and gpus != NO_SANDBOX_GPUS:
         protocol = protocol.replace(
             SESSION_ORIENTATION_SECTION,
-            f"{SESSION_ORIENTATION_SECTION}\n{SESSION_GPU_ORIENTATION_BULLET.format(gpus=gpus)}",
+            f"{SESSION_ORIENTATION_SECTION}\n{SESSION_GPU_ORIENTATION_BULLET}",
             1,
         )
     context_parts: list[str] = []
