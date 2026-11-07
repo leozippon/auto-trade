@@ -120,6 +120,16 @@ def test_costs_follow_the_catalog_price_of_the_configured_model():
 
     assert prices == TokenPrices(0.141, 0.0028, 0.282, 0.141)
     assert prices.cost_usd((1_000_000, 1_000_000, 1_000_000, 0)) == pytest.approx(0.4258)
+    # The relay's single-tier Chat Completions ids at their listed prices, the
+    # DeepSeek ones at the weekday peak: a million each of uncached, cached
+    # and completion tokens.
+    for model, cost in (
+        ("DeepSeek-V4.1-Flash", 0.2975 + 0.0059 + 1.1901),
+        ("DeepSeek-V4-Pro-0813", 1.3388 + 0.0447 + 4.0165),
+        ("qwen3.8-max-0902", 1.7851 + 0.2231 + 5.3553),
+    ):
+        tokens = (1_000_000, 1_000_000, 1_000_000, 0)
+        assert model_profile(model).prices.cost_usd(tokens) == pytest.approx(cost), model
 
 
 def test_the_local_model_is_free_and_every_hosted_model_is_priced():
@@ -136,20 +146,24 @@ def test_the_local_model_is_free_and_every_hosted_model_is_priced():
 
 
 @pytest.mark.parametrize(
-    ("prompt", "spend"),
+    ("model", "prompt", "spend"),
     [
         # At the relay's boundary the short-context tier:
         # 62,000 x 10 + 200,000 x 1 + 2,000 x 50 + 10,000 x 12.5, per million.
-        (272_000, 1.045),
+        ("gpt-6-astra", 272_000, 1.045),
         # One prompt token past it the whole call bills at the long-context
         # tier, every prompt price doubled and the completion's 1.5 times:
         # (62,001 x 10 + 200,000 x 1 + 10,000 x 12.5) x 2 + 2,000 x 50 x 1.5.
-        (272_001, 2.04002),
+        ("gpt-6-astra", 272_001, 2.04002),
+        # 62,000 x 2 + 200,000 x 0.1 + 2,000 x 10 + 10,000 x 2.5.
+        ("gpt-6.1-sol", 272_000, 0.189),
+        # (62,001 x 2 + 200,000 x 0.1 + 10,000 x 2.5) x 2 + 2,000 x 10 x 1.5.
+        ("gpt-6.1-sol", 272_001, 0.368004),
     ],
-    ids=["short-context", "long-context"],
+    ids=["astra-short", "astra-long", "sol-short", "sol-long"],
 )
 def test_a_gpt6_call_past_the_relay_length_boundary_bills_at_its_long_context_tier(
-    prompt, spend
+    model, prompt, spend
 ):
     """The boundary is the whole prompt, cached and written tokens included,
     so the cap stays truthful at any compaction threshold."""
@@ -164,7 +178,7 @@ def test_a_gpt6_call_past_the_relay_length_boundary_bills_at_its_long_context_ti
         max_calls=4, max_api_spend_usd=50.0, deadline=time.monotonic() + 60
     )
     SessionBudgetLLM(
-        _priced("gpt-6-astra", "lighting", [_response(usage)]), budget=budget
+        _priced(model, "lighting", [_response(usage)]), budget=budget
     ).complete(MESSAGES)
 
     assert budget.api_spend_usd == pytest.approx(spend)

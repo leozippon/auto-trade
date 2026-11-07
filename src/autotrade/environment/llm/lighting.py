@@ -1,12 +1,13 @@
 """LightingTheWord (New API relay) gateway.
 
 The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
-function tools on Chat Completions — and gemini-4-argon and DeepSeek-V4.1-Flash
-over ``/v1/chat/completions``, with a primary credential and an alternate one:
-an experiment's ``llm_key`` chooses which its calls start on, and the other is
-the fallback. gemini-4-argon is sent no reasoning level, so an experiment's
-``reasoning_effort`` does not reach it: it thinks at Google's default and keeps
-the provider's default temperature as well.
+function tools on Chat Completions — and gemini-4-argon, qwen3.8-max-0902 and
+its two DeepSeek ids over ``/v1/chat/completions``, with a primary credential
+and an alternate one: an experiment's ``llm_key`` chooses which its calls start
+on, and the other is the fallback. gemini-4-argon and qwen3.8-max-0902 are sent
+no thinking switch or reasoning level, so an experiment's thinking settings do
+not reach them: they think at their upstream default (on for both), and
+gemini-4-argon keeps the provider's default temperature as well.
 """
 
 from __future__ import annotations
@@ -58,26 +59,51 @@ GPT_ASTRA_MODEL = "gpt-6-astra"
 DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 
 # (relay model id, request dialect, context window, max output tokens, list
-# prices). Every relay id declares a 1M window, with the relay's own completion
-# ceilings; for gpt-6-astra that is the project owner's figure (2026-10-14),
-# backed by the relay pricing a tier past 272k but, as of that date, not probed
-# with such a request, and gemini-4-argon's upstream refuses a maxOutputTokens
-# above 1,048,576 (probed 2026-10-26), so its ceiling is kept at 1M, under
-# that limit.
+# prices). The relay publishes neither limit (its model listings report none,
+# audited 2026-11-07), so each comes from elsewhere, and a compaction threshold
+# derived near the window relies on it:
+# - gpt-6-astra and gpt-6.1-sol: 1M and 128,000, the project owner's figures
+#   (2026-10-14), backed by the relay pricing a tier past 272k but, as of that
+#   date, not probed with such a request.
+# - gemini-4-argon: a 1M window; its upstream refuses a maxOutputTokens above
+#   1,048,576 (probed 2026-10-26), so its ceiling is kept at 1M, under that.
+# - DeepSeek-V4.1-Flash and DeepSeek-V4-Pro-0813: DeepSeek lists a "1M"
+#   context and a "384K" maximum output for both deepseek-flash and
+#   deepseek-v4-pro, which it names DeepSeek-V4-Pro-0813
+#   (https://api-docs.deepseek.com/zh-cn/quick_start/pricing, read
+#   2026-11-07); the decimal reading is the safe one.
+# - qwen3.8-max-0902: QwenCloud lists a 1M window, a maximum input of 991K
+#   (983K with thinking, which is its default) and a 131K maximum output
+#   (https://www.qwencloud.com/models/qwen3.8-max-0902, read 2026-11-07), and
+#   Model Studio 128k output for qwen3.8-max
+#   (https://www.alibabacloud.com/help/en/model-studio/text-generation-model,
+#   updated 2026-11-05). Its window here is the thinking-mode maximum input,
+#   983,000, so neither the prompt nor prompt plus output passes a documented
+#   limit, and its ceiling is the smaller output figure.
 # Prices are USD per million uncached prompt / cached prompt / completion /
 # cache-write tokens from the relay's public
-# ``GET https://lightingtheword.com/api/pricing`` as of 2026-10-14, and
-# gemini-4-argon's prices and gpt-6-astra's cache write as of
-# 2026-10-26 (``pricing_version`` a42d372c): a dated snapshot, refreshed by
-# hand when the relay's ``pricing_version`` moves (unchanged on 2026-11-05).
-# gpt-6-astra bills a request by its length: the short-context tier listed
+# ``GET https://lightingtheword.com/api/pricing``: as of 2026-10-14, with
+# gemini-4-argon's prices and gpt-6-astra's cache write as of 2026-10-26 and
+# the other ids' as of 2026-11-07. A dated snapshot refreshed by hand by
+# comparing the prices themselves: ``pricing_version`` does not track price
+# edits (a42d372c throughout, while DeepSeek-V4.1-Flash moved from
+# 0.2957 / 1.1829 to 0.2975 / 1.1901 by 2026-11-07).
+# The gpt-6 ids bill a request by its length: the short-context tier listed
 # here up to 272,000 prompt tokens, a longer request whole at the
 # long-context tier (GPT_LONG_CONTEXT_TIER), which the spend cap charges too.
-# gemini-4-argon bills one tier at any length. DeepSeek-V4.1-Flash is listed
-# at its weekday-peak rate (off-peak bills half).
-# Cache writes: gpt-6-astra's at the relay's own (1.25 times the uncached
-# prompt); gemini-4-argon's price lists no cache-write term, so it stays at the
-# uncached prompt; DeepSeek reports none.
+# The other ids bill one tier at any length; the DeepSeek ids are listed at
+# their weekday-peak rate (off-peak bills half).
+# Cache writes: the gpt-6 ids' at the relay's own (1.25 times the uncached
+# prompt); the Chat Completions ids report none and gemini-4-argon's and
+# qwen3.8-max-0902's prices list no write term, so theirs stay at the uncached
+# prompt.
+# Prompt caching (relay audit 2026-11-07, ~7k-token prompts, each with an
+# identical repeat and a shared-prefix call): the gpt-6 ids and
+# qwen3.8-max-0902 read 98-100% of the prompt from cache on every repeat, the
+# DeepSeek ids 87-98% with an occasional cold miss (the relay spreads each
+# over two upstreams); gemini-4-argon caches only a fixed
+# block (75% of that prompt) and missed 3 of 4 shared-prefix calls entirely,
+# billing them uncached.
 # The relay's ``billing_expr`` for its gpt-6 ids: ``len <= 272000`` bills the
 # short-context tier, a longer prompt bills the whole request at twice every
 # prompt price (uncached, cached and cache write) and 1.5 times the
@@ -93,20 +119,42 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
         128_000,
         TokenPrices(10.0, 1.0, 50.0, 12.5, GPT_LONG_CONTEXT_TIER),
     ),
+    (
+        "gpt-6.1-sol",
+        RESPONSES_DIALECT,
+        1_000_000,
+        128_000,
+        TokenPrices(2.0, 0.1, 10.0, 2.5, GPT_LONG_CONTEXT_TIER),
+    ),
     ("gemini-4-argon", CHAT_DIALECT, 1_000_000, 1_000_000, TokenPrices(2.0, 0.1, 10.0, 2.0)),
     (
         DEEPSEEK_FLASH_MODEL,
         DEEPSEEK_DIALECT,
         1_000_000,
         384_000,
-        TokenPrices(0.2957, 0.0059, 1.1829, 0.2957),
+        TokenPrices(0.2975, 0.0059, 1.1901, 0.2975),
+    ),
+    (
+        "DeepSeek-V4-Pro-0813",
+        DEEPSEEK_DIALECT,
+        1_000_000,
+        384_000,
+        TokenPrices(1.3388, 0.0447, 4.0165, 1.3388),
+    ),
+    (
+        "qwen3.8-max-0902",
+        CHAT_DIALECT,
+        983_000,
+        128_000,
+        TokenPrices(1.7851, 0.2231, 5.3553, 1.7851),
     ),
 )
 MODEL_CHOICES = tuple(profile[0] for profile in MODEL_PROFILES)
 # Relay ids whose window bounds the prompt alone, the output having its own
 # ceiling (``ModelProfile.output_shares_context_window``): Google documents a
 # Gemini model's input and output token limits separately. The other relay ids
-# share their window between prompt and output, as OpenAI and DeepSeek document.
+# share their window between prompt and output, as OpenAI and DeepSeek document
+# (qwen3.8-max-0902's window above bounds its prompt as well).
 INPUT_ONLY_WINDOW_MODELS = ("gemini-4-argon",)
 # No temperature: Google's Gemini 3 guide keeps the default 1.0 (lower can loop).
 PROVIDER_TEMPERATURE_MODELS = ("gemini-4-argon",)
@@ -190,9 +238,9 @@ def build_gateway(
                 temperature=temperature,
                 thinking_enabled=thinking_enabled,
                 # Only the relay's two dialects that carry a level get one:
-                # gemini-4-argon thinks at its upstream default, and the
-                # responses dialect sends no field when thinking is off (the
-                # relay's gpt-6-astra has no "none" tier).
+                # gemini-4-argon and qwen3.8-max-0902 think at their upstream
+                # default, and the responses dialect sends no field when
+                # thinking is off (the relay's gpt-6 ids have no "none" tier).
                 reasoning_effort=(
                     reasoning_effort
                     if thinking_enabled

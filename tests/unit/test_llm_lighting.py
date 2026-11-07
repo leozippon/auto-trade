@@ -35,10 +35,12 @@ from autotrade.environment.llm.lighting import (
     API_KEY_ENV,
     BASE_URL_ENV,
     DEFAULT_BASE_URL,
+    GPT_LONG_CONTEXT_TIER,
     MODEL_PROFILES,
     LightingProxy,
 )
 from autotrade.environment.llm.openai_compatible import load_env_value
+from autotrade.environment.llm.pricing import TokenPrices
 from autotrade.environment.tools.base import validate_arguments
 from autotrade.pipelines.research_session import SessionBudgetLLM
 
@@ -283,9 +285,27 @@ def _streamed_text(text: str = "OK") -> bytes:
 def test_catalog_registers_every_relay_id_with_its_dialect_and_window():
     assert tuple(profile[0] for profile in MODEL_PROFILES) == (
         MODEL,
+        "gpt-6.1-sol",
         GEMINI_MODEL,
         RELAY_DEEPSEEK_MODEL,
+        "DeepSeek-V4-Pro-0813",
+        "qwen3.8-max-0902",
     )
+    # The sourced limits and the relay's list prices (see the module's
+    # profile comment): the window a derived compaction threshold relies on
+    # is never above the vendor's documented one.
+    limits_and_prices = {
+        "gpt-6.1-sol": (1_000_000, 128_000, TokenPrices(2.0, 0.1, 10.0, 2.5, GPT_LONG_CONTEXT_TIER)),
+        RELAY_DEEPSEEK_MODEL: (1_000_000, 384_000, TokenPrices(0.2975, 0.0059, 1.1901, 0.2975)),
+        "DeepSeek-V4-Pro-0813": (1_000_000, 384_000, TokenPrices(1.3388, 0.0447, 4.0165, 1.3388)),
+        "qwen3.8-max-0902": (983_000, 128_000, TokenPrices(1.7851, 0.2231, 5.3553, 1.7851)),
+    }
+    for model, expected in limits_and_prices.items():
+        profile = model_profile(model)
+        assert (profile.context_window_tokens, profile.max_output_tokens, profile.prices) == expected
+        assert profile.output_shares_context_window is True
+    assert model_profile("DeepSeek-V4-Pro-0813").request_dialect == "deepseek"
+    assert model_profile("qwen3.8-max-0902").request_dialect == "openai"
     for model, dialect, window, output, prices in MODEL_PROFILES:
         assert model in MODEL_CHOICES
         profile = model_profile(model)
