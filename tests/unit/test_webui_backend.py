@@ -157,7 +157,8 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
     ]
     assert fields["model"]["choices"] == list(MODEL_CHOICES)
     # The whole catalogue: the local Qwen, the direct DeepSeek and MiMo ids,
-    # and the relay's gpt-6 ids, gemini-4-argon, DeepSeek ids and Qwen Max.
+    # and the relay's gpt-6 ids, gemini-4-argon, DeepSeek-V4.1-Flash and Qwen
+    # Max.
     assert MODEL_CHOICES == (
         "qwen-3.8-27b-fp8",
         "deepseek-flash",
@@ -167,7 +168,6 @@ def test_local_webui_health_schema_and_brand(tmp_path: Path):
         "gpt-6.1-sol",
         "gemini-4-argon",
         "DeepSeek-V4.1-Flash",
-        "DeepSeek-V4-Pro-0813",
         "qwen3.8-max-0902",
     )
     # The main conversation defaults to the relay's gpt-6-astra, the

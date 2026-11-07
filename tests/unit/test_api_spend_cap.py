@@ -120,12 +120,11 @@ def test_costs_follow_the_catalog_price_of_the_configured_model():
 
     assert prices == TokenPrices(0.141, 0.0028, 0.282, 0.141)
     assert prices.cost_usd((1_000_000, 1_000_000, 1_000_000, 0)) == pytest.approx(0.4258)
-    # The relay's single-tier Chat Completions ids at their listed prices, the
-    # DeepSeek ones at the weekday peak: a million each of uncached, cached
-    # and completion tokens.
+    # The relay's single-tier Chat Completions ids at their listed prices,
+    # DeepSeek-V4.1-Flash at the weekday peak: a million each of uncached,
+    # cached and completion tokens.
     for model, cost in (
         ("DeepSeek-V4.1-Flash", 0.2975 + 0.0059 + 1.1901),
-        ("DeepSeek-V4-Pro-0813", 1.3388 + 0.0447 + 4.0165),
         ("qwen3.8-max-0902", 1.7851 + 0.2231 + 5.3553),
     ):
         tokens = (1_000_000, 1_000_000, 1_000_000, 0)

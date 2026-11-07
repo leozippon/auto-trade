@@ -2,7 +2,7 @@
 
 The relay serves its gpt-6 family over ``/v1/responses`` — that family refuses
 function tools on Chat Completions — and gemini-4-argon, qwen3.8-max-0902 and
-its two DeepSeek ids over ``/v1/chat/completions``, with a primary credential
+DeepSeek-V4.1-Flash over ``/v1/chat/completions``, with a primary credential
 and an alternate one: an experiment's ``llm_key`` chooses which its calls start
 on, and the other is the fallback. gemini-4-argon and qwen3.8-max-0902 are sent
 no thinking switch or reasoning level, so an experiment's thinking settings do
@@ -67,9 +67,8 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 #   date, not probed with such a request.
 # - gemini-4-argon: a 1M window; its upstream refuses a maxOutputTokens above
 #   1,048,576 (probed 2026-10-26), so its ceiling is kept at 1M, under that.
-# - DeepSeek-V4.1-Flash and DeepSeek-V4-Pro-0813: DeepSeek lists a "1M"
-#   context and a "384K" maximum output for both deepseek-flash and
-#   deepseek-v4-pro, which it names DeepSeek-V4-Pro-0813
+# - DeepSeek-V4.1-Flash: DeepSeek lists a "1M" context and a "384K" maximum
+#   output for deepseek-flash
 #   (https://api-docs.deepseek.com/zh-cn/quick_start/pricing, read
 #   2026-11-07); the decimal reading is the safe one.
 # - qwen3.8-max-0902: QwenCloud lists a 1M window, a maximum input of 991K
@@ -91,17 +90,17 @@ DEEPSEEK_FLASH_MODEL = "DeepSeek-V4.1-Flash"
 # The gpt-6 ids bill a request by its length: the short-context tier listed
 # here up to 272,000 prompt tokens, a longer request whole at the
 # long-context tier (GPT_LONG_CONTEXT_TIER), which the spend cap charges too.
-# The other ids bill one tier at any length; the DeepSeek ids are listed at
-# their weekday-peak rate (off-peak bills half).
+# The other ids bill one tier at any length; DeepSeek-V4.1-Flash is listed at
+# its weekday-peak rate (off-peak bills half).
 # Cache writes: the gpt-6 ids' at the relay's own (1.25 times the uncached
 # prompt); the Chat Completions ids report none and gemini-4-argon's and
 # qwen3.8-max-0902's prices list no write term, so theirs stay at the uncached
 # prompt.
 # Prompt caching (relay audit 2026-11-07, ~7k-token prompts, each with an
 # identical repeat and a shared-prefix call): the gpt-6 ids and
-# qwen3.8-max-0902 read 98-100% of the prompt from cache on every repeat, the
-# DeepSeek ids 87-98% with an occasional cold miss (the relay spreads each
-# over two upstreams); gemini-4-argon caches only a fixed
+# qwen3.8-max-0902 read 98-100% of the prompt from cache on every repeat,
+# DeepSeek-V4.1-Flash 87-98% with an occasional cold miss (the relay spreads
+# it over two upstreams); gemini-4-argon caches only a fixed
 # block (75% of that prompt) and missed 3 of 4 shared-prefix calls entirely,
 # billing them uncached.
 # The relay's ``billing_expr`` for its gpt-6 ids: ``len <= 272000`` bills the
@@ -133,13 +132,6 @@ MODEL_PROFILES: tuple[tuple[str, str, int, int, TokenPrices], ...] = (
         1_000_000,
         384_000,
         TokenPrices(0.2975, 0.0059, 1.1901, 0.2975),
-    ),
-    (
-        "DeepSeek-V4-Pro-0813",
-        DEEPSEEK_DIALECT,
-        1_000_000,
-        384_000,
-        TokenPrices(1.3388, 0.0447, 4.0165, 1.3388),
     ),
     (
         "qwen3.8-max-0902",
