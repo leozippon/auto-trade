@@ -126,7 +126,6 @@ def evidence_reading(
         "book_id": book.root.name,
         "experiment_id": book.experiment_id,
         "artifact_id": book.artifact_id,
-        "track": book.candidate_source,
         "rules": dict(rules),
         "first_day": dates[0] if dates else None,
         "last_day": dates[-1] if dates else None,

@@ -14,7 +14,7 @@ from pathlib import Path
 
 from autotrade.common.records import read_json_object
 
-from .style import BENCHMARK_LABEL, STYLE_ARTIFACT_NAME
+from .style import STYLE_ARTIFACT_NAME
 
 STRATEGY_LABEL = "策略"
 BASELINE_LABEL = "随机对照组合"
@@ -94,16 +94,16 @@ def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
 
 
 def benchmark_label(result_file: Path) -> str:
-    """Which benchmark this result was graded against, from its own sidecar.
+    """Which benchmark this result was graded against: the label of the
+    experiment's ``benchmark_index`` its own sidecar records. A sidecar
+    without one is refused."""
 
-    The sidecar records the experiment's ``benchmark_index``; a result written before
-    the parameter existed carries the default, which is what those experiments ran on.
-    """
-
-    sidecar = read_result(Path(result_file).parent / STYLE_ARTIFACT_NAME)
-    benchmark = sidecar.get("benchmark")
+    path = Path(result_file).parent / STYLE_ARTIFACT_NAME
+    benchmark = read_result(path).get("benchmark")
     label = benchmark.get("label") if isinstance(benchmark, dict) else None
-    return str(label) if label else BENCHMARK_LABEL
+    if not isinstance(label, str) or not label:
+        raise ValueError(f"{path} names no benchmark label")
+    return label
 
 
 def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str, object]:

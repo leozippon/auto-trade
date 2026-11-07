@@ -47,7 +47,7 @@ from autotrade.pipelines.worker import (
     strategy_sandbox_from_spec,
 )
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import CREATE_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.paper_book_fixture import paper_root
 from tests.unit.webui_research_experiment import build_experiment
@@ -200,7 +200,7 @@ def _create(client: TestClient, experiment_id: str, **params: object):
     with stubbed_gpu_probe():
         return client.post(
             "/api/experiments",
-            json={"params": {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **params}},
+            json={"params": {"experiment_id": experiment_id, **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED, **params}},
         )
 
 

@@ -30,11 +30,16 @@ from autotrade.pipelines.config import (
     DEFAULT_RESEARCH_GEOMETRY,
     MANDATED_DEFAULTS,
     AcceptanceRules,
-    RollingExperimentConfig,
+    ExperimentConfig,
     acceptance_for,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, WEB_REQUIRED_PARAMS
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES, TEST_GEOMETRY
+from tests.unit.acceptance_fixture import (
+    CREATE_RULES,
+    NO_SEED,
+    REQUIRED_RULES,
+    TEST_GEOMETRY,
+)
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
@@ -46,16 +51,23 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "compact_max_tokens": 10_000,
     # Null: each conversation role compacts at its bound.
     "compact_token_threshold": None,
-    # Ten August-July research years, a forward year, a Held-out quarter: the
-    # current rounds' geometry (scripts/experiments/_profiles.py).
+    # Ten August-July research years, a forward year, a Held-out quarter, and
+    # the dataset selection and window the default prebuilt view cache was
+    # built for: the current rounds' (scripts/experiments/_profiles.py).
     "research_start": "20150801",
     "research_end": "20250731",
     "forward_end": "20260731",
     "heldout_end": "20261031",
-    "gpu_count": 1,
-    "include_events": True,
-    "include_intraday": False,
+    "pit_views_seed": "data/pit_views_seed_research_10y_fundanns_20261106",
+    "include_fundamentals": True,
+    "fundamental_datasets": (),
+    "include_macro": True,
+    "macro_datasets": ("index_daily", "index_dailybasic", "sw_daily", "index_weight"),
+    "include_events": False,
     "include_text": True,
+    "text_datasets": ("anns_d",),
+    "gpu_count": 1,
+    "include_intraday": False,
     "inference_time": "08:00",
     "initial_cash": 1_000_000.0,
     "initial_control_mode": "auto",
@@ -69,18 +81,18 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "screen_exclude_new_listed_days": 0,
     "screen_exclude_st": False,
     "strategy_period": "day",
-    "window_months": 24,
+    "window_months": 132,
 }
 
 
-def make_config(root: Path, **overrides: object) -> RollingExperimentConfig:
+def make_config(root: Path, **overrides: object) -> ExperimentConfig:
     values: dict[str, object] = {
         "experiment_id": "exp",
         "experiments_root": root / "experiments",
         "acceptance": AcceptanceRules(**REQUIRED_RULES),
     }
     values.update(overrides)
-    return RollingExperimentConfig(**values)
+    return ExperimentConfig(**values)
 
 
 def test_screen_exclude_st_cli_alias_and_help() -> None:
@@ -115,7 +127,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         )
 
     def test_the_sealed_gates_rules_and_the_replay_year_budget_have_no_place_in_the_rules(self) -> None:
-        """The rolling validation's rules carry no sealed years, no ablation and
+        """The validation record's rules carry no sealed years, no ablation and
         no replay-year budget: a rules object built with one is refused, and
         the budget record has no replay-year counter, so neither can come back
         through a round file or a create request unnoticed."""
@@ -136,7 +148,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertNotIn("replay_years", {field.name for field in fields(BudgetUsed)})
         self.assertIn("test_replays", {field.name for field in fields(BudgetUsed)})
         for name in ("max_replay_years", "finalize_before_deadline_seconds"):
-            self.assertFalse(hasattr(RollingExperimentConfig, name), name)
+            self.assertFalse(hasattr(ExperimentConfig, name), name)
 
     def test_finite_metrics_keep_threshold_semantics(self) -> None:
         rules = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25)
@@ -370,7 +382,7 @@ class AcceptanceRulesTest(unittest.TestCase):
             AcceptanceRules(**REQUIRED_RULES, cost_stress_multiplier=float("nan"))
 
 
-class RollingExperimentConfigValidationTest(unittest.TestCase):
+class ExperimentConfigValidationTest(unittest.TestCase):
     def test_valid_defaults_pass(self) -> None:
         config = make_config(Path("/tmp"))
         self.assertEqual(config.geometry, DEFAULT_RESEARCH_GEOMETRY)
@@ -440,7 +452,7 @@ class DefaultsDriftTest(unittest.TestCase):
     """The console defaults, the domain dataclasses and the CLI must agree."""
 
     def test_console_defaults_match_the_domain_dataclasses(self) -> None:
-        for field_obj in fields(RollingExperimentConfig):
+        for field_obj in fields(ExperimentConfig):
             if (
                 field_obj.name not in WEB_CREATE_DEFAULTS
                 or field_obj.default is MISSING
@@ -494,6 +506,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     "strategy_path": "configs/agent_output_template/main.py",
                     **REQUIRED_RULES,
                     "data_backend": "pit",
+                    **NO_SEED,
                     "raw_dir": "data/raw",
                     "fundamental_events_root": "data/pit/fundamental_events",
                     "fundamental_events_status": (
@@ -504,18 +517,18 @@ class DefaultsDriftTest(unittest.TestCase):
                 repo_root=repo_root,
                 preflight=True,
             )
-        for field_obj in fields(RollingExperimentConfig):
+        for field_obj in fields(ExperimentConfig):
             if field_obj.default is MISSING or field_obj.name == "acceptance":
                 continue
             with self.subTest(field=field_obj.name):
                 self.assertEqual(
-                    getattr(options.rolling, field_obj.name),
+                    getattr(options.experiment, field_obj.name),
                     field_obj.default,
                     field_obj.name,
                 )
         # A request that names no limit gets the rules' own defaults, mandate
         # off, on whatever capital the Broker profile carries.
-        self.assertEqual(options.rolling.acceptance, AcceptanceRules(**REQUIRED_RULES))
+        self.assertEqual(options.experiment.acceptance, AcceptanceRules(**REQUIRED_RULES))
 
     def test_the_account_pays_the_dividend_tax_and_an_unknown_key_is_refused(self) -> None:
         """The worker runs every experiment under the one rule set: its account pays
@@ -531,6 +544,7 @@ class DefaultsDriftTest(unittest.TestCase):
             "strategy_path": "configs/agent_output_template/main.py",
             **REQUIRED_RULES,
             "data_backend": "pit",
+            **NO_SEED,
             "raw_dir": "data/raw",
             "fundamental_events_root": "data/pit/fundamental_events",
             "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
@@ -551,9 +565,9 @@ class DefaultsDriftTest(unittest.TestCase):
             for key in ("require_heldout_magic", "dividend_tax"):
                 with self.assertRaisesRegex(ValueError, rf"unknown experiment parameters: \['{key}'\]"):
                     options({**base, key: True})
-        profile = current.rolling.broker_profile
+        profile = current.experiment.broker_profile
         self.assertTrue(profile.dividend_tax)
-        self.assertEqual(current.rolling.acceptance, AcceptanceRules(**REQUIRED_RULES))
+        self.assertEqual(current.experiment.acceptance, AcceptanceRules(**REQUIRED_RULES))
         policy = _broker_replay_facts({"broker_profile": profile.to_record()})["dividend_tax_policy"]
         self.assertTrue(policy["charged"])
         self.assertEqual(policy["record_date_cutover"], "20150908")
@@ -577,6 +591,7 @@ class DefaultsDriftTest(unittest.TestCase):
             "strategy_path": "configs/agent_output_template/main.py",
             **REQUIRED_RULES,
             "data_backend": "pit",
+            **NO_SEED,
             "raw_dir": "data/raw",
             "fundamental_events_root": "data/pit/fundamental_events",
             "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
@@ -627,6 +642,7 @@ class DefaultsDriftTest(unittest.TestCase):
             "strategy_path": "configs/agent_output_template/main.py",
             **REQUIRED_RULES,
             "data_backend": "pit",
+            **NO_SEED,
             "raw_dir": "data/raw",
             "fundamental_events_root": "data/pit/fundamental_events",
             "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
@@ -641,7 +657,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     experiment_dir=repo_root / "experiments/boards_demo",
                     repo_root=repo_root,
                     preflight=True,
-                ).rolling.broker_profile
+                ).experiment.broker_profile
 
             recorded = profile(base)
             pinned = profile({**base, "permitted_boards": ["gem", "main"]})
@@ -691,6 +707,7 @@ class DefaultsDriftTest(unittest.TestCase):
                     "strategy_path": "configs/agent_output_template/main.py",
                     **REQUIRED_RULES,
                     "data_backend": "pit",
+                    **NO_SEED,
                     "raw_dir": "data/raw",
                     "fundamental_events_root": "data/pit/fundamental_events",
                     "fundamental_events_status": (
@@ -701,11 +718,11 @@ class DefaultsDriftTest(unittest.TestCase):
                 repo_root=repo_root,
                 preflight=True,
             )
-        self.assertEqual(options.rolling.geometry, geometry)
-        self.assertEqual(options.rolling.max_research_minutes, 300)
+        self.assertEqual(options.experiment.geometry, geometry)
+        self.assertEqual(options.experiment.max_research_minutes, 300)
         # The two the request names; it named no cap, so no tracking mandate.
         self.assertEqual(
-            options.rolling.acceptance,
+            options.experiment.acceptance,
             replace(AcceptanceRules(**REQUIRED_RULES), max_drawdown=0.2, cost_stress_multiplier=3.0),
         )
 
@@ -777,7 +794,7 @@ class DefaultsDriftTest(unittest.TestCase):
             "replay_granularity",
         }
         self.assertTrue(
-            removed.isdisjoint(field.name for field in fields(RollingExperimentConfig))
+            removed.isdisjoint(field.name for field in fields(ExperimentConfig))
         )
         self.assertTrue(removed.isdisjoint(WEB_CREATE_DEFAULTS))
 
@@ -943,7 +960,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                     json={
                         "params": {
                             "experiment_id": "params_demo",
-                            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+                            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
                             **overrides,
                         }
                     },
@@ -984,7 +1001,7 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                     json={
                         "params": {
                             "experiment_id": "params_gpu",
-                            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+                            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
                             "gpu_count": 2,
                         }
                     },
@@ -1045,10 +1062,9 @@ PIT_SEED_BASE_PARAMS = {
 class PitViewsSeedParameterTest(unittest.TestCase):
     """Which prebuilt PIT views an experiment may reuse is its own parameter.
 
-    The default tree is an optimisation and stays lenient; a tree named
-    explicitly is the only way an experiment with a non-default dataset selection gets
-    prebuilt views at all, so it is checked at create time instead of turning
-    into hours of silent cold building.
+    Every named tree, the console's default included, is checked at create time
+    and binds the release it was built from, instead of turning into hours of
+    silent cold building; ``""`` names none.
     """
 
     def _resolve(self, repo_root: Path, params: dict, *, preflight: bool = True):
@@ -1105,7 +1121,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
         )
         return seed
 
-    def test_the_default_seed_is_optional_and_an_explicit_one_is_required(self) -> None:
+    def test_no_seed_is_optional_and_every_named_one_the_default_included_is_required(self) -> None:
         import tempfile
 
         from autotrade.pipelines.config import DEFAULT_PIT_VIEWS_SEED
@@ -1114,20 +1130,19 @@ class PitViewsSeedParameterTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo_root = Path(tmp)
             (repo_root / "experiments").mkdir()
-            # Absent parameter: the default tree, which need not exist here.
+            # No seed: every view is built cold.
+            options = self._resolve(repo_root, NO_SEED)
+            self.assertIsNone(options.pit_views_seed)
+            self.assertFalse(options.pit_views_seed_required)
+            # An absent parameter is the console's default, which is named, so a
+            # repository without it refuses the create.
+            for params in ({}, {"pit_views_seed": str(DEFAULT_PIT_VIEWS_SEED)}):
+                with self.assertRaisesRegex(ValueError, "existing directory"):
+                    self._resolve(repo_root, params)
+            default = self._seed(repo_root, DEFAULT_PIT_VIEWS_SEED.name, {}, generation_id="gen_default")
             options = self._resolve(repo_root, {})
-            self.assertEqual(
-                options.pit_views_seed, repo_root / DEFAULT_PIT_VIEWS_SEED
-            )
-            self.assertFalse(options.pit_views_seed_required)
-            # Naming the default explicitly must not turn it into a demand.
-            options = self._resolve(
-                repo_root, {"pit_views_seed": str(DEFAULT_PIT_VIEWS_SEED)}
-            )
-            self.assertEqual(
-                options.pit_views_seed, repo_root / DEFAULT_PIT_VIEWS_SEED
-            )
-            self.assertFalse(options.pit_views_seed_required)
+            self.assertEqual(options.pit_views_seed, default)
+            self.assertTrue(options.pit_views_seed_required)
             # A matching tree named explicitly: resolved and mandatory.
             seed = self._seed(repo_root, "pit_views_seed_ext", selection)
             options = self._resolve(
@@ -1227,7 +1242,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertIn("index_weight/index_code=000852.SH", message)
             # An index the same release does carry is accepted and forwarded.
             options = self._resolve(repo_root, {**named, "benchmark_index": "000905.SH"})
-            self.assertEqual(options.rolling.benchmark_index, "000905.SH")
+            self.assertEqual(options.experiment.benchmark_index, "000905.SH")
 
     def test_a_benchmark_history_that_starts_inside_research_fails_the_create(self) -> None:
         """An eight-year experiment is refused where it names a release whose
@@ -1253,7 +1268,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             self.assertIn("index_daily/ts_code=000905.SH", message)
             self.assertIn("index_weight/index_code=000905.SH", message)
             options = self._resolve(repo_root, named)
-            self.assertEqual(options.rolling.geometry.research_start, "20210701")
+            self.assertEqual(options.experiment.geometry.research_start, "20210701")
 
     def test_a_named_seed_binds_the_release_it_was_built_from(self) -> None:
         """The nightly chain commits a new generation every night. An experiment
@@ -1303,7 +1318,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             )
 
             unseeded = self._resolve(
-                repo_root, {**selection, "experiment_id": "no_seed"}, preflight=False
+                repo_root, {**selection, **NO_SEED, "experiment_id": "no_seed"}, preflight=False
             )
             pin = json.loads(
                 (unseeded.experiment_dir / "research_release" / "manifest.json").read_text(

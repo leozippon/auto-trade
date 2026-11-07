@@ -214,8 +214,8 @@ def init(args: argparse.Namespace) -> int:
         note=args.note,
     )
     print(
-        f"created Paper account {book.root.name} at {book.root}: {book.experiment_id}/{book.artifact_id} "
-        f"({book.candidate_source}), initial cash {book.profile.initial_cash:,.2f}, profile {book.profile.profile_id}, "
+        f"created Paper account {book.root.name} at {book.root}: {book.experiment_id}/{book.artifact_id}, "
+        f"initial cash {book.profile.initial_cash:,.2f}, profile {book.profile.profile_id}, "
         f"commission {book.profile.commission_bps} bps, slippage {book.profile.slippage_bps} bps, "
         f"fit timeout {book.sandbox.fit_timeout_seconds:g}s, image {book.sandbox.spec.image}"
     )

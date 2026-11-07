@@ -52,7 +52,7 @@ from autotrade.pipelines.calendar import (
     GEOMETRY_PARAMETERS,
     ResearchGeometry,
 )
-from autotrade.pipelines.config import acceptance_for, rolling_default
+from autotrade.pipelines.config import acceptance_for, experiment_default
 from autotrade.pipelines.experiment import validation_statistics
 from autotrade.pipelines.experiment_params import PARAMETERS, read_param
 from autotrade.pipelines.hitl_state import (
@@ -520,7 +520,7 @@ def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
         "llm_calls": calls,
         "null_controls": _number(effective.get("max_null_controls")),
         "api_spend_usd": _number(
-            effective.get("max_api_spend_usd", rolling_default("max_api_spend_usd"))
+            effective.get("max_api_spend_usd", experiment_default("max_api_spend_usd"))
         ),
         "subagent_calls": (
             float(session_role_quotas(int(calls))[0]) if calls is not None and calls > 0 else None
@@ -688,12 +688,12 @@ def _listing(
 def experiment_listing(
     root: Path, kept: str | None = None, *, archived: bool = False
 ) -> dict[str, object]:
-    """The home page's listing: every row in order, the ranking of the registered
-    strategies with a readout,
-    ``archived``, how many experiments are archived, and ``kept``, the digest of the
-    rows that change only when their files do (every experiment without a live
-    worker) and of which experiments are archived. With ``archived`` the rows are the
-    archived experiments' instead of every other experiment's.
+    """The home page's listing: every row in order, the best experiment
+    (:func:`best_experiment`), ``archived``, how many experiments are archived,
+    and ``kept``, the digest of the rows that change only when their files do
+    (every experiment without a live worker) and of which experiments are
+    archived. With ``archived`` the rows are the archived experiments' instead
+    of every other experiment's.
 
     The home page polls it every few seconds, and those rows are nearly all of
     it. A poll that sends back the digest it last received, and finds it
@@ -707,7 +707,7 @@ def experiment_listing(
     rows, fresh, digest, shelved = _listing(Path(root), archived=archived)
     payload: dict[str, object] = {
         "experiments": rows,
-        "ranking": ranking(rows),
+        "best": best_experiment(rows),
         "kept": digest,
         "archived": shelved,
     }
@@ -717,40 +717,31 @@ def experiment_listing(
     return payload
 
 
-def ranking(rows: Sequence[Mapping[str, object]]) -> list[dict[str, object]]:
-    """The registered strategies with a readout, ranked by their validation record's
-    residual IR (a record the significance test could not read sorts last), each with
-    its forward reading and whether a Paper account may be opened from it.
+def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
+    """The home page's best experiment: the registered strategy whose readout
+    states the highest forward lower bound.
 
-    Research-period numbers never rank, and an experiment without a forward record is
-    not listed: the record and the forward reading are the whole evidence.
-    Ties keep the listing order.
+    Only an experiment that ended ``registered_with_record`` is offered: every
+    other ending registered nothing or was stopped by the environment or the
+    host, and an experiment still running has no forward reading at all, so
+    with none the home page names no best experiment rather than crowning the
+    least bad ending. A strategy that raised in its forward replay has no lower
+    bound and is not offered. Research-period numbers never rank. Ties keep the
+    listing order.
     """
 
-    ranked: list[tuple[int, float, int, dict[str, object]]] = []
+    ranked: list[tuple[float, int, Mapping[str, object]]] = []
     for position, row in enumerate(rows):
-        readout = _mapping(_mapping(row.get("forward")).get("readout"))
-        if not readout:
+        if _mapping(row.get("ending")).get("state") != VerdictStatus.REGISTERED_WITH_RECORD:
             continue
-        record = _mapping(readout.get("record"))
-        ratio = _number(record.get("residual_information_ratio"))
-        ranked.append(
-            (
-                ratio is None,
-                -(ratio or 0.0),
-                position,
-                {
-                    "experiment_id": row["experiment_id"],
-                    "record": {
-                        key: record.get(key)
-                        for key in ("residual_information_ratio", "p_value", "years", "steps", "candidate_changes", "start", "end")
-                    },
-                    "forward": dict(_mapping(readout.get("forward"))),
-                    "paper_candidate": row.get("paper_candidate") is not None,
-                },
-            )
-        )
-    return [entry for *_order, entry in sorted(ranked, key=lambda item: item[:3])]
+        forward = _mapping(_mapping(_mapping(row.get("forward")).get("readout")).get("forward"))
+        bound = _number(forward.get("lower_bound"))
+        if bound is not None:
+            ranked.append((-bound, position, row))
+    if not ranked:
+        return None
+    _bound, _position, row = min(ranked, key=lambda item: item[:2])
+    return {"experiment_id": row["experiment_id"]}
 
 
 def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
@@ -787,9 +778,6 @@ class ValidationView:
     max_drawdown: float | None
     plain_excess: float | None
     information_ratio: float | None
-    # ``active`` when the figures are of the node's return minus its
-    # random baseline, ``absolute`` when its replay carries none.
-    series: object
 
     @classmethod
     def of(cls, row: Mapping[str, object], multiplier: float) -> ValidationView:
@@ -811,7 +799,6 @@ class ValidationView:
             max_drawdown=_number(summary.get("max_drawdown")),
             plain_excess=_number(graded.get("plain_excess")),
             information_ratio=_number(graded.get("information_ratio")),
-            series=graded.get("series"),
         )
 
 
@@ -883,30 +870,46 @@ def _research_result(records: Sequence[Mapping[str, object]]) -> str | None:
 
 
 def _record_alpha(params: Mapping[str, object]) -> float:
-    """The level the experiment's record is read at, from its own stamped rules; an
-    experiment with a record was created under the rolling validation, whose rules
-    state it."""
+    """The level the experiment's record is read at, from its own stamped rules,
+    which state it."""
 
     return acceptance_for(params).alpha
+
+
+def record_passed(readout: Mapping[str, object]) -> bool:
+    """Whether a registered strategy's validation record passed, as the console
+    words a ``registered_with_record`` ending (通过 / 未通过): the record's
+    residual IR at or above the threshold its stored readout carries
+    (z(1−α)/√years over the record's own length). A reading that is missing
+    or not finite fails. Derived for display only: the stored verdict stays
+    ``registered_with_record`` and no record is rewritten."""
+
+    record = _mapping(readout.get("record"))
+    ratio = _number(record.get("residual_information_ratio"))
+    threshold = _number(record.get("threshold"))
+    return ratio is not None and threshold is not None and ratio >= threshold
 
 
 def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, object]) -> dict[str, object] | None:
     """The experiment's validation record so far, read as one series: the steps the
     ledger holds, the test horizon they reached, the significance test over them
-    (``validation_record.record_significance``) and how often the candidate
-    changed. ``None`` before the first step is recorded: nothing is read off a
-    replay the ledger does not name."""
+    (``validation_record.record_significance``), how often the candidate
+    changed, and ``passed`` (:func:`record_passed` of the stored readout; None
+    until the readout exists). ``None`` before the first step is recorded:
+    nothing is read off a replay the ledger does not name."""
 
     tests = validation_record.test_step_records(records)
     if not tests:
         return None
     significance = validation_record.record_significance([row["entry"] for row in tests], alpha=_record_alpha(params))  # type: ignore[misc]
+    readout = _mapping(_mapping(forward_record(records)).get("readout"))
     return {
         **significance,
         "start": str(tests[0]["window"]["start"]),  # type: ignore[index]
         "end": str(tests[-1]["window"]["end"]),  # type: ignore[index]
         "test_horizon": str(tests[-1]["test_horizon"]),
         "candidate_changes": validation_record.candidate_changes(records),
+        "passed": record_passed(readout) if readout else None,
     }
 
 
@@ -1089,7 +1092,6 @@ def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object
     if not seeds:
         return None
     return {
-        "trains_a_model": bool(seeds.get("trains_a_model")),
         "replicates": [
             {
                 "step_id": entry.get("step_id"),

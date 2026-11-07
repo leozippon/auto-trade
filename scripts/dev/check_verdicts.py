@@ -9,8 +9,8 @@ by this code, CPU only, and compared with the ledger key for key:
 
 - a research session's final registration (``experiment.check_registration``),
 - a forward record's slices, where its forward replay completed
-  (``experiment.judged_replay``), and its readout off the ledger's rolling
-  record and that forward slice (``validation_record.readout``).
+  (``experiment.judged_replay``), and its readout off the ledger's
+  validation record and that forward slice (``validation_record.readout``).
 
 Run it by hand before landing a change to the reading code, from a checkout
 whose ``experiments/`` holds the experiments, or with ``--experiments``:
@@ -151,7 +151,6 @@ def check_experiment(experiment: Path) -> list[Judgement]:
                     experiment_dir=experiment,
                     acceptance=rules,
                     seed_replicates=[steps[str(entry["step_id"])] for entry in seeds.get("replicates") or ()],
-                    deterministic=bool(seeds.get("deterministic")),
                 ),
             )
         elif kind == "forward" and isinstance(record.get("readout"), Mapping):
@@ -185,7 +184,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             detail = f": differs at {item.differences[:20]}" if item.differences else ""
             print(f"{'different' if item.differences else 'identical':<10} {item.reading:<27} {item.experiment}{detail}")
     print(
-        f"{len(experiments)} experiments under the rolling validation: "
+        f"{len(experiments)} experiments: "
         f"{count} stored readings, {count - failed} identical, {failed} different"
     )
     return 1 if failed else 0

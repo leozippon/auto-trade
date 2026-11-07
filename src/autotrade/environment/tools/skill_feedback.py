@@ -127,12 +127,12 @@ class SkillFeedbackTool:
         },
         mutating=False,
         example={
-            "skill": "curated/grid-plateau-selection",
+            "skill": "curated/validation-readings",
             "claim": "outdated",
             "evidence": (
-                "条目把单参数网格限死在四点；本会话把同一机制的 5 点网格一次提交 "
-                "validate（node_7f3a），单日耗时在限额内。"
-                "四点上限来自已废弃的 daily_backtest，不是当前工具的约束。"
+                "条目让读 `raw_readings.last_two_years.return`；本会话 validate 的整期行"
+                "（node_7f3a）里这个字段不存在，该块的字段是 strategy_return、"
+                "benchmark_return、baseline_return、raw_excess 与 plain_selection。"
             ),
         },
     )

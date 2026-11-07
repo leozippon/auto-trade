@@ -24,7 +24,7 @@ from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
-from autotrade.pipelines.config import RollingExperimentConfig
+from autotrade.pipelines.config import ExperimentConfig
 from autotrade.pipelines.ledger import ExperimentLedger
 from tests.unit.acceptance_fixture import RULES
 
@@ -258,7 +258,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             )
 
     def test_the_config_default_records_them(self) -> None:
-        config = RollingExperimentConfig("exp", Path("/tmp/experiments"), acceptance=RULES)
+        config = ExperimentConfig("exp", Path("/tmp/experiments"), acceptance=RULES)
         self.assertTrue(config.record_failed_attempts)
 
 

@@ -23,7 +23,12 @@ import numpy as np
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
+from autotrade.environment.replay.style import (
+    BENCHMARK_LABEL,
+    BENCHMARK_TS_CODE,
+    STYLE_ARTIFACT_NAME,
+    STYLE_SCHEMA_VERSION,
+)
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import AcceptanceRules
@@ -75,6 +80,8 @@ PARAMS: dict[str, object] = {
     # the live PIT audit, which a fixture repository does not have
     # (test_paper_books covers that check).
     "include_fundamentals": False,
+    # No prebuilt view cache, which a fixture repository does not have either.
+    "pit_views_seed": "",
     **REQUIRED_RULES,
 }
 REPLAY = {
@@ -166,11 +173,15 @@ def write_result(
         {
             "schema_version": STYLE_SCHEMA_VERSION,
             "mode": mode,
+            "benchmark": {"ts_code": BENCHMARK_TS_CODE, "label": BENCHMARK_LABEL},
             "benchmark_regression": {"available": True, "beta": 0.9, "alpha_annualized": 0.05, "r2": 0.8, "n_days": days},
             "style": {"available": False, "reason": "no_holdings"},
             "strategy_daily": [[day, float(value)] for day, value in zip(dates, strategy, strict=True)],
             "benchmark_daily": [[day, float(value)] for day, value in zip(dates, benchmark, strict=True)],
             "size_factor_daily": [[day, float(value)] for day, value in zip(dates, size, strict=True)],
+            # Every replay carries its random baseline; a zero one leaves the
+            # active figures the strategy's own (``_with_baselines`` sets others).
+            "baseline_daily": [[day, 0.0] for day in dates],
             "value_factor_daily": [
                 [day, float(value)]
                 for day, value in zip(
@@ -304,7 +315,6 @@ def build_experiment(
             gate = {
                 **gate,
                 "seed_replicates": {
-                    "trains_a_model": True,
                     "replicates": [
                         {
                             "step_id": replicate["step_id"],
@@ -450,7 +460,6 @@ def build_experiment(
                         "revision_id": nominee["revision_id"],
                         "fingerprint": nominee["fingerprint"],
                         "seed_replicates": [],
-                        "deterministic": False,
                     },
                     replay={"start": plan.start, "end": plan.end, "result_ref": record_ref},
                     entry=validation_record.step_entry(record_replay, record_analysis, start=first, end=last),

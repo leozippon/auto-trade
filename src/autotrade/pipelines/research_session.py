@@ -680,7 +680,6 @@ class LLMResearchDeveloper:
                 outcome,
                 node_id,
                 replicates,
-                deterministic,
                 reason,
                 finish_reason,
             ) = self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
@@ -698,7 +697,6 @@ class LLMResearchDeveloper:
                 outcome=outcome,
                 node_id=node_id,
                 seed_replicates=replicates,
-                deterministic=deterministic,
                 reason=reason,
                 finish_reason=finish_reason,
             )
@@ -935,8 +933,8 @@ class LLMResearchDeveloper:
         # Mount before the index is written: the curated entries and this
         # experiment's own skills reach the Agent through the same index.
         # Fixed at creation: a session mounts this experiment's snapshot and
-        # never re-resolves the library. An experiment created before
-        # snapshotting existed gets its snapshot here, once.
+        # never re-resolves the library. An experiment not created through the
+        # console gets its snapshot here, once.
         memory_snapshot = ensure_operating_memory_snapshot(
             self.experiment_dir,
             mode=self.operating_memory,
@@ -1207,11 +1205,11 @@ class LLMResearchDeveloper:
         resume: SessionResume | None,
         used: BudgetUsed,
         run_ref: str,
-    ) -> tuple[str, str, str | None, tuple[str, ...], bool, str, str]:
+    ) -> tuple[str, str, str | None, tuple[str, ...], str, str]:
         """Open the conversation, afresh or with the resume note over the last
         summary, and run it to its finish: the conversation id, the outcome,
-        the registered candidate (the last test's), its seed replicates, whether
-        it was declared deterministic, the reason and the finish reason."""
+        the registered candidate (the last test's), its seed replicates, the
+        reason and the finish reason."""
 
         from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
@@ -1268,7 +1266,6 @@ class LLMResearchDeveloper:
             conversation_id = result.conversation_id
             outcome, node_id, reason = _session_outcome(result.finish_value)
             replicates = _seed_replicates(result.finish_value)
-            deterministic = _deterministic(result.finish_value)
             finish_reason = "validation_period_complete"
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace,
@@ -1276,21 +1273,18 @@ class LLMResearchDeveloper:
             # are still the experiment's trials.
             conversation_id = exc.conversation_id
             outcome, node_id, replicates, reason = "deadline", None, (), ""
-            deterministic = False
             finish_reason = exc.finish_reason
         except EnvironmentBlocked as exc:
             # The host ended the session: its replays on one span kept failing
             # on the environment, so the experiment ends on that, not on research.
             conversation_id = runner.conversation_id
             outcome, node_id, replicates, reason = ENVIRONMENT_BLOCKED, None, (), exc.reason
-            deterministic = False
             finish_reason = ENVIRONMENT_BLOCKED
         return (
             conversation_id,
             outcome,
             node_id,
             replicates,
-            deterministic,
             reason,
             finish_reason,
         )
@@ -1311,7 +1305,6 @@ class LLMResearchDeveloper:
         outcome: str,
         node_id: str | None,
         seed_replicates: tuple[str, ...],
-        deterministic: bool,
         reason: str,
         finish_reason: str,
     ) -> ResearchSessionResult:
@@ -1353,7 +1346,6 @@ class LLMResearchDeveloper:
             outcome,
             node_id=node_id,
             seed_replicates=seed_replicates,
-            deterministic=deterministic,
             reason=reason,
             finish_reason=finish_reason,
             # The nulls the session already drew, for the registration to reuse.
@@ -1614,13 +1606,6 @@ def _seed_replicates(finish: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(str(item) for item in block.get("seed_replicates") or ())  # type: ignore[union-attr]
 
 
-def _deterministic(finish: Mapping[str, object]) -> bool:
-    """Whether the last test declared its candidate's package deterministic."""
-
-    candidate = finish.get("candidate")
-    return isinstance(candidate, Mapping) and candidate.get("deterministic") is True
-
-
 def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:
     """The last test's finish as the research session's outcome: ``completed``
     with the candidate it took."""
@@ -1663,7 +1648,7 @@ def _operating_memory_record(
     The snapshot id, not a live resolution: what this run mounted is decided by
     the experiment's frozen snapshot, and ``created_from`` says whether that
     snapshot was taken at creation or by the first session of an experiment
-    that predates snapshotting.
+    not created through the console.
     """
 
     return {

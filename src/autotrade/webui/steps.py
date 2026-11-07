@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from autotrade.environment.identity import LegacyExperimentError
 from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
 from autotrade.pipelines.ledger import registered_record
 
@@ -24,38 +23,14 @@ def _has_snapshot(steps_root: Path, node_id: str) -> bool:
     return (steps_root / node_id / NODE_OUTPUT_DIR).is_dir()
 
 
-def public_step_node(
-    node: dict[str, object], *, identity: PublicIdentity | None = None
-) -> dict[str, object]:
-    """Project one Step node; modern identities use the central boundary."""
-
-    if identity is not None:
-        return identity.public_record(node)
-    public = dict(node)
-    session_ref = public.pop("session_ref", None)
-    run_ref = public.pop("run_id", None)
-    revision_ref = public.pop("revision_id", None)
-    if session_ref:
-        public["session_ref"] = session_ref
-    if run_ref:
-        public["run_ref"] = run_ref
-    if revision_ref:
-        public["strategy_ref"] = revision_ref
-    return public
-
-
 def step_tree_view(experiment_dir: Path) -> dict[str, object]:
     experiment_dir = Path(experiment_dir)
     tree = StepTree(experiment_dir / "steps")
-    try:
-        identity: PublicIdentity | None = PublicIdentity(experiment_dir)
-    except LegacyExperimentError:
-        identity = None
+    identity = PublicIdentity(experiment_dir)
     registered_step = None
-    if identity is not None:
-        row = registered_record(read_ledger_records(experiment_dir))
-        if row is not None:
-            registered_step = row["registered"].get("source_step_id")  # type: ignore[union-attr]
+    row = registered_record(read_ledger_records(experiment_dir))
+    if row is not None:
+        registered_step = row["registered"].get("source_step_id")  # type: ignore[union-attr]
 
     nodes: list[dict[str, object]] = []
     for node in tree.nodes():
@@ -63,7 +38,7 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
         session_ref = str(node.get("session_ref") or "")
         raw_metrics = node.get("metrics")
         raw_attachments = node.get("attachments")
-        public = public_step_node(
+        public = identity.public_record(
             {
                 "node_id": node_id,
                 "parent_node_id": node.get("parent_node_id"),
@@ -82,10 +57,9 @@ def step_tree_view(experiment_dir: Path) -> dict[str, object]:
                 "has_snapshot": _has_snapshot(tree.root, node_id),
                 "registered": node_id == registered_step,
                 "is_current": node_id == tree.current_node_id,
-            },
-            identity=identity,
+            }
         )
-        if identity is not None and session_ref:
+        if session_ref:
             try:
                 public["session_key"] = identity.store.resolve("session", session_ref)
             except (KeyError, ValueError):

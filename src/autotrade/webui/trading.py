@@ -44,11 +44,7 @@ from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
-from autotrade.environment.replay.style import (
-    BENCHMARK_TS_CODE,
-    daily_returns_from_curve,
-    slot_benchmark,
-)
+from autotrade.environment.replay.style import daily_returns_from_curve, slot_benchmark
 from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_NAME,
@@ -217,7 +213,6 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
         identity = {
             "experiment_id": _text(record.get("experiment_id")),
             "artifact_id": _text(record.get("artifact_id")),
-            "candidate_source": _text(record.get("candidate_source")),
             "note": _text(record.get("note")),
             "initial_cash": _number(_mapping(record.get("profile")).get("initial_cash")),
         }
@@ -609,26 +604,23 @@ def _day_before(yyyymmdd: str) -> str:
     return (date(int(yyyymmdd[:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8])) - timedelta(days=1)).strftime("%Y%m%d")
 
 
-def _book_benchmark_index(root: Path) -> str:
-    """The index this book is measured against, from its own record.
-
-    Frozen at creation from the source experiment's ``benchmark_index``; a book
-    created before the parameter existed carries none and reads as the
-    default, which is the index those experiments ran on.
-    """
-    record, _error = _read_json(root / BOOK_NAME)
-    code = _mapping(record).get("benchmark_index")
-    return str(code) if isinstance(code, str) and code else BENCHMARK_TS_CODE
+def _book_benchmark_index(record: dict[str, object]) -> str:
+    """The index this book is measured against: its source experiment's
+    ``benchmark_index``, frozen into its record at creation. A record without
+    one is refused."""
+    code = record.get("benchmark_index")
+    if not isinstance(code, str) or not code:
+        raise ValueError(f"{BOOK_NAME} names no benchmark_index")
+    return code
 
 
-def _benchmark(root: Path) -> tuple[dict[str, float], str | None]:
+def _benchmark(root: Path, index: str) -> tuple[dict[str, float], str | None]:
     """The book's benchmark daily returns from the release its latest run
     pinned: the replay slot of that run, read as the research style sidecar
     reads it, keyed on the book's own index."""
     slot = newest_replay_slot(root)
     if slot is None:
         return {}, None
-    index = _book_benchmark_index(root)
     try:
         daily = slot_benchmark(slot, benchmark_index=index)
     except (OSError, ValueError, pa.ArrowException) as exc:  # a damaged cache file degrades the benchmark only
@@ -662,11 +654,11 @@ def _curve_entry(value: object) -> dict[str, object] | None:
 
 def _source_history(root: Path) -> tuple[dict[str, object] | None, str | None]:
     """The out-of-sample curve the book copied out of its source experiment at
-    creation. Absent for a book created before the copy existed, which is a
-    missing history and not an error; anything else is reported."""
+    creation. Every book has one, so a missing copy is reported as a damaged
+    one is."""
     record, error = _read_json(root / SOURCE_HISTORY_NAME)
     if record is None:
-        return None, error
+        return None, error or f"{SOURCE_HISTORY_NAME} is missing"
     if record.get("schema_version") != SOURCE_HISTORY_SCHEMA_VERSION:
         return None, f"unsupported {SOURCE_HISTORY_NAME} schema: {record.get('schema_version')}"
     series = [entry for value in record.get("series") or () if (entry := _curve_entry(value))]
@@ -718,6 +710,11 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
     ]
     base = {"env": env, "min_days": MIN_STATISTICS_DAYS}
     source, source_error = _source_history(root)
+    if record and not error:
+        try:
+            index = _book_benchmark_index(record)
+        except ValueError as exc:
+            error = str(exc)
     if error or initial is None or initial <= 0 or not curve:
         state = "unreadable" if error else "absent"
         return {
@@ -725,13 +722,13 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
             "benchmark_label": None, "benchmark_error": None, "source": source, "source_error": source_error,
         }
     returns = daily_returns_from_curve(curve)
-    daily, benchmark_error = _benchmark(root)
+    daily, benchmark_error = _benchmark(root, index)
     benchmark_rows = [(day, daily[day]) for day, _value in returns if day in daily]
     # The book's starting point — initial cash, no return, the calendar day
     # before its first settled day — opens the curve, so one settled day is
     # already a segment and the benchmark starts at zero beside it.
     anchor = _day_before(str(curve[0]["trade_date"]))
-    label = benchmark_index_label(_book_benchmark_index(root))
+    label = benchmark_index_label(index)
     benchmark = (
         curve_entry("benchmark", label, [(anchor, 0.0), *benchmark_rows])
         if benchmark_rows
@@ -1095,7 +1092,6 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
             "book_id": book,
             "experiment_id": (identity["book"] or {}).get("experiment_id"),
             "artifact_id": (identity["book"] or {}).get("artifact_id"),
-            "candidate_source": (identity["book"] or {}).get("candidate_source"),
             "verdict": identity["verdict"],
             "start_date": identity["start_date"],
             "initial_cash": (identity["book"] or {}).get("initial_cash"),

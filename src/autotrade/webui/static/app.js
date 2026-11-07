@@ -28,20 +28,19 @@ const OUTCOME_LABELS = {
 // How an experiment ended (webui/registry.py ENDING_STATES). The server classifies
 // the ending and writes its one-line reason; the console only words it, and
 // words it the same way on the card, the page header, the process list, the
-// 读出 view.
+// 读出 view and the best-experiment panel. A registered strategy with its record
+// is worded by whether that record passed (`record.passed`, registry.record_passed)
+// rather than by its stored state (endingKey).
 const ENDING_LABELS = {
-  registered_with_record: "已定版，有记录",
+  passed: "通过",
+  failed: "未通过",
   budget_exhausted: "预算耗尽",
   environment_blocked: "环境阻断",
   broken: "失败",
 };
-// The way a Paper account came in (paper/book.py candidate_source), and where its
-// Paper verdict stands (paper/verdict.py): the status as [badge state, label],
-// and the reason a terminal row or an unmeasured reading carries. A value not
-// listed renders as written.
-const TRACK_LABELS = {
-  registered: "定版策略",
-};
+// Where a Paper account's verdict stands (paper/verdict.py): the status as
+// [badge state, label], and the reason a terminal row or an unmeasured reading
+// carries. A value not listed renders as written.
 const VERDICT_STATUS = {
   observing: ["stopped", "观察中"],
   confirmed: ["completed", "已确认"],
@@ -67,13 +66,8 @@ const REASON_LABELS = {
   registration_tracking_error_above_cap: "研究期对基准指数跟踪误差",
   registration_beta_outside_band: "研究期市场 β",
   registration_unmeasurable: "研究期统计可算",
-  registration_too_few_seed_replicates: "训练模型的提名登记了种子复现",
   registration_seed_replicate_invalid: "种子复现只改种子一行",
 };
-// An experiment judged on its active series -- its daily return minus the random
-// baseline the host drew from its own book -- records `series: "active"`; a replay
-// without a random baseline records `absolute`, and its figures are its own.
-const SERIES_LABELS = { active: "主动（策略 − 随机对照组合）", absolute: "策略自身" };
 // The figures whose name does not already say what they are, each worded once
 // so every tile, column and criterion row that draws one says the same thing.
 // A gloss states no threshold: the registration check's own limits are carried by the
@@ -1729,7 +1723,7 @@ function researchStep(item) {
     };
   // The worker broke before the session could record an outcome at all: this
   // is the step that broke, and the only one that wears the cross.
-  if (item.ending) return { ...step, state: "failed", status: endingLabel(item.ending) };
+  if (item.ending) return { ...step, state: "failed", status: endingLabel(item) };
   if (item.worker_alive && status.session_key === "research")
     return item.state === "paused"
       ? { ...step, state: "waiting", status: STEP_STATUS_LABELS.paused }
@@ -1771,7 +1765,7 @@ function pipelineTailSteps(item) {
   const decided = item.ending
     ? {
         state: ENDING_STEP_STATES[item.ending.state] || "ended",
-        status: endingLabel(item.ending),
+        status: endingLabel(item),
       }
     : { state: "pending", status: STEP_STATUS_LABELS.undecided };
   return [
@@ -1885,11 +1879,23 @@ async function renderHomePage() {
   }, 5000);
 }
 
+/* The server names a best experiment only when a registered strategy has its
+   forward reading, so the hero is absent until one has. */
+function bestRow(payload) {
+  const best = payload.best;
+  if (!best) return null;
+  return (
+    (payload.experiments || []).find(
+      (row) => row.experiment_id === best.experiment_id,
+    ) || null
+  );
+}
 
 function homeView(payload) {
   const container = el("div", { id: "home" });
-  const ranking = rankingPanel(payload);
-  if (ranking) container.append(ranking, el("div", { class: "section-gap" }));
+  const best = bestRow(payload);
+  if (best)
+    container.append(heroPanel(best), el("div", { class: "section-gap" }));
   const rows = payload.experiments || [];
   container.append(
     listHead(payload),
@@ -1914,15 +1920,17 @@ function listHead(payload) {
   );
 }
 
-/* The grid is rebuilt on every poll; the ranking only when what it lists
-   changed, so its Paper roster is not re-fetched every five seconds. */
+/* The grid is rebuilt on every poll; the hero only when what it shows
+   changed, so its curve and its Paper roster are not re-fetched and redrawn
+   every five seconds. */
 async function refreshHomePage() {
   const payload = await fetchListing();
   const home = document.getElementById("home");
   const grid = home && home.querySelector(".grid");
-  const ranking = document.getElementById("ranking-panel");
-  const signature = rankingSignature(payload);
-  if (!home || !grid || (ranking ? ranking.__signature : "") !== signature) {
+  const hero = document.getElementById("hero-panel");
+  const best = bestRow(payload);
+  const signature = best ? heroSignature(best) : "";
+  if (!home || !grid || (hero ? hero.__signature : "") !== signature) {
     if (home) home.replaceWith(homeView(payload));
     return;
   }
@@ -1962,36 +1970,49 @@ async function renderArchivedPage() {
   );
 }
 
-function rankingSignature(payload) {
-  return JSON.stringify(payload.ranking || []);
+function heroSignature(item) {
+  return [
+    item.experiment_id,
+    item.state,
+    (item.ending || {}).state,
+    item.research_result,
+    (item.forward || {}).result,
+  ].join("|");
 }
 
 function experimentGrid(rows, options = {}) {
   return el("div", { class: "grid" }, ...rows.map((row) => experimentCard(row, options)));
 }
 
-function endingLabel(ending) {
-  const state = (ending || {}).state || "";
-  return ENDING_LABELS[state] || state;
+/* The ending as the console words it: its state, except that a registered
+   strategy with its record reads as passed or failed by its record's own test;
+   a record the server did not find passed (no reading, or none at all) is
+   failed. */
+function endingKey(item) {
+  const state = ((item || {}).ending || {}).state || "";
+  if (state !== "registered_with_record") return state;
+  return (item.record || {}).passed === true ? "passed" : "failed";
 }
 
-function trackLabel(source) {
-  return TRACK_LABELS[source] || source;
+function endingLabel(item) {
+  const key = endingKey(item);
+  return ENDING_LABELS[key] || key;
 }
 
 /* The ending as one badge; null while the experiment can still run. */
-function endingBadge(ending) {
+function endingBadge(item) {
+  const ending = item.ending;
   if (!ending || !ending.state) return null;
   return el(
     "span",
-    { class: `badge ending-${ending.state}`, title: ending.reason || null },
-    endingLabel(ending),
+    { class: `badge ending-${endingKey(item)}`, title: ending.reason || null },
+    endingLabel(item),
   );
 }
 
 /* The one badge an experiment wears: how it ended once it has, else where it is. */
 function experimentBadge(item) {
-  return item.ending ? endingBadge(item.ending) : stateBadge(item.state);
+  return item.ending ? endingBadge(item) : stateBadge(item.state);
 }
 
 /* The ending's reason, one quiet line. The homepage cards wear the badge alone
@@ -2038,108 +2059,73 @@ function fmtPValue(value) {
   return Number.isFinite(value) ? value.toFixed(3) : "—";
 }
 
-/* Whatever evidence the experiment already has, one figure per tile: the rolling
-   record so far -- its steps, the residual IR over them, its p-value and the
-   candidate changes -- and once the forward record exists the forward lower
-   bound. Never a research-period number: nothing in sample ranks or reads as
-   evidence here. Absent while the ledger holds no step. */
+/* Whatever evidence the experiment already has, six figures in one block: the
+   validation record so far -- its steps, the residual IR over them, its
+   p-value and the candidate changes -- then the forward lower bound and the
+   Held-out slice's residual IR. A figure not read yet (the replay still to
+   come, or a record the test could not read) is a dash, so every card holds
+   the same six. Never a research-period number: nothing in sample ranks or
+   reads as evidence here. Absent while the experiment has neither a record nor
+   a forward record. */
 function evidenceTiles(item) {
+  if (!item.record && !item.forward) return null;
   const record = item.record || {};
-  const forward = ((item.forward || {}).readout || {}).forward || {};
-  const tiles = presentTiles([
+  const forward = item.forward || {};
+  const lower = ((forward.readout || {}).forward || {}).lower_bound;
+  const heldout = ((forward.slices || {}).heldout || {}).residual_reading || {};
+  const tiles = [
     { label: "已测步数", value: record.steps, fmt: String, title: "验证记录里已记入的步数" },
     { label: "记录残差 IR", value: record.residual_information_ratio, fmt: fmtSharpe, signed: true, title: RECORD_IR_TITLE },
     { label: "p 值", value: record.p_value, fmt: fmtPValue, title: P_VALUE_TITLE },
     { label: "换候选", value: record.candidate_changes, fmt: String, title: "相邻两步候选不同的次数；只记录，不作目标" },
-    { label: "前推下界", value: forward.lower_bound, fmt: fmtPct, signed: true, title: LOWER_BOUND_TITLE },
-  ]);
-  return tiles.length ? statTilesRow(tiles) : null;
+    { label: "前推下界", value: lower, fmt: fmtPct, signed: true, title: LOWER_BOUND_TITLE },
+    {
+      label: "Held-out 残差 IR",
+      value: heldout.residual_information_ratio,
+      fmt: fmtSharpe,
+      signed: true,
+      title: "Held-out 段主动序列对市场、规模、价值三条因子腿回归的残差 IR；只报告，不作判定",
+    },
+  ];
+  return statTilesRow(
+    tiles.map((spec) => ({
+      label: spec.label,
+      value: spec.value === null || spec.value === undefined ? "—" : spec.fmt(spec.value),
+      cls: spec.signed ? signCls(spec.value) : "",
+      title: spec.title,
+    })),
+  );
 }
 
-/* The ranking view: every registered strategy with a readout, ranked by its
-   validation record's residual IR (`registry.ranking`), with its p-value, steps,
-   candidate changes and forward reading, and the Paper handoff beside each --
-   the book it has, or a button that opens one within the cap, which the
-   server enforces. Null while no experiment has a readout. */
-function rankingPanel(payload) {
-  const rows = payload.ranking || [];
-  if (!rows.length) return null;
-  const books = new Map();
-  const bookCell = (row) => {
-    const held = books.get(row.experiment_id);
-    if (held) return el("a", { href: bookHash(PAPER_ENV, held) }, held);
-    if (!row.paper_candidate) return el("span", { class: "hint" }, "—");
-    const button = el(
-      "button",
+/* The Forward and Held-out slices the forward record holds, as the holder
+   reads them: his account and the benchmark first, then the account against
+   the random baseline, then the active IR. Every tile is one figure: the
+   account and its benchmark sit side by side, never joined into one value.
+   Null for a replay the strategy's own error stopped before any slice. */
+function forwardTiles(item) {
+  const slices = (item.forward || {}).slices || {};
+  const f = slices.forward || {};
+  const tiles = [
+    ...accountTiles("前推", f),
+    ...presentTiles([
       {
-        class: "btn small",
-        onclick: async (event) => {
-          event.stopPropagation();
-          button.disabled = true;
-          try {
-            const opened = await api(`/api/trading/${PAPER_ENV}/books`, {
-              method: "POST",
-              body: JSON.stringify({ experiment_id: row.experiment_id }),
-            });
-            toast("已建立模拟账户");
-            location.hash = bookHash(PAPER_ENV, opened.book_id);
-          } catch (error) {
-            button.disabled = false;
-            toast(error.message, true);
-          }
-        },
+        label: "前推对随机对照",
+        value: (f.raw_readings || {}).plain_selection,
+        fmt: fmtPct,
+        signed: true,
+        title: PLAIN_SELECTION_TITLE,
       },
-      "建立模拟账户",
-    );
-    return button;
-  };
-  const forwardCell = (row) => {
-    const forward = row.forward || {};
-    if (forward.strategy_error)
-      return { value: `${SLICE_NAMES[forward.strategy_error.slice] || forward.strategy_error.slice}段策略异常`, cls: "neg" };
-    return { value: fmtPct(forward.lower_bound), cls: signCls(forward.lower_bound) };
-  };
-  const table = () =>
-    dataTable(
-      [
-        { label: "实验" },
-        { label: "记录残差 IR", num: true, title: RECORD_IR_TITLE },
-        { label: "p 值", num: true, title: P_VALUE_TITLE },
-        { label: "步数", num: true },
-        { label: "换候选", num: true },
-        { label: "前推下界", num: true, title: LOWER_BOUND_TITLE },
-        { label: "Paper" },
-      ],
-      rows.map((row) => {
-        const record = row.record || {};
-        return [
-          { value: experimentName(row.experiment_id) },
-          { value: fmtSharpe(record.residual_information_ratio), cls: signCls(record.residual_information_ratio) },
-          { value: fmtPValue(record.p_value) },
-          { value: String(record.steps ?? "—") },
-          { value: String(record.candidate_changes ?? "—") },
-          forwardCell(row),
-          { value: bookCell(row) },
-        ];
-      }),
-      { fit: true },
-    );
-  const panel = el(
-    "div",
-    { class: "panel", id: "ranking-panel" },
-    panelHead("定版策略排名", el("span", { class: "meta-line" }, "按验证记录残差 IR 排序；读数只报告，不作判定")),
-    table(),
-  );
-  panel.__signature = rankingSignature(payload);
-  api(`/api/trading/${PAPER_ENV}/books`)
-    .then((roster) => {
-      for (const row of roster.books || []) books.set(row.experiment_id, row.book_id);
-      panel.querySelector("table").replaceWith(table());
-    })
-    .catch(() => {
-      /* the roster is unreadable; the button still opens the book */
-    });
-  return panel;
+      {
+        label: "前推主动 IR",
+        value: f.information_ratio,
+        fmt: fmtSharpe,
+        signed: true,
+        title: IR_TITLE,
+      },
+    ]),
+    ...accountTiles("Held-out ", slices.heldout),
+  ];
+  return tiles.length ? statTilesRow(tiles) : null;
 }
 
 /* The experiment's curve on its card, fetched when the card comes near the screen.
@@ -2234,6 +2220,34 @@ function experimentCard(item, { archived = false } = {}) {
   return card;
 }
 
+/* The best experiment (`registry.best_experiment`): the registered strategy
+   whose readout states the highest forward lower bound, with its badge, its
+   Forward and Held-out tiles, its curve, and the Paper handoff the 读出 view
+   offers -- the account it has, or a button that opens one within the cap the
+   server enforces. Only an experiment the server named reaches here. */
+function heroPanel(item) {
+  const panel = el(
+    "div",
+    { class: "panel hero", id: "hero-panel" },
+    el(
+      "div",
+      { class: "panel-head" },
+      el(
+        "h3",
+        { class: "hero-title" },
+        el("span", { "aria-hidden": "true", title: "最佳实验：前推主动超额下界最高的定版策略" }, "🏆"),
+        experimentName(item.experiment_id),
+      ),
+      experimentBadge(item),
+    ),
+    forwardTiles(item),
+  );
+  panel.__signature = heroSignature(item);
+  const curve = experimentEquityHost(item, { width: 980, height: 240, ddH: 90 });
+  if (curve) panel.append(el("div", { class: "section-gap" }, curve));
+  panel.append(paperHandoff(item));
+  return panel;
+}
 
 function confirmDeleteBook(bookId) {
   showModal(
@@ -2906,7 +2920,6 @@ const SLICE_ROWS = [
   ["plain_selection", "对随机对照（账户 − 对照组合）", fmtPct, true, PLAIN_SELECTION_TITLE],
   ["market_beta", "主动市场 β（对随机对照）", fmtSharpe, true, ACTIVE_BETA_TITLE],
   ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
-  ["series", "评分序列", (value) => SERIES_LABELS[value] || String(value)],
   ["days", "交易日", String],
   ["information_ratio", "主动 IR", fmtSharpe, true, IR_TITLE],
   ["residual_information_ratio", "残差 IR（三因子）", fmtSharpe, true],
@@ -2930,7 +2943,6 @@ const HOLDER_STAT_FIELDS = [
 ];
 const FORWARD_STAT_FIELDS = [
   ...HOLDER_STAT_FIELDS,
-  "series",
   "days",
   "information_ratio",
   "residual_information_ratio",
@@ -2943,7 +2955,6 @@ const FORWARD_STAT_FIELDS = [
 ];
 const HELDOUT_STAT_FIELDS = [
   ...HOLDER_STAT_FIELDS,
-  "series",
   "days",
   "information_ratio",
   "residual_information_ratio",
@@ -3200,7 +3211,7 @@ function readoutStagePanel(detail) {
   const attempts = detail.replay_attempts || {};
   const validations = detail.research_validation_failures || {};
   const badge =
-    endingBadge(detail.ending) ||
+    endingBadge(detail) ||
     el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
   const recordedAt = forward ? forward.recorded_at : research && research.experiment_end ? research.recorded_at : null;
   const facts = [
@@ -7208,8 +7219,8 @@ function redrawTrading(payload, build) {
 /* One card per book, in the research home's language: its name and state, the
    figures its own panels measured and its curve once two days settled. A
    figure the book has not measured has no tile. Of the book's frozen identity
-   only the track and where its verdict stands ride along; artifact, start and
-   initial cash belong to the page head that spells it out in full. */
+   only where its verdict stands rides along; artifact, start and initial cash
+   belong to the page head that spells it out in full. */
 function bookCard(row) {
   const href = bookHash(tradingView.env, row.book_id);
   const card = el("div", {
@@ -7269,7 +7280,6 @@ function bookCard(row) {
   );
   const facts = [
     todayChip(row.today),
-    row.candidate_source ? chip(`轨道 ${trackLabel(row.candidate_source)}`) : null,
     row.verdict ? chip(`验证 ${(VERDICT_STATUS[row.verdict.status] || [])[1] || row.verdict.status}`) : null,
   ].filter(Boolean);
   if (facts.length) card.append(el("div", { class: "stats-chips" }, ...facts));
@@ -7364,9 +7374,6 @@ function paperHead(status, payload) {
       : null,
     // One vocabulary for the row: the status badge lives in the title, every
     // fact under it is the same labelled chip.
-    book.candidate_source
-      ? chip(`轨道 ${trackLabel(book.candidate_source)}`)
-      : null,
     payload.start_date ? chip(`起始 ${fmtDate(payload.start_date)}`) : null,
     book.initial_cash === null || book.initial_cash === undefined
       ? null
@@ -8376,11 +8383,7 @@ function paperEquityPanel(payload, pnl) {
         : payload.benchmark_days < stats.days
           ? `${benchmark} 覆盖 ${payload.benchmark_days}/${stats.days} 日`
           : null,
-    payload.source_error
-      ? `源实验历史读取失败：${payload.source_error}`
-      : payload.source
-        ? null
-        : "无源实验历史",
+    payload.source_error ? `源实验历史读取失败：${payload.source_error}` : null,
   ].filter(Boolean);
   const cost = [
     stats.fees === null ? null : `佣金 ${fmtAmount(stats.fees)}`,

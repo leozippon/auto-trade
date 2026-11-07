@@ -123,7 +123,7 @@ def test_the_create_form_is_seeded_with_the_research_geometry(tmp_path: Path):
     for retired in ("test_stage", "epochs", "fold_period", "development_first_period"):
         assert retired not in fields
     for key, value in (
-        ("window_months", 24),
+        ("window_months", 132),
         ("max_research_minutes", 2400),
         ("max_llm_calls", 6400),
         ("screen_exclude_st", False),

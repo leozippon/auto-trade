@@ -103,6 +103,9 @@ EXPERIMENTS: dict[str, dict[str, object]] = {
 }
 
 ROUND = Round(
+    # Its one experiment was created on the ZGCA instance on 2026-11-07; the
+    # file is the record of what was run.
+    closed=True,
     experiments=EXPERIMENTS,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={

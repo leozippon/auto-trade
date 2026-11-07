@@ -19,6 +19,8 @@ from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import pit_backend, pit_views_seed
 from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
+    DEFAULT_PIT_VIEWS_SEED,
+    DEFAULT_PIT_VIEWS_SEED_WORKSPACE,
     SNAPSHOT_CACHE_FORMAT_VERSION,
     SnapshotBundle,
 )
@@ -735,9 +737,9 @@ def test_the_dry_run_prints_the_plan_and_builds_nothing(
     )
     assert lines[1].startswith("[1/6] Y1 valid 20210701..20220630")
     assert json.loads(lines[-1])["status"] == "planned"
-    assert not (tmp_path / "data/pit_views_seed/explore").exists()
+    assert not (tmp_path / DEFAULT_PIT_VIEWS_SEED).exists()
     # The workspace carries the release pin on to the build.
-    assert (tmp_path / "data/pit_views_seed/explore_workspace").is_dir()
+    assert (tmp_path / DEFAULT_PIT_VIEWS_SEED_WORKSPACE).is_dir()
 
 
 def test_the_prebuild_refuses_a_misaligned_geometry_or_a_seed_inside_its_workspace_before_pinning(
@@ -848,6 +850,7 @@ def test_prebuild_overrides_build_the_identity_the_experiment_asks_for() -> None
         [
             "--macro-datasets",
             ",".join(macro),
+            "--include-events",
             "--events-datasets",
             ",".join(events),
             "--no-include-intraday",
@@ -856,6 +859,7 @@ def test_prebuild_overrides_build_the_identity_the_experiment_asks_for() -> None
     assert prebuilt == _experiment_identity(
         {
             "macro_datasets": list(macro),
+            "include_events": True,
             "events_datasets": list(events),
             "include_intraday": False,
         }
@@ -1023,7 +1027,7 @@ def test_a_seed_whose_prebuild_did_not_finish_is_refused(
         prebuild, "prebuild_asof_stash", lambda **_kwargs: {"reused": False, "trade_days": 1}
     )
     seed = tmp_path / "seed"
-    workspace = tmp_path / "data/pit_views_seed/explore_workspace"
+    workspace = tmp_path / DEFAULT_PIT_VIEWS_SEED_WORKSPACE
     argv = ["--repo-root", str(tmp_path), "--seed", str(seed)]
     with pytest.raises(ValueError, match="first decision view failed"):
         prebuild.main(argv)

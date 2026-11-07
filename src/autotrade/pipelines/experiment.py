@@ -64,11 +64,11 @@ from .config import (
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
+    ExperimentConfig,
     ReplaySpan,
     ResearchDeveloper,
     ResearchSessionRequest,
     ResearchSessionResult,
-    RollingExperimentConfig,
     SnapshotBundle,
     SnapshotProvider,
     StepResult,
@@ -225,7 +225,7 @@ class DailyStrategyPipeline:
         )
 
 
-class RollingExperimentPipeline:
+class ExperimentPipeline:
     """One research session → register → one continuous forward replay → readout.
 
     Every stage reads what came before it from the ledger, so a resumed worker
@@ -234,7 +234,7 @@ class RollingExperimentPipeline:
 
     def __init__(
         self,
-        config: RollingExperimentConfig,
+        config: ExperimentConfig,
         *,
         snapshots: SnapshotProvider,
         artifacts: ArtifactStore,
@@ -442,13 +442,12 @@ class RollingExperimentPipeline:
                         ),
                     }
                 else:
-                    node_id, replicates, deterministic = candidate
+                    node_id, replicates = candidate
                     gate = check_registration(
                         by_step[node_id],
                         experiment_dir=self.config.experiment_dir,
                         acceptance=self.config.acceptance,
                         seed_replicates=[by_step[step_id] for step_id in replicates],
-                        deterministic=deterministic,
                     )
                     if not gate["passed"]:
                         # Every test checked this registration already.
@@ -551,27 +550,25 @@ class RollingExperimentPipeline:
         session: ResearchSessionResult,
         tests: Sequence[Mapping[str, object]],
         by_step: Mapping[str, Mapping[str, object]],
-    ) -> tuple[str, tuple[str, ...], bool] | None:
-        """The Step the experiment registers, with its seed replicates and declaration.
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """The Step the experiment registers, with its seed replicates.
 
         A completed session registered its last test's candidate; a session whose
         budget ran out after a test registers the last tested candidate as that
         test registered it; one that never tested registers the last full-span,
-        non-control Step that registers on its own (a strategy that trains a
-        model owes a replicate no host can name, so it does not); none means
-        no deliverable.
+        non-control Step that registers on its own, without replicates; none
+        means no deliverable.
         """
 
         if session.outcome == "completed":
             if session.node_id is None:
                 raise RuntimeError("a completed session names no registered candidate")
-            return session.node_id, tuple(session.seed_replicates), session.deterministic
+            return session.node_id, tuple(session.seed_replicates)
         if tests:
             candidate = dict(tests[-1]["candidate"])  # type: ignore[arg-type]
             return (
                 str(candidate["step_id"]),
                 tuple(str(item) for item in candidate.get("seed_replicates") or ()),
-                bool(candidate.get("deterministic")),
             )
         for step in reversed(session.steps):
             row = by_step.get(step.step_id)
@@ -581,12 +578,12 @@ class RollingExperimentPipeline:
                 row, experiment_dir=self.config.experiment_dir, acceptance=self.config.acceptance
             )
             if gate["passed"]:
-                return step.step_id, (), False
+                return step.step_id, ()
         return None
 
     def complete_record(
         self,
-        frozen: Mapping[str, object],
+        registered: Mapping[str, object],
         gate: Mapping[str, object],
         tests: Sequence[Mapping[str, object]],
         *,
@@ -610,7 +607,7 @@ class RollingExperimentPipeline:
         done = len(tests)
         if done >= steps.count:
             return []
-        artifact = self._registered_artifact(frozen)
+        artifact = self._registered_artifact(registered)
         span = self.validation_span()
         request = span.request(
             _registered_revision(artifact),
@@ -630,13 +627,12 @@ class RollingExperimentPipeline:
             "session_key": SessionKind.RESEARCH,
         }
         candidate = {
-            "step_id": str(frozen["source_step_id"]),
-            "revision_id": str(frozen["revision_id"]),
+            "step_id": str(registered["source_step_id"]),
+            "revision_id": str(registered["revision_id"]),
             "fingerprint": fingerprint,
             "seed_replicates": [
-                str(item["source_step_id"]) for item in frozen.get("seed_replicates") or ()  # type: ignore[union-attr]
+                str(item["source_step_id"]) for item in registered.get("seed_replicates") or ()  # type: ignore[union-attr]
             ],
-            "deterministic": bool(frozen.get("deterministic")),
         }
         appended = []
         for step in range(done + 1, steps.count + 1):
@@ -736,14 +732,6 @@ class RollingExperimentPipeline:
                 "fit": fit is not None,
                 "refit_period": fit.refit_period if fit is not None else None,
             },
-            # The Agent's declaration that the package uses no randomness,
-            # which waived its seed replicates, only when made: the operator
-            # reviews it before the strategy goes live.
-            **(
-                {"deterministic": True}
-                if gate["seed_replicates"].get("deterministic")  # type: ignore[union-attr]
-                else {}
-            ),
             **({"seed_replicates": replicates} if replicates else {}),
         }
 
@@ -1203,12 +1191,11 @@ class RollingExperimentPipeline:
 def research_step_record(step: StepResult) -> dict[str, object]:
     """One completed Validation as the ledger's ``steps[]`` row.
 
-    ``graded`` carries the graded series' plain excess, tracking error, IR
+    ``graded`` carries the active series' plain excess, tracking error, IR
     and loadings over the span (``verdict.graded_statistics``), from the
     replay's own style sidecar (``None`` when they cannot be measured).
-    ``series`` inside it says whether that is the active series (the replay
-    carries a random baseline) or the strategy's own. ``fingerprint`` names
-    the bytes the revision holds, which the seed replicates' check compares.
+    ``fingerprint`` names the bytes the revision holds, which the seed
+    replicates' check compares.
     """
 
     return {
@@ -1227,21 +1214,16 @@ def research_step_record(step: StepResult) -> dict[str, object]:
 def completed_rows(
     experiment_dir: str | Path, rows: Sequence[Mapping[str, object]]
 ) -> list[Mapping[str, object]]:
-    """``rows`` each with what the ledger and the registration read of it.
-
-    The artifact fingerprint: the one a row carries, else the one the experiment's
-    revision store recorded for its revision
+    """``rows`` each with the artifact fingerprint the ledger and the
+    registration read of it: the one a row carries, else the one the
+    experiment's revision store recorded for its revision
     (``session_resume.revision_fingerprint``) -- a Step of the host's
-    deterministic baseline. And the graded statistics
-    (:func:`research_step_record`): the ones a row carries, else those of its
-    style sidecar, read where the experiment in ``experiment_dir`` now is.
+    deterministic baseline.
     """
 
     def completed(row: Mapping[str, object]) -> Mapping[str, object]:
         if not row.get("fingerprint"):
             row = {**row, "fingerprint": revision_fingerprint(experiment_dir, str(row["revision_id"]))}
-        if "graded" not in row:
-            row = {**row, "graded": _measured_or_none(_style_analysis(experiment_dir, row))}
         return row
 
     return [completed(row) for row in rows]
@@ -1253,7 +1235,6 @@ def check_registration(
     experiment_dir: str | Path,
     acceptance: AcceptanceRules,
     seed_replicates: Sequence[Mapping[str, object]] = (),
-    deterministic: bool = False,
 ) -> dict[str, object]:
     """Whether one nominated Step registers (docs/PIPELINE_DESIGN.md).
 
@@ -1262,9 +1243,9 @@ def check_registration(
     drawdown limit), it replayed the whole research-years span and is not a
     control, its series can be measured -- its residual reading included --
     the tracking mandate holds over its span where the rules set one
-    (``verdict.registered_mandate``), and its ``seed_replicates`` are what a
-    replicate must be (:func:`_seed_replicates`) -- none owed by a nomination
-    declared ``deterministic``. ``nominee`` and the replicates are ledger
+    (``verdict.registered_mandate``), and the ``seed_replicates`` it names,
+    which are optional, are what a replicate must be
+    (:func:`_seed_replicates`). ``nominee`` and the replicates are ledger
     rows (:func:`research_step_record`) of the experiment in ``experiment_dir``. The
     session reads the same function at every test
     (``session_tools.SessionValidations.registration``) and the pipeline
@@ -1280,7 +1261,7 @@ def check_registration(
         return {"passed": False, "reasons": reasons}
     try:
         analysis = _style_analysis(experiment_dir, nominee)
-        series = graded_statistics(analysis)["series"]
+        graded_statistics(analysis)
         # The reading the registration records: a series it cannot read (one the
         # factor legs explain exactly, an all-cash book) is refused here,
         # while the session is still open, never after the registration.
@@ -1290,13 +1271,7 @@ def check_registration(
     mandate = registered_mandate(analysis, rules=acceptance)
     nominee = completed_rows(experiment_dir, [nominee])[0]
     replicates = completed_rows(experiment_dir, seed_replicates)
-    seeds = _seed_replicates(
-        nominee,
-        replicates,
-        experiment_dir=experiment_dir,
-        deterministic=deterministic,
-        series=str(series),
-    )
+    seeds = _seed_replicates(nominee, replicates, experiment_dir=experiment_dir)
     reasons = [*mandate["reasons"], *judge(ConditionStage.SEEDS, seeds, {})]
     return {
         "passed": not reasons,
@@ -1403,27 +1378,20 @@ def _seed_replicates(
     replicates: Sequence[Mapping[str, object]],
     *,
     experiment_dir: str | Path,
-    deterministic: bool,
-    series: str,
 ) -> dict[str, object]:
     """What the registration reads of a nominee's seed replicates.
 
-    A strategy that trains a model (its ``main.py`` defines ``fit``, the
-    registered block's ``fit_plan``) is registered with its training seeds, which
-    the forward stage replays beside it and reports. A seed replicate is a
-    full-span, non-control row of the session whose bytes are the nominee's
-    but for one seed line (:func:`seed_change`) and differ from every other
-    registered row's, with a measured IR on the nominee's graded ``series``.
-    The block records what was read, a ``problem`` per refused replicate,
-    and is what the ``seeds`` conditions of ``verdict.CONDITIONS`` judge: a
-    named replicate that is not one, and a nominee that trains a model and
-    names none, unless the nomination declares its package ``deterministic``
-    (no randomness, so a replicate would reproduce it exactly); the block
-    records the declaration when it is made.
+    Replicates are optional: a nominee may name the other draws of its
+    strategy, which the forward stage replays beside it and reports, and
+    registers as well without any. A seed replicate is a full-span,
+    non-control row of the session whose bytes are the nominee's but for one
+    seed line (:func:`seed_change`) and differ from every other registered
+    row's, with a measured active IR. The block
+    records what was read, a ``problem`` per refused replicate, and is what
+    the ``seeds`` condition of ``verdict.CONDITIONS`` judges: a named
+    replicate that is not one.
     """
 
-    main = Path(experiment_dir) / REVISIONS_DIR / str(nominee["revision_id"]) / "output" / "main.py"
-    trains = validate_strategy_package(main) is not None
     seen = {str(nominee["fingerprint"]): "the nominee"}
     entries: list[dict[str, object]] = []
     for row in replicates:
@@ -1442,13 +1410,8 @@ def _seed_replicates(
                 raise ValueError(f"holds the same bytes as {seen[fingerprint]}")
             seen[fingerprint] = node_handle(step_id)
             ratio = figures.get("information_ratio") if isinstance(figures, Mapping) else None
-            if not (
-                isinstance(ratio, (int, float))
-                and not isinstance(ratio, bool)
-                and math.isfinite(ratio)
-                and figures.get("series") == series  # type: ignore[union-attr]
-            ):
-                raise ValueError(f"has no measured {series} information ratio")
+            if not (isinstance(ratio, (int, float)) and not isinstance(ratio, bool) and math.isfinite(ratio)):
+                raise ValueError("has no measured active information ratio")
             entry["seed_line"] = seed_change(
                 experiment_dir, str(nominee["revision_id"]), str(row["revision_id"])
             )
@@ -1456,11 +1419,7 @@ def _seed_replicates(
         except ValueError as exc:
             entry["problem"] = str(exc)
         entries.append(entry)
-    return {
-        "trains_a_model": trains,
-        **({"deterministic": True} if deterministic else {}),
-        "replicates": entries,
-    }
+    return {"replicates": entries}
 
 
 def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> dict[str, object]:
@@ -1757,7 +1716,7 @@ def _optional_gpu_count(value: object) -> int | None:
 
 
 def _session_budgets(
-    config: RollingExperimentConfig, override: object
+    config: ExperimentConfig, override: object
 ) -> dict[str, int | float]:
     limits: dict[str, int | float] = {
         "max_llm_calls": config.max_llm_calls,
@@ -1807,7 +1766,7 @@ def _session_budgets(
 __all__ = [
     "DailyStrategyPipeline",
     "EnvironmentBlockedAttempt",
-    "RollingExperimentPipeline",
+    "ExperimentPipeline",
     "check_registration",
     "completed_rows",
     "judged_replay",

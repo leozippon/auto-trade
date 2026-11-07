@@ -4,9 +4,9 @@
 Pins the current research generation (or, with ``--generation-id``, a release that is
 already published), plans the seed of one research geometry
 (``pit_views_seed.plan_seed``) and writes the completed decision views and
-replay slots into ``data/pit_views_seed/explore/``. That tree is not a
-live worker cache_root. New experiments hardlink it when ``provider.json``
-matches.
+replay slots into the console's default seed (``config.DEFAULT_PIT_VIEWS_SEED``)
+unless ``--seed`` names another. That tree is not a live worker cache_root.
+New experiments hardlink it when ``provider.json`` matches.
 
 The geometry defaults to ``DEFAULT_RESEARCH_GEOMETRY`` and the snapshot
 configuration to the console creation defaults; every field of either can be
@@ -144,7 +144,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--seed",
         type=Path,
         default=None,
-        help="Seed cache_root. Default: <repo>/data/pit_views_seed/explore",
+        help=f"Seed cache_root. Default: <repo>/{DEFAULT_PIT_VIEWS_SEED}",
     )
     parser.add_argument(
         "--workspace",
@@ -152,7 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Scratch experiment dir for the research-release pin, removed after a "
         "successful build; must not contain --seed. "
-        "Default: <repo>/data/pit_views_seed/explore_workspace",
+        f"Default: <repo>/{DEFAULT_PIT_VIEWS_SEED_WORKSPACE}",
     )
     parser.add_argument("--raw-dir", type=Path, default=None)
     parser.add_argument(

@@ -1,10 +1,10 @@
 """The condition table of docs/PIPELINE_DESIGN.md is ``verdict.CONDITIONS``.
 
-The design document states every condition the registration check and the
-graduation verdict judge in one table. This keeps that table the code's: the
-same rows in the same order, each with its stage, its graduation code, the
-rule that turns it on and the reason a failure records. ``docs/`` is local and
-not tracked, so the test skips where it is absent.
+The design document states every condition the registration check judges in
+one table. This keeps that table the code's: the same rows in the same order,
+each with its stage, the rule that turns it on and the reason a failure
+records. ``docs/`` is local and not tracked, so the test skips where it is
+absent.
 """
 
 from __future__ import annotations

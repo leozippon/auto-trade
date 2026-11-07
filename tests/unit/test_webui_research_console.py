@@ -32,14 +32,19 @@ from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.webui import registry
 from autotrade.webui.registry import (
     ENDING_STATES,
+    best_experiment,
     experiment_detail,
     experiment_listing,
-    ranking,
     summarize_experiment,
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES, TEST_GEOMETRY
+from tests.unit.acceptance_fixture import (
+    CREATE_RULES,
+    NO_SEED,
+    REQUIRED_RULES,
+    TEST_GEOMETRY,
+)
 from tests.unit.test_webui_inject_message import _const_block, _fn
 from tests.unit.webui_research_experiment import (
     ENVIRONMENT_BLOCKED_REASON,
@@ -270,6 +275,114 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
     assert experiment_detail(tmp_path, "budget_exhausted")["ending"] == endings["budget_exhausted"]
 
 
+@pytest.mark.parametrize(
+    ("record", "passed"),
+    [
+        ({"residual_information_ratio": 1.2, "threshold": 0.9}, True),
+        ({"residual_information_ratio": 0.5, "threshold": 0.9}, False),
+        ({"residual_information_ratio": 0.9, "threshold": 0.9}, True),
+        ({"residual_information_ratio": float("nan"), "threshold": 0.9}, False),
+        ({"residual_information_ratio": float("inf"), "threshold": 0.9}, False),
+        ({"residual_information_ratio": 1.2, "threshold": float("nan")}, False),
+        ({"residual_information_ratio": None, "threshold": 0.9, "unmeasured": "too few days"}, False),
+        ({"threshold": 0.9}, False),
+        ({"residual_information_ratio": 1.2}, False),
+        (None, False),
+    ],
+)
+def test_a_record_passes_when_its_residual_ir_reaches_its_stored_threshold(
+    record: dict[str, object] | None, passed: bool
+) -> None:
+    """通过 / 未通过 is read off the stored readout alone: the record's residual IR
+    at or above the threshold stored beside it. A reading that is missing or
+    not finite fails rather than passing by default."""
+
+    readout = {} if record is None else {"record": record}
+    assert registry.record_passed(readout) is passed
+
+
+def test_a_registered_experiment_serves_whether_its_record_passed_and_keeps_its_stored_state(
+    tmp_path: Path,
+) -> None:
+    """The listing row and the experiment page carry ``record.passed`` from the
+    stored readout, so a record below its threshold reads as failed while its
+    stored verdict and ending state stay ``registered_with_record``; before the
+    readout exists there is nothing to pass."""
+
+    root = tmp_path / "experiments"
+    build_experiment(root, "passed", "registered_with_record")
+    build_experiment(root, "failed", "registered_with_record")
+    build_experiment(root, "replaying", "forward")
+    ledger = root / "failed/ledgers/experiment_ledger.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    stored = rows[-1]["readout"]["record"]
+    stored["residual_information_ratio"] = stored["threshold"] - 0.01
+    ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    listed = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
+    assert (listed["passed"]["record"]["passed"], listed["failed"]["record"]["passed"]) == (True, False)
+    assert listed["replaying"]["record"]["passed"] is None
+    for name in ("passed", "failed"):
+        detail = experiment_detail(root, name)
+        assert detail["record"]["passed"] is listed[name]["record"]["passed"]
+        assert detail["ending"]["state"] == listed[name]["ending"]["state"] == "registered_with_record"
+        assert detail["verdict"]["status"] == "registered_with_record"
+    assert _records(root / "failed")[-1]["readout"]["record"] == stored
+
+
+def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_ending_shows(
+    tmp_path: Path,
+) -> None:
+    """A registered strategy with its record wears 通过 or 未通过 by its record's
+    test, never its stored state's name; a record with no ``passed`` at all is
+    未通过; every other ending keeps its own label. The card, the experiment
+    page header and the best-experiment panel wear experimentBadge, the 读出
+    view endingBadge and the process list endingLabel, all of the whole item."""
+
+    for experiment_id, stage in (
+        ("passed", "registered_with_record"),
+        ("deadline", "deadline"),
+        ("environment_blocked", "environment_blocked"),
+        ("broken", "broken"),
+    ):
+        build_experiment(tmp_path / "experiments", experiment_id, stage)
+    rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path / "experiments")["experiments"]}
+    failed = json.loads(json.dumps(rows["passed"]))
+    failed["record"]["passed"] = False
+    rows["failed"] = failed
+    rows["unread"] = {**rows["passed"], "record": None}
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            "const el = (tag, attrs, ...children) => ({ tag, attrs, children });",
+            "const stateBadge = () => null;",
+            _const_block(script, "ENDING_LABELS"),
+            *(_fn(script, name) for name in ("endingKey", "endingLabel", "endingBadge", "experimentBadge")),
+            f"const rows = {json.dumps(rows)};",
+            "console.log(JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, row]) => {",
+            "  const badge = experimentBadge(row);",
+            "  return [id, [endingLabel(row), badge.attrs.class, badge.children[0]]];",
+            "}))));",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "passed": ["通过", "badge ending-passed", "通过"],
+        "failed": ["未通过", "badge ending-failed", "未通过"],
+        "unread": ["未通过", "badge ending-failed", "未通过"],
+        "deadline": ["预算耗尽", "badge ending-budget_exhausted", "预算耗尽"],
+        "environment_blocked": ["环境阻断", "badge ending-environment_blocked", "环境阻断"],
+        "broken": ["失败", "badge ending-broken", "失败"],
+    }
+    assert "registered_with_record" not in _const_block(script, "ENDING_LABELS")
+    assert "endingBadge(detail)" in _fn(script, "readoutStagePanel")
+    assert "status: endingLabel(item)" in _fn(script, "pipelineTailSteps")
+    for name in ("experimentCard", "renderDetailPage", "heroPanel"):
+        assert "experimentBadge(" in _fn(script, name), name
+
+
 def test_the_home_list_flags_a_blocked_experiment_and_an_unresolved_issue(tmp_path: Path) -> None:
     """Two things put an attention line on an experiment's card and nothing else
     does: the host ending its session on the environment, and an issue report
@@ -372,7 +485,7 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     for panel in ("forwardStagePanel", "heldoutStagePanel", "readoutStagePanel"):
         assert "seedReadingsTable(" in body(panel), panel
     # Never on the home page.
-    for home in ("experimentCard", "rankingPanel", "evidenceTiles"):
+    for home in ("experimentCard", "heroPanel", "forwardTiles", "evidenceTiles"):
         assert "seed" not in body(home), home
 
 
@@ -679,9 +792,9 @@ def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Pa
     poll = client.get("/api/experiments", params={"kept": full["kept"]}).json()
     assert [row["experiment_id"] for row in poll["experiments"]] == ["running"]
     assert poll["order"] == order
-    assert (poll["kept"], poll["ranking"], poll["running"]) == (
+    assert (poll["kept"], poll["best"], poll["running"]) == (
         full["kept"],
-        full["ranking"],
+        full["best"],
         full["running"],
     )
     stale = client.get("/api/experiments", params={"kept": "not-the-digest"}).json()
@@ -875,62 +988,138 @@ def test_a_plan_of_unknown_sessions_is_listed_as_unreadable(tmp_path: Path) -> N
     assert rows["current"]["stage"] == "research"
 
 
-def _lower_bound(row: dict[str, object]) -> float:
-    return row["forward"]["slices"]["forward"]["lower_bound"]  # type: ignore[index]
-
-
-def test_the_ranking_lists_registered_strategies_by_their_records_residual_ir(tmp_path: Path) -> None:
-    """Only a registered strategy with a readout is ranked, by its validation record's
-    residual IR; a record the significance test could not read sorts last; nothing
-    still researching or ended without a registration is listed."""
+def test_the_best_experiment_is_the_registered_strategy_with_the_highest_forward_lower_bound(
+    tmp_path: Path,
+) -> None:
+    """Only an experiment that ended ``registered_with_record`` is offered, by the
+    forward lower bound its readout states; a strategy that raised in its
+    forward replay has no bound and is not offered; no other ending is ever
+    the best, whatever bound it carries. Ties keep the listing order."""
 
     for experiment_id, stage in (
         ("first", "registered_with_record"),
         ("second", "registered_with_record"),
-        ("unread", "registered_with_record"),
+        ("raised", "registered_with_record"),
         ("researching", "research"),
         ("exhausted", "deadline"),
+        ("blocked", "environment_blocked"),
     ):
         build_experiment(tmp_path, experiment_id, stage)
 
-    def restate(name: str, **record: object) -> None:
+    def restate(name: str, **forward: object) -> None:
         ledger = tmp_path / name / "ledgers/experiment_ledger.jsonl"
         rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-        rows[-1]["readout"]["record"].update(record)
+        rows[-1]["readout"]["forward"].update(forward)
         ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
-    restate("second", residual_information_ratio=50.0)
-    restate("unread", residual_information_ratio=None, p_value=None, unmeasured="the record has no entry yet")
+    bound = _records(tmp_path / "first")[-1]["readout"]["forward"]["lower_bound"]
+    restate("second", lower_bound=bound + 0.1)
+    restate("raised", lower_bound=None, residual_reading=None, strategy_error={"slice": "forward", "error": "boom"})
     rows = experiment_listing(tmp_path)["experiments"]
-    ranked = ranking(rows)
-    assert [row["experiment_id"] for row in ranked] == ["second", "first", "unread"]
-    assert ranked[0]["record"]["residual_information_ratio"] == 50.0
-    assert all(row["paper_candidate"] for row in ranked)
-    readout = _records(tmp_path / "first")[-1]["readout"]
-    assert ranked[1]["record"]["p_value"] == readout["record"]["p_value"]
-    assert ranked[1]["forward"] == readout["forward"]
-    # The home page serves the same ranking with its listing.
+    assert best_experiment(rows) == {"experiment_id": "second"}
+    by_id = {row["experiment_id"]: row for row in rows}
+    assert best_experiment([by_id["raised"]]) is None
+    tie = json.loads(json.dumps(by_id["second"]))
+    tie["experiment_id"] = "tie"
+    assert best_experiment([by_id["second"], tie]) == {"experiment_id": "second"}
+    # An ending that registered nothing is never crowned, even carrying a bound.
+    for name in ("researching", "exhausted", "blocked"):
+        other = json.loads(json.dumps(by_id[name]))
+        other["forward"] = by_id["second"]["forward"]
+        assert best_experiment([other, by_id["first"]]) == {"experiment_id": "first"}, name
+    # The home page serves the same answer with its listing.
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
-    assert listed["ranking"] == ranked
+    assert listed["best"] == {"experiment_id": "second"} and "ranking" not in listed
 
 
-def test_an_experiment_without_a_readout_is_not_ranked(tmp_path: Path) -> None:
-    """Ranking running experiments by how far they had got would crown one of a field
-    that has produced no out-of-sample reading at all: with no readout the
-    ranking is empty, and the homepage draws no ranking panel."""
+def test_a_running_experiment_is_never_the_best_experiment(tmp_path: Path) -> None:
+    """Ranking running experiments by how far they had got would crown one of a
+    field that has produced no forward reading at all: with none the listing
+    names no best experiment, and the home page draws no hero for that null
+    answer rather than an empty crowned panel."""
 
     build_experiment(tmp_path, "early", "research", alive=True)
     build_experiment(tmp_path, "registered", "forward", alive=True)
     rows = experiment_listing(tmp_path)["experiments"]
-    assert ranking(rows) == []
+    assert best_experiment(rows) is None
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
-    assert listed["ranking"] == []
+    assert listed["best"] is None
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    assert "if (!rows.length) return null;" in script.split("function rankingPanel(", 1)[1]
-    home = script.split("function homeView(", 1)[1].split("\nfunction ", 1)[0]
-    assert "rankingPanel(payload)" in home and "heroPanel" not in script
+    assert "if (!best) return null;" in _fn(script, "bestRow")
+    home = _fn(script, "homeView")
+    assert "if (best)" in home and "heroPanel(best)" in home
+    for retired in ("rankingPanel", "rankingSignature", "ranking-panel", "payload.ranking"):
+        assert retired not in script, retired
+
+
+def test_the_hero_carries_the_paper_handoff_and_redraws_only_on_a_new_signature() -> None:
+    """The hero is where the home page opens a Paper account for the best
+    registered strategy: it draws the same handoff as the 读出 view (the
+    account it has, or the button the server caps). The grid is rebuilt on
+    every poll; the hero only when what it shows changed, so its curve and its
+    Paper roster are not re-fetched every five seconds."""
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    hero = _fn(script, "heroPanel")
+    assert "paperHandoff(item)" in hero and "forwardTiles(item)" in hero
+    assert "panel.__signature = heroSignature(item);" in hero
+    refresh = _fn(script, "refreshHomePage")
+    assert "(hero ? hero.__signature : \"\") !== signature" in refresh
+    assert "grid.replaceWith(experimentGrid(payload.experiments || []));" in refresh
+
+
+def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(tmp_path: Path) -> None:
+    """A card's evidence is one block of six figures in a fixed order -- the
+    validation record's steps, residual IR, p-value and candidate changes,
+    then the forward lower bound and the Held-out slice's residual IR -- so
+    every card holds the same six: a reading the replay has not produced yet
+    is a dash, never a missing tile. An experiment with neither a record nor a
+    forward record has no block. The listing row carries the Held-out reading
+    as the forward record states it."""
+
+    root = tmp_path / "experiments"
+    for stage in ("research", "forward", "registered_with_record"):
+        build_experiment(root, stage, stage)
+    rows = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
+    heldout = _records(root / "registered_with_record")[-1]["slices"]["heldout"]["residual_reading"]
+    assert rows["registered_with_record"]["forward"]["slices"]["heldout"]["residual_reading"] == heldout
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            *(_const_block(script, name) for name in ("RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")),
+            *(_fn(script, name) for name in ("fmtPct", "fmtSharpe", "fmtPValue", "signCls", "evidenceTiles")),
+            "const statTilesRow = (tiles) => tiles;",
+            f"const rows = {json.dumps(rows)};",
+            "console.log(JSON.stringify(Object.fromEntries(",
+            "  Object.entries(rows).map(([id, row]) => [id, evidenceTiles(row)]))));",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    tiles = json.loads(result.stdout)
+    assert tiles["research"] is None
+    labels = ["已测步数", "记录残差 IR", "p 值", "换候选", "前推下界", "Held-out 残差 IR"]
+    for name in ("forward", "registered_with_record"):
+        assert [tile["label"] for tile in tiles[name]] == labels, name
+    record = rows["forward"]["record"]
+    assert [tile["value"] for tile in tiles["forward"]] == [
+        str(record["steps"]),
+        f"{record['residual_information_ratio']:.2f}",
+        f"{record['p_value']:.3f}",
+        str(record["candidate_changes"]),
+        "—",
+        "—",
+    ]
+    registered = {tile["label"]: tile for tile in tiles["registered_with_record"]}
+    assert registered["Held-out 残差 IR"]["value"] == f"{heldout['residual_information_ratio']:.2f}"
+    assert registered["前推下界"]["value"] != "—"
+    assert all(tile["value"] != "—" for tile in tiles["registered_with_record"])
 
 
 def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
@@ -948,7 +1137,7 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
         return script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
 
     joined = re.compile(r"\$\{[^}]*\} ?/ ?\$\{")
-    for name in ("accountTiles", "evidenceTiles", "rankingPanel"):
+    for name in ("accountTiles", "evidenceTiles", "forwardTiles"):
         assert not joined.search(body(name)), name
     card = body("experimentCard")
     assert "fraction: false" in card and "{ mini: true }" in card
@@ -960,11 +1149,8 @@ def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
     # The card leaves the random baselines to the experiment page.
     assert '!(mini && key === "null_controls")' in budget
     assert "activityNode(fresh.status)" in body("controlPanel")
-    # The card's evidence is the validation record and the forward reading, never
-    # a research-period figure.
-    labels = ("已测步数", "记录残差 IR", "p 值", "换候选", "前推下界")
-    found = [label for label in labels if f'label: "{label}"' in body("evidenceTiles")]
-    assert found == list(labels)
+    # The card's evidence is the validation record and the forward and
+    # Held-out readings, never a research-period figure.
     for retired in ("最佳候选", "DSR", "bestCandidateTiles", "research_best"):
         assert retired not in body("evidenceTiles") and retired not in body("sessionDetailPanel"), retired
 
@@ -1075,7 +1261,7 @@ def test_the_create_form_refuses_a_geometry_the_worker_refuses(
         json={
             "params": {
                 "experiment_id": "geometry",
-                **TEST_GEOMETRY.to_record(), **CREATE_RULES,
+                **TEST_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
                 **patch,
             }
         },
@@ -1123,7 +1309,7 @@ def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
     }
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
     for stage in ("research", "forward"):
-        # The attempt keys ``RollingExperimentPipeline`` writes on its failure path.
+        # The attempt keys ``ExperimentPipeline`` writes on its failure path.
         ledger.append(
             {
                 "experiment_id": "experiment",

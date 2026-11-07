@@ -11,13 +11,12 @@ point.
 
 Two decisions are shared rather than per-round because the console runs rounds
 side by side and their verdicts only compare while they agree: BASE_OVERRIDES
-carries the account, the cost stress and the per-session budgets (the research
-geometry is the console's, `config.DEFAULT_RESEARCH_GEOMETRY`, unless a
-round's profile names another), and BASE_EXPECTED_DEFAULTS pins the console creation
-defaults every round relies on -- above all the model roles an experiment does not
-name, so a change of the console's model defaults must stop the launcher
-rather than silently move an experiment onto another model, and the residual
-statistic's level. A round states what it decides for itself in `overrides`,
+carries the account, the cost stress and the per-session budgets, and
+BASE_EXPECTED_DEFAULTS pins the console creation defaults every round relies
+on -- the research geometry and dataset selection the default seed was built
+for, and above all the model roles an experiment does not name, so a change of
+the console's model defaults must stop the launcher rather than silently move
+an experiment onto another model, and the residual statistic's level. A round states what it decides for itself in `overrides`,
 and anything it states there stops being an expected default; the rules the
 console has no value for (`research_years`) it must state, for the round or
 per experiment, or every request is refused. What
@@ -26,19 +25,18 @@ in `_profiles.py`; an open round imports from there and from here, never from
 another round file.
 
 A round's id is the day it is launched, in Beijing time, with a letter suffix
-(b, c, ...) when that id is already taken -- by an earlier round of the same
-day, or by one of the rounds 20261008 to 20261015 that were named ahead of the
-calendar between 2026-10-03 and 10-08 -- and its experiments' ids end in it. Nothing
-reads an order into these ids: the queue is the experiment order of a round file,
-and RETIRED_IDS and the reuse check compare whole ids.
+(b, c, ...) when an earlier round of the same day took that id. Its file is
+`create_round_<round id>.py`, and `main` refuses an experiment id that does not
+end with `_<round id>` (ROUND_FILE_PREFIX says why). Nothing reads an order into
+these ids: the queue is the experiment order of a round file.
 
 A round whose experiments have all been created is marked `closed`, and so is one
-whose remaining experiments are withdrawn: they leave its experiment list and their ids go
-to RETIRED_IDS. Its `main` refuses every mode: the queue reads an experiment without
-an experiment directory as pending, so an experiment whose directory was deleted would
-be created again (archiving keeps the directory, see archive_experiment.py).
-Once every experiment of a closed round has ended, its file leaves the tree (git
-history keeps it) and its ids join RETIRED_IDS.
+whose remaining experiments are withdrawn: they leave its experiment list. Its `main`
+refuses every mode: the queue reads an experiment without an experiment directory as
+pending, so an experiment whose directory was deleted would be created again
+(archiving keeps the directory, see archive_experiment.py). Once every experiment of
+a closed round has ended, its file leaves the tree (git history keeps it); no later
+round takes its id, since a later round is launched on a later day.
 
 `normalize` runs the request-level checks the console applies on POST
 /api/experiments (ExperimentManager.create_experiment's closed, unknown,
@@ -92,13 +90,6 @@ experiment's starter replays on cards the smoke takes for its duration, admitted
 the console admits them (``gpu.host_min_free_gpu_memory_mib``: the cards that
 keep its margin free and that no running experiment claims); with too few of those the
 experiment is refused for that run only, and nothing is recorded.
-
-RETIRED_IDS records the experiment ids that have been used and archived, or
-withdrawn from a round's queue, or defined by a round whose file has left the
-tree, so a new round cannot quietly reuse one.
-`logs/archive/` is not part of the repository, which is why the list is
-checked in rather than read from disk; `archived_ids` reads the archive
-where it exists so the two can be compared.
 """
 
 from __future__ import annotations
@@ -151,20 +142,38 @@ from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker
 from autotrade.webui.manager import gpu_request, uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
-ARCHIVE_ROOT = REPO_ROOT / "logs" / "archive"
 # Where an experiment's reference workspace lives when the experiment does not name one.
 PACKS_DIR = "configs/workspace_refs"
 # The id the round-level dry-run validates under. Never created: it only
 # carries the parameters every experiment shares through the pre-flight.
 PROBE_ID = "round_dry_run_probe"
+# A round's id is its file's name after this prefix, and every experiment id of the
+# round ends with `_<round id>`. An id is never reused: the console keys the
+# experiment directory, the sandbox work root, the Docker image tag (on the ZGCA
+# instance too) and the archive path on it, so a second run under an old id would
+# be indistinguishable from the first in every record that survives it. Round ids
+# are unique by file name, so experiment ids ending in them cannot collide across
+# rounds.
+ROUND_FILE_PREFIX = "create_round_"
 
 # Console defaults every round relies on. Values, not commentary: if the console
 # changes any of them the round has to be re-decided, not silently re-run.
 BASE_EXPECTED_DEFAULTS: dict[str, object] = {
+    # The ten-year geometry and dataset selection the console's default seed
+    # was prebuilt for (scripts/experiments/_profiles.py), part of every seed's
+    # snapshot configuration.
+    "research_start": "20150801",
+    "research_end": "20250731",
+    "forward_end": "20260731",
+    "heldout_end": "20261031",
+    "window_months": 132,
     "include_fundamentals": True,
+    "fundamental_datasets": (),
     "include_macro": True,
-    "include_events": True,
+    "macro_datasets": ("index_daily", "index_dailybasic", "sw_daily", "index_weight"),
+    "include_events": False,
     "include_text": True,
+    "text_datasets": ("anns_d",),
     "include_intraday": False,
     "screen_exclude_st": False,
     "screen_exclude_new_listed_days": 0,
@@ -202,10 +211,6 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
 
 # What every round decides the same way. Values, not commentary.
 BASE_OVERRIDES: dict[str, object] = {
-    # Sixty months behind the research-end decision view reach 2020-07, just
-    # inside the 2020 floor of fundamentals and macro; part of every seed's
-    # snapshot configuration.
-    "window_months": 60,
     # No GPU. The request travels with the experiment to the Agent session
     # sandbox and the strategy container of every replay alike; an experiment that
     # really trains on a card overrides this with 1.
@@ -272,455 +277,16 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "compact_model",
 )
 
-# Experiment ids that were used and archived, or withdrawn from a round's
-# queue. An id is never reused: the console keys the experiment directory,
-# the sandbox work root, the Docker image tag and the archive path on it, so
-# a second run under an old name would be indistinguishable from the first
-# in every record that survives it.
-RETIRED_IDS: frozenset[str] = frozenset(
-    {
-        "alpha158_lgbm_20260920",
-        "alt_events_ranker_20260916",
-        "alt_events_ranker_20260917",
-        "analyst_revision_20260916",
-        "analyst_revision_20260917",
-        "cb_linkage_20260914",
-        "corner_cases_20260907",
-        "corner_cases_20260910",
-        "defensive_quality_20260918",
-        "defensive_quality_20260920",
-        "earnings_surprise_20260918",
-        "explore_github_strategies_20260910",
-        "explore_platform_strategies_20260910",
-        "factor_cs_20260910",
-        "factor_cs_allflash_20260910",
-        # Created by round 20261007, withdrawn from it and deleted unarchived.
-        "fund_event2_100k_8y_mimo_20261007",
-        "fund_event2_100k_8y_qwen_20261007",
-        # Queued by rounds 20261008, 20261009 and 20261011b and withdrawn on
-        # 2026-10-05 before any recorded a validation; the five that had been
-        # created were deleted unarchived. The round files say why.
-        "fund_open2_100k_8y_mimo_20261011",
-        "fund_open2_100k_8y_qwen_20261011",
-        "seqbag2_cost_100k_8y_mimo_20261008",
-        "seqbag2_cost_100k_8y_qwen_20261008",
-        "seqbag2_pool_100k_8y_mimo_20261008",
-        "seqbag2_pool_100k_8y_qwen_20261008",
-        "seqhold_beta_100k_8y_mimo_20261009",
-        "seqhold_beta_100k_8y_qwen_20261009",
-        "github_confirm_20260917",
-        "gru_ranker_20260920",
-        "margin_flow_20260916",
-        "margin_flow_20260917",
-        "ml_ranker_20260910",
-        "open_mechanism_20260910",
-        "open_research_20260920",
-        "order_flow_ranker_20260917",
-        "site_visits_20260914",
-        "value_regime_20260914",
-        # Every experiment of the closed rounds 20260916 to 20261010, whose files were
-        # removed from the tree on 2026-10-06 (last in 0b1b07e); 211 of them were
-        # archived on 2026-10-04, the rest finished and stay on disk.
-        "abturn_chinext_1m_20260926",
-        "age1k_alla_100k_20260927",
-        "ageout_alla_100k_20260927",
-        "alpha158_lgbm_20260921",
-        "amp_momentum_csi500_1m_20260926",
-        "amtac_alla_100k_20260927",
-        "amtcv_alla_100k_20260927",
-        "amtind_alla_100k_20260927",
-        "amtlag_alla_100k_20260927",
-        "at1k_alla_100k_20260927",
-        "atcy_alla_100k_20260927",
-        "atlag_alla_100k_20260927",
-        "aturn_alla_100k_20260927",
-        "beta1k_alla_100k_20260927",
-        "beta60_alla_100k_20260927",
-        "big500_alla_100k_20260927",
-        "bigind_alla_100k_20260927",
-        "board_block_1m_20260923",
-        "body_alla_100k_20260927",
-        "boundary_alla_100k_20260927",
-        "broad_alla_100k_20260927",
-        "capital_aware_100k_concentrated_20260921",
-        "capital_aware_100k_pv_20260921",
-        "capital_aware_1m_enhanced_20260921",
-        "capital_aware_1m_riskmodel_20260921",
-        "cashdiv_pool_100k_20260921d",
-        "cashmix_alla_100k_20260927",
-        "census_gbdt_alla_8y_20261001",
-        "census_gbdt_csi1000_100k_8y_20261001",
-        "census_lin_csi1000_100k_8y_deepseek_20261004",
-        "census_lin_csi1000_100k_8y_mimo_20261002",
-        "census_lin_csi1000_100k_8y_qwen_20261002",
-        "ch3bmk_alla_100k_20260927",
-        "champ1000_alla_100k_20260927",
-        "champ300_alla_100k_20260927",
-        "champ_alla_100k_20260927",
-        "champbmk_alla_100k_20260927",
-        "chdelta_alla_100k_20260927",
-        "cma_overlay_1m_20260921d",
-        "csi500_shape_1m_20260923",
-        "csk1k_alla_100k_20260927",
-        "decay_alla_1m_20260926",
-        "decouple_alla_100k_20260927",
-        "defensive_quality_20260921",
-        "delay1k_alla_100k_20260927",
-        "delay60_alla_100k_20260927",
-        "dn1000_alla_100k_20260927",
-        "dn20_alla_100k_20260927",
-        "dn60_alla_100k_20260927",
-        "dvy_csi1000_100k_20260924",
-        "dvy_csi1000_100k_b3_20260925",
-        "dvy_csi1000_100k_excy_20260925",
-        "dvy_csi1000_100k_q_20260925",
-        "dvy_csi1000_100k_s20_20260925",
-        "dvy_csi1000_100k_s8_20260925",
-        "dvy_csi1000_1m_20260924",
-        "dvy_csi1000_1m_b25_20260925",
-        "dvy_csi1000_1m_excy_20260925",
-        "dvy_csi1000_1m_q_20260925",
-        "dvy_csi1000_1m_s12_20260925",
-        "dvy_csi1000_1m_s30_20260925",
-        "dvy_csi300_8y_20260927",
-        "dvy_csi500_100k_20260924",
-        "dvy_csi500_1m_20260924",
-        "dvy_csi500_1m_q_20260925",
-        "earnac_alla_100k_20260927",
-        "entry_alla_100k_20260927",
-        "ep_csi500_8y_20260927",
-        "event_screens_20260917",
-        "exit1000_alla_100k_20260927",
-        "exit300_alla_100k_20260927",
-        "exit500_alla_100k_20260927",
-        "exit50_alla_100k_20260927",
-        "exitbmk_alla_100k_20260927",
-        "exitcy_alla_100k_20260927",
-        "exitwide_alla_100k_20260927",
-        "eyield_concentrated_100k_20260921b",
-        "flip_alla_8y_20261001",
-        "flow_block_1m_20260923",
-        "freefloat_alla_100k_20260927",
-        "freegrow_alla_100k_20260927",
-        "freeshare_alla_100k_20260927",
-        "fresh_book_1m_20260925",
-        "fresh_book_csi500_1m_20260925",
-        "fullcash_overlay_1m_20260921b",
-        "fund_event3_100k_8y_mimo_20261010",
-        "fund_event3_100k_8y_qwen_20261010",
-        "fund_event_100k_8y_mimo_20261005",
-        "fund_event_100k_8y_qwen_20261005",
-        "fund_learn2_100k_8y_mimo_20261007",
-        "fund_learn2_100k_8y_qwen_20261007",
-        "fund_learn_100k_8y_mimo_20261005",
-        "fund_learn_100k_8y_qwen_20261005",
-        "fund_open_100k_8y_mimo_20261005",
-        "fund_open_100k_8y_qwen_20261005",
-        "gnn_csi1000_8y_20260925",
-        "gnn_relation_1m_20260922",
-        "gp_overlay_1m_20260921d",
-        "gru_csi1000_8y_20260925",
-        "gru_ranker_20260921",
-        "high52_overlay_1m_20260921c",
-        "iat1k_alla_100k_20260927",
-        "indact_alla_100k_20260927",
-        "indcalm_alla_100k_20260927",
-        "indcycle_100k_8y_mimo_20261009",
-        "indcycle_100k_8y_qwen_20261009",
-        "inddisp_alla_100k_20260927",
-        "index_migration_csi500_1m_20260926",
-        "index_relative_100k_20260919",
-        "index_relative_1m_20260919",
-        "index_relative_1m_b_20260919",
-        "indflow_alla_100k_20260927",
-        "indmv_alla_100k_20260927",
-        "indneutral_value_1m_20260921b",
-        "indpb_alla_100k_20260927",
-        "indpbl_alla_100k_20260927",
-        "indrev_alla_100k_20260927",
-        "indrise_alla_100k_20260927",
-        "indto_alla_100k_20260927",
-        "intraday_stats_block_1m_20260924",
-        "iroe_alla_100k_20260927",
-        "iwadd_alla_100k_20260927",
-        "label_axis_100k_20260923",
-        "lagpool_alla_8y_20260926",
-        "leader_alla_100k_20260927",
-        "learner_axis_1m_20260924",
-        "lgbm_csi1000_8y_20260925",
-        "lgbm_meta_100k_20260922",
-        "limdn_alla_100k_20260927",
-        "liqco_alla_100k_20260927",
-        "listed_alla_100k_20260927",
-        "lock1000_alla_100k_20260927",
-        "lottery_reverse_100k_20260921c",
-        "lowvol_bucketed_20260917",
-        "lowvol_quality_20260916",
-        "lstm_alla_100k_20260926",
-        "lstm_alla_8y_20260926",
-        "market_state_block_1m_20260924",
-        "mgnlag_alla_100k_20260927",
-        "mid1000_alla_100k_20260927",
-        "mid300_alla_100k_20260927",
-        "mid3bmk_alla_100k_20260927",
-        "mid50_alla_100k_20260927",
-        "midbmk_alla_100k_20260927",
-        "midcy_alla_100k_20260927",
-        "midflat_alla_100k_20260927",
-        "midnew_alla_100k_20260927",
-        "mlp_alla_100k_20260926",
-        "mlp_alla_8y_20260925",
-        "nearvw_alla_100k_20260927",
-        "net_issuance_100k_20260921c",
-        "new300_alla_100k_20260927",
-        "new500_alla_100k_20260927",
-        "newbig_alla_100k_20260927",
-        "newbmk_alla_100k_20260927",
-        "newcy_alla_100k_20260927",
-        "newmem_alla_100k_20260927",
-        "next1k_alla_100k_20260927",
-        "nextlo_alla_100k_20260927",
-        "nextmb_alla_100k_20260927",
-        "nlead_alla_100k_20260927",
-        "noa_index_100k_20260921d",
-        "northbound_holdings_1m_20260925",
-        "open_research_100k_8y_deepseek_r1_20261004",
-        "open_research_100k_8y_deepseek_r2_20261004",
-        "open_research_100k_8y_deepseek_r3_20261004",
-        "open_research_100k_8y_mimo_20261002",
-        "open_research_100k_8y_mimo_r2_20261003",
-        "open_research_100k_8y_mimo_r3_20261004",
-        "open_research_100k_8y_qwen_20261002",
-        "open_research_100k_8y_qwen_r2_20261003",
-        "open_research_100k_8y_qwen_r3_20261004",
-        "open_research_20260916",
-        "open_research_20260917",
-        "open_research_20260917b",
-        "open_research_20260917c",
-        "open_research_20260917d",
-        "open_research_20260917e",
-        "open_research_20260917f",
-        "open_research_20260917g",
-        "open_research_20260917h",
-        "open_research_20260917i",
-        "open_research_20260917j",
-        "open_research_20260921",
-        "open_research_8y_20261001",
-        "pacc_index_100k_20260921c",
-        "patchmlp_alla_100k_20260926",
-        "paylag_alla_100k_20260927",
-        "pb1000_alla_100k_20260927",
-        "pb_alla_100k_20260927",
-        "pblagm_alla_100k_20260927",
-        "pe1000_alla_100k_20260927",
-        "pe_alla_100k_20260927",
-        "peerlag_alla_100k_20260927",
-        "peerlead_alla_100k_20260927",
-        "peerliq_alla_100k_20260927",
-        "peersize_alla_100k_20260927",
-        "pelagm_alla_100k_20260927",
-        "pond_alla_100k_20260927",
-        "ps1000_alla_100k_20260927",
-        "ps1ind_alla_100k_20260927",
-        "ps1sz_alla_100k_20260927",
-        "ps300_alla_100k_20260927",
-        "ps500_alla_100k_20260927",
-        "ps_alla_100k_20260927",
-        "psacc_alla_100k_20260927",
-        "pscy_alla_100k_20260927",
-        "psgap_alla_100k_20260927",
-        "psgem_alla_100k_20260927",
-        "psind_alla_100k_20260927",
-        "psl10_alla_100k_20260927",
-        "psl300_alla_100k_20260927",
-        "psl42_alla_100k_20260927",
-        "psl500_alla_100k_20260927",
-        "pslag_alla_100k_20260927",
-        "pslage_alla_100k_20260927",
-        "pslagm_alla_100k_20260927",
-        "pslbig_alla_100k_20260927",
-        "pslboth_alla_100k_20260927",
-        "pslcy_alla_100k_20260927",
-        "pslly_alla_100k_20260927",
-        "psloutm_alla_100k_20260927",
-        "pslsml_alla_100k_20260927",
-        "psltail_alla_100k_20260927",
-        "pslthen_alla_100k_20260927",
-        "psly1k_alla_100k_20260927",
-        "psly500_alla_100k_20260927",
-        "psly_alla_100k_20260927",
-        "psmain_alla_100k_20260927",
-        "psmly_alla_100k_20260927",
-        "psnew_alla_100k_20260927",
-        "psout_alla_100k_20260927",
-        "pssize_alla_100k_20260927",
-        "psstay_alla_100k_20260927",
-        "psxfin_alla_100k_20260927",
-        "pv_exposure_budget_20260917",
-        "pvcorr_alla_100k_20260927",
-        "quality_lowrisk_20260916",
-        "quality_overlay_1m_20260921c",
-        "range20_csi1000_100k_20260926",
-        "range20_csi1000_1m_20260926",
-        "range20_csi300_8y_20260927",
-        "range20_csi500_1m_20260926",
-        "range20_csi500_8y_20260927",
-        "reldn_alla_100k_20260927",
-        "resid_momentum_100k_20260921b",
-        "rmax_overlay_1m_20260921c",
-        "roe1k_alla_100k_20260927",
-        "roeout_alla_100k_20260927",
-        "room_alla_100k_20260927",
-        "runner_alla_100k_20260927",
-        "sale1000_alla_100k_20260927",
-        "sale500_alla_100k_20260927",
-        "salem_alla_100k_20260927",
-        "seasonality_csi500_1m_20260926",
-        "seed_bag_1m_20260926",
-        "seq_gru_persist_1m_20260922",
-        "seqbag2_bag_100k_8y_mimo_20261008",
-        "seqbag2_bag_100k_8y_qwen_20261008",
-        "seqbag_alla_100k_8y_deepseek_20261004",
-        "seqbag_alla_100k_8y_mimo_20261003",
-        "seqbag_alla_100k_8y_qwen_20261003",
-        "seqbag_alla_8y_20261001",
-        "seqfund_alla_100k_8y_mimo_20261006",
-        "seqfund_alla_100k_8y_qwen_20261006",
-        "seqhold_clock_100k_8y_qwen_20261009",
-        "seqlabel_alla_100k_8y_mimo_20261006",
-        "seqlabel_alla_100k_8y_qwen_20261006",
-        "shortmlp_alla_8y_20260926",
-        "sleeve_blend_20260918",
-        "spec_alla_100k_20260926",
-        "ssch1000_alla_100k_20260927",
-        "stay500_alla_100k_20260927",
-        "swpe_alla_100k_20260927",
-        "sz1k_alla_100k_20260927",
-        "tattn_alla_8y_20260926",
-        "tcn_alla_8y_20260925",
-        "tom1k_alla_100k_20260927",
-        "volag_alla_100k_20260927",
-        "wdelta_alla_100k_20260927",
-        "wresid_alla_100k_20260927",
-        "wtheavy_alla_100k_20260927",
-        "wtstab_alla_100k_20260927",
-        "xs_transformer_1m_20260922",
-        "xsattn_csi1000_8y_20260925",
-        # Every experiment of the closed rounds 20261011, 20261012, 20261012b,
-        # 20261012c and 20261012d, whose files were removed from the tree on
-        # 2026-10-06 (last in 6a0f487; 20261012b's file and reference workspace in 0144b7c;
-        # 20261013's file and reference workspace in 315e7c5); all finished and stay on disk
-        # or in the archive.
-        "incdraft2_100k_8y_qwen_20261013",
-        "incdraft_100k_8y_mimo_20261012",
-        "incdraft_100k_8y_qwen_20261012",
-        "incdraft_500k_8y_qwen_20261012",
-        "seqfresh_100k_8y_mimo_20261011",
-        "seqfresh_100k_8y_qwen_20261011",
-        "seqnovel_cl_100k_8y_qwen_20261012",
-        "seqnovel_ssm_100k_8y_mimo_20261012",
-        "titlemap_100k_8y_mimo_20261012",
-        "titlerank_100k_8y_qwen_20261012",
-        # Every experiment of the closed round 20261015, whose file and reference workspaces left the
-        # tree with round 20261008b's launch; all ended no_edge and stay on disk.
-        "open_chips_100k_5y_mimo_20261015",
-        "open_cluster_100k_8y_mimo_20261015",
-        "open_distress_100k_8y_qwen_20261015",
-        "open_ensemble_100k_8y_qwen_20261015",
-        "open_micro_100k_8y_mimo_20261015",
-        "open_tables_100k_5y_qwen_20261015",
-        # Every experiment of rounds 20261008b, 20261014, 20261014b and 20261014d,
-        # whose files left the tree on 2026-10-15. The eleven experiments of the first
-        # two and the two of 20261014d ended and stay on disk; the two 20261014b
-        # experiments were terminated on 2026-10-14 and their directories are no
-        # longer on disk.
-        "hcm_100k_8y_sol_dsf_20261014b",
-        "hcm_100k_8y_sol_dsf_20261014d",
-        "hcm_100k_8y_sol_qwen_20261014b",
-        "hcm_100k_8y_sol_qwen_20261014d",
-        "open_adapt_100k_8y_mimo_20261014",
-        "open_avoid_100k_8y_mimo_20261014",
-        "open_capital_100k_8y_mimo_20261008b",
-        "open_commit_100k_8y_qwen_20261014",
-        "open_earnings_100k_8y_qwen_20261014",
-        "open_ensemble_100k_8y_qwen_20261008b",
-        "open_exclude_100k_5y_mimo_20261008b",
-        "open_free_100k_8y_mimo_20261014",
-        "open_free_100k_8y_qwen_20261014",
-        "open_guidance_100k_8y_qwen_20261008b",
-        "open_tables_100k_5y_qwen_20261008b",
-        # Both experiments of round 20261014c, on the A100 instance; ended no_deliverable, synced here.
-        "hcm_100k_8y_dsf_zgca_20261014c",
-        "hcm_100k_8y_sol_dsf_zgca_20261014c",
-        # Every experiment of rounds 20261019, 20261019b (on the A100 instance) and
-        # 20261022, whose files left the tree on 2026-10-24. Five ended
-        # no_deliverable and stay on disk; the A100 experiment
-        # egcu_lm_100k_8y_opus_zgca_20261019b was interrupted.
-        "egcu_lm_100k_8y_opus_zgca_20261019b",
-        "egcu_lm_100k_8y_sol_20261019",
-        "hcm_lm_100k_8y_opus_20261019",
-        "hcm_lm_100k_8y_sol_zgca_20261019b",
-        "retrieval_lm_100k_8y_opus_20261022",
-        "retrieval_lm_100k_8y_sol_20261022",
-        # Both experiments of round 20261025 on the A100 instance, created and
-        # withdrawn on 2026-10-25 before their first leg (terminated and
-        # archived there) when the owner narrowed the direction; round
-        # 20261025b replaces them.
-        "open_lm_100k_8y_opus_zgca_20261025",
-        "open_lm_100k_8y_sol_zgca_20261025",
-        # Every experiment of rounds 20261025b, 20261027b and 20261027c on the A100
-        # instance, whose files left the tree on 2026-10-28. All ended (the
-        # opus experiment no_deliverable on 10-26, the sol experiments no_edge, the argon
-        # experiment rejected); their instance directories were deleted on 10-28,
-        # and the copies synced here stay on disk.
-        "retrieval_100k_8y_argon_zgca_20261027c",
-        "retrieval_100k_8y_opus_zgca_20261025b",
-        "retrieval_100k_8y_sol_zgca_20261025b",
-        "retrieval_100k_8y_sol_zgca_20261027b",
-        # Every experiment of rounds 20261026, 20261027, 20261030 and 20261031, whose
-        # files and reference workspaces left the tree on 2026-11-02. None is running; the
-        # directories that remain stay on disk.
-        "memory_100k_10y_argon_local_20261031",
-        "memory_100k_10y_astra_local_20261031",
-        "memory_100k_8y_argon_local_20261030",
-        "memory_100k_8y_astra_local_20261030",
-        "retrieval_100k_8y_argon_20261026",
-        "retrieval_100k_8y_argon_zgca_20261027",
-        "retrieval_100k_8y_astra_20261026",
-        "retrieval_100k_8y_astra_zgca_20261026",
-        "retrieval_100k_8y_fable_20261026",
-        # Withdrawn from round 20261102's queue before it was created, when the
-        # round was narrowed to Astra experiments alone.
-        "memory_200k_10y_argon_local_20261102",
-        # Every experiment of round 20261102 and the two memory experiments of round
-        # 20261103, whose file, experiments and memory reference workspaces left the tree on
-        # 2026-11-05 with the memory machinery. All ended and stay on disk.
-        "memory_200k_10y_astra_local_20261102",
-        "memory_200k_10y_astra_local_20261102b",
-        "memory_200k_10y_astra_local_20261102c",
-        "memory_200k_10y_astra_local_20261103a",
-        "memory_200k_10y_astra_local_20261103b",
-    }
-)
+def round_id(program: str) -> str:
+    """The id of the round whose file ``program`` (a round's ``argv[0]``) is."""
 
-
-def archived_ids() -> set[str]:
-    """Experiment ids with an archived tree under ``logs/archive/<batch>/<id>``.
-
-    Empty where the archive was never created -- it is a local operator
-    artifact, not part of the repository -- so a caller must treat an empty
-    result as "no evidence", never as "nothing was archived".
-    """
-
-    if not ARCHIVE_ROOT.is_dir():
-        return set()
-    return {
-        experiment.name
-        for batch in ARCHIVE_ROOT.iterdir()
-        if batch.is_dir() and not batch.is_symlink()
-        for experiment in batch.iterdir()
-        if experiment.is_dir() and not experiment.is_symlink()
-    }
+    stem = Path(program).stem
+    if not stem.startswith(ROUND_FILE_PREFIX) or stem == ROUND_FILE_PREFIX:
+        raise SystemExit(
+            f"{program} is not a round file: a round runs from"
+            f" scripts/experiments/{ROUND_FILE_PREFIX}<round id>.py"
+        )
+    return stem.removeprefix(ROUND_FILE_PREFIX)
 
 
 def normalize(params: dict[str, object]) -> dict[str, object]:
@@ -880,11 +446,11 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
         shutil.copytree(starter, output, ignore=shutil.ignore_patterns("__pycache__"))
         # Every year of the geometry the experiment replays, the validation years
         # too: its tests replay those on the same seed.
-        years = pipeline.research_spans(options.rolling.geometry.research_years)
+        years = pipeline.research_spans(options.experiment.geometry.research_years)
         request = research_span(years, FULL_SPAN).request(
             ArtifactRevision("smoke", output),
-            schedule=options.rolling.schedule,
-            broker_profile=options.rolling.broker_profile,
+            schedule=options.experiment.schedule,
+            broker_profile=options.experiment.broker_profile,
         )
         runs = [(year.label, year.start, SMOKE_DAYS) for year in years] + [(FULL_SPAN, None, None)]
         for label, start, days in runs:
@@ -1000,12 +566,14 @@ class Round:
     # pending.
     closed: bool = False
 
-    def __post_init__(self) -> None:
-        reused = sorted(set(self.experiments) & RETIRED_IDS)
-        if reused:
-            raise ValueError(
-                "experiment ids that were already used and archived cannot be "
-                "reused: " + ", ".join(reused)
+    def check_ids(self, round_id: str) -> None:
+        """Refuse an experiment id that does not end with ``_<round_id>``
+        (ROUND_FILE_PREFIX says why)."""
+
+        foreign = [experiment for experiment in self.experiments if not experiment.endswith(f"_{round_id}")]
+        if foreign:
+            raise SystemExit(
+                f"an experiment id of round {round_id} must end with _{round_id}: " + ", ".join(foreign)
             )
 
     @property
@@ -1201,6 +769,7 @@ class Round:
                 "this round is closed: every experiment it defines has been created, and the file"
                 " is only the record of what was run"
             )
+        self.check_ids(round_id(argv[0]))
         # A mistyped flag must never fall through to the real POST path: without
         # this, --dryrun is read as an experiment-id filter and creates the round.
         mistyped = [

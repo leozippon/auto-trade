@@ -36,12 +36,12 @@ from autotrade.pipelines.skills import MemorySource, mounted_skill_refs
 from autotrade.webui import skill_feedback as projection
 
 SESSION_KEY = "research"
-CURATED = "curated/grid-plateau-selection"
+CURATED = "curated/offline-readings"
 OTHER_CURATED = "curated/validation-readings"
 # A real report: what was tried, what the reading was, what it contradicts.
 EVIDENCE = (
-    "条目要求单参数网格不超过四点；本会话把 5 点网格一次提交 validate（node_7f3a），"
-    "replay-year 与单日耗时都在限额内，四点上限来自已废弃的 daily_backtest。"
+    "条目说离线引擎在已验证节点上逐笔对上 executions 就可以读它的收益；本会话照做"
+    "（node_7f3a），名单与订单逐笔一致，年化收益却差 3 个百分点，差在离线引擎没扣最低佣金。"
 )
 
 
@@ -54,7 +54,7 @@ def _mounted() -> dict[str, str]:
                 "curated",
                 "curated",
                 Path("memory/curated"),
-                ("grid-plateau-selection", "validation-readings"),
+                ("offline-readings", "validation-readings"),
             ),
         )
     )
@@ -150,7 +150,7 @@ def test_an_entry_this_session_does_not_mount_is_refused_with_the_mounted_set(
     assert error.value.error_type == "skill_feedback_policy"
     # A bare entry name is not the mounted reference either.
     with pytest.raises(ToolError):
-        _file(tool, skill="grid-plateau-selection")
+        _file(tool, skill="offline-readings")
     assert not skill_feedback_path(experiment_dir).exists()
 
 
@@ -284,7 +284,7 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
     # a curated row can open the entry it names.
     assert labelled["skill"] == CURATED
     assert labelled["source"] == "curated"
-    assert labelled["name"] == "grid-plateau-selection"
+    assert labelled["name"] == "offline-readings"
     assert labelled["origin"] == "curated"
     assert labelled["session_label"] == SESSION_KEY
     assert "/Data2" not in str(labelled["evidence"])

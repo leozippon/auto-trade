@@ -171,14 +171,15 @@ def _shell_description(
         "directory exists) while shell always takes it literally — so keep script paths "
         "free of that prefix. "
         f"`timeout_seconds` defaults to {timeout_seconds:g} and is at most {max_timeout_seconds:g}; "
-        "the command runs in the foreground and is killed at the timeout, so bound the work: "
-        "validate a script on a sample of dates/stocks first, split a full-market or "
-        "full-history pass into chunks that each finish within the cap, and checkpoint "
-        "intermediate results to files under the workspace (they persist) rather than "
-        "starting work in the background. The one exception is a model server such as "
-        "`vllm serve` bound to 127.0.0.1, detached with setsid and with stdin, stdout and "
-        "stderr redirected to files: it keeps running after the command returns, outside "
-        "its timeout, until the session container ends. stdout and stderr over "
+        "the command runs in the foreground and is killed at the timeout, so validate a "
+        "script on a sample of dates/stocks first. Work longer than one call either runs "
+        "as foreground chunks that each finish within the cap, or as a detached job: start "
+        "it with setsid (nohup optional) so it leaves the call's process group, with "
+        "stdin, stdout and stderr redirected to files under the workspace, have it checkpoint its intermediate results there (they persist), "
+        "and check on it in later calls by reading its log. A detached job keeps running "
+        "after the command returns, outside the timeout, until the session container "
+        "ends; a model server such as `vllm serve` bound to 127.0.0.1 is started the same "
+        "way. stdout and stderr over "
         f"{max_output_chars} chars come back as an inline head plus `<stream>_tail`, with the "
         "full stream spilled to a file: `<stream>_spill.result_hint` gives the read_file call "
         "for the omitted lines. Write large outputs to a workspace file and read them selectively."
@@ -457,7 +458,10 @@ def reject_forbidden_wait(argv: Sequence[str]) -> None:
         "shell wait is forbidden",
         error_type=FORBIDDEN_WAIT,
         reason=FORBIDDEN_WAIT,
-        retry_hint="Run one bounded foreground command; do not sleep or poll.",
+        retry_hint=(
+            "Run one bounded foreground command and do not sleep; check a detached job "
+            "by reading its log in a later call."
+        ),
     )
 
 

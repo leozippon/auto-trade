@@ -45,8 +45,8 @@ def generate_orders(context):
     ]
 """
 
-# Stateless, like the graduated books: one seat in B, bought at the close
-# whenever the account it is shown does not hold B.
+# Stateless: one seat in B, bought at the close whenever the account it is
+# shown does not hold B.
 SEAT_STRATEGY = """def generate_orders(context):
     stamp = context.inference_at.strftime("%Y-%m-%d")
     if "600000.SH" in context.account.positions:

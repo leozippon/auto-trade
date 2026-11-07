@@ -36,3 +36,7 @@
 `raw_readings.active_market_beta` 是主动序列对市场（`benchmark_index`）、规模、价值三条腿回归里市场腿的载荷，与 `residual_reading.market_beta` 同一个数。为负说明账户持有的名字比随机副本更低 β：指数大涨的年份主动序列落后于对照组合，大跌的年份领先。验证记录与每个验证行的统计量（`acceptance_rules.significance`）读的是同一回归的截距除以残差波动（`residual_reading.residual_information_ratio`），三条腿能解释的部分不算在里面。某一年的读数用 `daily_series`（`validation/active_daily.csv`）里该年的 `active_return` 对 `benchmark_return`、`size_factor_return`、`value_factor_return` 回归即得。
 
 跟踪约束不读主动序列的市场载荷：设了跟踪约束的实验，登记比的是策略自身收益的 `benchmark.market_beta` 与 `benchmark.tracking_error`（`acceptance_rules.registration.tracking_mandate`）。
+
+## 与策略无关的读数噪声
+
+随机选股对照组合的随机种子只由回测区间决定，换名的对象是节点自己的成交骨架：同一份字节在同一个 span 上重跑，对照组合与读数都不变；换一个 span，或者字节变了以致成交变了，对照组合就换了。两个从同一年起跑的 span 上，确定性策略在共同那几年的日收益逐位相同，那几年逐年主动值之差就是对照组合噪声的一次实测。训练模型的策略换一个训练种子本身就会移动读数：两个配置之差小于同一配置换种子的读数差时，这个差分不开。

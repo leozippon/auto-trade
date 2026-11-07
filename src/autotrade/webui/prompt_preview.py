@@ -65,7 +65,7 @@ def build_prompt_preview(
 
     directory = Path(experiment_dir)
     # The same store a session projects its identities through, constructed
-    # before anything else so a legacy experiment fails here exactly as a real
+    # before anything else so a corrupt experiment fails here exactly as a real
     # session would.
     ref_store = AgentRefStore(directory)
     _require_research_session(directory, session_key)
@@ -94,8 +94,8 @@ class _SessionContext:
     session_key: str
 
     @property
-    def rolling(self):
-        return self.options.rolling
+    def experiment(self):
+        return self.options.experiment
 
     @property
     def strategy_sandbox(self) -> SandboxConfig:
@@ -109,7 +109,7 @@ class _SessionContext:
 
         return strategy_sandbox_from_spec(
             self.options.agent_sandbox,
-            **strategy_boundary(self.rolling),
+            **strategy_boundary(self.experiment),
         )
 
     @property
@@ -138,31 +138,31 @@ def _research_prompt(
         start_record,
     )
 
-    rolling = context.rolling
-    geometry = rolling.geometry
-    budgets = _session_budgets(rolling, resource_override)
+    config = context.experiment
+    geometry = config.geometry
+    budgets = _session_budgets(config, resource_override)
     sandbox = context.strategy_sandbox
     manifest: dict[str, object] = {
-        "experiment_id": rolling.experiment_id,
+        "experiment_id": config.experiment_id,
         "epoch_id": "research",
         "fold_id": context.session_key,
         "kind": "research",
         "research": research_geometry_record(
             geometry.research_years,
-            research_years=rolling.acceptance.research_years,
-            test_step_months=rolling.acceptance.test_step_months,
+            research_years=config.acceptance.research_years,
+            test_step_months=config.acceptance.test_step_months,
             steps_tested=0,
-            window_months=rolling.window_months,
+            window_months=config.window_months,
         ),
-        "benchmark_index": rolling.benchmark_index,
+        "benchmark_index": config.benchmark_index,
         "snapshot_config": context.options.snapshot_config.to_record(),
         "start": start_record(),
         "experiment": experiment_record(()),
-        "modification_constraints": rolling.step_constraints.to_record(),
-        "acceptance_rules": rolling.acceptance.to_record(),
-        "schedule": rolling.schedule.to_record(),
-        "broker_profile": rolling.broker_profile.to_record(),
-        "record_failed_attempts": rolling.record_failed_attempts,
+        "modification_constraints": config.step_constraints.to_record(),
+        "acceptance_rules": config.acceptance.to_record(),
+        "schedule": config.schedule.to_record(),
+        "broker_profile": config.broker_profile.to_record(),
+        "record_failed_attempts": config.record_failed_attempts,
         "attempt": 1,
         "sandbox_spec": (
             context.options.agent_sandbox.to_record()
@@ -170,8 +170,8 @@ def _research_prompt(
             else None
         ),
         "budgets": {
-            "validates_per_step": rolling.acceptance.validates_per_step,
-            "max_null_controls": rolling.max_null_controls,
+            "validates_per_step": config.acceptance.validates_per_step,
+            "max_null_controls": config.max_null_controls,
             "max_llm_calls": budgets["max_llm_calls"],
             "max_api_spend_usd": budgets["max_api_spend_usd"],
             "deadline_seconds": budgets["deadline_seconds"],
@@ -181,14 +181,14 @@ def _research_prompt(
             "strategy_gpu_count": sandbox.spec.gpu_count,
             "strategy_cpus": sandbox.spec.cpus,
             "strategy_memory_bytes": sandbox.spec.memory_bytes,
-            "batch_validate_max_concurrency": rolling.batch_validate_max_concurrency,
+            "batch_validate_max_concurrency": config.batch_validate_max_concurrency,
             "used_before_this_attempt": BudgetUsed().to_record(),
         },
     }
     # The blocks LLMResearchDeveloper._session_facts adds beside the shared
     # projection: the fixed workspace/boundary index.
     blocks = session_fact_blocks(Path("/nonexistent/prompt-preview-workspace"))
-    if rolling.workspace_reference:
+    if config.workspace_reference:
         blocks["workspace"]["refs"] = "refs/"  # type: ignore[index]
     facts: dict[str, object] = {
         **build_experiment_facts(
@@ -203,7 +203,7 @@ def _research_prompt(
     _mark_runtime_only(facts)
     return build_system_prompt(
         experiment_facts=facts,
-        exploration_directive=rolling.research_directive,
+        exploration_directive=config.research_directive,
         session_directive=directive,
     )
 

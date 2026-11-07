@@ -62,7 +62,9 @@ def _analysis(*segments):
     """A sidecar of ``segments``, each ``(days, strategy, benchmark, size)``
     with ``value`` as a fifth item where the test names one; a segment that
     names none gets a value leg of independent noise the book does not load
-    on, so the three-factor fit is defined."""
+    on, so the three-factor fit is defined. Its random baseline is zero, so
+    the active series is the strategy's own (``_with_baselines`` sets
+    another)."""
 
     def legs(segment):
         if len(segment) == 5:
@@ -81,6 +83,7 @@ def _analysis(*segments):
         "benchmark_daily": [[row[0], float(row[2])] for row in rows],
         "size_factor_daily": [[row[0], float(row[3])] for row in rows],
         "value_factor_daily": [[row[0], float(row[4])] for row in rows],
+        "baseline_daily": [[row[0], 0.0] for row in rows],
     }
 
 
@@ -146,7 +149,7 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
     )
     coefficients, residual_ss, _, _ = np.linalg.lstsq(design, strategy, rcond=None)
 
-    assert stats["series"] == "absolute" and stats["days"] == len(strategy)
+    assert stats["series"] == "active" and stats["days"] == len(strategy)
     assert stats["plain_excess"] == pytest.approx(strategy.mean() * TRADING_DAYS_PER_YEAR, rel=1e-12)
     assert stats["plain_excess"] == window_plain_excess(analysis)
     assert stats["tracking_error"] == pytest.approx(strategy.std(ddof=1) * SCALE, rel=1e-12)
@@ -167,7 +170,7 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
 
 
 def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
-    """The one statistic the sealed gate grades: OLS of a daily series on the
+    """The one statistic the validation record is read with: OLS of a daily series on the
     three legs, its intercept annualised over its residual standard deviation
     annualised, with the threshold z(1 - alpha) / sqrt(years) beside it."""
 
@@ -213,8 +216,9 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
         "benchmark_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(market)],
         "size_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(size)],
         "value_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(value)],
+        "baseline_daily": [[f"d{index:05d}", 0.0] for index in range(len(active))],
     }
-    assert verdict.residual_reading(analysis, alpha=0.05) == {"series": "absolute", **reading, "dropped_days": 0}
+    assert verdict.residual_reading(analysis, alpha=0.05) == {"series": "active", **reading, "dropped_days": 0}
     # A non-finite day is dropped and counted, never read as a figure: a NaN
     # does not pass for a series the legs explain exactly.
     holed = {**analysis, "strategy_daily": [[day, math.nan if index == 7 else value] for index, (day, value) in enumerate(analysis["strategy_daily"])]}
@@ -274,7 +278,7 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
     assert _forward(analysis, turnover=breakeven * 2, cost_stress_multiplier=1.0)[
         "excess_at_cost_stress"
     ] == pytest.approx(base["plain_excess"])
-    # The sealed gate's statistic over the forward months, for the pool.
+    # The record's statistic over the forward months, for the pool.
     assert base["residual_reading"] == verdict.residual_reading(
         _with_baselines(analysis, np.zeros(len(FORWARD_DAYS))), start=FORWARD_START, end=FORWARD_END, alpha=0.05
     )
@@ -288,35 +292,16 @@ def _with_baselines(analysis, baselines):
     }
 
 
-def test_a_zero_random_baseline_reproduces_the_ungraded_figures_exactly():
-    """Grading subtracts the random baseline and changes nothing else: against a random baseline of
-    zeros every statistic, bound and reason is the float it was without one,
-    and only ``series`` and the random baseline's own reading tell the two records
-    apart: a book without a random baseline has no plain selection, one against a zero
-    random baseline selects exactly its own return. A forward slice reads the same with
-    or without it."""
+def test_every_reading_refuses_a_replay_without_a_random_baseline():
+    """Every reading grades the active series, so a sidecar that carries no random
+    baseline has nothing to read and is refused, never read as the strategy's own.
+    Against a zero random baseline the holder's random baseline earns nothing and the
+    plain selection is the account's own return."""
     rng = np.random.default_rng(101)
-    research = _weekdays("20210701", "20250630")
-    _analysis(_segment(research, 0.16, rng))  # draws the research years first: the stream the forward slice reads
     forward = _analysis(
         _segment(FORWARD_DAYS, 0.10, rng), _segment(HELDOUT_DAYS, 0.02, rng, te=0.05)
     )
-
-    panel_readings = ("baseline_return", "plain_selection")
-
-    def without_series(block):
-        kept = {key: value for key, value in block.items() if key != "series"}
-        if "residual_reading" in kept:
-            kept["residual_reading"] = {
-                key: value for key, value in kept["residual_reading"].items() if key != "series"
-            }
-        if "raw_readings" in kept:
-            kept["raw_readings"] = {
-                key: value
-                for key, value in kept["raw_readings"].items()
-                if key not in panel_readings
-            }
-        return kept
+    bare = {key: value for key, value in forward.items() if key != "baseline_daily"}
 
     def heldout(sidecar):
         return _heldout(
@@ -335,19 +320,17 @@ def test_a_zero_random_baseline_reproduces_the_ungraded_figures_exactly():
         }
         return verdict.forward_slice(sidecar, **_ruled(arguments))
 
-    for read in (heldout, forward_slice, verdict.graded_statistics):
-        sidecar = forward
-        zeros = _with_baselines(sidecar, np.zeros(len(sidecar["strategy_daily"])))
-        own, graded = read(sidecar), read(zeros)
-        assert (own["series"], graded["series"]) == ("absolute", "active")
-        assert without_series(own) == without_series(graded)
-        if "raw_readings" in own:
-            assert {key: own["raw_readings"][key] for key in panel_readings} == {
-                "baseline_return": None,
-                "plain_selection": None,
-            }
-            assert graded["raw_readings"]["baseline_return"] == 0.0
-            assert graded["raw_readings"]["plain_selection"] == own["raw_readings"]["strategy_return"]
+    def residual(sidecar):
+        return verdict.residual_reading(sidecar, alpha=0.05)
+
+    for read in (heldout, forward_slice, verdict.graded_statistics, residual):
+        with pytest.raises(ValueError, match="no random baseline"):
+            read(bare)
+        assert read(forward)["series"] == "active"
+    for read in (heldout, forward_slice):
+        raw = read(forward)["raw_readings"]
+        assert raw["baseline_return"] == 0.0
+        assert raw["plain_selection"] == raw["strategy_return"]
 
 
 def test_the_graded_series_is_the_strategy_minus_its_random_baseline():
@@ -372,7 +355,7 @@ def test_the_graded_series_is_the_strategy_minus_its_random_baseline():
         assert graded[key] == pytest.approx(verdict.graded_statistics(alone)[key], rel=1e-9)
 
     registered = verdict.registered_mandate(book, rules=AcceptanceRules(**REQUIRED_RULES))
-    own = verdict.graded_statistics({**book, "baseline_daily": []})
+    own = verdict.graded_statistics(_analysis((days, active + baselines, benchmark, size)))
     assert registered["mandate"]["market_beta"] == pytest.approx(own["market_beta"], rel=1e-12)
     assert registered["mandate"]["market_beta"] == pytest.approx(0.95, abs=0.03)
     # The mandate's tracking error is the residual one, below the series' own.
@@ -436,7 +419,7 @@ def _summary(*, slippage_bps=5.0, turnover=40.0):
     return {"turnover": turnover, "cost_sensitivity": {"slippage_bps": slippage_bps}}
 
 
-def test_the_graduations_cost_stress_is_one_formula_for_a_row_and_a_forward_slice():
+def test_the_cost_stress_is_one_formula_for_a_row_and_a_forward_slice():
     """The forward slice's F5 reading, the registration check's and a research row's
     report are the same function of the graded series, the turnover and the
     slippage."""
@@ -500,8 +483,7 @@ def _intercept(analysis, start="", end=""):
     """The annualised intercept of the graded series on the three factor
     legs: what a regressed grade would have read."""
 
-    graded, _series = verdict._graded(analysis)
-    rows, _dropped = verdict._regression_rows(graded, start, end)
+    rows, _dropped = verdict._regression_rows(verdict._graded(analysis), start, end)
     return float(factor_ols(rows[:, 0], rows[:, 1:])[0][0]) * TRADING_DAYS_PER_YEAR
 
 
@@ -672,7 +654,7 @@ def test_f2_reads_the_book_and_its_seed_replicates_as_one_daily_series():
     assert agreed["lower_bound"] > 0
 
     # A replicate without a random baseline, or one that measured other days.
-    with pytest.raises(ValueError, match="another series"):
+    with pytest.raises(ValueError, match="no random baseline"):
         _forward(book, seed_replicates=[replicate({**others[0][1], "baseline_daily": []})])
     short = _selection_book(rng, 0.10, days=FORWARD_DAYS[:-1])
     with pytest.raises(ValueError, match="measured other days than the registered book"):
@@ -697,9 +679,9 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
         stages.setdefault(condition.stage, []).append(condition)
     assert list(stages) == ["nomination", "registration", "mandate", "seeds"]
     assert {condition.requires for condition in verdict.CONDITIONS} == {"", "tracking_error_cap"}
+    # Replicates are optional: the only seed condition is a named one's validity.
     assert {condition.reason for condition in stages["seeds"]} == {
         "registration_seed_replicate_invalid",
-        "registration_too_few_seed_replicates",
     }
     retired = {"sealed", "validity", "strategy_error", "graduat"}
     assert not any(word in reason for reason in reasons for word in retired)

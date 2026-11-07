@@ -140,7 +140,7 @@ def test_a_new_book_records_the_content_address_of_the_artifact_it_trades(tmp_pa
 
 
 def test_book_ids_are_single_path_segments():
-    assert validate_book_id("experiment-graduated_2026.09") == "experiment-graduated_2026.09"
+    assert validate_book_id("experiment-registered_2026.09") == "experiment-registered_2026.09"
     for bad in ("", ".hidden", "a/b", "..", "a..b", "x" * 97):
         with pytest.raises(ValueError):
             validate_book_id(bad)
@@ -166,7 +166,7 @@ def test_a_registered_strategy_opens_its_book_once_and_an_experiment_without_one
     assert (record["experiment_id"], record["artifact_id"], record["note"]) == (
         "exp", "strategy_research_abc", "registered"
     )
-    assert record["candidate_source"] == "registered"
+    assert "candidate_source" not in record
     opened = _book_files(root / "exp")
     assert open_registered_book(tmp_path, experiment) == "exp"  # an open book is left as it is
     assert _book_files(root / "exp") == opened
@@ -246,7 +246,7 @@ def _kill(root: Path, day: str = "20260105") -> None:
 def test_a_new_book_pins_its_verdict_rules(tmp_path: Path):
     book = _registered_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
-    assert record["schema_version"] == 3 and record["candidate_source"] == book.candidate_source == "registered"
+    assert record["schema_version"] == 4
     rules = record["verdict_rules"]
     assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
     assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
@@ -383,11 +383,15 @@ def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
 
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
+    """Schema 3 recorded a candidate source every book shared; such a book is
+    refused, not read without it."""
     book = _registered_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
-    (book.root / BOOK_NAME).write_text(json.dumps({**record, "schema_version": 1}), encoding="utf-8")
-    with pytest.raises(ValueError, match="unsupported Paper account schema 1"):
-        load_book(book.root)
+    for older in (1, 3):
+        stale = {**record, "schema_version": older, "candidate_source": "registered"}
+        (book.root / BOOK_NAME).write_text(json.dumps(stale), encoding="utf-8")
+        with pytest.raises(ValueError, match=f"unsupported Paper account schema {older}"):
+            load_book(book.root)
 
 
 def test_every_book_decides_under_the_paper_decision_clock(tmp_path: Path):

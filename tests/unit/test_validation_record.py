@@ -184,7 +184,7 @@ def test_the_ledger_records_each_step_once_in_order(tmp_path: Path) -> None:
             head=HEAD,
             steps=steps,
             step=step,
-            candidate={"step_id": f"node_{fingerprint}", "revision_id": "rev", "fingerprint": fingerprint, "seed_replicates": [], "deterministic": False},
+            candidate={"step_id": f"node_{fingerprint}", "revision_id": "rev", "fingerprint": fingerprint, "seed_replicates": []},
             replay={"start": steps.start, "end": steps.horizon_after(step), "result_ref": "result.json"},
             entry=step_entry(replay, analysis, start=window[0], end=window[1]),
             registration={"passed": True, "reasons": []},

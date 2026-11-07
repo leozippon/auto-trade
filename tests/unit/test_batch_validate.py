@@ -481,7 +481,8 @@ class _Session:
                     "name": name,
                     "hypothesis": f"{name} earns a positive active excess",
                     "path": f"candidates/{name}",
-                    "control": name in controls,
+                    # Left out for a candidate, as a session may.
+                    **({"control": True} if name in controls else {}),
                 }
                 for name in names
             ],
@@ -694,7 +695,7 @@ class BatchValidateSpanTest(unittest.TestCase):
 
 class RegistrationTest(unittest.TestCase):
     """``test`` reads the Pipeline's own registration over the session's Steps
-    (its refusal is pinned in test_rolling_validation); here, what registers."""
+    (its refusal is pinned in test_experiment_validation); here, what registers."""
 
     def test_a_sub_span_node_does_not_register_and_a_lone_full_span_one_does(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -733,7 +734,8 @@ class RegistrationTest(unittest.TestCase):
 
 
 class ControlsTest(unittest.TestCase):
-    """A registered control is recorded and never registers for a test."""
+    """A control is recorded and never registers for a test; a candidate
+    that leaves control out is recorded as no control."""
 
     def test_a_control_is_recorded_and_can_never_be_nominated(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -760,26 +762,24 @@ class ControlsTest(unittest.TestCase):
             # Rows name a node by the short handle the tools accept.
             self.assertEqual(cand["handle"], cand["result_name"])
 
-    def test_a_registration_without_its_control_flag_is_refused_before_anything_runs(
+    def test_control_is_optional_and_a_non_boolean_one_is_refused_before_anything_runs(
         self,
     ) -> None:
         schema = ValidateTool.spec.input_schema
         # Offline screens are no longer declared: nothing in the schema asks.
         self.assertNotIn("offline_trials", schema["properties"])
         self.assertEqual(schema["required"], ["candidates"])
-        self.assertIn("control", schema["properties"]["candidates"]["items"]["required"])
+        self.assertEqual(
+            schema["properties"]["candidates"]["items"]["required"], ["name", "hypothesis", "path"]
+        )
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("5"))
             candidate = {"name": "a", "hypothesis": "h", "path": "candidates/a"}
-            for arguments in (
-                {"candidates": [candidate]},
-                {"candidates": [{**candidate, "control": "no"}]},
-            ):
-                with self.assertRaises(ToolError) as caught:
-                    session.batch.invoke(arguments)
-                self.assertEqual(caught.exception.error_type, "schema_error")
-                self.assertEqual(caught.exception.blocked_target, "control")
+            with self.assertRaises(ToolError) as caught:
+                session.batch.invoke({"candidates": [{**candidate, "control": "no"}]})
+            self.assertEqual(caught.exception.error_type, "schema_error")
+            self.assertEqual(caught.exception.blocked_target, "control")
             self.assertEqual(session.evaluator.calls, 0)
 
 
@@ -1268,15 +1268,15 @@ class BatchValidateRunTest(unittest.TestCase):
                     self.assertNotIn(word, flat)
                 self.assertNotIn("vs_parent", row)
 
-    def test_every_row_reads_the_holders_money_and_the_graduations_cost_stress(
+    def test_every_row_reads_the_holders_money_and_the_forward_readings_cost_stress(
         self,
     ) -> None:
         """Two sessions quoted 0.148 and 1.608 as one node's "cost stress": the
-        graduation's active reading and the raw cumulative excess. Every row
-        carries the one both gates judge, computed by the host: the active
-        excess at the experiment's multiplier. The holder's readings beside it are
-        the structure a forward slice carries, plain selection included, so
-        the row reads over research what the graduation reads forward."""
+        active reading and the raw cumulative excess. Every row carries the one
+        the forward reading reports, computed by the host: the active excess at
+        the experiment's multiplier. The holder's readings beside it are the
+        structure a forward slice carries, plain selection included, so the row
+        reads over research what the forward reading reads forward."""
         with TemporaryDirectory() as tmp:
             session = _Session(
                 Path(tmp), acceptance_rules={"max_drawdown": 0.25, "cost_stress_multiplier": 3.0}

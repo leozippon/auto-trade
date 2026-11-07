@@ -137,9 +137,8 @@ def _regression_rows(
     """``(strategy, market, size, value)`` rows of every day of the slice that
     carries all three legs (``style.FACTOR_SERIES``), joined exactly as
     ``style._factor_regression`` joins them, and how many such days were
-    dropped for a non-finite value: a NaN is never read as a figure. A
-    sidecar written before the value leg existed carries none and yields no
-    row."""
+    dropped for a non-finite value: a NaN is never read as a figure. A day
+    missing a leg yields no row."""
 
     legs = [dict(_series_pairs(analysis.get(series))) for _name, series in FACTOR_SERIES]
     rows = np.asarray(
@@ -229,15 +228,14 @@ def residual_statistics(
 def residual_reading(
     analysis: Mapping[str, object], *, start: str = "", end: str = "", alpha: float
 ) -> dict[str, object]:
-    """:func:`residual_statistics` of one sidecar's graded series over a
-    slice (empty bounds take the whole sidecar), with ``series`` naming it --
-    the active series where the sidecar carries a random baseline -- and
-    ``dropped_days``, the days left out for a non-finite value.
-    ``ValueError`` where it cannot be read (see :func:`residual_statistics`)."""
+    """:func:`residual_statistics` of one sidecar's active series over a
+    slice (empty bounds take the whole sidecar), with ``series`` naming it
+    and ``dropped_days``, the days left out for a non-finite value.
+    ``ValueError`` where it cannot be read (see :func:`residual_statistics`
+    and :func:`_graded`)."""
 
-    graded, series = _graded(analysis)
-    rows, dropped = _regression_rows(graded, start, end)
-    return {"series": series, **residual_statistics(*rows.T, alpha=alpha), "dropped_days": dropped}
+    rows, dropped = _regression_rows(_graded(analysis), start, end)
+    return {"series": GRADED_SERIES, **residual_statistics(*rows.T, alpha=alpha), "dropped_days": dropped}
 
 
 def _reported_residual(
@@ -336,11 +334,19 @@ def _measured(
     }, daily
 
 
-def _graded(analysis: Mapping[str, object]) -> tuple[Mapping[str, object], str]:
-    """The analysis of the series a reading grades, and that series' name."""
+# The series every reading grades, named in each record: the strategy's daily
+# return minus its random-baseline composite (``style.active_analysis``).
+GRADED_SERIES = "active"
+
+
+def _graded(analysis: Mapping[str, object]) -> Mapping[str, object]:
+    """The analysis of the active series a reading grades. A sidecar without a
+    random baseline has none, and raises ``ValueError``."""
 
     active = active_analysis(analysis)
-    return (analysis, "absolute") if active is None else (active, "active")
+    if active is None:
+        raise ValueError("the replay carries no random baseline, so its active series cannot be read")
+    return active
 
 
 def graded_statistics(
@@ -348,9 +354,8 @@ def graded_statistics(
 ) -> dict[str, object]:
     """What every gate reads of one span's graded series.
 
-    The graded series is the active one when the sidecar carries a zero-skill
-    random baseline, else the strategy's own, and ``series`` names which.
-    ``plain_excess`` is its annualised mean, ``tracking_error`` its
+    The graded series is the active one (:func:`_graded`), and ``series``
+    names it. ``plain_excess`` is its annualised mean, ``tracking_error`` its
     annualised standard deviation and ``information_ratio`` their ratio
     (``None`` on a flat series), as ``stats.plain_statistics`` reads them;
     ``market_beta``, ``size_beta`` and ``value_beta`` are its loadings
@@ -359,8 +364,7 @@ def graded_statistics(
 
     start = _date(start, "start") if start else ""
     end = _date(end, "end") if end else ""
-    graded, series = _graded(analysis)
-    return {**_measured(graded, start, end)[0], "series": series}
+    return {**_measured(_graded(analysis), start, end)[0], "series": GRADED_SERIES}
 
 
 def _mandate(analysis: Mapping[str, object], start: str, end: str) -> dict[str, object]:
@@ -621,18 +625,13 @@ def forward_lower_bound(
     bound alone (:func:`bootstrap_lower_bound`, seeded by ``seed_key``). It is
     not ``raw_readings.plain_selection``, which compounds the book and the
     random baseline each over the span before taking their difference. A member whose
-    replay graded another series (it carries no random baseline) or measured other days
-    than the book's raises ``ValueError``: a seed is never dropped from the
-    mean, nor averaged on another footing.
+    replay carries no random baseline or measured other days than the book's
+    raises ``ValueError``: a seed is never dropped from the mean, nor averaged
+    on another footing.
     """
 
     start, end = _span(start, end)
-    graded = [_graded(analysis) for analysis in analyses]
-    if any(series != graded[0][1] for _analysis, series in graded[1:]):
-        raise ValueError(
-            f"a seed replicate's replay graded another series than the registered book's over {start}..{end}"
-        )
-    members = [dict(_strategy_returns(analysis, start, end)) for analysis, _series in graded]
+    members = [dict(_strategy_returns(_graded(analysis), start, end)) for analysis in analyses]
     dates = list(members[0])
     if any(list(member) != dates for member in members[1:]):
         raise ValueError(
@@ -665,7 +664,6 @@ class ConditionReason(StrEnum):
     REGISTRATION_TRACKING_ERROR_ABOVE_CAP = "registration_tracking_error_above_cap"
     REGISTRATION_BETA_OUTSIDE_BAND = "registration_beta_outside_band"
     REGISTRATION_SEED_REPLICATE_INVALID = "registration_seed_replicate_invalid"
-    REGISTRATION_TOO_FEW_SEED_REPLICATES = "registration_too_few_seed_replicates"
     # Not a condition's: what a registration that was never read off a
     # nominee records. The session read a node that is not one of its Steps;
     # the nominee's statistics could not be measured.
@@ -736,11 +734,9 @@ CONDITIONS: tuple[Condition, ...] = (
     # The tracking mandate over the nominee's span, when the rules set one.
     Condition(ConditionStage.MANDATE, ConditionReason.REGISTRATION_TRACKING_ERROR_ABOVE_CAP, _within_cap, requires=_CAP),
     Condition(ConditionStage.MANDATE, ConditionReason.REGISTRATION_BETA_OUTSIDE_BAND, _within_band, requires=_CAP),
-    # The nominee's seed replicates (``experiment._seed_replicates``): a named
-    # replicate that is not one, and a nominee that trains a model and names
-    # none, unless the nomination declared its package deterministic.
+    # The nominee's seed replicates (``experiment._seed_replicates``), which
+    # are optional: a named replicate that is not one.
     Condition(ConditionStage.SEEDS, ConditionReason.REGISTRATION_SEED_REPLICATE_INVALID, lambda m, t: not _refused_replicate(m)),
-    Condition(ConditionStage.SEEDS, ConditionReason.REGISTRATION_TOO_FEW_SEED_REPLICATES, lambda m, t: bool(m["replicates"]) or not m["trains_a_model"] or m.get("deterministic", False)),
 )
 
 
@@ -876,7 +872,7 @@ def forward_slice(
         raise ValueError(
             f"round_trips must be a non-negative integer, got {round_trips!r}"
         )
-    graded, series = _graded(analysis)
+    graded = _graded(analysis)
     statistics, _daily = _measured(graded, start, end)
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
@@ -895,7 +891,7 @@ def forward_slice(
     return {
         "start": start,
         "end": end,
-        "series": series,
+        "series": GRADED_SERIES,
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),
@@ -945,7 +941,7 @@ def heldout_slice(
 
     start, end = _span(start, end)
     mean_gross = _non_negative(mean_gross, "mean_gross")
-    graded, series = _graded(analysis)
+    graded = _graded(analysis)
     statistics, _daily = _measured(graded, start, end)
     drawdown = _max_slice_drawdown(analysis, start, end)
     active_drawdown = _max_slice_drawdown(graded, start, end)
@@ -956,7 +952,7 @@ def heldout_slice(
     return {
         "start": start,
         "end": end,
-        "series": series,
+        "series": GRADED_SERIES,
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),

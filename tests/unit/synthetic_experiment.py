@@ -281,6 +281,10 @@ def make_experiment(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 "include_events": False,
                 "include_text": False,
                 "include_intraday": False,
+                # No prebuilt view cache: every view is built from the raw
+                # calendar, reaching two years back.
+                "pit_views_seed": "",
+                "window_months": 24,
                 **REQUIRED_RULES,
                 **GEOMETRY,
                 **params,

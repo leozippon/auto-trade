@@ -12,7 +12,7 @@ All control state lives under ``experiments/<id>/hitl/`` as single-writer JSON
 files (atomic replace, no locking needed):
 
   params.json    creation parameters (written once by the creator; rebuilt into
-                 RollingExperimentConfig + backends deterministically on every start)
+                 ExperimentConfig + backends deterministically on every start)
   control.json   written by the controller (web backend / researcher)
   status.json    written only by the worker (heartbeat, position, live trace)
   schedule.json  written by the worker at startup (the research session and the forward replay)

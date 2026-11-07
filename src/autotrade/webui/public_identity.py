@@ -17,11 +17,7 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.common.records import HOST_PATH_MARKER, read_json_object
-from autotrade.environment.identity import (
-    LEGACY_EXPERIMENT_MESSAGE,
-    AgentRefStore,
-    LegacyExperimentError,
-)
+from autotrade.environment.identity import AgentRefStore, CorruptExperimentError
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, SCHEDULE_NAME
 from autotrade.pipelines.ledger import SessionKind
 
@@ -90,7 +86,8 @@ class PublicIdentity:
         )
         store = AgentRefStore.existing(self.experiment_dir)
         if store is None:
-            raise LegacyExperimentError(LEGACY_EXPERIMENT_MESSAGE)
+            # The console creates the store with the experiment.
+            raise CorruptExperimentError("experiment has no Agent reference store; it is corrupt")
         self.store = store
         self._text_replacements: dict[str, str] = {}
         schedule = read_json_object(self.experiment_dir / HITL_DIR_NAME / SCHEDULE_NAME, missing_ok=True)

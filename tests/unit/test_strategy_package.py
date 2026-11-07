@@ -31,7 +31,7 @@ from autotrade.environment.strategy_loader import (
 )
 from autotrade.environment.tools import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
-from autotrade.pipelines.config import rolling_default
+from autotrade.pipelines.config import experiment_default
 from autotrade.pipelines.experiment import (
     _MAX_DEADLINE_OVERRIDE_MINUTES,
     _session_budgets,
@@ -403,29 +403,29 @@ def test_budgets_come_from_one_source_each():
     assert (executor.timeout_seconds, executor.fit_timeout_seconds) == (360.0, 3600.0)
     # The pipeline knob defaults to the executor's fit wall clock and the
     # WebUI defaults read the pipeline dataclass.
-    assert rolling_default("strategy_fit_timeout_seconds") == executor.fit_timeout_seconds
+    assert experiment_default("strategy_fit_timeout_seconds") == executor.fit_timeout_seconds
     strategy_config = strategy_sandbox_from_spec(
-        None, fit_timeout_seconds=rolling_default("strategy_fit_timeout_seconds")
+        None, fit_timeout_seconds=experiment_default("strategy_fit_timeout_seconds")
     )
     assert strategy_config == executor
     for name in ("max_research_minutes", "max_llm_calls", "max_null_controls", "max_api_spend_usd"):
-        assert WEB_CREATE_DEFAULTS[name] == rolling_default(name)
+        assert WEB_CREATE_DEFAULTS[name] == experiment_default(name)
     assert (
-        rolling_default("max_research_minutes"),
-        rolling_default("max_llm_calls"),
-        rolling_default("max_null_controls"),
+        experiment_default("max_research_minutes"),
+        experiment_default("max_llm_calls"),
+        experiment_default("max_null_controls"),
     ) == (2400, 6400, 12)
-    assert rolling_default("max_api_spend_usd") == 50.0
-    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * rolling_default("max_research_minutes") == 4800
+    assert experiment_default("max_api_spend_usd") == 50.0
+    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * experiment_default("max_research_minutes") == 4800
 
     config = SimpleNamespace(
-        max_llm_calls=rolling_default("max_llm_calls"),
-        max_api_spend_usd=rolling_default("max_api_spend_usd"),
-        max_research_minutes=rolling_default("max_research_minutes"),
-        deadline_grace_minutes=rolling_default("deadline_grace_minutes"),
+        max_llm_calls=experiment_default("max_llm_calls"),
+        max_api_spend_usd=experiment_default("max_api_spend_usd"),
+        max_research_minutes=experiment_default("max_research_minutes"),
+        deadline_grace_minutes=experiment_default("deadline_grace_minutes"),
     )
     budgets = _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60})
-    grace = rolling_default("deadline_grace_minutes") * 60.0
+    grace = experiment_default("deadline_grace_minutes") * 60.0
     assert budgets["deadline_seconds"] == 4800 * 60.0 + grace
     with pytest.raises(ValueError, match="cannot exceed 4800 minutes"):
         _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60 + 1})

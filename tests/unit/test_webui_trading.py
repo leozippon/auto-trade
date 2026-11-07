@@ -105,7 +105,7 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
     payload = trading.book_payload(tmp_path, BOOK)
     assert payload["state"] == "ok"
     assert payload["book"] == {
-        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "registered",
+        "experiment_id": "exp", "artifact_id": "art",
         "note": "参考簿（观察中）", "initial_cash": 100_000.0,
     }
     assert (payload["start_date"], payload["settled_through"]) == ("20260105", "20260105")
@@ -274,11 +274,11 @@ def test_a_book_carries_the_source_curve_the_console_projects_for_that_result(tm
     assert source["benchmark"]["final"] == console["benchmark"]["final"]
     # The overview card draws the same chained line the page does.
     assert trading.books_payload(tmp_path)["books"][0]["source"] == source
-    # A book created before the copy existed has no history, which is not an
-    # error: the page says so in one label instead of a red banner.
+    # Every book copies its history at creation, so a missing copy is
+    # reported like a damaged one.
     (root / SOURCE_HISTORY_NAME).unlink()
     plain = trading.performance_payload(tmp_path, BOOK)
-    assert plain["source"] is None and plain["source_error"] is None
+    assert plain["source"] is None and plain["source_error"] == f"{SOURCE_HISTORY_NAME} is missing"
     # A damaged or newer copy is reported rather than drawn.
     (root / SOURCE_HISTORY_NAME).write_text('{"schema_version": 99}', encoding="utf-8")
     assert trading.performance_payload(tmp_path, BOOK)["source_error"] == (
@@ -490,7 +490,7 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     assert (alpha["start_date"], alpha["initial_cash"], alpha["state"]) == ("20260105", 100_000.0, "ok")
     # The card names where the candidate came from and draws the book's own
     # curve; the maximum drawdown the day count gates belongs to the book page.
-    assert alpha["candidate_source"] == "registered" and "max_drawdown" not in alpha
+    assert "candidate_source" not in alpha and "max_drawdown" not in alpha
     # 持仓 is the one figure every settled book has: the lines its own 当前持仓
     # panel lists, absent rather than zero before the first snapshot.
     assert alpha["position_count"] == len(snapshot["positions"])
@@ -1196,8 +1196,8 @@ def test_the_book_curve_continues_its_source_experiment_on_one_date_axis():
     assert "singleSeriesBarChart" not in trading_section
     assert "/api/experiments/" not in trading_section
     assert "payload.account" in _js_top_level(script, "function equityChart(")
-    # A book with no copied history says so in one short label.
-    assert "无源实验历史" in _js_top_level(script, "function paperEquityPanel(")
+    # A book whose copied history cannot be read says so in one short label.
+    assert "源实验历史读取失败" in _js_top_level(script, "function paperEquityPanel(")
 
 
 def test_the_page_draws_a_figure_only_where_the_book_measured_one():

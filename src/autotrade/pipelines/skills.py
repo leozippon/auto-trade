@@ -527,13 +527,12 @@ def ensure_operating_memory_snapshot(
     mode: str,
     repo_root: str | Path | None = None,
 ) -> dict[str, object]:
-    """The snapshot, taken now if this experiment predates snapshotting.
+    """The snapshot, taken now if this experiment has none yet.
 
-    Experiments created before this existed have no snapshot and must keep
-    running: the first session that needs one resolves the library exactly as
-    the old behaviour did and freezes the result, so it happens once rather
-    than at every session, and the manifest says the snapshot came from a
-    session.
+    An experiment not created through the console has no snapshot: the first
+    session that needs one resolves the library and freezes the result here,
+    once rather than at every session, and the manifest says the snapshot came
+    from a session.
     """
 
     existing = read_operating_memory_snapshot(experiment_dir)

@@ -11,13 +11,13 @@ from autotrade.environment.artifacts import ArtifactRevision, RegisteredArtifact
 
 from .config import (
     EvaluationResult,
-    RollingExperimentConfig,
+    ExperimentConfig,
     StepResult,
     StrategyExperimentConfig,
 )
 from .experiment import (
     DailyStrategyPipeline,
-    RollingExperimentPipeline,
+    ExperimentPipeline,
 )
 from .ledger import ExperimentLedger
 from .pit_backend import (
@@ -28,11 +28,11 @@ __all__ = [
     "ArtifactRevision",
     "DailyStrategyPipeline",
     "EvaluationResult",
+    "ExperimentConfig",
     "ExperimentLedger",
+    "ExperimentPipeline",
     "RegisteredArtifact",
     "ResearchPITSnapshotProvider",
-    "RollingExperimentConfig",
-    "RollingExperimentPipeline",
     "StepResult",
     "StrategyExperimentConfig",
 ]

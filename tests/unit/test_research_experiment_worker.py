@@ -92,8 +92,8 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     options = load_worker_options(experiment, repo_root=repo)
     measured: dict[str, float] = {}
     real_research, real_forward = (
-        experiment_module.RollingExperimentPipeline.run_research_session,
-        experiment_module.RollingExperimentPipeline.run_forward,
+        experiment_module.ExperimentPipeline.run_research_session,
+        experiment_module.ExperimentPipeline.run_forward,
     )
 
     def research(self, **kwargs):
@@ -108,12 +108,12 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
         measured["forward"] = peak.growth
         return record
 
-    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", research)
-    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_forward", forward)
+    monkeypatch.setattr(experiment_module.ExperimentPipeline, "run_research_session", research)
+    monkeypatch.setattr(experiment_module.ExperimentPipeline, "run_forward", forward)
 
     result = run_local_interactive_worker(options)
 
-    records = ExperimentLedger(options.rolling.ledger_path).read()
+    records = ExperimentLedger(options.experiment.ledger_path).read()
     assert [row["record_type"] for row in records] == [*(["test_step"] * 4), "research_session", "forward"]
     *tests, research_row, replay = records
     # The baseline tests nothing: its budget ends and the host registers its
@@ -197,11 +197,11 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     assert set(measured) == {"research", "forward"}
 
     # A resume after the readout republishes the terminal status and runs nothing.
-    before = ExperimentLedger(options.rolling.ledger_path).read()
+    before = ExperimentLedger(options.experiment.ledger_path).read()
     synthetic_provider.requests.clear()
     again = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert again["verdict"] == verdict
-    assert ExperimentLedger(options.rolling.ledger_path).read() == before
+    assert ExperimentLedger(options.experiment.ledger_path).read() == before
     assert synthetic_provider.requests == []
 
 
@@ -209,7 +209,7 @@ def test_a_crashed_research_attempt_is_run_again_by_the_next_worker_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     repo, experiment = make_experiment(tmp_path, session_max_attempts=1)
-    real = experiment_module.RollingExperimentPipeline.run_research_session
+    real = experiment_module.ExperimentPipeline.run_research_session
     calls: list[int] = []
 
     def crash_once(self, **kwargs):
@@ -218,7 +218,7 @@ def test_a_crashed_research_attempt_is_run_again_by_the_next_worker_start(
             raise RuntimeError("session container died")
         return real(self, **kwargs)
 
-    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", crash_once)
+    monkeypatch.setattr(experiment_module.ExperimentPipeline, "run_research_session", crash_once)
     with pytest.raises(RuntimeError, match="session container died"):
         run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
@@ -234,7 +234,7 @@ def test_a_worker_stopped_after_the_registration_resumes_with_the_forward_replay
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     repo, experiment = make_experiment(tmp_path, session_max_attempts=1)
-    real_forward = experiment_module.RollingExperimentPipeline.run_forward
+    real_forward = experiment_module.ExperimentPipeline.run_forward
     state = {"forward_calls": 0}
 
     def forward_fails_once(self, **kwargs):
@@ -243,7 +243,7 @@ def test_a_worker_stopped_after_the_registration_resumes_with_the_forward_replay
             raise OSError("replay host disk vanished")
         return real_forward(self, **kwargs)
 
-    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_forward", forward_fails_once)
+    monkeypatch.setattr(experiment_module.ExperimentPipeline, "run_forward", forward_fails_once)
     with pytest.raises(OSError):
         run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     ledger = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl")
@@ -252,12 +252,12 @@ def test_a_worker_stopped_after_the_registration_resumes_with_the_forward_replay
     # A failed run may resume: its cache stays until the verdict.
     assert (experiment / "pit_views" / "provider.json").is_file()
 
-    research = experiment_module.RollingExperimentPipeline.run_research_session
+    research = experiment_module.ExperimentPipeline.run_research_session
 
     def no_more_research(self, **kwargs):
         raise AssertionError("the research session re-ran after the registration")
 
-    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", no_more_research)
+    monkeypatch.setattr(experiment_module.ExperimentPipeline, "run_research_session", no_more_research)
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert state["forward_calls"] == 2
     assert result["verdict"]["status"] == "registered_with_record"
@@ -272,7 +272,7 @@ def test_an_experiment_stopped_before_its_verdict_keeps_its_pit_views(
 
     repo, experiment = make_experiment(tmp_path)
     control_path = experiment / "hitl" / "control.json"
-    real = experiment_module.RollingExperimentPipeline.run_research_session
+    real = experiment_module.ExperimentPipeline.run_research_session
 
     def stop_after_research(self, **kwargs):
         record = real(self, **kwargs)
@@ -281,7 +281,7 @@ def test_an_experiment_stopped_before_its_verdict_keeps_its_pit_views(
         write_control(control_path, control)
         return record
 
-    monkeypatch.setattr(experiment_module.RollingExperimentPipeline, "run_research_session", stop_after_research)
+    monkeypatch.setattr(experiment_module.ExperimentPipeline, "run_research_session", stop_after_research)
     result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert result["status"] == "stop"
     rows = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
@@ -327,7 +327,7 @@ def test_a_failed_replay_attempt_is_recorded_and_retried_from_forward_start(
     result = run_local_interactive_worker(options)
 
     assert spans == [("20240701", RELEASE_END)] * 2
-    rows = ExperimentLedger(options.rolling.ledger_path).read()
+    rows = ExperimentLedger(options.experiment.ledger_path).read()
     failed = [row for row in rows if row["record_type"] == "attempt_failed"]
     assert [(row["phase"], row["error"]) for row in failed] == [
         ("forward", "TimeoutError: strategy inference exceeded 360s")
@@ -447,7 +447,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
     )
 
-    records = ExperimentLedger(options.rolling.ledger_path).read()
+    records = ExperimentLedger(options.experiment.ledger_path).read()
     *tests, research_row, replay = records
     assert [(row["record_type"], row["step"], row["test_horizon"], row["source"]) for row in tests] == [
         ("test_step", 1, "20230930", "test"),
@@ -627,7 +627,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
         run_local_interactive_worker(
             options, llm=first_llm, command_runner_factory=lambda _workspace: _NoShellRunner()
         )
-    ledger = ExperimentLedger(options.rolling.ledger_path)
+    ledger = ExperimentLedger(options.experiment.ledger_path)
     [failed] = ledger.read()
     assert failed["record_type"] == "attempt_failed" and failed["session_key"] == "research"
     session_root = options.work_root / options.experiment_id / "research"
@@ -735,7 +735,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
         run_local_interactive_worker(
             options, llm=first_llm, command_runner_factory=lambda _workspace: _NoShellRunner()
         )
-    ledger = ExperimentLedger(options.rolling.ledger_path)
+    ledger = ExperimentLedger(options.experiment.ledger_path)
     tested, failed = ledger.read()
     assert (tested["record_type"], tested["step"], tested["test_horizon"], tested["source"]) == (
         "test_step", 1, "20230930", "test"
@@ -813,7 +813,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
         run_local_interactive_worker(
             options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
         )
-    ledger = ExperimentLedger(options.rolling.ledger_path)
+    ledger = ExperimentLedger(options.experiment.ledger_path)
     [failed] = ledger.read()
     assert failed["record_type"] == "attempt_failed"
     assert not (experiment / "steps" / "tree.json").is_file()
@@ -909,7 +909,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
 
     # The test was never asked for: the cap refused the call before it.
     assert len(second_llm.calls) == 1
-    records = ExperimentLedger(options.rolling.ledger_path).read()
+    records = ExperimentLedger(options.experiment.ledger_path).read()
     assert [row["record_type"] for row in records] == [
         "attempt_failed", *(["test_step"] * 4), "research_session", "forward"
     ]
@@ -984,7 +984,7 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
             llm=_NominatingLLM([ProviderResponse(tool_calls=(ToolCall("f", "test", {"outcome": "no_edge", "reason": "x" * 60}),))]),
             command_runner_factory=lambda _workspace: _NoShellRunner(),
         )
-    rows = ExperimentLedger(options.rolling.ledger_path).read()
+    rows = ExperimentLedger(options.experiment.ledger_path).read()
     assert [row["record_type"] for row in rows] == ["attempt_failed", "attempt_failed"]
     assert "workspace of the interrupted attempt is missing" in rows[-1]["error"]
     assert read_status(experiment / "hitl" / "status.json")["state"] == "failed"
@@ -1022,7 +1022,7 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
     def interrupted(*_args, **_kwargs):
         raise SystemExit("worker stopped")
 
-    pipeline = experiment_module.RollingExperimentPipeline
+    pipeline = experiment_module.ExperimentPipeline
     research_inputs = pipeline.research_inputs
     monkeypatch.setattr(pipeline, "research_inputs", interrupted)
     with pytest.raises(SystemExit):
@@ -1118,7 +1118,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     )
 
     assert len(llm.calls) == 5
-    records = ExperimentLedger(options.rolling.ledger_path).read()
+    records = ExperimentLedger(options.experiment.ledger_path).read()
     *tests, record, replay = records
     assert [(row["record_type"], row["step"], row["test_horizon"], row["source"]) for row in tests] == [
         ("test_step", 1, "20230930", "test"),
@@ -1252,7 +1252,7 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     never = ProviderResponse(tool_calls=(ToolCall("test", "test", {"candidate": "working_copy"}),))
-    attempts = options.rolling.session_max_attempts
+    attempts = options.experiment.session_max_attempts
     assert attempts == 3
     llm = _NominatingLLM([*([validate("full")] * (2 * attempts)), never])
     result = run_local_interactive_worker(
@@ -1260,7 +1260,7 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
     )
 
     assert len(llm.calls) == 2 * attempts
-    *failed, record = ExperimentLedger(options.rolling.ledger_path).read()
+    *failed, record = ExperimentLedger(options.experiment.ledger_path).read()
     assert [row["record_type"] for row in failed] == ["attempt_failed"] * (attempts - 1)
     assert all("EnvironmentBlockedAttempt: span full: 2 batches failed" in row["error"] for row in failed)
     assert record["record_type"] == "research_session" and record["attempts"] == attempts
@@ -1338,7 +1338,7 @@ def test_a_readme_edit_stops_a_new_session_and_not_one_already_seeded(
         options = load_worker_options(experiment, repo_root=repo)
         build = worker.build_experiment_pipeline(
             options,
-            ledger=ExperimentLedger(options.rolling.ledger_path),
+            ledger=ExperimentLedger(options.experiment.ledger_path),
             store=FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy"),
             ref_store=AgentRefStore(options.experiment_dir),
             llm=ScriptedLLM([]),

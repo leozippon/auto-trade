@@ -785,14 +785,12 @@ class SessionValidations:
         self,
         node_id: str,
         seed_replicates: Sequence[str] = (),
-        deterministic: bool = False,
     ) -> dict[str, object]:
         """Whether one Step of this session registers, as the Pipeline reads
         it (``experiment.check_registration``), with ``seed_replicates`` the
-        Steps it would register as its seed replicates and ``deterministic``
-        its declaration that the package uses no randomness. Registration
-        only, never a score. A node that is not a Step of this session does
-        not register.
+        Steps it would register as its seed replicates. Registration only,
+        never a score. A node that is not a Step of this session does not
+        register.
         """
 
         rows = {
@@ -806,7 +804,6 @@ class SessionValidations:
             experiment_dir=self.experiment_dir,
             acceptance=self.rules,
             seed_replicates=[rows[step_id] for step_id in seed_replicates],
-            deterministic=deterministic,
         )
 
     @property
@@ -1072,7 +1069,7 @@ def recorded_step(
 
 # ``validate``'s candidate range and replay width live with the experiment's
 # other budgets (``config.BATCH_VALIDATE_MAX_CANDIDATES``,
-# ``RollingExperimentConfig.batch_validate_max_concurrency``).
+# ``ExperimentConfig.batch_validate_max_concurrency``).
 BATCH_NAME_MAX_CHARS = 40
 # A pre-registration is only binding if the falsification clause fits with it:
 # signal, holding, control, and what would refute the claim. It is bounded like
@@ -1366,15 +1363,14 @@ class _BatchCandidate:
 
 
 class ValidateTool(SessionTimeBudgetAware):
-    """The one Validation tool: pre-registered candidates as sibling Steps.
+    """The one Validation tool: candidates as sibling Steps.
 
     Every candidate gets its own ``modification_check``, its own immutable
     revision, one replay over the batch's span and one Step node; the call
     counts once against the interval's ``validates_per_step`` allowance,
     whatever its width. The candidates of a call share
     one parent node and one span, so a round's numbers are comparable and each
-    hypothesis is registered before any result exists, at every width from one
-    to six.
+    hypothesis is recorded before its result, at every width from one to six.
 
     Selection is never automatic: the Agent reads the table and tests a
     candidate with ``test``.
@@ -1384,7 +1380,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "validate",
         "Replay "
         f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "PRE-REGISTERED candidates over one span of the research years, in one "
+        "candidates over one span of the research years, in one "
         "call; this is the only way to create a node that test can take. span is "
         "full (the research years, the default), one research year such as Y2, or "
         "contiguous research years such as Y2..Y4, as the research_geometry fact "
@@ -1394,7 +1390,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "most acceptance_rules.validation.validates_per_step before the first test "
         "and between two tests, after which the next call is refused until the "
         "next test. Each candidate is {name, "
-        "hypothesis, path, control}, as their "
+        "hypothesis, path} with an optional control, as their "
         "parameters define them: path is a "
         "workspace directory laid out like output/ (main.py plus its sibling "
         "modules; the read-only template files such as README.md are supplied for "
@@ -1504,10 +1500,10 @@ class ValidateTool(SessionTimeBudgetAware):
                                 "minLength": 1,
                                 "maxLength": BATCH_HYPOTHESIS_MAX_CHARS,
                                 "description": (
-                                    "Falsifiable statement registered BEFORE "
-                                    "any result exists; at most "
+                                    "What this candidate is and what you expect "
+                                    "of it, recorded before its result; at most "
                                     f"{BATCH_HYPOTHESIS_MAX_CHARS} characters "
-                                    "(keep the detail in your own notes)."
+                                    "(detail belongs in your notes)."
                                 ),
                             },
                             "path": {
@@ -1522,17 +1518,13 @@ class ValidateTool(SessionTimeBudgetAware):
                             "control": {
                                 "type": "boolean",
                                 "description": (
-                                    "true registers a comparison leg (a "
-                                    "baseline, the mechanism-removed carrier, a "
-                                    "placebo): it replays in the same call like "
-                                    "any candidate, but test never takes it, so "
-                                    "a real candidate registered as a control "
-                                    "can never be tested or registered; false for a "
-                                    "candidate."
+                                    "Optional, default false. true marks a "
+                                    "comparison leg: it replays like any "
+                                    "candidate, but test never takes it."
                                 ),
                             },
                         },
-                        "required": ["name", "hypothesis", "path", "control"],
+                        "required": ["name", "hypothesis", "path"],
                         "additionalProperties": False,
                     },
                 },
@@ -1545,16 +1537,9 @@ class ValidateTool(SessionTimeBudgetAware):
             "span": "Y3..Y4",
             "candidates": [
                 {
-                    "name": "value_quality",
-                    "hypothesis": "T-1 估值+质量 4 因子等权打分的主动超额在两个年份都为正",
-                    "path": "candidates/value_quality",
-                    "control": False,
-                },
-                {
-                    "name": "c_base",
-                    "hypothesis": "对照：同一池等权持有，不用打分；读数是 value_quality 的归因基线",
-                    "path": "candidates/c_base",
-                    "control": True,
+                    "name": "lgbm_ranker",
+                    "hypothesis": "LightGBM 横截面排序（季度重训）的主动超额在两个年份都为正",
+                    "path": "candidates/lgbm_ranker",
                 },
             ],
         },
@@ -1791,7 +1776,7 @@ class ValidateTool(SessionTimeBudgetAware):
             if not isinstance(item, dict):
                 raise ToolError(
                     f"candidate {index} must be an object with name, "
-                    "hypothesis, path and control",
+                    "hypothesis, path and an optional control",
                     error_type="schema_error",
                     blocked_target=str(index),
                 )
@@ -1807,11 +1792,11 @@ class ValidateTool(SessionTimeBudgetAware):
                 item, "hypothesis", index, BATCH_HYPOTHESIS_MAX_CHARS
             )
             path = _batch_text(item, "path", index, STRATEGY_PATH_MAX_CHARS)
-            control = item.get("control")
+            control = item.get("control", False)
             if not isinstance(control, bool):
                 raise ToolError(
-                    f"candidate {index} needs control: true for a registered "
-                    "comparison leg (never nominatable) or false for a candidate",
+                    f"candidate {index} control must be true (a comparison leg "
+                    "test never takes) or false; leave it out for a candidate",
                     error_type="schema_error",
                     blocked_target="control",
                 )
@@ -2162,11 +2147,11 @@ TEST_DESCRIPTION = (
     "Advance the validation period by one step with candidate: a complete full-span "
     "validate node of this session (full id or short handle). The candidate must "
     "register: not a control, finite metrics, equity drawdown within acceptance_rules' "
-    "limit and, when its main.py defines fit, at least one seed replicate in "
-    "seed_replicates (another full-span node of this session whose bytes differ from "
-    "the candidate's in exactly one integer seed assignment, e.g. SEED_BASE = 1000 -> "
-    "2000), unless deterministic=true declares that the package uses no randomness, "
-    "which is recorded for the operator. Registration reads no performance; a "
+    "limit; any seed replicate it names must be valid. Seed replicates are optional for "
+    "any candidate: seed_replicates may name other full-span nodes of this session "
+    "whose bytes differ from the candidate's in exactly one integer seed assignment "
+    "(e.g. SEED_BASE = 1000 -> 2000); they are registered and replayed forward beside "
+    "it. Registration reads no performance; a "
     "candidate that does not register is refused with named reasons and the test horizon "
     "does not move. A registered candidate is replayed with its random baseline as one "
     "fresh continuous book from the validation start to the end of the next step; "
@@ -2220,19 +2205,9 @@ class TestTool(SessionTimeBudgetAware):
                     "type": "array",
                     "items": {"type": "string", "minLength": 1, "maxLength": 500},
                     "description": (
-                        "The candidate's seed replicates as acceptance_rules.registration."
-                        "seed_replicates defines them, each a node id or short handle of this "
-                        "session; required (at least one) when the candidate's main.py defines "
-                        "fit, unless deterministic is true."
-                    ),
-                },
-                "deterministic": {
-                    "type": "boolean",
-                    "description": (
-                        "true declares that the candidate's package uses no randomness at all, "
-                        "so seed replicates would reproduce it exactly; registration then asks "
-                        "for none, and the declaration is recorded in the ledger for the "
-                        "operator's review. Default false."
+                        "Optional: the candidate's seed replicates as "
+                        "acceptance_rules.registration.seed_replicates defines them, each a "
+                        "node id or short handle of this session."
                     ),
                 },
             },
@@ -2273,15 +2248,14 @@ class TestTool(SessionTimeBudgetAware):
             )
             for item in arguments.get("seed_replicates") or ()  # type: ignore[union-attr]
         )
-        deterministic = arguments.get("deterministic") is True
-        registration = dict(backtest.registration(node_id, replicates, deterministic))
+        registration = dict(backtest.registration(node_id, replicates))
         if not registration.get("passed"):
             reasons = [str(item) for item in registration.get("reasons") or ()]
             raise ToolError(
                 f"test refused: {backtest.named([node_id])[0]} does not register "
                 f"({', '.join(reasons) or 'no reason recorded'}); the test horizon did not move. "
                 "Name a node that registers, or validate what registration lacks (a full-span "
-                "validation, a seed replicate). A seed replicate is what "
+                "validation). A seed replicate, when you name one, is what "
                 "acceptance_rules.registration.seed_replicates defines.",
                 error_type="test_registration_refused",
                 details={
@@ -2352,7 +2326,6 @@ class TestTool(SessionTimeBudgetAware):
                     "revision_id": candidate.revision_id,
                     "fingerprint": candidate.fingerprint,
                     "seed_replicates": list(replicates),
-                    "deterministic": deterministic,
                 },
                 replay={"start": steps.start, "end": test_horizon, "result_ref": evaluation.result_ref},
                 entry=entry,
@@ -2380,7 +2353,6 @@ class TestTool(SessionTimeBudgetAware):
                 "node_id": node_id,
                 **backtest.handle(node_id),
                 **({"seed_replicates": list(replicates)} if replicates else {}),
-                "deterministic": deterministic,
             },
             "replay": {"start": steps.start, "end": test_horizon, "wall_seconds": round(time.perf_counter() - started, 1)},
             "stats": batch_candidate_stats(evaluation.summary),

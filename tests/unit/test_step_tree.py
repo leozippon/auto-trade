@@ -6,6 +6,7 @@ from pathlib import Path
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import build_system_prompt
 from autotrade.environment.artifacts import new_revision_id
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
@@ -258,6 +259,8 @@ RESEARCH_MANIFEST = {
     },
     "acceptance_rules": dict(REQUIRED_RULES),
     "budgets": {"max_null_controls": 3, "deadline_seconds": 43800.0, "validates_per_step": 6},
+    "benchmark_index": "000300.SH",
+    "broker_profile": BrokerProfile().to_record(),
 }
 
 

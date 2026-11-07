@@ -39,7 +39,7 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from autotrade.pipelines.worker import load_worker_options
 from autotrade.webui.manager import ExperimentManager
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 
 
@@ -325,7 +325,7 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
         path.write_text(json.dumps({**params, **boundary}), encoding="utf-8")
         options = load_worker_options(experiment, repo_root=repo)
         sandbox = strategy_sandbox_from_spec(
-            options.agent_sandbox, **strategy_boundary(options.rolling)
+            options.agent_sandbox, **strategy_boundary(options.experiment)
         )
         return sandbox, options.agent_sandbox
 
@@ -958,8 +958,8 @@ def test_worker_params_reject_unknown_keys_and_a_bad_geometry(tmp_path: Path):
     params = json.loads(path.read_text(encoding="utf-8"))
     options = load_worker_options(experiment, repo_root=repo)
     # A params file that states no geometry runs on the console's.
-    assert options.rolling.geometry == DEFAULT_RESEARCH_GEOMETRY
-    assert options.rolling.max_research_minutes == 2400
+    assert options.experiment.geometry == DEFAULT_RESEARCH_GEOMETRY
+    assert options.experiment.max_research_minutes == 2400
     for key, value in (
         ("typo_budget", 3),
         ("development_first_period", "2022"),
@@ -1200,6 +1200,7 @@ def _console_params(repo: Path, experiments_root: Path, **overrides) -> dict:
             "_creation_surface": "webui",
             # The rules a create request must state (``WEB_REQUIRED_PARAMS``).
             **CREATE_RULES,
+            **NO_SEED,
         }
     )
     params.update(overrides)

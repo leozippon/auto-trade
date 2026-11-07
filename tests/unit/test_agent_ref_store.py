@@ -14,10 +14,10 @@ from fastapi.testclient import TestClient
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import (
-    LEGACY_EXPERIMENT_MESSAGE,
+    CORRUPT_EXPERIMENT_MESSAGE,
     AgentRefStore,
     AgentRefStoreError,
-    LegacyExperimentError,
+    CorruptExperimentError,
 )
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.step_tree import NODE_OUTPUT_DIR, StepTree
@@ -159,35 +159,37 @@ def test_write_failure_never_returns_or_persists_new_ref(
 
 
 @pytest.mark.parametrize(
-    "legacy_path",
+    "recorded_path",
     [
         "ledgers/experiment_ledger.jsonl",
         "steps/tree.json",
         "artifacts/traces/run_old.jsonl",
     ],
 )
-def test_legacy_identity_artifacts_are_read_only(
-    tmp_path: Path, legacy_path: str
+def test_recorded_work_without_a_ref_store_is_refused_as_corrupt(
+    tmp_path: Path, recorded_path: str
 ) -> None:
-    experiment = tmp_path / "legacy"
-    path = experiment / legacy_path
+    experiment = tmp_path / "corrupt"
+    path = experiment / recorded_path
     path.parent.mkdir(parents=True)
     path.write_text("{}\n", encoding="utf-8")
 
-    with pytest.raises(LegacyExperimentError, match=LEGACY_EXPERIMENT_MESSAGE):
+    with pytest.raises(CorruptExperimentError, match=CORRUPT_EXPERIMENT_MESSAGE):
         AgentRefStore(experiment)
-    with pytest.raises(LegacyExperimentError, match=LEGACY_EXPERIMENT_MESSAGE):
+    with pytest.raises(CorruptExperimentError, match=CORRUPT_EXPERIMENT_MESSAGE):
         run_local_interactive_worker(
             cast(InteractiveWorkerOptions, SimpleNamespace(experiment_dir=experiment))
         )
     assert not (experiment / ".host").exists()
 
 
-def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
+def test_a_corrupt_experiment_is_refused_by_the_console_views_mutations_and_preview(
     tmp_path: Path,
 ) -> None:
+    """Recorded work without a reference store cannot be projected safely, so
+    every console path refuses it instead of showing raw identities."""
     experiments = tmp_path / "experiments"
-    experiment = experiments / "legacy"
+    experiment = experiments / "corrupt"
     tree = StepTree(experiment / "steps")
     tree.record_failed_attempt(
         epoch_id="epoch_001",
@@ -215,30 +217,28 @@ def test_legacy_web_audit_remains_readable_but_mutations_and_preview_fail(
         },
     )
 
-    audit = step_tree_view(experiment)
-    # No ref store: the tree still projects, with no session resolved.
-    assert "session_key" not in audit["nodes"][0]
-    assert audit["nodes"][0]["session_ref"] == "session_ref_deadbeef00"
-    assert "fold_id" not in audit["nodes"][0]
-    assert "fold_2024Q1" not in str(audit)
+    with pytest.raises(CorruptExperimentError, match="no Agent reference store"):
+        step_tree_view(experiment)
+    client = TestClient(create_app(tmp_path))
+    steps = client.get("/api/experiments/corrupt/steps")
+    assert steps.status_code == 409 and "identity state" in steps.json()["detail"]
 
-    node_id = str(audit["nodes"][0]["node_id"])
+    [node] = StepTree(experiment / "steps").nodes()
+    node_id = str(node["node_id"])
     output = experiment / "steps" / node_id / NODE_OUTPUT_DIR
     output.mkdir(parents=True)
     (output / "main.py").write_text("pass\n", encoding="utf-8")
-    source = TestClient(create_app(tmp_path)).get(
-        f"/api/experiments/legacy/steps/{node_id}/source.zip"
-    )
+    source = client.get(f"/api/experiments/corrupt/steps/{node_id}/source.zip")
     assert source.status_code == 409
     assert "identity state" in source.json()["detail"]
 
-    with pytest.raises(LegacyExperimentError, match=LEGACY_EXPERIMENT_MESSAGE):
+    with pytest.raises(CorruptExperimentError, match=CORRUPT_EXPERIMENT_MESSAGE):
         build_prompt_preview(
             experiment, "epoch_001/fold_2024Q1", "", repo_root=tmp_path
         )
-    with pytest.raises(ManagerError, match=LEGACY_EXPERIMENT_MESSAGE):
+    with pytest.raises(ManagerError, match=CORRUPT_EXPERIMENT_MESSAGE):
         ExperimentManager(tmp_path, experiments).control(
-            "legacy",
+            "corrupt",
             "set_directive",
             session_key="epoch_001/fold_2024Q1",
             directive="keep it simple",

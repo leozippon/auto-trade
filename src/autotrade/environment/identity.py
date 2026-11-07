@@ -24,15 +24,21 @@ AGENT_REF_PREFIXES: Mapping[str, str] = {
     "run": "run_ref",
     "trace": "trace_ref",
 }
-LEGACY_EXPERIMENT_MESSAGE = "legacy experiment is read-only; start a new experiment"
+# An experiment creates its store before it records anything, so recorded work
+# without one is a corrupt experiment.
+CORRUPT_EXPERIMENT_MESSAGE = (
+    "experiment has recorded work but no Agent reference store; it is corrupt and"
+    " cannot be read, resumed or changed"
+)
 
 
 class AgentRefStoreError(ValueError):
     """The host-only mapping is missing, corrupt, or inconsistent."""
 
 
-class LegacyExperimentError(AgentRefStoreError):
-    """A pre-random-ref experiment may be audited but never resumed or changed."""
+class CorruptExperimentError(AgentRefStoreError):
+    """An experiment with recorded work and no reference store: corrupt, never
+    read, resumed or changed."""
 
 
 class AgentRefStore:
@@ -63,32 +69,28 @@ class AgentRefStore:
 
     def initialize(self) -> None:
         """Create an empty mapping for a new experiment or validate an existing one."""
-        if not self.path.exists() and _has_legacy_identity_artifacts(
-            self.experiment_dir
-        ):
-            raise LegacyExperimentError(LEGACY_EXPERIMENT_MESSAGE)
+        if not self.path.exists() and _has_recorded_work(self.experiment_dir):
+            raise CorruptExperimentError(CORRUPT_EXPERIMENT_MESSAGE)
         with self._locked():
             if self.path.exists():
                 self._read_unlocked()
                 return
-            if _has_legacy_identity_artifacts(self.experiment_dir):
-                raise LegacyExperimentError(LEGACY_EXPERIMENT_MESSAGE)
+            if _has_recorded_work(self.experiment_dir):
+                raise CorruptExperimentError(CORRUPT_EXPERIMENT_MESSAGE)
             self._write_unlocked(self._empty_payload())
 
     def get_or_create(self, namespace: str, raw_source: object) -> str:
         """Return a durable UUID4 ref, creating exactly one mapping under flock."""
         namespace = _validate_namespace(namespace)
         source = _source_text(raw_source)
-        if not self.path.exists() and _has_legacy_identity_artifacts(
-            self.experiment_dir
-        ):
-            raise LegacyExperimentError(LEGACY_EXPERIMENT_MESSAGE)
+        if not self.path.exists() and _has_recorded_work(self.experiment_dir):
+            raise CorruptExperimentError(CORRUPT_EXPERIMENT_MESSAGE)
         with self._locked():
             if self.path.exists():
                 payload = self._read_unlocked()
             else:
-                if _has_legacy_identity_artifacts(self.experiment_dir):
-                    raise LegacyExperimentError(LEGACY_EXPERIMENT_MESSAGE)
+                if _has_recorded_work(self.experiment_dir):
+                    raise CorruptExperimentError(CORRUPT_EXPERIMENT_MESSAGE)
                 payload = self._empty_payload()
             entries = payload["entries"]
             assert isinstance(entries, list)
@@ -251,7 +253,9 @@ def _validate_ref(namespace: str, ref: str) -> None:
         raise AgentRefStoreError(f"non-canonical UUID4 {namespace} reference")
 
 
-def _has_legacy_identity_artifacts(experiment_dir: Path) -> bool:
+def _has_recorded_work(experiment_dir: Path) -> bool:
+    """Whether the experiment has a ledger record, a step or a trace."""
+
     ledger = experiment_dir / "ledgers" / "experiment_ledger.jsonl"
     if ledger.is_file() and ledger.stat().st_size:
         return True

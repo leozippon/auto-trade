@@ -35,15 +35,14 @@ cache-dir = ".runtime/cache/ruff"
 # E501 is not selected.
 line-length = 88
 # Never lint or fix these, even when a tool names them explicitly: reference
-# packs are immutable records, the starter lib is byte-copied into them, round
-# files are frozen queues, the strategy contract modules and the output
-# template's README are baked into the sandbox image (an edit forces a
-# rebuild), and the template's main.py is the file every session starts from.
+# packs are immutable records, round files are frozen queues, the strategy
+# contract modules and the output template's README are baked into the sandbox
+# image (an edit forces a rebuild), and the template's main.py is the file
+# every session starts from.
 force-exclude = true
 extend-exclude = [
   "external_references",
   "configs/workspace_refs",
-  "configs/starter_lib",
   "configs/agent_output_template",
   "src/autotrade/environment/strategy.py",
   "src/autotrade/environment/strategy_loader.py",

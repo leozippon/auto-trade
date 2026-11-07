@@ -117,7 +117,7 @@ def main() -> int:
     # ``--sandbox-image`` instead) and its smoke-test command runner.
     pipeline, _trading_days, _developer_label = build_experiment_pipeline(
         options,
-        ledger=ExperimentLedger(options.rolling.ledger_path),
+        ledger=ExperimentLedger(options.experiment.ledger_path),
         store=FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy"),
         ref_store=AgentRefStore(options.experiment_dir),
     )

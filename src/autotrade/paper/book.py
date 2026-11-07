@@ -13,9 +13,9 @@ book keeps the history its own days continue. A different capital, artifact or
 environment is a new book in a new state root.
 
 A book trades the registered strategy of an experiment with its forward record (the
-experiment's Paper candidate), recorded as its ``candidate_source``, and is opened by
-the operator from the console's ranking view; at most ``BOOK_CAP`` books are open at
-once. Creation pins the rules its Paper verdict is read by (``paper/verdict.py``),
+experiment's Paper candidate) and is opened by the operator from the console, on
+the experiment page's 读出 view or the best-experiment panel; at most
+``BOOK_CAP`` books are open at once. Creation pins the rules its Paper verdict is read by (``paper/verdict.py``),
 so a later change cannot move a book already trading, and the boards its account
 may buy on, in its Broker profile: those of the experiment's stamp (every board
 when it has none) that the book's own initial cash qualifies for
@@ -58,13 +58,12 @@ from .pit import require_audited_fundamentals
 from .storage import read_jsonl
 
 BOOK_NAME = "book.json"
-# 3: the pinned verdict rules, and the snapshot configuration and the strategy
-# sandbox as their own records (``SnapshotConfig.to_record``,
+# 4: no candidate source, since every book trades its experiment's registered
+# strategy; 3 added the pinned verdict rules, and the snapshot configuration
+# and the strategy sandbox as their own records (``SnapshotConfig.to_record``,
 # ``SandboxConfig.to_record``). A book of another schema is refused.
-BOOK_SCHEMA_VERSION = 3
+BOOK_SCHEMA_VERSION = 4
 STRATEGY_COPY_NAME = "strategy"
-# What every book trades, as its ``candidate_source`` records it.
-CANDIDATE_SOURCE = "registered"
 # Books open at once; a killed book does not count.
 BOOK_CAP = 4
 # The capital, in CNY, a new book starts with unless its creator names another,
@@ -102,8 +101,6 @@ class Book:
     root: Path
     experiment_id: str
     artifact_id: str
-    # ``CANDIDATE_SOURCE``.
-    candidate_source: str
     note: str
     strategy_path: Path
     models_dir: Path | None
@@ -176,12 +173,12 @@ def create_book(
         fundamental_events_status=options.fundamental_events_status,
         today=datetime.now(CN_TZ).strftime("%Y%m%d"),
     )
-    profile = options.rolling.broker_profile
+    profile = options.experiment.broker_profile
     permitted_boards = profile.permitted_boards or BOARDS
     eligible = default_permitted_boards(profile.initial_cash)
     profile = replace(profile, permitted_boards=tuple(board for board in permitted_boards if board in eligible))
     sandbox = strategy_sandbox_from_spec(
-        options.agent_sandbox, **strategy_boundary(options.rolling)
+        options.agent_sandbox, **strategy_boundary(options.experiment)
     )
     image = read_json_object(experiment / "hitl" / "sandbox_image.json", missing_ok=True).get("image_ref")
     if image:
@@ -202,16 +199,15 @@ def create_book(
         "created_at": datetime.now(CN_TZ).isoformat(),
         "experiment_id": experiment.name,
         "artifact_id": artifact_id,
-        "candidate_source": CANDIDATE_SOURCE,
         "artifact_fingerprint": fingerprint,
         "note": note,
         "strategy_path": str((copy / "output" / "main.py").relative_to(root)),
         "models_dir": str(models.relative_to(root)) if models is not None else None,
-        "schedule": options.rolling.schedule.to_record(),
+        "schedule": options.experiment.schedule.to_record(),
         # The index the source experiment was graded against, so the book's own page
         # continues the copied out-of-sample curve against the same benchmark
         # instead of splicing two different indexes into one line.
-        "benchmark_index": options.rolling.benchmark_index,
+        "benchmark_index": options.experiment.benchmark_index,
         "profile": profile.to_record(),
         # Without a decision clock: every Paper decision runs under
         # PAPER_DECISION_TIMEOUT_SECONDS (load_book).
@@ -226,8 +222,8 @@ def create_book(
             "kill_confidence": KILL_CONFIDENCE,
             "confirm_confidence": CONFIRM_CONFIDENCE,
             # The experiment's own drawdown limits, which its verdict and gate used.
-            "max_drawdown": options.rolling.acceptance.max_drawdown,
-            "active_max_drawdown": options.rolling.acceptance.active_max_drawdown,
+            "max_drawdown": options.experiment.acceptance.max_drawdown,
+            "active_max_drawdown": options.experiment.acceptance.active_max_drawdown,
             "baseline_seed": null_control_seed(artifact_id, "paper"),
         },
     }
@@ -236,60 +232,20 @@ def create_book(
     return load_book(root)
 
 
-def write_source_history(
-    state_root: str | Path,
-    *,
-    experiment_id: str,
-    result_file: str | Path,
-    heldout_start: str | None = None,
-) -> Path:
-    """Copy one out-of-sample replay curve into the book.
-
-    The curve is projected exactly as the console projects a result of that
-    experiment, so the book's copy and the console's read the same numbers.
-    Copying frees the book from ``experiments/``: its page keeps drawing the
-    artifact's history after the experiment is archived.
-    """
-
-    root = Path(state_root).resolve(strict=True)
-    path = Path(result_file).resolve(strict=True)
-    if path.is_dir():
-        path = path / "result.json"
-    if not path.is_file():
-        raise FileNotFoundError(f"replay result is missing: {path}")
-    curve = result_curve(path)
-    if not curve["series"]:
-        raise ValueError(f"replay result has no daily returns: {path}")
-    target = root / SOURCE_HISTORY_NAME
-    write_json_atomic(
-        target,
-        {
-            "schema_version": SOURCE_HISTORY_SCHEMA_VERSION,
-            "copied_at": datetime.now(CN_TZ).isoformat(),
-            "experiment_id": experiment_id,
-            "result": path.parent.name,
-            # The session the Held-out slice opens on, drawn as a divider; a
-            # replay that is Held-out end to end has none.
-            "heldout_start": heldout_start,
-            "series": curve["series"],
-            "benchmark": curve["benchmark"],
-        },
-        private=True,
-        sort_keys=False,
-    )
-    return target
-
-
 def copy_source_history(state_root: str | Path, experiment_dir: str | Path) -> Path:
-    """The book's copy of its source experiment's out-of-sample curve.
+    """Copy the book's source experiment's out-of-sample curve into the book.
 
     The forward record names the one replay carrying the experiment's forward and
     Held-out slices — the curve the console draws beside its readout — so an
     experiment without one has no history to copy and says so. The recorded path is
     read under the experiment's current directory (``ledger.recorded_path``), so an
-    experiment moved since its replay copies too.
+    experiment moved since its replay copies too. The curve is projected exactly as
+    the console projects a result of that experiment, so the book's copy and the
+    console's read the same numbers. Copying frees the book from ``experiments/``:
+    its page keeps drawing the artifact's history after the experiment is archived.
     """
 
+    root = Path(state_root).resolve(strict=True)
     experiment = Path(experiment_dir).resolve(strict=True)
     record = forward_record(ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read())
     if record is None:
@@ -299,15 +255,34 @@ def copy_source_history(state_root: str | Path, experiment_dir: str | Path) -> P
     reference = record.get("result_ref")
     if not isinstance(reference, str) or not reference:
         raise ValueError(f"{experiment.name}'s forward record names no replay result")
-    result_file = recorded_path(experiment, reference)
+    path = recorded_path(experiment, reference).resolve(strict=True)
+    if path.is_dir():
+        path = path / "result.json"
+    if not path.is_file():
+        raise FileNotFoundError(f"replay result is missing: {path}")
+    curve = result_curve(path)
+    if not curve["series"]:
+        raise ValueError(f"replay result has no daily returns: {path}")
     replay = record.get("replay") if isinstance(record.get("replay"), dict) else {}
     heldout_start = replay.get("heldout_start")
-    return write_source_history(
-        state_root,
-        experiment_id=experiment.name,
-        result_file=result_file,
-        heldout_start=str(heldout_start) if heldout_start else None,
+    target = root / SOURCE_HISTORY_NAME
+    write_json_atomic(
+        target,
+        {
+            "schema_version": SOURCE_HISTORY_SCHEMA_VERSION,
+            "copied_at": datetime.now(CN_TZ).isoformat(),
+            "experiment_id": experiment.name,
+            "result": path.parent.name,
+            # The session the Held-out slice opens on, drawn as a divider; a
+            # replay that is Held-out end to end has none.
+            "heldout_start": str(heldout_start) if heldout_start else None,
+            "series": curve["series"],
+            "benchmark": curve["benchmark"],
+        },
+        private=True,
+        sort_keys=False,
     )
+    return target
 
 
 def load_book(state_root: str | Path) -> Book:
@@ -324,7 +299,6 @@ def load_book(state_root: str | Path) -> Book:
         root=root,
         experiment_id=str(record["experiment_id"]),
         artifact_id=str(record["artifact_id"]),
-        candidate_source=str(record["candidate_source"]),
         note=str(record.get("note") or ""),
         strategy_path=root / str(record["strategy_path"]),
         models_dir=root / str(record["models_dir"]) if record.get("models_dir") else None,
@@ -394,7 +368,6 @@ def require_book_place(paper_root: str | Path, book_id: str) -> None:
 __all__ = [
     "BOOK_CAP",
     "BOOK_NAME",
-    "CANDIDATE_SOURCE",
     "PAPER_DECISION_TIMEOUT_SECONDS",
     "PAPER_INITIAL_CASH",
     "PAPER_SHEET_DUE",
@@ -408,5 +381,4 @@ __all__ = [
     "open_capped_books",
     "require_book_place",
     "verify_book_artifact",
-    "write_source_history",
 ]

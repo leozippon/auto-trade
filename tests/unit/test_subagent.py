@@ -1095,10 +1095,10 @@ def test_subagent_prompts_carry_the_path_and_argv_contract() -> None:
     assert "先 `write_file` 写成文件再按路径运行" in writer
     assert "`notes/<topic>/`" in writer
     assert "第二次编辑必须匹配前一次编辑之后的内容" in writer
-    # A writer implements a pre-registered candidate as specified and reports
+    # A writer implements a candidate as the task specifies it and reports
     # data facts verbatim; a read-only role carries no implementation rule.
-    assert "不得静默回退、换机制或改预登记条件" in writer
-    assert "不得静默回退、换机制或改预登记条件" not in reader
+    assert "不得静默回退或改动 task 的设定" in writer
+    assert "不得静默回退或改动 task 的设定" not in reader
     # A read-only role has no shell, so it is told who runs the screen instead.
     assert "argv" not in reader
     assert "只能由父 Agent 或可执行子代理经 `shell` 运行" in reader

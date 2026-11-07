@@ -59,11 +59,10 @@ from .calendar import (
     yyyymmdd,
 )
 from .config import (
-    DEFAULT_PIT_VIEWS_SEED,
-    RollingExperimentConfig,
+    ExperimentConfig,
     acceptance_for,
 )
-from .experiment import RollingExperimentPipeline
+from .experiment import ExperimentPipeline
 from .experiment_params import (
     ExperimentParams,
     read_param,
@@ -259,15 +258,15 @@ class InteractiveWorkerOptions:
     data_backend: str
     execution_mode: str
     developer_mode: str
-    rolling: RollingExperimentConfig
+    experiment: ExperimentConfig
     work_root: Path
     raw_dir: Path | None = None
     fundamental_events_root: Path | None = None
     fundamental_events_status: Path | None = None
     pit_cache_root: Path | None = None
     pit_views_seed: Path | None = None
-    # An explicitly chosen seed must apply or the run fails; the default one is
-    # an optimisation, so a missing or non-matching default cold-builds.
+    # A named seed must apply or the run fails; with none every view is built
+    # cold.
     pit_views_seed_required: bool = False
     snapshot_config: SnapshotConfig = field(default_factory=SnapshotConfig)
     max_intraday_row_group_rows: int = 2_000_000
@@ -333,7 +332,7 @@ def resolve_worker_options(
     # Every key a parameter, every value of its declared type
     # (``experiment_params.ExperimentParams``). The checks below read the file through
     # ``read_param``: a key it leaves out takes the parameter's one declared
-    # default (for a pipeline knob ``RollingExperimentConfig``'s), never a
+    # default (for a pipeline knob ``ExperimentConfig``'s), never a
     # literal of the worker's own that could silently reconfigure every
     # experiment whose params.json predates the key; a value it states, null
     # included, is checked as stated.
@@ -501,7 +500,7 @@ def resolve_worker_options(
         str(read_param_or_default(params, "inference_time")),
     )
     initial_cash = _positive_float(read_param(params, "initial_cash"), "initial_cash")
-    rolling = RollingExperimentConfig(
+    config = ExperimentConfig(
         experiment_id=experiment_id,
         experiments_root=directory.parent,
         geometry=geometry,
@@ -570,7 +569,7 @@ def resolve_worker_options(
         data_backend=data_backend,
         execution_mode=execution_mode,
         developer_mode=developer_mode,
-        rolling=rolling,
+        experiment=config,
         work_root=work_root,
         raw_dir=raw_dir,
         fundamental_events_root=events_root,
@@ -587,16 +586,16 @@ def resolve_worker_options(
     )
 
 
-def strategy_boundary(rolling: RollingExperimentConfig) -> dict[str, Any]:
+def strategy_boundary(config: ExperimentConfig) -> dict[str, Any]:
     """The experiment's strategy-container boundary as ``strategy_sandbox_from_spec``
     takes it: the one mapping every builder of an experiment's strategy sandbox (the
     pipeline, a Paper account, the console's prompt preview) passes on."""
 
     return {
-        "fit_timeout_seconds": rolling.strategy_fit_timeout_seconds,
-        "inference_timeout_seconds": rolling.strategy_inference_timeout_seconds,
-        "cpus": rolling.strategy_cpus,
-        "memory": rolling.strategy_memory,
+        "fit_timeout_seconds": config.strategy_fit_timeout_seconds,
+        "inference_timeout_seconds": config.strategy_inference_timeout_seconds,
+        "cpus": config.strategy_cpus,
+        "memory": config.strategy_memory,
     }
 
 
@@ -612,7 +611,7 @@ def strategy_sandbox_from_spec(
     """The strategy container's boundary, derived from the Agent session's spec.
 
     The wall clocks, CPU quota and memory ceiling are the experiment's own
-    (``RollingExperimentConfig.strategy_*``); one left as None keeps the
+    (``ExperimentConfig.strategy_*``); one left as None keeps the
     executor's default (``SandboxConfig``, ``SandboxSpec``), which is also the
     experiment default. The process guard, ``/dev/shm`` and the user are the
     container defaults and ``/tmp`` is ``STRATEGY_TMPFS_SIZE``, whatever the
@@ -663,7 +662,7 @@ def strategy_sandbox_from_spec(
 class ExperimentPipelineBuild(NamedTuple):
     """One assembled experiment, as either driver of it needs to see it."""
 
-    pipeline: RollingExperimentPipeline
+    pipeline: ExperimentPipeline
     trading_days: list[str]
     developer_label: str
 
@@ -707,7 +706,7 @@ def build_experiment_pipeline(
     )
     strategy_sandbox = strategy_sandbox_from_spec(
         options.agent_sandbox,
-        **strategy_boundary(options.rolling),
+        **strategy_boundary(options.experiment),
         experiment_id=options.experiment_id,
     )
     if options.data_backend == "pit":
@@ -732,7 +731,7 @@ def build_experiment_pipeline(
             execution_mode=options.execution_mode,
             max_intraday_row_group_rows=options.max_intraday_row_group_rows,
             sandbox=strategy_sandbox,
-            benchmark_index=options.rolling.benchmark_index,
+            benchmark_index=options.experiment.benchmark_index,
         )
         trading_days = snapshots.trading_days
     else:
@@ -743,7 +742,7 @@ def build_experiment_pipeline(
             options.daily_path,
             options.experiment_dir / "artifacts" / "results",
             execution_mode=options.execution_mode,
-            benchmark_index=options.rolling.benchmark_index,
+            benchmark_index=options.experiment.benchmark_index,
             sandbox=strategy_sandbox,
         )
         trading_days = evaluator.trading_days
@@ -763,8 +762,8 @@ def build_experiment_pipeline(
             baseline_strategy=options.baseline_strategy,
             artifact_store=store,
             evaluator=evaluator,
-            schedule=options.rolling.schedule,
-            broker_profile=options.rolling.broker_profile,
+            schedule=options.experiment.schedule,
+            broker_profile=options.experiment.broker_profile,
             ledger=ledger,
             experiment_dir=options.experiment_dir,
             runtime_root=options.work_root / options.experiment_id,
@@ -772,9 +771,9 @@ def build_experiment_pipeline(
             command_runner_factory=command_runner_factory,
             # One ceiling for the parent conversation and its children.
             max_response_tokens=options.llm.max_tokens_for("main"),
-            research_directive=options.rolling.research_directive,
-            workspace_reference=options.rolling.workspace_reference,
-            operating_memory=options.rolling.operating_memory,
+            research_directive=options.experiment.research_directive,
+            workspace_reference=options.experiment.workspace_reference,
+            operating_memory=options.experiment.operating_memory,
             repo_root=options.repo_root,
         )
         developer_label = "llm_research_agent"
@@ -783,13 +782,13 @@ def build_experiment_pipeline(
             baseline_strategy=options.baseline_strategy,
             artifact_store=store,
             evaluator=evaluator,
-            schedule=options.rolling.schedule,
-            broker_profile=options.rolling.broker_profile,
+            schedule=options.experiment.schedule,
+            broker_profile=options.experiment.broker_profile,
             ref_store=ref_store,
         )
         developer_label = "deterministic_baseline_no_agent_improvement"
-    pipeline = RollingExperimentPipeline(
-        options.rolling,
+    pipeline = ExperimentPipeline(
+        options.experiment,
         snapshots=snapshots,
         artifacts=store,
         evaluator=evaluator,
@@ -816,7 +815,7 @@ def run_local_interactive_worker(
 
     ref_store = AgentRefStore(options.experiment_dir)
     hitl = options.experiment_dir / "hitl"
-    ledger = ExperimentLedger(options.rolling.ledger_path)
+    ledger = ExperimentLedger(options.experiment.ledger_path)
     store = FilesystemArtifactStore(options.experiment_dir / "artifacts" / "strategy")
     records = ledger.read()
     try:
@@ -885,7 +884,7 @@ def run_local_interactive_worker(
         status_path=hitl / "status.json",
         ref_store=ref_store,
         poll_seconds=poll_seconds,
-        session_max_attempts=options.rolling.session_max_attempts,
+        session_max_attempts=options.experiment.session_max_attempts,
     )
     result = interactive.run()
     if result["status"] != "complete":
@@ -894,7 +893,8 @@ def run_local_interactive_worker(
         ledger, {"completed_at": utc_now_iso()}, developer_mode=developer_label
     )
     # No book opens here: the operator opens a registered strategy's Paper account
-    # from the console's ranking view (``paper.books.open_registered_book``).
+    # from the console, on the experiment page's 读出 view or the best-experiment
+    # panel (``paper.books.open_registered_book``).
     write_json_atomic(hitl / "status.json", payload)
     _release_finished_experiment(options, payload)
     return payload
@@ -909,7 +909,7 @@ def _write_session_plan(
     release; ``geometry.heldout`` refuses a release that does not reach it.
     """
 
-    geometry = options.rolling.geometry
+    geometry = options.experiment.geometry
     heldout = geometry.heldout(trading_days)
     plan = build_session_plan(
         forward={
@@ -1281,29 +1281,21 @@ def _pit_views_seed(
 ) -> tuple[Path, str | None]:
     """The prebuilt view cache this experiment hardlinks from, and the release it binds.
 
-    The default seed is an optimisation over cold-building: it carries the
-    default dataset selection, and an experiment that asks for anything else
-    simply finds no matching contract and builds its own views. A seed named
-    explicitly is a decision — the only way an experiment whose selection differs from
-    the default gets prebuilt views at all — so it is checked here, at create
+    A named seed, the console's default included, is checked here, at create
     time: the tree must exist and must already carry exactly this snapshot
     configuration. Silently cold-building instead would cost hours and look
-    like a slow experiment rather than a wrong parameter. A named seed also
-    binds the experiment's research release: the generation id it was built
-    from is returned (the path the seed records beside it is where that
-    release was on the host that built the seed, not a condition), and None
-    means the seed is the optional default, which binds nothing and need not
-    apply.
+    like a slow experiment rather than a wrong parameter. A seed also binds the
+    experiment's research release: the generation id it was built from is
+    returned (the path the seed records beside it is where that release was
+    on the host that built the seed, not a condition). No seed (``""``)
+    returns ``(None, None)``: every view is built cold, on the newest release.
     """
 
-    default = repo_root / DEFAULT_PIT_VIEWS_SEED
     if value in (None, ""):
-        return default, None
+        return None, None
     if not isinstance(value, str):
         raise ValueError("pit_views_seed must be a string")
     seed = _repo_path(repo_root, value.strip(), "pit_views_seed")
-    if seed == default:
-        return default, None
     if not seed.is_dir() or seed.is_symlink():
         raise ValueError(f"pit_views_seed must be an existing directory: {seed}")
     generation_id, _release_raw_dir = assert_seed_snapshot_config(seed, snapshot_config)
@@ -1438,15 +1430,6 @@ def _positive_float(value: object, name: str) -> float:
     number = float(value)
     if not math.isfinite(number) or number <= 0:
         raise ValueError(f"{name} must be a positive finite number")
-    return number
-
-
-def _finite_float(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{name} must be finite")
-    number = float(value)
-    if not math.isfinite(number):
-        raise ValueError(f"{name} must be finite")
     return number
 
 

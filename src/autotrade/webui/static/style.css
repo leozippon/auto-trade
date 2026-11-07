@@ -448,8 +448,14 @@ main {
  color: var(--muted);
  font-weight: 500;
 }
-/* How an experiment ended: a broken worker reads as a failure, and a spent
-   budget stays quiet. */
+/* How an experiment ended: a registered strategy's record that passed reads as
+   success and one that did not as failure, a broken worker reads as a failure,
+   and a spent budget stays quiet. */
+.badge.ending-passed {
+ background: var(--ok-soft);
+ color: var(--ok);
+}
+.badge.ending-failed,
 .badge.ending-broken {
  background: var(--bad-soft);
  color: var(--bad);
@@ -1476,6 +1482,20 @@ details.fold.history-day.idle > summary {
 }
 .modal.prompt-modal .body {
  flex: 1;
+}
+.panel.hero {
+ border-color: var(--accent);
+ box-shadow:
+  0 0 0 1px var(--accent-soft),
+  var(--shadow-lift);
+}
+.hero-title {
+ display: flex;
+ align-items: center;
+ gap: var(--space-2);
+ min-width: 0;
+ margin: 0;
+ font-size: 1.03rem;
 }
 
 .session-list {

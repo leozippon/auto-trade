@@ -11,7 +11,6 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from autotrade.environment.broker_core import STAMP_DUTY_CUTOVER
-from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.dividend_tax import (
     BONUS_SHARE_PAR_CNY,
     DIVIDEND_TAX_CUTOVER,
@@ -126,7 +125,7 @@ def build_experiment_facts(
     runtime_env = runtime_env or {}
     data_summary = data_summary or {}
     snapshot_config = _as_mapping(manifest.get("snapshot_config"))
-    benchmark_index = str(manifest.get("benchmark_index") or DEFAULT_BENCHMARK_INDEX)
+    benchmark_index = str(manifest["benchmark_index"])
 
     facts: dict[str, object] = {
         "identity": compact_mapping(
@@ -203,8 +202,7 @@ def build_experiment_facts(
         "broker_replay": _broker_replay_facts(manifest),
         # The index this experiment is measured against: the benchmark leg of every
         # factor loading below, and the membership the random-selection control
-        # draws its replacement names from. A manifest written before the
-        # parameter existed reads as the default, which is what those experiments ran.
+        # draws its replacement names from.
         "benchmark_index": benchmark_index,
         # The caliber every factor loading and residual tracking error in this
         # session was computed under. One sentence, naming that benchmark:
@@ -473,7 +471,7 @@ PERMITTED_BOARDS_RULE = (
 
 
 def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
-    profile = _as_mapping(manifest.get("broker_profile"))
+    profile = _as_mapping(manifest["broker_profile"])
     schedule = _as_mapping(manifest.get("schedule"))
     boards = profile.get("permitted_boards")
     return compact_mapping(
@@ -490,7 +488,6 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                 }
             ),
             "slippage_bps": profile.get("slippage_bps"),
-            # A run manifest written before the field existed was untaxed.
             "dividend_tax_policy": (
                 {
                     "charged": True,
@@ -514,7 +511,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                     },
                     "conventions": "ex_date_cash_settlement_bonus_shares_keep_original_acquisition_date_conversions_not_income",
                 }
-                if profile.get("dividend_tax") is True
+                if profile["dividend_tax"]
                 else {"charged": False}
             ),
             # Only where the profile pins them: an account without the field

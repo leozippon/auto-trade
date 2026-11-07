@@ -58,7 +58,7 @@ from .config import (
     REQUIRED_ACCEPTANCE_KEYS,
     AcceptanceRules,
     acceptance_default,
-    rolling_default,
+    experiment_default,
 )
 
 
@@ -119,9 +119,9 @@ class PackParams:
     """What the experiment's sessions are handed: the directive, the reference workspace
     and whether the curated skill library mounts."""
 
-    research_directive: str = _param(rolling_default("research_directive"))
-    workspace_reference: str = _param(rolling_default("workspace_reference"))
-    operating_memory: str = _param(rolling_default("operating_memory"))
+    research_directive: str = _param(experiment_default("research_directive"))
+    workspace_reference: str = _param(experiment_default("workspace_reference"))
+    operating_memory: str = _param(experiment_default("operating_memory"))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -133,7 +133,7 @@ class ScheduleParams:
     # Sets nothing since the approval mode was removed; still written because
     # the round launcher pins it (scripts/experiments/_round.py).
     initial_control_mode: str = _param("auto")
-    benchmark_index: str = _param(rolling_default("benchmark_index"))
+    benchmark_index: str = _param(experiment_default("benchmark_index"))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -141,26 +141,30 @@ class DataParams:
     """The decision view's windows and domains, its prebuilt view cache and the
     universe screen."""
 
-    window_months: int = _param(rolling_default("window_months"))
+    window_months: int = _param(experiment_default("window_months"))
     daily_window_months: int | None = _param()
     fundamentals_window_months: int | None = _param()
     events_window_months: int | None = _param()
     macro_window_months: int | None = _param()
     text_window_months: int | None = _param()
     intraday_trade_days: int = _param(SnapshotConfig().intraday_trade_days)
+    # The default selection is the default prebuilt view cache's: the ten
+    # default fundamentals, the index and Shenwan macro datasets and the
+    # announcement titles, with events and intraday off.
     include_fundamentals: bool = _param(True)
     include_macro: bool = _param(True)
-    include_events: bool = _param(True)
+    include_events: bool = _param(False)
     include_text: bool = _param(True)
     include_intraday: bool = _param(False)
     fundamental_datasets: tuple[str, ...] = _param(())
-    macro_datasets: tuple[str, ...] = _param(())
+    macro_datasets: tuple[str, ...] = _param(("index_daily", "index_dailybasic", "sw_daily", "index_weight"))
     events_datasets: tuple[str, ...] = _param(())
-    text_datasets: tuple[str, ...] = _param(())
-    # Which prebuilt PIT view tree this experiment hardlinks from. The default
-    # one carries the default dataset selection; an experiment that selects
-    # other datasets needs a tree prebuilt for exactly its own selection, and
-    # naming one that was not makes the create fail instead of cold-building.
+    text_datasets: tuple[str, ...] = _param(("anns_d",))
+    # Which prebuilt PIT view tree this experiment hardlinks from and whose
+    # research release it pins. A named tree must exist and carry exactly this
+    # experiment's selection, so an experiment that selects other datasets names
+    # a tree prebuilt for them, or "" for none (it cold-builds every view on the
+    # newest release).
     pit_views_seed: str = _param(str(DEFAULT_PIT_VIEWS_SEED))
     # The universe reaches the agent unfiltered (all boards, ST included, no
     # new-listing exclusion); the strategy applies its own filters.
@@ -176,16 +180,16 @@ class DataParams:
 
 @dataclass(frozen=True, kw_only=True)
 class BudgetParams:
-    """The research session's budgets and attempts (``RollingExperimentConfig``)."""
+    """The research session's budgets and attempts (``ExperimentConfig``)."""
 
-    max_null_controls: int = _param(rolling_default("max_null_controls"))
-    batch_validate_max_concurrency: int = _param(rolling_default("batch_validate_max_concurrency"))
-    max_llm_calls: int = _param(rolling_default("max_llm_calls"))
-    max_api_spend_usd: float = _param(rolling_default("max_api_spend_usd"))
-    session_max_attempts: int = _param(rolling_default("session_max_attempts"))
-    max_research_minutes: int = _param(rolling_default("max_research_minutes"))
-    per_call_timeout_seconds: int = _param(rolling_default("per_call_timeout_seconds"))
-    record_failed_attempts: bool = _param(rolling_default("record_failed_attempts"))
+    max_null_controls: int = _param(experiment_default("max_null_controls"))
+    batch_validate_max_concurrency: int = _param(experiment_default("batch_validate_max_concurrency"))
+    max_llm_calls: int = _param(experiment_default("max_llm_calls"))
+    max_api_spend_usd: float = _param(experiment_default("max_api_spend_usd"))
+    session_max_attempts: int = _param(experiment_default("session_max_attempts"))
+    max_research_minutes: int = _param(experiment_default("max_research_minutes"))
+    per_call_timeout_seconds: int = _param(experiment_default("per_call_timeout_seconds"))
+    record_failed_attempts: bool = _param(experiment_default("record_failed_attempts"))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -193,10 +197,10 @@ class SandboxParams:
     """The strategy container's boundary, the experiment's GPU request and the
     session container's limits (``sandbox.SandboxSpec``)."""
 
-    strategy_fit_timeout_seconds: int = _param(rolling_default("strategy_fit_timeout_seconds"))
-    strategy_inference_timeout_seconds: int = _param(rolling_default("strategy_inference_timeout_seconds"))
-    strategy_cpus: float = _param(rolling_default("strategy_cpus"))
-    strategy_memory: str = _param(rolling_default("strategy_memory"))
+    strategy_fit_timeout_seconds: int = _param(experiment_default("strategy_fit_timeout_seconds"))
+    strategy_inference_timeout_seconds: int = _param(experiment_default("strategy_inference_timeout_seconds"))
+    strategy_cpus: float = _param(experiment_default("strategy_cpus"))
+    strategy_memory: str = _param(experiment_default("strategy_memory"))
     gpu_count: int = _param(SandboxSpec().gpu_count)
     agent_sandbox_image: str | None = _host(DEFAULT_IMAGE)
     # Left out: the strategy container's strategy_cpus and strategy_memory.

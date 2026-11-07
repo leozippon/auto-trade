@@ -75,7 +75,7 @@ def test_an_experiment_without_research_years_is_refused_before_anything_is_writ
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Its full span would otherwise be every year of the geometry: a record
-    from before the rolling validation is refused, as its worker refuses it."""
+    without its research years is refused, as its worker refuses it."""
 
     experiment = _experiment(tmp_path)
     (experiment / "hitl" / "params.json").write_text(json.dumps({"experiment_id": "experiment", "alpha": 0.05}), encoding="utf-8")

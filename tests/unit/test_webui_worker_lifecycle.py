@@ -51,7 +51,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.webui import manager as manager_module
 from autotrade.webui.manager import ManagerError
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 SRC_ROOT = str(Path(autotrade.__file__).resolve().parents[1])
@@ -676,7 +676,7 @@ class CreatePreflightTest(unittest.TestCase):
     def _create(self, **overrides):
         payload = {
             "experiment_id": "preflight_demo",
-            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
         }
         payload.update(overrides)
         return self.client.post("/api/experiments", json=payload)
@@ -771,7 +771,7 @@ class CreatePreflightTest(unittest.TestCase):
         self.assertTrue(manager.worker_script.is_file())
         payload = {
             "experiment_id": "shared_body",
-            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+            **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
         }
         with patch.object(manager, "start_worker", lambda experiment_id: {"spawned": False}):
             created = manager.create_experiment(dict(payload))
@@ -916,7 +916,7 @@ class RestartSlotRaceTest(unittest.TestCase):
             "/api/experiments",
             json={
                 "experiment_id": experiment_id,
-                **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+                **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
             },
         )
         if response.status_code == 200:

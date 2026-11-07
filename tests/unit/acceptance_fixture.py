@@ -28,3 +28,7 @@ RULES = AcceptanceRules(**REQUIRED_RULES)
 # What a console create request must state beside the geometry: the rules the
 # console has no value for (``hitl_state.WEB_REQUIRED_PARAMS``).
 CREATE_RULES: dict[str, object] = {key: REQUIRED_RULES[key] for key in ("research_years",)}
+# The prebuilt view cache a create request in a fixture repository names: none,
+# since the repository holds no seed and a named one, the console's default
+# included, must exist.
+NO_SEED: dict[str, object] = {"pit_views_seed": ""}

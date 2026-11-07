@@ -81,8 +81,6 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
     # description or prompt already states; renaming one is a deliberate
     # library change.
     assert set(entries) == {
-        "artifact-hygiene",
-        "grid-plateau-selection",
         "offline-readings",
         "refit-snapshot-rescore",
         "residual-label-benchmark",
@@ -100,11 +98,11 @@ def test_a_new_experiment_mounts_the_curated_library(tmp_path: Path) -> None:
     )
     mounted = {entry["name"]: entry for entry in index["operating_memory"]}
     assert set(mounted) == set(operating_memory_entries(LIBRARY))
-    hygiene = mounted["artifact-hygiene"]
-    assert hygiene["origin"] == "curated"
-    assert hygiene["path"] == f"memory/{CURATED_MEMORY_SOURCE}/artifact-hygiene/SKILL.md"
-    assert (workspace / hygiene["path"]).read_bytes() == (
-        LIBRARY / "artifact-hygiene" / "SKILL.md"
+    entry = mounted["offline-readings"]
+    assert entry["origin"] == "curated"
+    assert entry["path"] == f"memory/{CURATED_MEMORY_SOURCE}/offline-readings/SKILL.md"
+    assert (workspace / entry["path"]).read_bytes() == (
+        LIBRARY / "offline-readings" / "SKILL.md"
     ).read_bytes()
 
 
@@ -123,8 +121,8 @@ def test_the_curated_library_mounts_read_only(tmp_path: Path) -> None:
     memory = workspace / OPERATING_MEMORY_DIRNAME
     assert [source.source for source in mounted] == [CURATED_MEMORY_SOURCE]
     assert [path.name for path in memory.iterdir()] == [CURATED_MEMORY_SOURCE]
-    entry = memory / CURATED_MEMORY_SOURCE / "artifact-hygiene" / "SKILL.md"
-    assert entry.read_bytes() == (LIBRARY / "artifact-hygiene" / "SKILL.md").read_bytes()
+    entry = memory / CURATED_MEMORY_SOURCE / "offline-readings" / "SKILL.md"
+    assert entry.read_bytes() == (LIBRARY / "offline-readings" / "SKILL.md").read_bytes()
     assert not stat.S_IMODE(entry.stat().st_mode) & 0o222
     assert not stat.S_IMODE(entry.parent.stat().st_mode) & 0o222
     with pytest.raises(PermissionError):
@@ -204,11 +202,11 @@ def test_the_index_lists_every_source_tagged_by_origin(tmp_path: Path) -> None:
     assert [entry["name"] for entry in index["skills"]] == ["fold-notes"]
     assert [entry["origin"] for entry in index["skills"]] == ["session"]
     memory = {entry["name"]: entry for entry in index["operating_memory"]}
-    assert memory["artifact-hygiene"]["origin"] == "curated"
-    assert memory["artifact-hygiene"]["source"] == CURATED_MEMORY_SOURCE
+    assert memory["offline-readings"]["origin"] == "curated"
+    assert memory["offline-readings"]["source"] == CURATED_MEMORY_SOURCE
     assert (
-        memory["artifact-hygiene"]["path"]
-        == f"memory/{CURATED_MEMORY_SOURCE}/artifact-hygiene/SKILL.md"
+        memory["offline-readings"]["path"]
+        == f"memory/{CURATED_MEMORY_SOURCE}/offline-readings/SKILL.md"
     )
     # count/files/bytes stay the writable tree's ledger fields.
     assert index["count"] == 1
@@ -230,7 +228,7 @@ def test_a_session_can_neither_rewrite_nor_delete_mounted_memory(
         path: path.read_bytes() for path in memory.rglob("SKILL.md")
     }
     safe = SafeWorkspace(workspace)
-    for name in ("artifact-hygiene", "validation-readings"):
+    for name in ("offline-readings", "validation-readings"):
         for tool, arguments in (
             (WriteSkillTool(safe), {"name": name, "path": "SKILL.md", "content": "# gone\n"}),
             (
@@ -255,14 +253,14 @@ def test_the_run_config_carries_the_mode(tmp_path: Path) -> None:
     params = json.loads(params_path.read_text(encoding="utf-8"))
 
     assert (
-        load_worker_options(experiment, repo_root=repo).rolling.operating_memory
+        load_worker_options(experiment, repo_root=repo).experiment.operating_memory
         == DEFAULT_OPERATING_MEMORY
     )
 
     params["operating_memory"] = "none"
     params_path.write_text(json.dumps(params), encoding="utf-8")
     assert (
-        load_worker_options(experiment, repo_root=repo).rolling.operating_memory
+        load_worker_options(experiment, repo_root=repo).experiment.operating_memory
         == "none"
     )
 

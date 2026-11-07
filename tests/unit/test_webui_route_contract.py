@@ -236,7 +236,7 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
 
     [row] = client.get("/api/trading/paper/books").json()["books"]
     for key in (
-        "book_id", "experiment_id", "artifact_id", "candidate_source", "verdict", "start_date",
+        "book_id", "experiment_id", "artifact_id", "verdict", "start_date",
         "initial_cash", "equity", "cash", "position_count", "total_return", "excess_return",
         "benchmark_label", "curve", "source", "signal_date", "order_count", "state", "error",
     ):
@@ -345,7 +345,7 @@ def test_no_page_appends_a_renderer_that_can_return_nothing() -> None:
 
     source = APP_JS.read_text(encoding="utf-8")
     nullable = (
-        "rankingPanel",
+        "forwardTiles",
         "evidenceTiles",
         "recordPanel",
         "validationWindowBlock",
@@ -482,9 +482,6 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
     assert len(reasons) == 4, reasons
     assert reasons <= keys("const VERDICT_REASON_LABELS = {"), sorted(reasons)
     assert keys("const VERDICT_STATUS = {") == {"observing", "confirmed", "killed"}
-    from autotrade.paper.book import CANDIDATE_SOURCE
-
-    assert keys("const TRACK_LABELS = {") == {CANDIDATE_SOURCE}
 
 
 def test_a_criterion_that_names_a_threshold_words_it_from_the_record() -> None:
@@ -518,11 +515,13 @@ def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: P
     projection of a synthetic experiment that carries its readout, frozen with seed
     replicates so the fields only such an experiment has are served too."""
 
-    from autotrade.webui.registry import experiment_detail
+    from autotrade.webui.registry import experiment_detail, summarize_experiment
     from tests.unit.webui_research_experiment import build_experiment
 
     build_experiment(tmp_path, "experiment", "registered_with_record", seeded=True)
     detail = experiment_detail(tmp_path, "experiment")
+    # The home page's row of the same experiment (the cards and the hero).
+    row = summarize_experiment(tmp_path / "experiment")
     [research, replay] = detail["sessions"]
     assert (research["kind"], replay["kind"]) == ("research", "forward")
     registered = set(detail["registered"])
@@ -562,6 +561,11 @@ def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: P
         ("registeredPanel", reads("registeredPanel", "registered"), registered),
         ("researchSessionPanel", reads("researchSessionPanel", "record"), record),
         ("evidenceTiles", reads("evidenceTiles", "record"), rolling),
+        ("evidenceTiles", reads("evidenceTiles", "forward"), set(row["forward"])),
+        ("evidenceTiles", reads("evidenceTiles", "heldout"), set(row["forward"]["slices"]["heldout"]["residual_reading"])),
+        ("forwardTiles", reads("forwardTiles", "f"), set(row["forward"]["slices"]["forward"])),
+        ("heroSignature", reads("heroSignature", "item"), set(row)),
+        ("paperHandoff", reads("paperHandoff", "detail"), set(row)),
         ("recordPanel", reads("recordPanel", "record"), rolling),
         ("recordPanel", reads("recordPanel", "row"), rolling_row),
         ("readoutBlock", reads("readoutBlock", "readout"), readout),

@@ -257,7 +257,7 @@ def render_orders(book: Book, trade_date: str) -> str:
         lines += [f"> {book.note}", ""]
     lines += [
         (
-            f"- 模拟账户：{book.experiment_id} / {book.artifact_id}（{book.candidate_source}），"
+            f"- 模拟账户：{book.experiment_id} / {book.artifact_id}，"
             f"{_day(str(state.get('start_date') or trade_date))} 起，初始资金 {_money(book.profile.initial_cash)}"
         ),
         (
@@ -349,7 +349,7 @@ def render_killed(book: Book, trade_date: str, transition: Mapping[str, object])
         lines += [f"> {book.note}", ""]
     lines += [
         (
-            f"本模拟账户（{book.experiment_id} / {book.artifact_id}，{book.candidate_source}）在 "
+            f"本模拟账户（{book.experiment_id} / {book.artifact_id}）在 "
             f"{_day(str(transition['date']))}（Paper 第 {transition['days']} 个结算日）被判定终止："
             f"{transition['reason']}。它不再决策，今后不出订单；请手工卖出下列持仓。"
         ),

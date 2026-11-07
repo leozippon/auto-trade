@@ -1,4 +1,4 @@
-"""Seed replicates: a strategy that trains a model is registered with its seeds.
+"""Seed replicates: a strategy may be registered with its other training seeds.
 
 The experiment's own pipeline runs end to end -- the real artifact store, ledger,
 final registration, sealed reading and verdict -- over scripted Validations
@@ -23,15 +23,15 @@ from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.config import (
     EvaluationRequest,
     EvaluationResult,
+    ExperimentConfig,
     ResearchSessionRequest,
     ResearchSessionResult,
-    RollingExperimentConfig,
     StepResult,
     acceptance_for,
     research_span,
 )
 from autotrade.pipelines.experiment import (
-    RollingExperimentPipeline,
+    ExperimentPipeline,
     check_registration,
 )
 from autotrade.pipelines.ledger import (
@@ -42,7 +42,7 @@ from autotrade.pipelines.ledger import (
 )
 from scripts.dev.check_verdicts import check_experiment
 from tests.unit.acceptance_fixture import REQUIRED_RULES
-from tests.unit.test_rolling_pipeline import (
+from tests.unit.test_experiment_pipeline import (
     CONFIG_PROFILE,
     CONFIG_SCHEDULE,
     DAYS,
@@ -158,7 +158,6 @@ class SeedDeveloper:
         *,
         nominee: int,
         replicates,
-        deterministic: bool,
         outcome: str = "completed",
     ):
         self.store = store
@@ -166,7 +165,6 @@ class SeedDeveloper:
         self.candidates = candidates
         self.nominee = nominee
         self.replicates = tuple(replicates)
-        self.deterministic = deterministic
         self.outcome = outcome
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
@@ -194,7 +192,6 @@ class SeedDeveloper:
             "completed",
             node_id=steps[self.nominee].step_id,
             seed_replicates=tuple(steps[index].step_id for index in self.replicates),
-            deterministic=self.deterministic,
         )
 
 
@@ -204,11 +201,10 @@ def _experiment(
     *,
     nominee=0,
     replicates=(),
-    deterministic=False,
     outcome="completed",
     **replays,
 ):
-    config = RollingExperimentConfig(
+    config = ExperimentConfig(
         experiment_id="experiment",
         experiments_root=tmp_path / "experiments",
         geometry=GEOMETRY,
@@ -216,7 +212,7 @@ def _experiment(
     )
     store = FilesystemArtifactStore(config.experiment_dir / "artifacts" / "strategy")
     evaluator = SeedEvaluator(config.experiment_dir / "artifacts" / "results", **replays)
-    pipeline = RollingExperimentPipeline(
+    pipeline = ExperimentPipeline(
         config,
         snapshots=Snapshots(),
         artifacts=store,
@@ -227,7 +223,6 @@ def _experiment(
             candidates,
             nominee=nominee,
             replicates=replicates,
-            deterministic=deterministic,
             outcome=outcome,
         ),
         trading_days=DAYS,
@@ -251,9 +246,7 @@ def test_a_model_nominee_registers_with_its_seed_replicate_and_both_replay_forwa
     gate = record["registration"]
     seeds = gate["seed_replicates"]
     assert gate["passed"] is True and gate["reasons"] == []
-    # Nothing was declared, so no record states a declaration.
-    assert seeds["trains_a_model"] is True and "deterministic" not in seeds
-    assert "deterministic" not in record["registered"]
+    assert set(seeds) == {"replicates"}
     assert [entry["seed_line"] for entry in seeds["replicates"]] == [
         "main.py: SEED_BASE = 2000",
         "main.py: SEED_BASE = 3000",
@@ -312,32 +305,35 @@ def test_seeds_that_agree_forward_are_read_together(tmp_path: Path):
     assert forward["readout"]["forward"]["lower_bound"] == block["lower_bound"]
 
 
-def _refused(
-    tmp_path: Path, candidates, *, nominee: int = 0, replicates=(), deterministic: bool = False
-) -> dict[str, object]:
+def _refused(tmp_path: Path, candidates, *, nominee: int = 0, replicates=()) -> dict[str, object]:
     """The registration ``test`` reads for ``nominee`` with ``replicates``,
-    off the experiment's recorded Validations. The session ends on its budget
-    before any test, and a nominee that trains a model owes a replicate no
-    host can name, so the experiment itself registers nothing."""
+    off the Validations of a session that ended on its budget before any
+    test."""
 
     pipeline, _evaluator = _experiment(tmp_path, candidates, outcome="deadline")
-    record = pipeline.run_research_session()
-    assert record["registered"] is None
-    assert record["experiment_end"]["status"] == "no_deliverable"
-    rows = record["steps"]
+    rows = pipeline.run_research_session()["steps"]
     return check_registration(
         rows[nominee],
         experiment_dir=pipeline.config.experiment_dir,
         acceptance=pipeline.config.acceptance,
         seed_replicates=[rows[index] for index in replicates],
-        deterministic=deterministic,
     )
 
 
-def test_a_model_nominee_without_a_replicate_is_refused(tmp_path: Path):
-    gate = _refused(tmp_path, [(_source(1000), "full"), (_source(1000, swaps=3), "full")])
-    assert gate["reasons"] == ["registration_too_few_seed_replicates"]
-    assert gate["seed_replicates"]["replicates"] == []
+def test_a_session_out_of_budget_before_any_test_registers_its_last_model_step(tmp_path: Path):
+    """No host can name a replicate for a session that never tested, and none
+    is owed: the last full-span Step registers on its own, a model-training
+    one included, and its record is completed."""
+
+    pipeline, _evaluator = _experiment(
+        tmp_path, [(_source(1000), "full"), (_source(2000), "full")], outcome="deadline"
+    )
+    record = pipeline.run_research_session()
+    assert record["registration"]["passed"] is True
+    assert record["registration"]["seed_replicates"] == {"replicates": []}
+    assert record["registered"]["source_step_id"] == "research_step_1"
+    assert record["registered"]["fit_plan"]["fit"] is True
+    assert "seed_replicates" not in record["registered"]
 
 
 @pytest.mark.parametrize(
@@ -377,50 +373,20 @@ def test_a_replicate_that_loses_does_not_hold_back_the_registration(tmp_path: Pa
     ]
 
 
-@pytest.mark.parametrize("replicates", [(), (1,)], ids=["alone", "with_a_worse_seed"])
-def test_a_deterministic_model_nominee_owes_no_replicate(tmp_path: Path, replicates):
-    """A nominee that trains a model but declares its package deterministic
-    registers without a replicate. The gate and the registered block record the
-    declaration for the operator's review."""
-
-    pipeline, _evaluator = _experiment(
-        tmp_path,
-        [(_source(1000), "full"), (_source(4000), "full")],
-        replicates=replicates,
-        deterministic=True,
-    )
-    record = pipeline.run_research_session()
-    gate = record["registration"]
-    seeds = gate["seed_replicates"]
-    assert gate["passed"] is True and gate["reasons"] == []
-    assert seeds["trains_a_model"] is True and seeds["deterministic"] is True
-    assert record["registered"]["deterministic"] is True
-
-
-def test_a_deterministic_nominee_is_held_to_its_replicates_validity(tmp_path: Path):
-    gate = _refused(
-        tmp_path,
-        [(_source(1000), "full"), (_source(3000, swaps=2), "full"), (_source(1000), "full")],
-        replicates=(2,),
-        deterministic=True,
-    )
-    assert gate["reasons"] == ["registration_seed_replicate_invalid"]
-    assert gate["seed_replicates"]["deterministic"] is True
-
-
-def test_a_nominee_that_trains_no_model_is_judged_on_its_own_series(tmp_path: Path):
-    """A nominee that trains no model needs no replicate: it registers alone,
-    its gate reads that it had nothing to replicate, and forward its own
-    series is read, with its bound."""
+@pytest.mark.parametrize("fit", [True, False], ids=["trains_a_model", "trains_none"])
+def test_a_nominee_without_a_replicate_is_judged_on_its_own_series(tmp_path: Path, fit: bool):
+    """Replicates are optional: a nominee that names none registers alone,
+    whether or not it trains a model, and forward its own series is read,
+    with its bound."""
 
     pipeline, evaluator = _experiment(
-        tmp_path, [(_source(1000, fit=False), "full"), (_source(2000, fit=False), "full")]
+        tmp_path, [(_source(1000, fit=fit), "full"), (_source(2000, fit=fit), "full")]
     )
     record = pipeline.run_research_session()
     gate = record["registration"]
-    assert gate["passed"] is True
-    assert gate["seed_replicates"]["trains_a_model"] is False
-    assert gate["seed_replicates"]["replicates"] == []
+    assert gate["passed"] is True and gate["reasons"] == []
+    assert gate["seed_replicates"] == {"replicates": []}
+    assert record["registered"]["fit_plan"]["fit"] is fit
     assert "seed_replicates" not in record["registered"]
     research = len(evaluator.requests)
     forward = pipeline.run_forward()
@@ -470,7 +436,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
             RuntimeError,
             r"seed replicate research_step_1 \(.*\) did not complete",
         ),
-        ({"bare_seed": 2000}, ValueError, "graded another series than the registered book"),
+        ({"bare_seed": 2000}, ValueError, "no random baseline"),
     ],
     ids=["the_host_fails_its_replay", "its_replay_has_no_random_baseline"],
 )

@@ -38,7 +38,7 @@ class TerminalTool:
             value={
                 "status": "step_recorded",
                 "outcome": "completed",
-                "candidate": {"node_id": node_id, "deterministic": arguments.get("deterministic") is True},
+                "candidate": {"node_id": node_id},
             },
             finish=True,
         )

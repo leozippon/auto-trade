@@ -59,7 +59,6 @@ RG_AVAILABLE = shutil.which("rg") is not None
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    deterministic: bool = False,
 ) -> dict[str, object]:
     """A registration every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}

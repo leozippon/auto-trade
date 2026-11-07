@@ -28,7 +28,7 @@ SESSIONS = ("20260105", "20260106", "20260107", "20260108", "20260109", "2026011
 SYMBOL = "000001.SZ"
 PROFILE = BrokerProfile(initial_cash=100_000.0, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0)
 
-# A module-level decision counter, the way the graduated experiment paces its
+# A module-level decision counter, the way a registered strategy may pace its
 # rebalance: it buys on the first call of a worker and sells on the third.
 COUNTER_STRATEGY = """_CALLS = 0
 
@@ -146,7 +146,7 @@ def _sheet_book(book: _Book, note: str = "") -> object:
 
     return type("SheetBook", (), {
         "root": book.root.resolve(), "note": note,
-        "experiment_id": "exp", "artifact_id": "art", "candidate_source": "registered",
+        "experiment_id": "exp", "artifact_id": "art",
         "profile": PROFILE, "schedule": StrategySchedule(),
     })()
 
@@ -316,9 +316,9 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     book.run("20260105")
     book.run("20260106")
     book.run("20260107")
-    sheet_book = _sheet_book(book, note="参考簿（观察中）：graduated, unconfirmed — monitor")
+    sheet_book = _sheet_book(book, note="参考簿（观察中）：registered, unconfirmed — monitor")
     text = render_orders(sheet_book, "20260107")
-    assert text.startswith("# Paper 订单 · 2026-01-07（周三）\n\n> 参考簿（观察中）：graduated, unconfirmed — monitor")
+    assert text.startswith("# Paper 订单 · 2026-01-07（周三）\n\n> 参考簿（观察中）：registered, unconfirmed — monitor")
     assert "数据截至 2026-01-06（周二） 收盘" in text
     # A held name is quoted at the close the account was marked with (20260106: 12.50).
     assert "总资产 ¥100,149.89，现金 ¥98,899.89，持仓 1 只" in text

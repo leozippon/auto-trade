@@ -23,6 +23,7 @@ from autotrade.agent.prompts import (
     build_system_prompt,
 )
 from autotrade.environment.artifacts import new_revision_id
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_MIN_TOKENS,
@@ -59,7 +60,6 @@ from tests.unit.terminal_tool import TerminalTool
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    deterministic: bool = False,
 ) -> dict[str, object]:
     """A registration every node passes: these tests are about the Runner."""
     return {"passed": True, "reasons": []}
@@ -1358,7 +1358,12 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     ):
         assert rule in prohibitions
     facts = build_experiment_facts(
-        manifest={"kind": "research", "experiment_id": "exp"},
+        manifest={
+            "kind": "research",
+            "experiment_id": "exp",
+            "benchmark_index": "000300.SH",
+            "broker_profile": BrokerProfile().to_record(),
+        },
         ref_store=AgentRefStore(tmp_path / "experiment"),
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
@@ -1369,10 +1374,10 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     prompt = build_system_prompt(experiment_facts={})
     assert "从日期、路径、元数据和模型自身的知识推断之后的行情" in prompt
-    # The shell's foreground-only rule and its one exception are the tool's
+    # The shell's foreground cap and its detached-job recipe are the tool's
     # own description, not a second copy in the prompt.
-    assert "starting work in the background" in SandboxShellTool.spec.description
-    assert "starting work in the background" not in prompt
+    assert "as a detached job" in SandboxShellTool.spec.description
+    assert "as a detached job" not in prompt
     assert "修改策略产物" not in prompt
     assert "pyright --project" not in prompt
     assert "pandas.read_parquet" not in prompt

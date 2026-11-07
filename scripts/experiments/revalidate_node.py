@@ -265,7 +265,7 @@ def main(argv: list[str] | None = None) -> int:
         # The spans the session resolved a node's span over: its research years.
         _, years = pipeline.research_inputs()
         request = research_span(years[:research_years], args.span).request(
-            revision, schedule=options.rolling.schedule, broker_profile=options.rolling.broker_profile
+            revision, schedule=options.experiment.schedule, broker_profile=options.experiment.broker_profile
         )
         result = pipeline.evaluator.evaluate(request, max_days=args.max_days, start_day=args.start_day)
         if args.max_days is None and args.start_day is None:

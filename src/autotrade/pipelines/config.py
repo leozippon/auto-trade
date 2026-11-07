@@ -104,10 +104,9 @@ DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY = 3
 
 # Research on ten August-July years, a twelve-month forward test after them,
 # and a Held-out quarter the replay clips to the release end
-# (docs/PIPELINE_DESIGN.md): the current rounds' geometry
-# (scripts/experiments/_profiles.py, FUND_TITLE_TEN_YEAR), which the console's
-# create form offers and the round launcher sends unless a round names another.
-# The prebuilt view cache is planned over it.
+# (docs/PIPELINE_DESIGN.md), which the console's create form offers and the
+# round launcher sends unless a round names another. The default prebuilt view
+# cache is planned over it.
 DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
     research_start="20150801",
     research_end="20250731",
@@ -115,14 +114,14 @@ DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
     heldout_end="20261031",
 )
 
-# The exploration prebuilt view cache an experiment hardlinks completed views from
-# unless its ``pit_views_seed`` parameter names another tree, and the scratch
-# directory the offline prebuild pins its research release in. Repo-relative
-# and gitignored; the contract that decides reuse lives in
-# ``autotrade.pipelines.pit_views_seed``. Defined here because both the console
-# creation defaults and that module need the path.
-DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed/explore")
-DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed/explore_workspace")
+# The prebuilt view cache the console's create form names, built for its
+# defaults: the geometry above and the console's dataset selection, from
+# release 85cd2284caa943689c72117369f9ca0c (logs/data/seed_build_20261106_10y.log).
+# Also where the offline prebuild writes by default, and the scratch directory
+# it pins its research release in. Repo-relative and gitignored; the contract
+# that decides reuse lives in ``autotrade.pipelines.pit_views_seed``.
+DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed_research_10y_fundanns_20261106")
+DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed_research_10y_fundanns_20261106_workspace")
 
 
 @dataclass(frozen=True)
@@ -450,17 +449,16 @@ class AcceptanceRules:
                     f"<= {self.max_drawdown}: equity drawdown over the candidate's span"
                 ),
                 "seed_replicates": (
-                    "a candidate whose main.py defines fit (it trains a model) names at "
-                    "least one seed replicate in test's seed_replicates: another complete "
-                    "full-span Validation of this session, registered as a candidate (not "
-                    "a control), whose strategy is the candidate's bytes with exactly one "
+                    "optional, for any candidate: test's seed_replicates may name other "
+                    "complete full-span Validations of this session, registered as "
+                    "candidates (not controls), each the candidate's bytes with exactly one "
                     "line changed, an integer assignment to a seed name (SEED, SEED_BASE, "
                     "or one ending in _SEED or _SEED_BASE; e.g. SEED_BASE = 1000 in the "
-                    "candidate, 2000 in a replicate), and whose bytes differ from every "
-                    "other registered one. The replicates named at the last test are "
-                    "registered beside the strategy and replayed forward with it. A candidate "
-                    "without fit needs none, and one declared deterministic in test (its "
-                    "package uses no randomness) owes none"
+                    "candidate, 2000 in a replicate), and with bytes that differ from every "
+                    "other registered one. A named replicate that is not one refuses the "
+                    "test. The replicates named at the last test are registered beside the "
+                    "strategy and replayed forward with it, and the Forward reading reports "
+                    "them and their mean with the strategy's"
                 ),
                 "tracking_mandate": mandate,
                 "checked": "at every test; a candidate that fails is refused and the test horizon does not move",
@@ -473,7 +471,7 @@ class AcceptanceRules:
                     f"{self.forward_confidence:.0%} block-bootstrap lower bound of active "
                     "excess over the registered book and its seed replicates, the active excess "
                     f"with slippage multiplied by {self.cost_stress_multiplier}, drawdowns, "
-                    "turnover and the residual statistic; recorded beside the rolling "
+                    "turnover and the residual statistic; recorded beside the validation "
                     "record, pooled across registered strategies, deciding nothing"
                 ),
             },
@@ -559,14 +557,15 @@ def defaulted_acceptance(params: Mapping[str, object]) -> dict[str, object]:
 
 
 @dataclass(frozen=True)
-class RollingExperimentConfig:
+class ExperimentConfig:
     experiment_id: str
     experiments_root: Path
     # Research, forward and Held-out dates of the experiment (pipelines/calendar.py).
     geometry: ResearchGeometry = DEFAULT_RESEARCH_GEOMETRY
-    # The macro data floor is 2020-01, so 24 months before a July 2022
-    # decision view is the most history every domain carries.
-    window_months: int = 24
+    # Months every domain of a decision view reaches back: 132 covers the ten
+    # research years of the default geometry and the one before them that
+    # their start reads.
+    window_months: int = 132
     # The index this experiment is measured against: the benchmark leg of the style
     # attribution and of the factor loadings, and the membership the
     # random baseline draws its replacements from. One of
@@ -599,8 +598,7 @@ class RollingExperimentConfig:
     # The rest of the strategy container's boundary: the wall clock of one
     # ``generate_orders(context)`` call, the CPU quota its thread variables are
     # derived from, and its memory ceiling (a Docker limit). The executor's
-    # defaults are the single source, so an experiment whose params.json predates these
-    # knobs replays exactly as before; the session container takes the same CPUs
+    # defaults are the single source; the session container takes the same CPUs
     # and memory (``worker._llm_settings``).
     strategy_inference_timeout_seconds: int = int(SandboxConfig().timeout_seconds)
     strategy_cpus: float = SandboxConfig().spec.cpus
@@ -694,11 +692,11 @@ def positive_spend_cap(value: object) -> float:
     return float(value)
 
 
-_ROLLING_FIELDS = {field_obj.name: field_obj for field_obj in fields(RollingExperimentConfig)}
+_ROLLING_FIELDS = {field_obj.name: field_obj for field_obj in fields(ExperimentConfig)}
 
 
-def rolling_default(name: str) -> object:
-    """Default of one ``RollingExperimentConfig`` field.
+def experiment_default(name: str) -> object:
+    """Default of one ``ExperimentConfig`` field.
 
     The dataclass is the single source of truth for the pipeline defaults. A
     caller that fills in an absent value (the ``params.json`` loader, a CLI)
@@ -706,7 +704,7 @@ def rolling_default(name: str) -> object:
     """
     field_obj = _ROLLING_FIELDS.get(name)
     if field_obj is None or field_obj.default is MISSING:
-        raise KeyError(f"{name} is not a defaulted RollingExperimentConfig field")
+        raise KeyError(f"{name} is not a defaulted ExperimentConfig field")
     return field_obj.default
 
 
@@ -946,8 +944,7 @@ class BudgetUsed:
     # counter of its own, outside every budget.
     test_replays: int = 0
     null_controls: int = 0
-    # USD charged against ``max_api_spend_usd``; a block written before the cap
-    # existed reads as 0.
+    # USD charged against ``max_api_spend_usd``.
     api_spend_usd: float = 0.0
 
     def to_record(self) -> dict[str, object]:
@@ -1024,12 +1021,12 @@ class ResearchSessionRequest:
     # stays inside the research years).
     years: tuple[ReplaySpan, ...]
     # Months of history every decision view carries up to its anchor
-    # (``RollingExperimentConfig.window_months``): the view the session reads
+    # (``ExperimentConfig.window_months``): the view the session reads
     # and the view each research year's replay starts from.
     window_months: int
     max_llm_calls: int
     deadline_seconds: float
-    # The experiment's benchmark index (``RollingExperimentConfig.benchmark_index``),
+    # The experiment's benchmark index (``ExperimentConfig.benchmark_index``),
     # published to the session through the run manifest so the Agent grades
     # itself against the index the host grades it on. Required: a request that
     # omitted it would tell the Agent the default index whatever the experiment's is.
@@ -1057,16 +1054,16 @@ class ResearchSessionRequest:
     snapshot_config: Mapping[str, object] = field(default_factory=dict)
     record_failed_attempts: bool = True
     # Cap on the session's own ``run_null_control`` calls; the experiment default
-    # is the single source (RollingExperimentConfig.max_null_controls).
-    max_null_controls: int = RollingExperimentConfig.max_null_controls
+    # is the single source (ExperimentConfig.max_null_controls).
+    max_null_controls: int = ExperimentConfig.max_null_controls
     # Replays one ``validate`` call runs at once
-    # (RollingExperimentConfig.batch_validate_max_concurrency).
+    # (ExperimentConfig.batch_validate_max_concurrency).
     batch_validate_max_concurrency: int = (
-        RollingExperimentConfig.batch_validate_max_concurrency
+        ExperimentConfig.batch_validate_max_concurrency
     )
-    # The experiment's API spend cap (RollingExperimentConfig.max_api_spend_usd), after
+    # The experiment's API spend cap (ExperimentConfig.max_api_spend_usd), after
     # any HITL resource override.
-    max_api_spend_usd: float = RollingExperimentConfig.max_api_spend_usd
+    max_api_spend_usd: float = ExperimentConfig.max_api_spend_usd
     progress_hook: Callable[[str, dict[str, object] | None], None] | None = field(
         default=None,
         repr=False,
@@ -1088,7 +1085,7 @@ class ResearchSessionRequest:
     @classmethod
     def for_experiment(
         cls,
-        config: RollingExperimentConfig,
+        config: ExperimentConfig,
         *,
         budgets: Mapping[str, float],
         **session: Any,
@@ -1139,13 +1136,12 @@ class ResearchSessionResult:
     # Keyword-only from here: independent optional fields, so a new one can
     # never land in an older field's positional slot.
     _: KW_ONLY
-    # The registered candidate: the Step the last test took, the Steps it
-    # registered as its seed replicates and whether it declared its package
-    # deterministic (``experiment.check_registration``). None when no test
-    # ran (``deadline`` before the first test, or ``environment_blocked``).
+    # The registered candidate: the Step the last test took and the Steps it
+    # registered as its seed replicates (``experiment.check_registration``).
+    # None when no test ran (``deadline`` before the first test, or
+    # ``environment_blocked``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
-    deterministic: bool = False
     # The Agent's own account of its outcome.
     reason: str = ""
     finish_reason: str = ""
@@ -1189,12 +1185,12 @@ __all__ = [
     "EvaluationRequest",
     "EvaluationResult",
     "ExecutionMode",
+    "ExperimentConfig",
     "RegisteredArtifact",
     "ReplaySpan",
     "ResearchDeveloper",
     "ResearchSessionRequest",
     "ResearchSessionResult",
-    "RollingExperimentConfig",
     "SessionResume",
     "SnapshotBundle",
     "SnapshotProvider",
@@ -1203,8 +1199,8 @@ __all__ = [
     "acceptance_default",
     "acceptance_for",
     "defaulted_acceptance",
+    "experiment_default",
     "positive_spend_cap",
     "research_span",
-    "rolling_default",
     "session_deadline_seconds",
 ]

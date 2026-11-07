@@ -214,7 +214,7 @@ def test_step_record(
 
     ``head`` carries the link keys and the session key; ``candidate`` names
     the Step tested (``step_id``, ``revision_id``, ``fingerprint``,
-    ``seed_replicates``, ``deterministic``); ``replay`` the whole replay
+    ``seed_replicates``); ``replay`` the whole replay
     (``start``, ``end``, ``result_ref``) the entry was read from; ``entry`` is
     :func:`step_entry` over the step's window, daily rows included;
     ``registration`` what the registration read; ``source`` is

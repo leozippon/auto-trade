@@ -93,7 +93,7 @@ _LLM_FAILURE_CIRCUIT = 3
 # running. Read at each call site, so a test can shorten it on the module.
 SUBAGENT_TEARDOWN_WAIT_SECONDS = 30.0
 
-# Default wrap-up grace shared with RollingExperimentConfig.deadline_grace_minutes:
+# Default wrap-up grace shared with ExperimentConfig.deadline_grace_minutes:
 # the pipeline hands the session a budget of main deadline + grace and the runner
 # reserves the trailing grace for wrap-up. Keep the two defaults aligned.
 DEFAULT_DEADLINE_GRACE_SECONDS = 600.0

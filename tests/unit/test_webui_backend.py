@@ -53,7 +53,7 @@ from autotrade.webui.manager import (
 )
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app, is_loopback_host
-from tests.unit.acceptance_fixture import CREATE_RULES, REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.webui_research_experiment import build_experiment
 
@@ -380,7 +380,7 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
             json={
                 "params": {
                     "experiment_id": "persistent_demo",
-                    **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
                     "strategy_period": "quarter",
                     "inference_time": "23:59",
                     "daily_window_months": 18,
@@ -1408,7 +1408,7 @@ class WebuiBackendTest(unittest.TestCase):
                 json={
                     "params": {
                         "experiment_id": "exp_new",
-                        **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES,
+                        **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
                     }
                 },
             )

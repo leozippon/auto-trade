@@ -18,11 +18,7 @@ from autotrade.common.records import read_json_object_or_empty, write_json_atomi
 from autotrade.environment import pretrained
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
-from autotrade.environment.identity import (
-    LEGACY_EXPERIMENT_MESSAGE,
-    AgentRefStore,
-    LegacyExperimentError,
-)
+from autotrade.environment.identity import AgentRefStore, CorruptExperimentError
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import EXPERIMENT_LABEL, SandboxSpec
@@ -306,11 +302,11 @@ class ManagerDeleteError(ManagerError):
     """A terminal experiment could not be fully removed from local storage."""
 
 
-def _modern_ref_store(directory: Path) -> AgentRefStore:
+def _open_ref_store(directory: Path) -> AgentRefStore:
     try:
         return AgentRefStore(directory)
-    except LegacyExperimentError as exc:
-        raise ManagerError(LEGACY_EXPERIMENT_MESSAGE) from exc
+    except CorruptExperimentError as exc:
+        raise ManagerError(str(exc)) from exc
     except ValueError as exc:
         raise ManagerError("experiment identity state is unreadable") from exc
 
@@ -393,7 +389,7 @@ class ExperimentManager:
                 merged["pretrained_manifest_sha256"] = pretrained.manifest_digest()
             except pretrained.PretrainedStoreError as exc:
                 raise ManagerError(str(exc)) from exc
-            _modern_ref_store(directory)
+            _open_ref_store(directory)
             hitl = directory / "hitl"
             hitl.mkdir(parents=True)
             # Skill library is fixed for the life of the experiment: resolve
@@ -566,7 +562,7 @@ class ExperimentManager:
         # running_experiments() once the status write at the end lands.
         with self._experiment_lock(experiment_id), self._slots:
             directory = self._experiment_dir(experiment_id)
-            _modern_ref_store(directory)
+            _open_ref_store(directory)
             # Archived is finished for good: the prunes may already have taken
             # the views and release a worker would run on.
             if experiment_is_archived(directory):
@@ -604,6 +600,7 @@ class ExperimentManager:
             # /dev/null, leaving the run unexplainable. Append both streams to a
             # per-experiment file under the ignored logs/ tree instead; the
             # parent closes its handle immediately, the detached child keeps it.
+            # Unbuffered, so a killed worker loses none of what it printed.
             log_ref = worker_log_ref(experiment_id)
             log_path = self.repo_root / log_ref
             log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -629,7 +626,7 @@ class ExperimentManager:
                         str(directory),
                     ],
                     cwd=str(self.repo_root),
-                    env={**os.environ, "TMPDIR": str(temp_dir)},
+                    env={**os.environ, "TMPDIR": str(temp_dir), "PYTHONUNBUFFERED": "1"},
                     stdin=subprocess.DEVNULL,
                     stdout=log,
                     stderr=subprocess.STDOUT,
@@ -709,7 +706,7 @@ class ExperimentManager:
             raise ManagerError("at is only accepted by restart")
         with self._experiment_lock(experiment_id):
             directory = self._experiment_dir(experiment_id)
-            _modern_ref_store(directory)
+            _open_ref_store(directory)
             try:
                 identity = PublicIdentity(directory)
             except (OSError, ValueError) as exc:
@@ -973,7 +970,7 @@ class ExperimentManager:
     def delete_experiment(self, experiment_id: str) -> dict[str, object]:
         with self._experiment_lock(experiment_id):
             directory = self._experiment_dir(experiment_id)
-            _modern_ref_store(directory)
+            _open_ref_store(directory)
             state = experiment_state(directory)
             if state.get("worker_alive") or state.get("state") == ExperimentState.LAUNCHING:
                 raise ManagerError(

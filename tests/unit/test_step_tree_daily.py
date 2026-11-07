@@ -13,7 +13,6 @@ from tests.unit.terminal_tool import TerminalTool
 def _passing_gate(
     node_id: str,
     seed_replicates: tuple[str, ...] = (),
-    deterministic: bool = False,
 ) -> dict[str, object]:
     """A registration every node passes."""
     return {"passed": True, "reasons": []}

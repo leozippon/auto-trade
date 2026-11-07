@@ -33,12 +33,12 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     DEFAULT_DEADLINE_GRACE_MINUTES,
-    rolling_default,
+    experiment_default,
     session_deadline_seconds,
 )
 from autotrade.pipelines.hitl_state import build_session_plan
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
-from tests.unit.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
+from tests.unit.acceptance_fixture import NO_SEED, REQUIRED_RULES, TEST_GEOMETRY
 
 SESSION_KEY = "research"
 
@@ -109,6 +109,7 @@ def _experiment(tmp_path: Path, **overrides: object) -> tuple[Path, Path]:
         "raw_dir": "data/raw",
         "fundamental_events_root": "data/pit/fundamental_events",
         "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+        **NO_SEED,
         "execution_mode": "sandbox",
         "developer_mode": "llm",
         # The local model the fixture's VLLM credential serves; a file that
@@ -169,15 +170,15 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert facts["budgets"] == {
         "context_compaction": facts["budgets"]["context_compaction"],
         "deadline_seconds": session_deadline_seconds(
-            rolling_default("max_research_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
+            experiment_default("max_research_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
         ),
         "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
         "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
         "validates_per_step": 6,
         "validation_failure_note": VALIDATION_FAILURE_NOTE,
-        "max_null_controls": rolling_default("max_null_controls"),
-        "max_llm_calls": rolling_default("max_llm_calls"),
-        "max_api_spend_usd": rolling_default("max_api_spend_usd"),
+        "max_null_controls": experiment_default("max_null_controls"),
+        "max_llm_calls": experiment_default("max_llm_calls"),
+        "max_api_spend_usd": experiment_default("max_api_spend_usd"),
         "used_before_this_attempt": {
             "inference_seconds": 0.0,
             "llm_calls": 0,
@@ -189,7 +190,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
             "api_spend_usd": 0.0,
         },
         "strategy_fit_timeout_seconds": float(
-            rolling_default("strategy_fit_timeout_seconds")
+            experiment_default("strategy_fit_timeout_seconds")
         ),
         "strategy_inference_timeout_seconds": sandbox.timeout_seconds,
         "strategy_gpu_count": sandbox.spec.gpu_count,
@@ -216,7 +217,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER
     assert (
         facts["budgets"]["deadline_seconds"] - facts["budgets"]["deadline_grace_seconds"]
-        == rolling_default("max_research_minutes") * 60.0
+        == experiment_default("max_research_minutes") * 60.0
     )
     # The session starts from the template.
     assert facts["artifact_contract"]["start"]["kind"] == "template"

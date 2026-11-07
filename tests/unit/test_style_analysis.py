@@ -798,13 +798,16 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
     assert graded["strategy_daily"] == bare["strategy_daily"]
     compact = benchmark_summary_block(graded)
     active = graded_statistics(graded)
-    own = graded_statistics(bare)
-    assert (active["series"], own["series"]) == ("active", "absolute")
+    assert active["series"] == "active"
+    # Without its random baseline the replay has no active series to grade.
+    with pytest.raises(ValueError, match="no random baseline"):
+        graded_statistics(bare)
     assert compact["active_excess"] == round(active["plain_excess"], 4)
     assert compact["active_tracking_error"] == round(active["tracking_error"], 4)
     assert compact["active_information_ratio"] == round(active["information_ratio"], 4)
     # The mandate's figures are the strategy's own regression's.
-    assert compact["tracking_error"] == round(_mandate(bare, "", "")["tracking_error"], 4)
+    own = _mandate(bare, "", "")
+    assert compact["tracking_error"] == round(own["tracking_error"], 4)
     assert compact["market_beta"] == round(own["market_beta"], 3)
     assert compact["baseline_draws"] == 20
     # The active drawdown the verdict holds to its limit is the one the Agent

@@ -29,7 +29,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
     """One options set, shaped like the worker's validated options."""
 
     options = SimpleNamespace(
-        rolling=SimpleNamespace(
+        experiment=SimpleNamespace(
             ledger_path=tmp_path / "ledger.jsonl",
             schedule=object(),
             broker_profile=object(),
@@ -91,7 +91,7 @@ def test_the_audit_entrypoint_assembles_through_the_shared_builder() -> None:
     for name in (
         "LLMResearchDeveloper",
         "LLMMetaLearner",
-        "RollingExperimentPipeline",
+        "ExperimentPipeline",
         "ResearchPITSnapshotProvider",
         "PITDailyEvaluationBackend",
         "LocalDailySnapshotProvider",
@@ -194,7 +194,7 @@ def test_the_compaction_gateway_is_built_without_provider_retries(
     )
     monkeypatch.setattr(
         worker_module,
-        "RollingExperimentPipeline",
+        "ExperimentPipeline",
         lambda *args, **kwargs: SimpleNamespace(**kwargs),
     )
     options = _options(tmp_path)
@@ -240,7 +240,7 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
     monkeypatch.setattr(worker_module, "LLMResearchDeveloper", capture("developer"))
     monkeypatch.setattr(
         worker_module,
-        "RollingExperimentPipeline",
+        "ExperimentPipeline",
         lambda *args, **kwargs: SimpleNamespace(**kwargs),
     )
 

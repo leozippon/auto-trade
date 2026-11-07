@@ -464,7 +464,7 @@ DEFAULT_DATASETS: dict[str, tuple[str, ...]] = {
 
 @dataclass(frozen=True)
 class SnapshotConfig:
-    # Same base window the research calendar uses (RollingExperimentConfig).
+    # Same base window the research calendar uses (ExperimentConfig).
     window_months: int = 24
     daily_window_months: int | None = None
     fundamentals_window_months: int | None = None

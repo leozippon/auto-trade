@@ -100,7 +100,7 @@ SESSION_STATIC_SECTIONS = (
 PROTOCOL_INSTRUCTION = "\n\n".join(SESSION_STATIC_SECTIONS)
 
 SESSION_DEFAULT_INSTRUCTION = """\
-开始研究。参考工作区在 `refs/`（若挂载），策略合同在只读的 `output/README.md`，日期、步数与预算在「环境」里。准备好候选后用 `test` 推进验证期。\
+开始研究。参考工作区在 `refs/`（若挂载），策略合同在只读的 `output/README.md`，日期、步数与预算在「环境」里。推理时间、模型调用与花费的预算都是研究预算；验证期只能用 `test` 揭开，何时开始测试由你决定。\
 """
 
 SESSION_DYNAMIC_CONTEXT_HEADER = """\

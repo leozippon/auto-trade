@@ -115,10 +115,8 @@ def load_recorded_steps(experiment_dir: str | Path) -> tuple[StepResult, ...]:
                     str(recorded_path(directory, str(record["result_ref"]))),
                 ),
                 span=str(record["span"]),
-                # A sidecar written before batches registered controls has
-                # none: no control.
-                control=record.get("control") is True,
-                batch_id=record.get("batch_id"),
+                control=record["control"] is True,
+                batch_id=record["batch_id"],
                 fingerprint=revision_fingerprint(directory, str(record["revision_id"])),
             )
         )

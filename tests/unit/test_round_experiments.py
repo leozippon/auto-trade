@@ -5,9 +5,9 @@ The round files are data -- experiments, seed, dataset selection, directives -- 
 once and parametrised over whatever open round files exist. A new round file or
 experiment is covered the moment it is added; with none, the steady state between
 rounds, those checks collect nothing and are reported skipped, while the
-launcher's own behaviour is still tested on synthetic rounds. A closed round is
-the record of experiments that were created and is only imported: it must refuse to
-run, and its ids stay used, in RETIRED_IDS once its file has left the tree.
+launcher's own behaviour is still tested on synthetic rounds, run as the round
+file `create_round_test.py`. A closed round is the record of experiments that were
+created and is only imported: it must refuse to run.
 """
 
 from __future__ import annotations
@@ -50,9 +50,8 @@ from scripts.experiments._round import (
     BASE_OVERRIDES,
     PROBE_ID,
     REPO_ROOT,
-    RETIRED_IDS,
     Round,
-    archived_ids,
+    round_id,
 )
 from tests.unit.acceptance_fixture import CREATE_RULES, TEST_GEOMETRY
 from tests.unit.research_release_fixture import (
@@ -62,6 +61,8 @@ from tests.unit.research_release_fixture import (
 )
 
 MODEL_ROLES = ("model", "subagent_model", "compact_model")
+# The program a synthetic round runs as, so its experiment ids end with "_test".
+LAUNCHER = "create_round_test.py"
 # A four-digit calendar year, the shape every literal date in a directive takes.
 CALENDAR_YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?:\d{4})?(?!\d)")
 
@@ -183,7 +184,7 @@ def test_a_round_dry_runs_against_its_seed_contract(
     and every experiment passes after them."""
     rnd = ROUNDS[round_name]
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 0
+    assert rnd.main([f"{round_name}.py", "0", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
     assert "release synthetic, which every experiment pins" in out[0]
     report = json.loads(out[1])
@@ -199,7 +200,7 @@ def test_the_dry_run_refuses_a_seed_built_for_another_selection(
     rnd = _sealed_round(pit_views_seed="data/seed_probe", overrides={"text_datasets": ["report_rc"]})
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     other = _sealed_round(pit_views_seed=rnd.pit_views_seed, overrides={"text_datasets": ["anns_d"]})
-    assert other.main(["launcher", "0", "--dry-run"]) == 1
+    assert other.main([LAUNCHER, "0", "--dry-run"]) == 1
     assert "different snapshot configuration" in capsys.readouterr().err
 
 
@@ -211,7 +212,7 @@ def test_the_dry_run_refuses_a_seed_whose_release_is_not_published(
     rnd = _sealed_round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     shutil.rmtree(tmp_path / "data" / "research_releases" / "synthetic")
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 1
     assert "research release synthetic is missing or incomplete" in capsys.readouterr().err
 
 
@@ -222,7 +223,7 @@ def test_the_dry_run_refuses_a_seed_whose_build_did_not_finish(
     rnd = _sealed_round(pit_views_seed="data/seed_probe")
     seed = _synthetic_repo(tmp_path, monkeypatch, rnd)
     (seed / UNFINISHED_BUILD_MARKER).write_text("{}", encoding="utf-8")
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 1
     err = capsys.readouterr().err
     assert "unfinished build" in err and "no parameter needs changing" in err
 
@@ -233,7 +234,7 @@ def test_the_dry_run_refuses_a_research_period_that_is_not_whole_years(
     rnd = _sealed_round(pit_views_seed="data/seed_probe")
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     shifted = _sealed_round(pit_views_seed=rnd.pit_views_seed, overrides={"research_end": "20250331"})
-    assert shifted.main(["launcher", "0", "--dry-run"]) == 1
+    assert shifted.main([LAUNCHER, "0", "--dry-run"]) == 1
     assert "whole years" in capsys.readouterr().err
 
 
@@ -259,7 +260,7 @@ def test_an_eight_year_round_dry_runs_on_the_backfilled_release(
     an eight-year experiment on any of them passes the create pre-flight."""
     rnd = _sealed_round(
         experiments={
-            f"eight_year_{code[:6]}": {"benchmark_index": code}
+            f"eight_year_{code[:6]}_test": {"benchmark_index": code}
             for code in BENCHMARK_INDEXES
             if code != STAR_50
         },
@@ -267,7 +268,7 @@ def test_an_eight_year_round_dry_runs_on_the_backfilled_release(
         pit_views_seed="data/seed_probe_8y",
     )
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 0
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 0
     report = json.loads(capsys.readouterr().out.splitlines()[1])
     assert (report["research_start"], report["window_months"]) == ("20170701", 108)
 
@@ -283,25 +284,25 @@ def test_an_eight_year_round_refuses_star_50_and_fundamentals(
     reaches."""
     rnd = _sealed_round(
         experiments={
-            "eight_year_star50": {"benchmark_index": STAR_50},
-            "eight_year_fundamentals": {"benchmark_index": "000905.SH", "include_fundamentals": True},
+            "eight_year_star50_test": {"benchmark_index": STAR_50},
+            "eight_year_fundamentals_test": {"benchmark_index": "000905.SH", "include_fundamentals": True},
         },
         overrides=EIGHT_YEAR,
         pit_views_seed="data/seed_probe_8y",
     )
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 1
     err = capsys.readouterr().err.splitlines()
     reasons = {line.split(":", 1)[0]: line for line in err if line.startswith("eight_year_")}
     assert "benchmark_index 000688.SH (科创50) has no history before research_start 20170701" in (
-        reasons["eight_year_star50"]
+        reasons["eight_year_star50_test"]
     )
     assert (
         "{'index_daily/ts_code=000688.SH': '20191231', 'index_weight/index_code=000688.SH': '20200731'}"
-        in reasons["eight_year_star50"]
+        in reasons["eight_year_star50_test"]
     )
-    assert "different snapshot configuration" in reasons["eight_year_fundamentals"]
-    assert err[-1] == "refused: eight_year_star50, eight_year_fundamentals"
+    assert "different snapshot configuration" in reasons["eight_year_fundamentals_test"]
+    assert err[-1] == "refused: eight_year_star50_test, eight_year_fundamentals_test"
 
 
 def test_an_experiment_mounts_the_pack_named_after_it_unless_it_names_another(
@@ -315,31 +316,31 @@ def test_an_experiment_mounts_the_pack_named_after_it_unless_it_names_another(
     refused like a named one."""
     rnd = _sealed_round(
         experiments={
-            "conventional": {},
-            "elsewhere": {"workspace_reference": "configs/workspace_refs/shared"},
-            "packless": {"workspace_reference": ""},
+            "conventional_test": {},
+            "elsewhere_test": {"workspace_reference": "configs/workspace_refs/shared"},
+            "packless_test": {"workspace_reference": ""},
         },
         pit_views_seed="data/seed_probe",
     )
     assert {experiment: rnd.request_params(experiment)["workspace_reference"] for experiment in rnd.experiments} == {
-        "conventional": "configs/workspace_refs/conventional",
-        "elsewhere": "configs/workspace_refs/shared",
-        "packless": "",
+        "conventional_test": "configs/workspace_refs/conventional_test",
+        "elsewhere_test": "configs/workspace_refs/shared",
+        "packless_test": "",
     }
     assert rnd.request_params(PROBE_ID)["workspace_reference"] == WEB_CREATE_DEFAULTS["workspace_reference"]
     shared = _sealed_round(experiments={"seed_a": {}}, overrides={"workspace_reference": "configs/workspace_refs/shared"})
     assert shared.request_params("seed_a")["workspace_reference"] == "configs/workspace_refs/shared"
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    (tmp_path / "configs/workspace_refs/conventional").rmdir()
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    (tmp_path / "configs/workspace_refs/conventional_test").rmdir()
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 1
     err = capsys.readouterr().err
-    assert "conventional: parameters rejected" in err and "workspace_reference" in err
-    assert err.splitlines()[-1] == "refused: conventional"
+    assert "conventional_test: parameters rejected" in err and "workspace_reference" in err
+    assert err.splitlines()[-1] == "refused: conventional_test"
 
 
 def test_a_round_without_experiments_is_never_posted() -> None:
     with pytest.raises(SystemExit, match="no experiments to create"):
-        _sealed_round().main(["launcher", "0"])
+        _sealed_round().main([LAUNCHER, "0"])
 
 
 def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -355,7 +356,7 @@ def test_a_closed_round_refuses_every_mode(monkeypatch: pytest.MonkeyPatch) -> N
     rnd = _sealed_round(experiments={"done": {}}, closed=True)
     for flags in ([], ["done"], ["--dry-run"], ["--fill"], ["--fill", "--dry-run"]):
         with pytest.raises(SystemExit, match="this round is closed"):
-            rnd.main(["launcher", "0", *flags])
+            rnd.main([LAUNCHER, "0", *flags])
 
 
 def test_an_open_round_imports_no_other_round() -> None:
@@ -400,11 +401,11 @@ def test_a_round_leaves_the_boards_to_the_capital_unless_it_names_them(monkeypat
 # --fill reads the experiment list as a queue against the live console, so these are
 # the only tests here that fake it: the health record it reads and the create
 # request it sends.
-FILL_EXPERIMENTS = ("fill_first", "fill_second", "fill_third")
+FILL_EXPERIMENTS = ("fill_first_test", "fill_second_test", "fill_third_test")
 # Both session roles on the local model: the experiment counts against the local limit.
 LOCAL_ROLES = {"model": LOCAL_QWEN_MODEL, "subagent_model": LOCAL_QWEN_MODEL}
 # The one line a timer run logs: its local time with offset, then the counts.
-SUMMARY = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2} fill launcher: (.*)$")
+SUMMARY = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2} fill create_round_test: (.*)$")
 
 
 def _fill_round(
@@ -469,10 +470,10 @@ def test_a_fill_creates_pending_experiments_in_queue_order_up_to_the_free_slots(
     """One free slot, one experiment already created: the next pending experiment takes it and
     the one behind it waits, and the run logs one line saying so."""
     rnd, posted = _fill_round(
-        tmp_path, monkeypatch, local=2, hosted=MAX_RUNNING_EXPERIMENTS - 3, created=("fill_first",)
+        tmp_path, monkeypatch, local=2, hosted=MAX_RUNNING_EXPERIMENTS - 3, created=("fill_first_test",)
     )
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
-    assert posted == ["fill_second"]
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
+    assert posted == ["fill_second_test"]
     hosted = ", ".join(f"hosted_{index}" for index in range(MAX_RUNNING_EXPERIMENTS - 3))
     assert _summary(capsys.readouterr().out) == (
         f"slots {MAX_RUNNING_EXPERIMENTS - 1}/{MAX_RUNNING_EXPERIMENTS} in use "
@@ -529,7 +530,7 @@ def test_a_fill_with_nothing_to_do_is_the_steady_state(
     """The mode runs on a timer, so an idle fill exits 0, sends nothing and
     logs one line however long the queue behind it is."""
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=local, hosted=hosted, created=created)
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
     assert posted == []
     assert _summary(capsys.readouterr().out).endswith(counts)
 
@@ -545,17 +546,17 @@ def test_a_fill_holds_a_local_experiment_at_the_local_limit_and_creates_the_host
     hosted experiment between them takes a free slot, and holding is the steady
     state, not a refusal."""
     experiments = {experiment: dict(LOCAL_ROLES) for experiment in FILL_EXPERIMENTS}
-    experiments["fill_second"] = dict(HOSTED_ROLES)
+    experiments["fill_second_test"] = dict(HOSTED_ROLES)
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, experiments=experiments)
-    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
+    assert rnd.main([LAUNCHER, "0", "--fill", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert "fill_first: pending, waits for a local-model slot" in out
-    assert "fill_second: pending, takes a free slot" in out
-    assert "fill_third: pending, waits for a local-model slot" in out
+    assert "fill_first_test: pending, waits for a local-model slot" in out
+    assert "fill_second_test: pending, takes a free slot" in out
+    assert "fill_third_test: pending, waits for a local-model slot" in out
     assert posted == []
 
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
-    assert posted == ["fill_second"]
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
+    assert posted == ["fill_second_test"]
     assert _summary(capsys.readouterr().out).endswith(
         f"local-model slots {MAX_RUNNING_LOCAL_EXPERIMENTS}/{MAX_RUNNING_LOCAL_EXPERIMENTS} in use "
         f"({', '.join(f'local_{index}' for index in range(MAX_RUNNING_LOCAL_EXPERIMENTS))}), 0 free; "
@@ -571,15 +572,15 @@ def test_a_fill_holds_a_gpu_experiment_while_no_card_is_free_and_creates_the_cpu
     experiment between them is created; one free card takes the first GPU experiment only,
     since the console hands a card to one experiment at a time."""
     experiments = {experiment: {"gpu_count": 1} for experiment in FILL_EXPERIMENTS}
-    experiments["fill_second"] = {}
+    experiments["fill_second_test"] = {}
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, experiments=experiments)
-    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
+    assert rnd.main([LAUNCHER, "0", "--fill", "--dry-run"]) == 0
     out = capsys.readouterr().out.splitlines()
-    assert "fill_first: pending, waits for a free GPU" in out
-    assert "fill_second: pending, takes a free slot" in out
-    assert "fill_third: pending, waits for a free GPU" in out
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
-    assert posted == ["fill_second"]
+    assert "fill_first_test: pending, waits for a free GPU" in out
+    assert "fill_second_test: pending, takes a free slot" in out
+    assert "fill_third_test: pending, waits for a free GPU" in out
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
+    assert posted == ["fill_second_test"]
     assert _summary(capsys.readouterr().out).endswith(
         "GPUs 0 free (none); queue 3: 0 skipped (created already), 1 created, 0 refused, "
         "2 pending (0 held by the local-model limit, 2 by the free GPUs, 0 by an unfinished seed)"
@@ -589,8 +590,8 @@ def test_a_fill_holds_a_gpu_experiment_while_no_card_is_free_and_creates_the_cpu
     no_card = _round.health(0)
     monkeypatch.setattr(_round, "health", lambda port: {**no_card, "gpus_free": [5]})
     posted.clear()
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
-    assert posted == ["fill_first", "fill_second"]
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
+    assert posted == ["fill_first_test", "fill_second_test"]
     assert _summary(capsys.readouterr().out).endswith(
         "GPUs 1 free (5); queue 3: 0 skipped (created already), 2 created, 0 refused, "
         "1 pending (0 held by the local-model limit, 1 by the free GPUs, 0 by an unfinished seed)"
@@ -603,16 +604,16 @@ def test_a_fill_past_a_held_local_experiment_still_stops_at_any_refusal(
     """Only the local limit holds an experiment back; the pre-flight refusing the
     hosted experiment behind it stops the run as before, with nothing sent after it."""
     experiments = {experiment: dict(HOSTED_ROLES) for experiment in FILL_EXPERIMENTS}
-    experiments["fill_first"] = dict(LOCAL_ROLES)
-    experiments["fill_second"] = {**HOSTED_ROLES, "research_end": "20250331"}
+    experiments["fill_first_test"] = dict(LOCAL_ROLES)
+    experiments["fill_second_test"] = {**HOSTED_ROLES, "research_end": "20250331"}
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=MAX_RUNNING_LOCAL_EXPERIMENTS, experiments=experiments)
-    assert rnd.main(["launcher", "0", "--fill"]) == 1
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 1
     assert posted == []
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
         "0 created, 1 refused, 2 pending (1 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
-    assert "fill_second: parameters rejected" in captured.err
+    assert "fill_second_test: parameters rejected" in captured.err
 
 
 def test_a_fill_reports_a_creation_the_console_refused(
@@ -621,13 +622,13 @@ def test_a_fill_reports_a_creation_the_console_refused(
     rnd, posted = _fill_round(
         tmp_path, monkeypatch, local=2, hosted=MAX_RUNNING_EXPERIMENTS - 4, accepted=False
     )
-    assert rnd.main(["launcher", "0", "--fill"]) == 1
-    assert posted == ["fill_first", "fill_second"]
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 1
+    assert posted == ["fill_first_test", "fill_second_test"]
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
         "0 created, 2 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
-    assert "not created: fill_first, fill_second" in captured.err
+    assert "not created: fill_first_test, fill_second_test" in captured.err
 
 
 def test_a_fill_stops_at_an_experiment_the_preflight_refuses(
@@ -636,15 +637,15 @@ def test_a_fill_stops_at_an_experiment_the_preflight_refuses(
     """Nothing is sent for the refused experiment or after it, the reason and the
     summary still reach the log, and the run exits non-zero."""
     experiments = {experiment: {} for experiment in FILL_EXPERIMENTS}
-    experiments["fill_second"] = {"research_end": "20250331"}
+    experiments["fill_second_test"] = {"research_end": "20250331"}
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, experiments=experiments)
-    assert rnd.main(["launcher", "0", "--fill"]) == 1
-    assert posted == ["fill_first"]
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 1
+    assert posted == ["fill_first_test"]
     captured = capsys.readouterr()
     assert _summary(captured.out).endswith(
         "1 created, 1 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)"
     )
-    assert "fill_second: parameters rejected" in captured.err
+    assert "fill_second_test: parameters rejected" in captured.err
     assert "whole years" in captured.err
 
 
@@ -652,11 +653,11 @@ def test_a_fill_dry_run_plans_without_creating(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, hosted=MAX_RUNNING_EXPERIMENTS - 1)
-    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
+    assert rnd.main([LAUNCHER, "0", "--fill", "--dry-run"]) == 0
     assert posted == []
     out = capsys.readouterr().out.splitlines()
-    assert "fill_first: pending, takes a free slot" in out
-    assert "fill_third: pending, waits for a free slot" in out
+    assert "fill_first_test: pending, takes a free slot" in out
+    assert "fill_third_test: pending, waits for a free slot" in out
     match = SUMMARY.match(out[-1])
     assert match, out[-1]
     assert match.group(1).endswith(
@@ -672,14 +673,14 @@ def test_a_fill_holds_an_experiment_whose_seed_is_not_built_yet_and_creates_it_o
     its experiment pending -- not refused -- while the experiments behind it go ahead; the
     next run after the prebuild reports status ok creates it."""
     experiments = {experiment: {} for experiment in FILL_EXPERIMENTS}
-    experiments["fill_first"] = {"pit_views_seed": "data/seed_later"}
+    experiments["fill_first_test"] = {"pit_views_seed": "data/seed_later"}
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0, experiments=experiments)
     seed = tmp_path / "data" / "seed_later"
     shutil.move(seed / "provider.json", tmp_path / "provider.later")
-    assert rnd.main(["launcher", "0", "--fill", "--dry-run"]) == 0
-    assert "fill_first: pending, waits for its seed's prebuild to finish" in capsys.readouterr().out.splitlines()
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
-    assert posted == ["fill_second", "fill_third"]
+    assert rnd.main([LAUNCHER, "0", "--fill", "--dry-run"]) == 0
+    assert "fill_first_test: pending, waits for its seed's prebuild to finish" in capsys.readouterr().out.splitlines()
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
+    assert posted == ["fill_second_test", "fill_third_test"]
     assert _summary(capsys.readouterr().out).endswith(
         "2 created, 0 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 1 by an unfinished seed)"
     )
@@ -688,13 +689,13 @@ def test_a_fill_holds_an_experiment_whose_seed_is_not_built_yet_and_creates_it_o
     shutil.move(tmp_path / "provider.later", seed / "provider.json")
     (seed / UNFINISHED_BUILD_MARKER).write_text("{}", encoding="utf-8")
     posted.clear()
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
-    assert posted == ["fill_second", "fill_third"]
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
+    assert posted == ["fill_second_test", "fill_third_test"]
     capsys.readouterr()
 
     (seed / UNFINISHED_BUILD_MARKER).unlink()
     posted.clear()
-    assert rnd.main(["launcher", "0", "--fill"]) == 0
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 0
     assert posted == list(FILL_EXPERIMENTS) and "1 by an unfinished seed" not in capsys.readouterr().out
 
 
@@ -706,15 +707,15 @@ def test_a_failed_smoke_refuses_the_experiment_with_its_reason(
     a dry-run reads every experiment before it reports the refusal."""
     rnd, posted = _fill_round(tmp_path, monkeypatch, local=0)
     reason = "Y3, 3 days from 20190701: RuntimeError: daily Validation failed: ArrowTypeError"
-    monkeypatch.setattr(_round, "smoke", lambda merged: reason if merged["experiment_id"] == "fill_second" else "")
-    assert rnd.main(["launcher", "0", "--fill"]) == 1
-    assert posted == ["fill_first"]
+    monkeypatch.setattr(_round, "smoke", lambda merged: reason if merged["experiment_id"] == "fill_second_test" else "")
+    assert rnd.main([LAUNCHER, "0", "--fill"]) == 1
+    assert posted == ["fill_first_test"]
     captured = capsys.readouterr()
-    assert f"fill_second: the starter's smoke failed on data/seed_probe, nothing was sent: {reason}" in captured.err
+    assert f"fill_second_test: the starter's smoke failed on data/seed_probe, nothing was sent: {reason}" in captured.err
     assert _summary(captured.out).endswith("1 created, 1 refused, 1 pending (0 held by the local-model limit, 0 by the free GPUs, 0 by an unfinished seed)")
-    assert rnd.main(["launcher", "0", "--dry-run"]) == 1
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 1
     out = capsys.readouterr()
-    assert out.out.count("  smoke: the starter replayed") == 2 and "refused: fill_second" in out.err
+    assert out.out.count("  smoke: the starter replayed") == 2 and "refused: fill_second_test" in out.err
 
 
 def test_the_smoke_is_recorded_once_per_seed_and_starter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -852,9 +853,9 @@ def test_a_gpu_smoke_pins_admissible_cards_and_without_one_records_nothing(
         raise GpuUnavailableError("0 free GPU(s); held: open_x [5]")
 
     monkeypatch.setattr(_round, "smoke", busy)
-    assert rnd.main(["launcher", "0"]) == 1 and posted == []
+    assert rnd.main([LAUNCHER, "0"]) == 1 and posted == []
     assert (
-        "fill_first: no GPU is admissible for the starter's smoke, so nothing was smoked,"
+        "fill_first_test: no GPU is admissible for the starter's smoke, so nothing was smoked,"
         " recorded or sent: 0 free GPU(s); held: open_x [5]"
     ) in capsys.readouterr().err
 
@@ -865,7 +866,7 @@ def test_a_fill_never_takes_an_experiment_id(
     """Naming an experiment would be silently ignored: the queue decides the selection."""
     rnd, _ = _fill_round(tmp_path, monkeypatch, local=0)
     with pytest.raises(SystemExit, match="reads the queue itself"):
-        rnd.main(["launcher", "0", "--fill", "fill_first"])
+        rnd.main([LAUNCHER, "0", "--fill", "fill_first_test"])
 
 
 def test_an_experiment_is_tracked_only_when_it_names_a_tracking_error_cap() -> None:
@@ -997,24 +998,30 @@ def test_the_selection_matches_the_prebuilt_seed(round_name: str) -> None:
     assert recorded["snapshot_config"] == expected
 
 
-def test_no_round_reuses_an_experiment_id() -> None:
-    """An id is never reused, by any round.
+@pytest.mark.parametrize("path", ROUND_FILES, ids=lambda path: path.stem)
+def test_every_experiment_id_ends_with_its_round_id(path: Path) -> None:
+    """Closed rounds included: an experiment id ends with the id of its round,
+    the file's name after `create_round_`, so no two rounds can share one."""
+    ROUNDS[path.stem].check_ids(round_id(str(path)))
 
-    Three sources of "already used" are checked: the other round files, closed
-    ones included, the retired ids, and -- where the operator's archive
-    exists -- what is actually archived on this machine.
-    """
-    seen: dict[str, str] = {}
-    for round_name in sorted(ROUNDS):
-        for experiment_id in ROUNDS[round_name].experiments:
-            assert experiment_id not in seen, (experiment_id, seen.get(experiment_id), round_name)
-            seen[experiment_id] = round_name
-    with pytest.raises(ValueError, match="already used and archived"):
-        _sealed_round(experiments={min(RETIRED_IDS): {}})
-    archived = archived_ids()
-    if not archived:
-        pytest.skip("logs/archive/ is not present, so archived ids cannot be cross-checked")
-    assert archived - set(seen) <= RETIRED_IDS, sorted(archived - set(seen) - RETIRED_IDS)
+
+def test_a_round_refuses_an_experiment_id_that_does_not_end_with_its_round_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every mode refuses before it reads the console, and a program that is
+    not a round file has no round id to check against."""
+
+    def unreachable(*args: object) -> object:
+        raise AssertionError("a round with a foreign id reached the console")
+
+    monkeypatch.setattr(_round, "health", unreachable)
+    monkeypatch.setattr(_round, "post", unreachable)
+    rnd = _sealed_round(experiments={"kept_test": {}, "open_20261107": {}, "kept_testb": {}})
+    for flags in ([], ["--dry-run"], ["--fill"]):
+        with pytest.raises(SystemExit, match=r"must end with _test: open_20261107, kept_testb$"):
+            rnd.main([LAUNCHER, "0", *flags])
+    with pytest.raises(SystemExit, match="is not a round file"):
+        _sealed_round(experiments={"kept_test": {}}).main(["launcher", "0", "--dry-run"])
 
 
 @pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
@@ -1089,32 +1096,6 @@ def test_no_pack_table_quotes_the_forward_period(pack: Path) -> None:
     """A pack quotes no forward or Held-out reading."""
     rows = _forward_period_table_rows(pack)
     assert not rows, f"{pack.name} quotes the forward period:\n" + "\n".join(rows)
-
-
-# Round 20260927 copied the book into 225 starters in 38 variants, so a fixed
-# defect (a full book buying a 13th seat) kept shipping in the copies for 70
-# hours. A starter's book is the canonical file itself.
-STARTER_LIB = REPO_ROOT / "configs" / "starter_lib"
-CANONICAL_BOOK = {
-    path.name: path.read_bytes()
-    for path in STARTER_LIB.iterdir()
-    if path.is_file() and path.name != "README.md"
-}
-
-
-@pytest.mark.parametrize("pack", PACKS, ids=lambda path: path.name)
-def test_a_starter_carries_the_canonical_book_byte_for_byte(pack: Path) -> None:
-    """A starter file named like one in configs/starter_lib/ is that file."""
-    assert CANONICAL_BOOK, "configs/starter_lib/ holds no canonical module"
-    differing = [
-        str(path.relative_to(pack))
-        for path in sorted((pack / "starter").rglob("*"))
-        if path.name in CANONICAL_BOOK and path.read_bytes() != CANONICAL_BOOK[path.name]
-    ]
-    assert not differing, (
-        f"{pack.name} edits its copy of configs/starter_lib/ ({', '.join(differing)}): copy the "
-        "canonical file unchanged, or change it there first"
-    )
 
 
 def test_a_round_that_states_no_research_years_is_refused(

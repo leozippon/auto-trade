@@ -17,6 +17,7 @@ from autotrade.agent.experiment_facts import (
     build_experiment_facts,
 )
 from autotrade.agent.prompts import build_system_prompt
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 
@@ -40,6 +41,8 @@ def _facts(
         },
         "schedule": {"period": "day", "inference_time": "08:30"},
         "snapshot_config": SnapshotConfig().to_record(),
+        "benchmark_index": "000300.SH",
+        "broker_profile": BrokerProfile().to_record(),
     }
     manifest.update(manifest_overrides)
     with tempfile.TemporaryDirectory() as tmp:
@@ -87,15 +90,22 @@ def test_the_session_facts_state_the_research_period_and_the_session_place() -> 
 
 
 def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
+    manifest = {
+        "kind": "research",
+        "experiment_id": "exp",
+        "run_id": "run_x",
+        "benchmark_index": "000300.SH",
+        "broker_profile": BrokerProfile().to_record(),
+    }
     with tempfile.TemporaryDirectory() as tmp:
         store = AgentRefStore(Path(tmp) / "experiment")
         docker_facts = build_experiment_facts(
-            manifest={"kind": "research", "experiment_id": "exp", "run_id": "run_x"},
+            manifest=manifest,
             ref_store=store,
             runtime_env={"mode": "docker"},
         )
         local_facts = build_experiment_facts(
-            manifest={"kind": "research", "experiment_id": "exp", "run_id": "run_x"},
+            manifest=manifest,
             ref_store=store,
             runtime_env={"mode": "local"},
         )
@@ -198,10 +208,13 @@ def test_the_session_is_told_which_index_it_is_measured_against() -> None:
     facts = _facts(benchmark_index="000905.SH")
     assert facts["benchmark_index"] == "000905.SH"
     assert "中证500" in facts["regression_method"]
-    # A manifest written before the parameter existed reads as the default,
-    # which is the index those experiments actually ran on.
-    assert _facts()["benchmark_index"] == "000300.SH"
     assert "沪深300" in _facts()["regression_method"]
+    # Every run manifest states the index; one that does not is refused.
+    with tempfile.TemporaryDirectory() as tmp, pytest.raises(KeyError, match="benchmark_index"):
+        build_experiment_facts(
+            manifest={"kind": "research", "broker_profile": BrokerProfile().to_record()},
+            ref_store=AgentRefStore(Path(tmp) / "experiment"),
+        )
 
 
 def test_the_intraday_lookback_is_named_only_when_minutes_are_built() -> None:
