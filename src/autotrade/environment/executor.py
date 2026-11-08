@@ -26,7 +26,6 @@ from .contract_fingerprint import (
 )
 from .gpu import device_request, gpu_memory_contention
 from .pretrained import PretrainedStoreError, require_pretrained_store
-from .runtime import chmod_tree
 from .sandbox import DockerSandbox, SandboxConfig, container_thread_env
 from .strategy import (
     AccountSnapshot,
@@ -63,7 +62,7 @@ _READY_SEQUENCE = -1
 _SIGKILL_EXIT_CODE = 137
 # Container-side path of the read-only strategy package (the directory that
 # holds main.py), and of the read-only data roots and the per-replay state
-# directory, which is read-only for generate_orders and read-write for fit.
+# directory, which fit and generate_orders both read and write.
 CONTAINER_STRATEGY_DIR = "/strategy"
 CONTAINER_SNAPSHOT_DIR = "/strategy-data/snapshot"
 CONTAINER_ASOF_DIR = "/strategy-data/asof"
@@ -313,23 +312,11 @@ class FittableStrategyExecutor(StrategyExecutor, Protocol):
     def fit(self, context: StrategyContext) -> None: ...
 
 
-def _lock_state_dir(state_dir: Path | None, *, writable: bool) -> None:
-    """Host-side read-only gate over an in-process strategy's state directory."""
-
-    if state_dir is None:
-        return
-    if writable:
-        chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)
-    else:
-        chmod_tree(state_dir, file_mode=0o444, dir_mode=0o555)
-
-
 class TrustedStrategyExecutor:
     """Run an explicitly trusted, reviewed strategy in the host process.
 
     This is intentionally not an isolation boundary and is never selected by
-    an implicit fallback from Docker execution. The state directory is still
-    chmod-locked between ``fit`` calls so a ``generate_orders`` write fails.
+    an implicit fallback from Docker execution.
     """
 
     def __init__(
@@ -358,7 +345,6 @@ class TrustedStrategyExecutor:
         self.context_models_dir = str(self.models_dir) if self.models_dir is not None else ""
         # The pretrained store reaches Docker strategies only.
         self.context_pretrained_dir = ""
-        _lock_state_dir(self.state_dir, writable=False)
 
     @classmethod
     def from_path(
@@ -380,11 +366,7 @@ class TrustedStrategyExecutor:
     def fit(self, context: StrategyContext) -> None:
         if self._fit is None:
             raise StrategyExecutionError("strategy defines no fit(context)")
-        _lock_state_dir(self.state_dir, writable=True)
-        try:
-            self._fit(context)
-        finally:
-            _lock_state_dir(self.state_dir, writable=False)
+        self._fit(context)
 
     def execute(self, context: StrategyContext) -> object:
         return self._strategy(context)
@@ -398,10 +380,11 @@ class DockerStrategyExecutor:
 
     The strategy package (the directory holding ``main.py``) is bind-mounted
     read-only as a whole, so ``main.py`` can import its sibling modules.
-    A strategy that declares ``fit`` gets a second, equally locked-down worker
-    whose only difference is a read-write bind of the state directory; the
-    inference worker binds the same directory read-only, so the kernel — not
-    the strategy — decides that ``generate_orders`` cannot write state.
+    A strategy that declares ``fit`` gets a second, identical worker, so
+    training keeps its memory and module state apart from the inference
+    worker's. Both bind the replay's state directory read-write: it is the
+    strategy's working store, and the channel from ``fit`` to
+    ``generate_orders``.
 
     Both workers attach the experiment's GPU request (``SandboxSpec``): the
     inference container selects the devices once at start and the fit worker
@@ -420,7 +403,6 @@ class DockerStrategyExecutor:
         asof_dir: str | Path | None = None,
         models_dir: str | Path | None = None,
         state_dir: str | Path | None = None,
-        state_writable: bool = False,
     ) -> None:
         self.strategy_path = Path(strategy_path).resolve()
         if not self.strategy_path.is_file():
@@ -441,7 +423,6 @@ class DockerStrategyExecutor:
         self.context_pretrained_dir = (
             CONTAINER_PRETRAINED_DIR if self.pretrained_dir is not None else ""
         )
-        self._state_writable = state_writable
         self._fit_worker: DockerStrategyExecutor | None = None
         # Read before the container exists and rendered into its run arguments
         # below. A request that was given no device fails right here
@@ -538,9 +519,8 @@ class DockerStrategyExecutor:
             if source is not None:
                 command.extend(["--mount", f"type=bind,src={source},dst={target},readonly"])
         if self.state_dir is not None:
-            mode = "" if self._state_writable else ",readonly"
             command.extend(
-                ["--mount", f"type=bind,src={self.state_dir},dst={CONTAINER_STATE_DIR}{mode}"]
+                ["--mount", f"type=bind,src={self.state_dir},dst={CONTAINER_STATE_DIR}"]
             )
         command.extend([
             "--workdir",
@@ -568,7 +548,6 @@ class DockerStrategyExecutor:
                 asof_dir=self.asof_dir,
                 models_dir=self.models_dir,
                 state_dir=self.state_dir,
-                state_writable=True,
             )
         try:
             self._fit_worker._roundtrip(

@@ -681,9 +681,10 @@ class StrategyContext:
     snapshot_dir: str = ""
     asof_dir: str = ""
     asof_version: str = "0"
-    # Per-replay fitted state written by ``fit`` and read-only afterwards, the
-    # frozen Agent-authored ``models/`` assets, and the read-only pretrained
-    # model store the experiment pinned; each empty when absent.
+    # The per-replay state directory that ``fit`` and ``generate_orders`` both
+    # read and write, the frozen Agent-authored ``models/`` assets, and the
+    # read-only pretrained model store the experiment pinned; each empty when
+    # absent.
     state_dir: str = ""
     models_dir: str = ""
     pretrained_dir: str = ""

@@ -165,7 +165,6 @@ def _executor_for_process(
     executor.fit_schedule = None
     executor.context_state_dir = ""
     executor.context_models_dir = ""
-    executor._state_writable = False
     executor._fit_worker = None
     executor.gpu_indices = []
     executor._fit_seconds = []

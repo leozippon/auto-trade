@@ -92,8 +92,8 @@ FORBIDDEN_ATTRIBUTES = frozenset(
         "urlopen",
     }
 )
-# The only file I/O a strategy may perform: reads below a read-only data root,
-# writes below the per-replay state directory that ``fit`` owns.
+# The only file I/O a strategy may perform: reads below a context directory,
+# writes below the per-replay state directory, the only writable one.
 # ``save_model``/``load_model`` are the LightGBM and XGBoost booster files,
 # ``from_pretrained``/``save_pretrained`` the transformers and peft model
 # directories (the pretrained store under ``pretrained_dir`` among them).

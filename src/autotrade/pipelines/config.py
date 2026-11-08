@@ -133,7 +133,7 @@ class StrategyExperimentConfig:
     execution_mode: ExecutionMode = "sandbox"
     sandbox: SandboxConfig = field(default_factory=SandboxConfig)
     # The strategy's frozen ``models/`` tree, mounted read-only when it has
-    # one. The per-replay ``fit`` state directory is not a configuration knob:
+    # one. The per-replay state directory is not a configuration knob:
     # the replay creates it empty and discards it with the run.
     models_dir: Path | None = None
 

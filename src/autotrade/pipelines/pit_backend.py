@@ -929,10 +929,11 @@ class PITDailyEvaluationBackend:
         result_dir = self.results_root / result_id
         result_dir.mkdir(parents=True, exist_ok=False)
         asof_dir = result_dir / "asof"
-        # Fresh and empty for every replay: fit(context) recomputes it from PIT
-        # data in validation and forward replays alike, and nothing from
-        # an earlier run or the revision can reach it. World-writable so the
-        # sandbox's non-root fit worker can create files in it.
+        # The strategy's working store, fresh and empty for every replay: fit
+        # and generate_orders rebuild it from PIT data in validation and
+        # forward replays alike, and nothing from an earlier run or the
+        # revision can reach it. World-writable so the sandbox's non-root
+        # workers can create files in it.
         state_dir = result_dir / "state"
         state_dir.mkdir()
         state_dir.chmod(0o777)
@@ -1289,12 +1290,11 @@ def _revision_models_dir(models_path: Path | None) -> Path | None:
 
 
 def _discard_strategy_state(state_dir: Path) -> None:
-    """Drop the per-replay fitted state; it is never an artifact of the result."""
+    """Drop the per-replay strategy state; it is never an artifact of the result."""
 
     if not state_dir.exists():
         return
     try:
-        chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)
         shutil.rmtree(state_dir)
     except OSError as exc:
         raise RuntimeError(f"cannot discard strategy state: {state_dir}: {exc}") from exc

@@ -50,7 +50,7 @@ from autotrade.environment.replay import (
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.stats import window_activity
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
-from autotrade.environment.runtime import chmod_tree, utc_now_iso
+from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.step_tree import node_handle
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.trace import agent_trace_path
@@ -172,9 +172,9 @@ class DailyStrategyPipeline:
         frame = pd.read_parquet(daily) if isinstance(daily, (str, Path)) else daily
         if not isinstance(frame, pd.DataFrame):
             raise TypeError("daily must be a pandas DataFrame or parquet path")
-        # Every replay fits from empty: the state directory is created here and
-        # discarded with the run, so nothing an earlier run wrote reaches it.
-        # World-writable for the sandbox's non-root fit worker.
+        # Every replay starts from an empty state directory: it is created here
+        # and discarded with the run, so nothing an earlier run wrote reaches
+        # it. World-writable for the sandbox's non-root workers.
         state = TemporaryDirectory(prefix="strategy_state_")
         state_dir = Path(state.name)
         state_dir.chmod(0o777)
@@ -202,8 +202,6 @@ class DailyStrategyPipeline:
                 raise
             return replace(replay, resources=strategy_resource_usage(executor))
         finally:
-            # The trusted executor leaves the tree read-only between fits.
-            chmod_tree(state_dir, file_mode=0o644, dir_mode=0o755)
             state.cleanup()
 
     def _create_executor(self, state_dir: Path) -> StrategyExecutor:

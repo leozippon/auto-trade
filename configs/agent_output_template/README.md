@@ -17,13 +17,13 @@ def fit(context):
     ...  # train on the visible PIT history and np.save(...) the result under context.state_dir
 ```
 
-`fit` is recognised by its definition in `main.py`, not by what its body does: delegating the work to a sibling module (`def fit(context): return trainer.fit(context)`) behaves exactly like writing the body inline. The Environment calls `fit` once before the first decision of every replay and again at the first decision that falls in a new `REFIT_PERIOD`, always with the same context object that day's `generate_orders` receives, so `fit` can never see a row the decision could not. `fit` may write files under `context.state_dir`; `generate_orders` can only read them. That directory is empty at the start of every replay (every `validate`, `test` or `smoke_backtest` replay, and the later replay of a frozen artifact, re-fits from PIT data), is never part of a revision or frozen artifact, and is discarded with the replay. One `fit` invocation has its own wall-clock budget (`budgets.strategy_fit_timeout_seconds`) and every `generate_orders` call has a per-decision one (`budgets.strategy_inference_timeout_seconds`), both this experiment's values in the run facts; a timeout or an exception in either fails the whole backtest.
+`fit` is recognised by its definition in `main.py`, not by what its body does: delegating the work to a sibling module (`def fit(context): return trainer.fit(context)`) behaves exactly like writing the body inline. The Environment calls `fit` once before the first decision of every replay and again at the first decision that falls in a new `REFIT_PERIOD`, always with the same context object that day's `generate_orders` receives, so `fit` can never see a row the decision could not. `context.state_dir` is the strategy's working store for the replay: `fit` and `generate_orders` both read and write it, and it is how `fit` hands what it trained to `generate_orders`. It is empty at the start of every replay (every `validate`, `test` or `smoke_backtest` replay, and the later replay of a frozen artifact, rebuilds it from PIT data), is never part of a revision or frozen artifact, and is discarded with the replay. One `fit` invocation has its own wall-clock budget (`budgets.strategy_fit_timeout_seconds`) and every `generate_orders` call has a per-decision one (`budgets.strategy_inference_timeout_seconds`), both this experiment's values in the run facts; a timeout or an exception in either fails the whole backtest.
 
 The strategy returns orders; it never receives or calls the Broker. The Environment validates the complete return value, queues accepted orders, and applies market timing, cash, positions, T+1, trading constraints, costs, and account updates.
 
-The official working copy is `/mnt/agent/workspace/output` (search root `output`); there is no sibling `/mnt/agent/output`. `main.py` may import sibling modules and packages that live in this directory with absolute imports (`from lib.features import momentum` for `output/lib/features.py`); relative imports are rejected. A package module is one module however it is imported: an `import` written inside a function body — the usual way to break a cycle between two modules — resolves to the same module object, with the same module-level state, as one written at the top of the file. Every `.py` file here is part of the strategy, is held to the same import and file-I/O rules as `main.py`, and counts toward the artifact fingerprint and the file and byte limits (`max_strategy_files`, `max_strategy_bytes`). A single-file strategy is simply a package with one module. Do not write caches, logs, data dumps, model weights, notebooks, hidden files, or secrets here.
+The official working copy is `/mnt/agent/workspace/output` (search root `output`); there is no sibling `/mnt/agent/output`. `main.py` may import sibling modules and packages that live in this directory with absolute imports (`from lib.features import momentum` for `output/lib/features.py`); relative imports are rejected. A package module is one module however it is imported: an `import` written inside a function body — the usual way to break a cycle between two modules — resolves to the same module object, with the same module-level state, as one written at the top of the file. Every `.py` file here is part of the strategy, is held to the same import and file-I/O rules as `main.py`, and counts toward the artifact fingerprint and the file and byte limits (`max_strategy_files`, `max_strategy_bytes`). A single-file strategy is simply a package with one module. Do not write caches, logs, data dumps, model weights, notebooks, hidden files, or secrets here; what the running strategy caches goes under `context.state_dir`.
 
-Static assets that travel with the artifact (lookup tables, vocabularies, precomputed static features, reference parameters) belong in `/mnt/agent/workspace/models` (search root `models`), not in `output/`; the running strategy sees that directory read-only as `context.models_dir`. It may contain subdirectories and files such as `.npy`, `.npz`, `.parquet`, `.json` or `.txt`; at runtime a strategy reads them with `np.load` (`.npy`/`.npz`), `pd.read_parquet`, `torch.load` or a booster's `load_model`, so `pickle`- and `joblib`-only formats are not loadable. Anything fitted at replay time belongs in `context.state_dir`, never in `models/`. Temporary training files stay elsewhere in `/mnt/agent/workspace/` (never under `output/` or `models/`).
+Static assets that travel with the artifact (lookup tables, vocabularies, precomputed static features, reference parameters) belong in `/mnt/agent/workspace/models` (search root `models`), not in `output/`; the running strategy sees that directory read-only as `context.models_dir`. It may contain subdirectories and files such as `.npy`, `.npz`, `.parquet`, `.json` or `.txt`; at runtime a strategy reads them with `np.load` (`.npy`/`.npz`), `pd.read_parquet`, `torch.load` or a booster's `load_model`, so `pickle`- and `joblib`-only formats are not loadable. Anything fitted or cached at replay time belongs in `context.state_dir`, never in `models/`. Temporary training files stay elsewhere in `/mnt/agent/workspace/` (never under `output/` or `models/`).
 
 ## Data units are part of the strategy contract
 
@@ -59,13 +59,13 @@ Each invocation receives an immutable market-level context:
 | `context.snapshot_dir` | Read-only frozen research snapshot path string |
 | `context.asof_dir` | Read-only PIT view path string for this decision |
 | `context.asof_version` | Version label for the current as-of view |
-| `context.state_dir` | Per-replay state directory path string: writable while `fit` runs, read-only for `generate_orders`; nothing is there for a strategy without `fit` |
+| `context.state_dir` | Path string of the replay's working store, read-write for `fit` and `generate_orders` alike and empty when the replay starts (see Caching across calls) |
 | `context.models_dir` | Read-only path string of the artifact's `models/` directory; empty when the artifact has none |
 | `context.pretrained_dir` | Read-only path string of the pretrained-model store (see Pretrained models); empty when this experiment mounts none |
 
 Every bar has a timezone-aware `available_at` no later than `context.inference_at`.
 
-The strategy receives no Broker, Shell, experiment controls or previous results. The runtime mounts this `output/` package read-only, the read-only snapshot/as-of directories, the read-only `models/` directory, the read-only pretrained-model store and the state directory (read-write only for `fit`); nothing else of the workspace is visible, so executable strategy logic must live in this package.
+The strategy receives no Broker, Shell, experiment controls or previous results. The runtime mounts this `output/` package read-only, the read-only snapshot/as-of directories, the read-only `models/` directory, the read-only pretrained-model store and the read-write state directory; nothing else of the workspace is visible, so executable strategy logic must live in this package.
 
 ## Reading PIT data
 
@@ -84,7 +84,7 @@ The two path strings have **different layouts**, and mixing them up is the singl
 
 Run `smoke_backtest` before `validate`: it replays `output/` or a candidate directory over a few trading days, from the start of the research period or from a later `start`, on the real path — real as-of layout, real `AccountSnapshot`, same executor and per-decision timeout — and returns the exact exception text on failure. A hand-written shell script that assigns `context.asof_dir = "/mnt/snapshot"` or fakes an account object proves nothing about the replay.
 
-The supported file I/O is `pandas.read_parquet`, `numpy.load`, `torch.load`, a booster's `load_model` and `from_pretrained` for reading, and `numpy.save`/`savez`/`savez_compressed`, `DataFrame.to_parquet`, `torch.save`, a booster's `save_model` and `save_pretrained` for writing. Build the path however you like — a helper function, a variable, a loop, an f-string, a module constant — from the context directory it belongs under: reads from `context.snapshot_dir`, `context.asof_dir`, `context.state_dir`, `context.models_dir` or `context.pretrained_dir`, writes from `context.state_dir`. The static check only refuses what the source proves wrong: an absolute path literal (nothing at a host or sandbox path exists inside the replay container) and a write rooted at one of the read-only directories. At runtime the state directory is read-only outside `fit`, so a write from `generate_orders` fails the backtest. For example:
+The supported file I/O is `pandas.read_parquet`, `numpy.load`, `torch.load`, a booster's `load_model` and `from_pretrained` for reading, and `numpy.save`/`savez`/`savez_compressed`, `DataFrame.to_parquet`, `torch.save`, a booster's `save_model` and `save_pretrained` for writing. Build the path however you like — a helper function, a variable, a loop, an f-string, a module constant — from the context directory it belongs under: reads from `context.snapshot_dir`, `context.asof_dir`, `context.state_dir`, `context.models_dir` or `context.pretrained_dir`, writes from `context.state_dir`. The static check only refuses what the source proves wrong: an absolute path literal (nothing at a host or sandbox path exists inside the replay container) and a write rooted at one of the read-only directories. At runtime every context directory except `context.state_dir` is mounted read-only. For example:
 
 ```python
 import pandas as pd
@@ -97,9 +97,18 @@ daily = pd.read_parquet(
 
 The exact file layout, schema, dataset labels, coverage, and units come from the current run's data summary, snapshot manifest, Parquet metadata, and unit reference.
 
-The formal executor keeps one strategy worker alive across the inference calls of a replay. A module-level cache may reuse PIT-data-derived values only while its recorded `context.asof_version` still matches the current call. The version identifies the as-of data view only; values that depend on `context.inference_at`, `context.bars`, or `context.account` must be recomputed per call or keyed separately. When the version changes, update the cache from only newly visible rows or replace it from the required columns and an exact finite tail. If the incremental merge cannot be proved exact for the confirmed schema, use the bounded-tail reload. Every read must remain rooted in the current context and must not admit a row beyond `context.inference_at`.
+## Caching across calls
 
-Worker and revision restarts naturally clear module state, so a cache is only an optimization: strategy results must remain correct from a cold cache. A refit replaces the files under `context.state_dir` without restarting the inference worker, so reload them after each refit, for example by keying a module-level cache on a refit stamp that `fit` writes under `context.state_dir`; never cache them across a refit or at import time. Do not reread the full PIT directory and rerun full-history sort, group, percentage-change, and rolling calculations on every daily invocation. Project only required columns, retain the exact per-symbol tail the longest factor needs, then run cross-sectional work. Validate an optimization once in development against a full-history reference for factors, ranks, candidates, and orders to a floating tolerance appropriate to the dtype (`1e-12` for float64 CPU arithmetic); this equivalence check is not part of every inference.
+The executor keeps one strategy worker alive across the inference calls of a replay, so module-level state persists from one decision day to the next inside each container (`fit` runs in a container of its own, with its own module state). `context.state_dir` persists across calls and across both containers. Use either for anything expensive that later calls can reuse: feature panels, fitted models, scores, intermediate tables, whatever the method needs. A value derived from an earlier day's PIT view can be reused on any later day without look-ahead, because the replay only moves forward and that view held nothing the later day lacks.
+
+Compute the warm-up window once, at the first call that needs it, and extend it by each new day's rows: read only the rows dated after the last day it holds, drop what falls out of the longest lookback, and run the cross-sectional work on that tail. Do not reread the full PIT directory and rerun the full-history sort, group, percentage-change and rolling calculations on every decision day. Track what a cache holds by the rows' dates, not by part file names, which change as each finished month is merged. Validate an incremental path once in development against a full recomputation of factors, ranks, candidates and orders, to a floating tolerance appropriate to the dtype (`1e-12` for float64 CPU arithmetic); that equivalence check is not part of every inference.
+
+Two things stay the strategy's decision:
+
+- Later views may revise what earlier rows said: a restated fundamental arrives as a new row for an old period, and a new universe vintage changes names, industries and listings. `context.asof_version` changes with each of these, as it does with every new part. If the features `fit` trained on and the features a decision uses must agree exactly, recompute the trailing window the rolling calculations depend on, or compare `context.asof_version` where exactness matters.
+- A replay starts cold. The first call builds what it needs from PIT data, and module state must be something the calls of this replay, re-issued in order, would rebuild. Paper, the daily account a registered strategy may later run in, does exactly that every morning with a fresh worker while its state directory persists from day to day, so the re-issued calls may find what later days wrote there, the latest fit included; the module state they leave must still be the one the replay would carry into the new day. A refit replaces files under `context.state_dir` without restarting the inference worker, so reload fitted artifacts when the stamp `fit` writes there changes, never at import time.
+
+Values derived from `context.inference_at`, `context.bars` or `context.account` belong to the call that received them. Every read stays rooted in the current context and must not admit a row beyond `context.inference_at`.
 
 ## Strict JSON order array
 
@@ -252,7 +261,7 @@ outputs = engine(context).chat(
 texts = [output.outputs[0].text for output in outputs]
 ```
 
-- `fit` and `generate_orders` run in two containers on the same card, and an engine claims 90% of its card's memory (`gpu_memory_utilization`), so build it in one of them: for example in `fit` with `REFIT_PERIOD = "day"`, writing the day's readings under `context.state_dir` for `generate_orders` to read.
+- `fit` and `generate_orders` run in two containers on the same card, and an engine claims 90% of its card's memory (`gpu_memory_utilization`), so build it in one of them: in `generate_orders`, where the engine stays loaded for the following calls, or in `fit` with `REFIT_PERIOD = "day"`, writing the day's readings under `context.state_dir` for `generate_orders` to read.
 - Loading is slow and counts on the clock of the call that loads. Measured with Qwen3.8-27B-FP8 on one L20 under these container limits: about 3 minutes with `enforce_eager=True`, about 6.5 minutes without (torch.compile and CUDA-graph capture, redone in every container because their caches live in `/tmp`); reading the weights from a cold disk took about 70 seconds of either. Prefill then ran at about 2,300 prompt tokens per second eager and 3,200 compiled, for a batch of 20 prompts of about 1,000 tokens each. On one card this hybrid model's linear-attention state holds about 180 concurrent sequences, so `max_num_seqs` must stay below that (vLLM's default 256 refuses to start). With the engine loaded, a replay's fit container peaked at about 5.7 GiB of container memory.
 - Reproducibility. With `enforce_eager=True`, temperature 0 and the same batch of prompts in the same order, outputs were identical in every container and on every card tried. A compiled engine (the default) gave different outputs in another container, and with prefix caching on (vLLM's default) even when the same engine repeated a batch. In both modes any other batch (one prompt alone, a subset, another order) changed most outputs. Since two replays of the same bytes must place the same orders, use eager mode and send each decision's prompts as one fixed batch (for example the day's shortlist sorted by code).
 - `chat_template_kwargs={"enable_thinking": False}` switches the Qwen3.5-family thinking block off; the template then renders an empty one and the answer follows it.
@@ -271,7 +280,7 @@ Submodules of these libraries (`scipy.stats`, `sklearn.linear_model`, `torch.nn`
 
 Random draws must be reproducible, because two replays of the same span that place different orders are not reproducible evidence. Write the seed once, as one integer assignment to a seed name — `SEED`, `SEED_BASE`, or a name ending in `_SEED` or `_SEED_BASE` (`SEED_BASE = 1000`) — and derive every draw from it, optionally together with the decision date: `day = int(context.inference_at.strftime("%Y%m%d"))`, then `rng = np.random.default_rng([SEED_BASE, day])` with a further fixed integer for each independent stream, and an integer derived from the seed for any library that samples (`random_state=`, `seed=`, `torch.manual_seed`). Another draw of the same strategy is then that one line changed. Never seed from the wall clock or draw from numpy's unseeded global state (`np.random.choice`, `np.random.default_rng()`); `modification_check` refuses both.
 
-The default executor uses network-disabled, read-only Docker containers with bounded CPU, memory, process count, inference time, fit time, protocol output, and temporary storage; a strategy with `fit` gets a second identical container whose only difference is the writable state mount. If the container boundary cannot be established, execution fails instead of changing modes.
+The default executor uses network-disabled, read-only Docker containers with bounded CPU, memory, process count, inference time, fit time, protocol output, and temporary storage; a strategy with `fit` gets a second, identical container for it, and both mount the state directory read-write. If the container boundary cannot be established, execution fails instead of changing modes.
 
 ## Opening file
 
@@ -279,7 +288,7 @@ When a reference workspace supplies a starter, that starter replaces `output/mai
 
 ## A fitted-model package example
 
-The same contract with a library model and a helper module. `fit` trains a scikit-learn classifier on the visible PIT window and persists its parameters as arrays; `generate_orders` scores the latest cross-section with NumPy from that state. Blocks are labelled with their path under `output/`.
+The same contract with a library model and a helper module. `fit` trains a scikit-learn classifier on the visible PIT window and persists its parameters as arrays with a stamp; `generate_orders` keeps its feature window in module state, extending it by each new day's rows, reloads the parameters only when the stamp changes, and scores the latest cross-section with NumPy. Blocks are labelled with their path under `output/`.
 
 ```python
 # output/lib/ranker.py
@@ -294,18 +303,33 @@ from sklearn.linear_model import LogisticRegression
 FEATURES = ["ret_5", "ret_20", "vol_20"]
 
 
-def daily_since(context, lookback_days):
-    """Visible daily rows from the PIT view, bounded to a calendar lookback."""
+def daily_rows(context, filters):
+    """Visible daily rows of the PIT view that pass ``filters``, with adjusted closes."""
 
-    start = (context.inference_at - timedelta(days=lookback_days)).strftime("%Y%m%d")
     frame = pd.read_parquet(
         context.asof_dir + "/daily",
         columns=["ts_code", "trade_date", "close", "adj_factor"],
-        filters=[("trade_date", ">=", start)],
+        filters=filters,
     ).dropna()
-    frame = frame[frame["close"] > 0].sort_values(["ts_code", "trade_date"])
+    frame = frame[frame["close"] > 0].copy()
     frame["adj_close"] = frame["close"] * frame["adj_factor"]
-    return frame.reset_index(drop=True)
+    return frame
+
+
+def daily_since(context, lookback_days, held=None):
+    """Visible daily rows over a calendar lookback, by symbol and date.
+
+    ``held`` is the window an earlier call of this replay returned: only the
+    days after its last one are read, and the days now out of reach dropped.
+    """
+
+    start = (context.inference_at - timedelta(days=lookback_days)).strftime("%Y%m%d")
+    if held is None or held.empty:
+        frame = daily_rows(context, [("trade_date", ">=", start)])
+    else:
+        frame = pd.concat([held, daily_rows(context, [("trade_date", ">", held["trade_date"].max())])])
+    frame = frame[frame["trade_date"] >= start]
+    return frame.sort_values(["ts_code", "trade_date"]).reset_index(drop=True)
 
 
 def features(frame):
@@ -360,11 +384,25 @@ FEATURE_LOOKBACK_DAYS = 45
 MIN_FIT_SAMPLES = 100
 TOP_N = 10
 CASH_FRACTION = 0.95
+# Module state of the inference worker, kept from one decision to the next.
+WINDOW = {}
+MODEL = {}
 
 
 def fit(context):
     coef, intercept = fit_classifier(daily_since(context, FIT_LOOKBACK_DAYS), MIN_FIT_SAMPLES)
     np.savez(context.state_dir + "/ranker.npz", coef=coef, intercept=np.array([intercept]))
+    np.save(context.state_dir + "/stamp.npy", np.array([int(context.inference_at.strftime("%Y%m%d"))]))
+
+
+def fitted(context):
+    """The parameters of the latest fit, read from disk only after a refit."""
+
+    stamp = int(np.load(context.state_dir + "/stamp.npy")[0])
+    if MODEL.get("stamp") != stamp:
+        params = np.load(context.state_dir + "/ranker.npz")
+        MODEL.update(stamp=stamp, coef=params["coef"], intercept=float(params["intercept"][0]))
+    return MODEL["coef"], MODEL["intercept"]
 
 
 def generate_orders(context):
@@ -373,8 +411,8 @@ def generate_orders(context):
     execution_at = context.inference_at.replace(hour=9, minute=30, second=0, microsecond=0)
     if context.inference_at > execution_at:
         return []
-    params = np.load(context.state_dir + "/ranker.npz")
-    frame = daily_since(context, FEATURE_LOOKBACK_DAYS)
+    frame = daily_since(context, FEATURE_LOOKBACK_DAYS, WINDOW.get("daily"))
+    WINDOW["daily"] = frame
     if frame.empty:
         return []
     latest = frame["trade_date"].max()
@@ -382,7 +420,8 @@ def generate_orders(context):
     cross_section = cross_section[cross_section["trade_date"] == latest].copy()
     if cross_section.empty:
         return []
-    cross_section["score"] = score(cross_section, params["coef"], float(params["intercept"][0]))
+    coef, intercept = fitted(context)
+    cross_section["score"] = score(cross_section, coef, intercept)
     ranked = cross_section.sort_values(["score", "ts_code"], ascending=[False, True])
     prices = frame[frame["trade_date"] == latest].set_index("ts_code")["close"]
     symbols = ranked["ts_code"].tolist()[:TOP_N]
@@ -411,7 +450,8 @@ A LightGBM or XGBoost booster follows the same shape with `booster.save_model(co
 Before validating or testing a candidate, verify that:
 
 - The package under `output/` is complete (every import resolves inside it or to a supported library) and passes static validation.
-- If `fit` is defined, it writes everything `generate_orders` needs under `context.state_dir` and completes within `budgets.strategy_fit_timeout_seconds`.
+- If `fit` is defined, it writes what `generate_orders` needs from it under `context.state_dir`, with a stamp `generate_orders` reloads on, and completes within `budgets.strategy_fit_timeout_seconds`.
+- A cold start (an empty state directory and fresh module state) builds everything a warm call reuses, and an incremental path matches a full recomputation.
 - Every field and unit used by the signal has been confirmed from the current data contract.
 - Orders pass strict JSON validation and respect the configured schedule.
 - Batch sizing leaves a cost buffer and does not depend on same-call account mutation.

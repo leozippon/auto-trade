@@ -1390,8 +1390,9 @@ def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     )
     for rule in (
         "keeps one strategy worker alive",
-        "recorded `context.asof_version`",
-        "must remain correct from a cold cache",
+        "`context.state_dir` persists across calls and across both containers",
+        "compare `context.asof_version` where exactness matters",
+        "A replay starts cold",
         "Do not reread the full PIT directory",
         "must not admit a row beyond `context.inference_at`",
     ):

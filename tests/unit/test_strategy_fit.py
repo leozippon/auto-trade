@@ -2,9 +2,10 @@
 
 What must always hold: ``fit`` runs at the first decision of a replay and again
 only when its declared ``REFIT_PERIOD`` rolls over; it sees exactly the context
-``generate_orders`` sees that day; the state it writes is read-only for
-``generate_orders``; a fit timeout or exception fails the backtest explicitly;
-and every replay starts from an empty state directory.
+``generate_orders`` sees that day; ``fit`` and ``generate_orders`` share one
+read-write state directory, so what either writes reaches the later calls of
+both; a fit timeout or exception fails the backtest explicitly; and every
+replay starts from an empty state directory.
 """
 
 from __future__ import annotations
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
@@ -212,7 +214,7 @@ def _trusted(tmp_path: Path, source: str = FIT_STRATEGY) -> tuple[TrustedStrateg
 
 
 def test_fit_runs_at_start_and_on_schedule_with_the_same_pit_bound_as_orders(tmp_path: Path):
-    executor, state = _trusted(tmp_path)
+    executor, _state = _trusted(tmp_path)
     fitted: list[str] = []
     original = executor.fit
 
@@ -232,18 +234,54 @@ def test_fit_runs_at_start_and_on_schedule_with_the_same_pit_bound_as_orders(tmp
     # fit on 03-28 saw one bar (that day's close, visible at 18:00); orders on
     # 03-29 still read that state; the 04-01 refit saw three bars.
     assert [order["fitted_on"] for order in pending] == [1, 1, 3, 3]
-    assert not (state / "seen.npy").stat().st_mode & 0o222
 
 
-def test_state_is_read_only_during_generate_orders_in_host(tmp_path: Path):
-    source = FIT_STRATEGY.replace(
-        "    seen = int(", "    np.save(context.state_dir + '/leak.npy', np.zeros(1))\n    seen = int("
+# Counts its decisions in the state directory; fit records the count it found.
+SHARED_STATE_STRATEGY = '''import numpy as np
+
+REFIT_PERIOD = "day"
+
+
+def _calls(context):
+    try:
+        return int(np.load(context.state_dir + "/calls.npy")[0])
+    except FileNotFoundError:
+        return 0
+
+
+def fit(context):
+    np.save(context.state_dir + "/fit_saw.npy", np.array([_calls(context)]))
+
+
+def generate_orders(context):
+    calls = _calls(context)
+    np.save(context.state_dir + "/calls.npy", np.array([calls + 1]))
+    return [{
+        "symbol": "000001.SZ",
+        "action": "buy",
+        "quantity": 100,
+        "execute_at": "2099-01-01T09:30:00+08:00",
+        "calls_before": calls,
+        "fit_saw": int(np.load(context.state_dir + "/fit_saw.npy")[0]),
+    }]
+'''
+
+
+def test_generate_orders_writes_state_that_later_calls_and_fit_read_in_host(tmp_path: Path):
+    """The state directory is the strategy's working store for the replay: a
+    file ``generate_orders`` writes on one day is there for the next day's
+    ``generate_orders`` and for the ``fit`` that precedes it."""
+
+    executor, state = _trusted(tmp_path, SHARED_STATE_STRATEGY)
+    result = run_daily_replay(
+        daily=_daily(["20240328", "20240329", "20240401"]),
+        strategy=executor,
+        schedule=StrategySchedule("day", "18:00"),
     )
-    executor, _state = _trusted(tmp_path, source)
-    with pytest.raises(BacktestError, match=r"generate_orders failed.*Permission denied"):
-        run_daily_replay(
-            daily=_daily(["20240328"]), strategy=executor, schedule=StrategySchedule("day", "18:00")
-        )
+    pending = result.pending_orders
+    assert [order["calls_before"] for order in pending] == [0, 1, 2]
+    assert [order["fit_saw"] for order in pending] == [0, 1, 2]
+    assert np.load(state / "calls.npy").tolist() == [3]
 
 
 def test_a_fit_exception_fails_the_backtest_explicitly(tmp_path: Path):
@@ -332,7 +370,9 @@ def test_modification_check_refuses_a_fit_the_environment_could_not_call(tmp_pat
 # --- Docker executor and worker protocol -----------------------------------
 
 
-def test_docker_command_binds_state_read_only_for_orders_and_read_write_for_fit(tmp_path: Path):
+def test_both_workers_bind_the_state_directory_read_write_and_are_otherwise_twins(
+    tmp_path: Path,
+):
     path = tmp_path / "main.py"
     path.write_text(FIT_STRATEGY, encoding="utf-8")
     state = tmp_path / "state"
@@ -342,29 +382,41 @@ def test_docker_command_binds_state_read_only_for_orders_and_read_write_for_fit(
     with pytest.raises(StrategyExecutionError, match="has no state_dir"):
         with patch.object(DockerStrategyExecutor, "_start"):
             DockerStrategyExecutor(path, SandboxConfig(), models_dir=models)
-    with patch.object(DockerStrategyExecutor, "_start"):
-        orders_worker = DockerStrategyExecutor(
-            path, SandboxConfig(), models_dir=models, state_dir=state
-        )
-        fit_worker = DockerStrategyExecutor(
-            path, SandboxConfig(), models_dir=models, state_dir=state, state_writable=True
-        )
-    mounts = [arg for arg in orders_worker.docker_command() if arg.startswith("type=bind")]
-    assert f"type=bind,src={models.resolve()},dst=/strategy-data/models,readonly" in mounts
-    assert f"type=bind,src={state.resolve()},dst={CONTAINER_STATE_DIR},readonly" in mounts
-    fit_mounts = [arg for arg in fit_worker.docker_command() if arg.startswith("type=bind")]
-    assert f"type=bind,src={state.resolve()},dst={CONTAINER_STATE_DIR}" in fit_mounts
-    assert orders_worker.context_state_dir == CONTAINER_STATE_DIR
     context = StrategyContext(
         inference_at=datetime(2024, 3, 28, 8, 30, tzinfo=CN_TZ),
         bars=(),
         account=AccountSnapshot(cash=1.0, positions={}),
-        state_dir=orders_worker.context_state_dir,
-        models_dir=orders_worker.context_models_dir,
     )
-    record = orders_worker._context_record(context)
+    with (
+        patch.object(DockerStrategyExecutor, "_start"),
+        patch.object(DockerStrategyExecutor, "_roundtrip"),
+    ):
+        orders_worker = DockerStrategyExecutor(
+            path, SandboxConfig(), models_dir=models, state_dir=state
+        )
+        orders_worker.fit(context)
+    fit_worker = orders_worker._fit_worker
+    assert fit_worker is not None
+    mounts = [arg for arg in orders_worker.docker_command() if arg.startswith("type=bind")]
+    assert f"type=bind,src={models.resolve()},dst=/strategy-data/models,readonly" in mounts
+    assert f"type=bind,src={state.resolve()},dst={CONTAINER_STATE_DIR}" in mounts
+    # The fit worker is the same container under another name.
+    renamed = [
+        orders_worker.container_name if arg == fit_worker.container_name else arg
+        for arg in fit_worker.docker_command()
+    ]
+    assert renamed == orders_worker.docker_command()
+    assert orders_worker.context_state_dir == CONTAINER_STATE_DIR
+    record = orders_worker._context_record(
+        replace(
+            context,
+            state_dir=orders_worker.context_state_dir,
+            models_dir=orders_worker.context_models_dir,
+        )
+    )
     assert record["state_dir"] == CONTAINER_STATE_DIR
     assert record["models_dir"] == "/strategy-data/models"
+    orders_worker.close()
 
 
 def test_fit_worker_shares_the_inference_container_gpu_devices(tmp_path: Path):
@@ -470,7 +522,7 @@ def test_fit_timeout_fails_explicitly_and_aborts_the_worker():
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
-def test_real_sandbox_fit_writes_state_that_generate_orders_can_only_read(tmp_path: Path):
+def test_real_sandbox_fit_and_generate_orders_share_a_read_write_state_directory(tmp_path: Path):
     # The package directory is what gets bound; pytest's tmp_path itself is
     # 0700, so the package needs its own world-readable directory.
     package = tmp_path / "output"
@@ -481,23 +533,27 @@ def test_real_sandbox_fit_writes_state_that_generate_orders_can_only_read(tmp_pa
         '''import numpy as np
 
 
+def _decisions(context):
+    try:
+        return int(np.load(context.state_dir + "/decisions.npy")[0])
+    except FileNotFoundError:
+        return 0
+
+
 def fit(context):
-    np.save(context.state_dir + "/coef.npy", np.array([0.5, len(context.bars)]))
+    np.save(context.state_dir + "/coef.npy", np.array([0.5, _decisions(context)]))
 
 
 def generate_orders(context):
-    try:
-        np.save(context.state_dir + "/leak.npy", np.zeros(1))
-        leak = "written"
-    except OSError as exc:
-        leak = str(exc)
+    decisions = _decisions(context) + 1
+    np.save(context.state_dir + "/decisions.npy", np.array([decisions]))
     return [{
         "symbol": "000001.SZ",
         "action": "buy",
         "quantity": 100,
         "execute_at": "2099-01-01T09:30:00+08:00",
         "coef": np.load(context.state_dir + "/coef.npy").tolist(),
-        "leak": leak,
+        "decisions": decisions,
     }]
 ''',
         encoding="utf-8",
@@ -509,20 +565,27 @@ def generate_orders(context):
         strategy, SandboxConfig(fit_timeout_seconds=120.0), state_dir=state
     )
     try:
-        context = StrategyContext(
-            inference_at=datetime(2024, 3, 28, 8, 30, tzinfo=CN_TZ),
-            bars=(),
-            account=AccountSnapshot(cash=1.0, positions={}),
-            state_dir=executor.context_state_dir,
+        first_day, second_day = (
+            StrategyContext(
+                inference_at=datetime(2024, 3, day, 8, 30, tzinfo=CN_TZ),
+                bars=(),
+                account=AccountSnapshot(cash=1.0, positions={}),
+                state_dir=executor.context_state_dir,
+            )
+            for day in (28, 29)
         )
-        executor.fit(context)
+        executor.fit(first_day)
         assert np.load(state / "coef.npy").tolist() == [0.5, 0.0]
-        (order,) = executor.execute(context)
+        (first,) = executor.execute(first_day)
+        # The inference container wrote; the fit container reads it back and
+        # overwrites its own file, which the next decision reads.
+        executor.fit(second_day)
+        (second,) = executor.execute(second_day)
     finally:
         executor.close()
-    assert order["coef"] == [0.5, 0.0]
-    assert "Read-only file system" in order["leak"]
-    assert not (state / "leak.npy").exists()
+    assert (first["coef"], first["decisions"]) == ([0.5, 0.0], 1)
+    assert (second["coef"], second["decisions"]) == ([0.5, 1.0], 2)
+    assert np.load(state / "decisions.npy").tolist() == [2]
 
 
 # --- the shipped template and the PIT evaluation path -----------------------
@@ -671,6 +734,51 @@ def test_readme_package_example_passes_modification_check_and_a_short_pit_smoke_
     assert not (Path(result.result_ref).parent / "state").exists()
 
 
+def test_readme_example_window_extended_day_by_day_equals_a_fresh_read(tmp_path: Path):
+    """The README example keeps its feature window across calls and reads only
+    the days after the last one it holds. Extended over a later part and moved
+    forward past days that left the lookback, it is the window a fresh read of
+    the same view returns, so its features are too."""
+
+    _readme_example_package(tmp_path / "output")
+    ranker: dict[str, object] = {}
+    source = (tmp_path / "output" / "lib" / "ranker.py").read_text(encoding="utf-8")
+    exec(compile(source, "ranker.py", "exec"), ranker)
+    daily_since, features = ranker["daily_since"], ranker["features"]
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=70)]
+    rng = np.random.default_rng(3)
+    rows = pd.DataFrame(
+        [
+            {"ts_code": symbol, "trade_date": day, "close": float(price), "adj_factor": 1.0 + index}
+            for index, symbol in enumerate(["000001.SZ", "000002.SZ", "000003.SZ"])
+            for day, price in zip(days, 10.0 * np.exp(np.cumsum(rng.normal(0.0, 0.02, len(days)))))
+        ]
+    )
+    daily = tmp_path / "asof" / "daily"
+    daily.mkdir(parents=True)
+
+    def context(day: str) -> StrategyContext:
+        at = datetime.strptime(day, "%Y%m%d").replace(hour=8, minute=30, tzinfo=CN_TZ)
+        return StrategyContext(
+            inference_at=at,
+            bars=(),
+            account=AccountSnapshot(cash=1.0, positions={}),
+            asof_dir=str(tmp_path / "asof"),
+        )
+
+    rows[rows["trade_date"] < days[60]].to_parquet(daily / "part_0000.parquet", index=False)
+    held = daily_since(context(days[60]), 45)
+    rows[rows["trade_date"].between(days[60], days[64])].to_parquet(daily / "part_0001.parquet", index=False)
+    later = context(days[65])
+    extended = daily_since(later, 45, held)
+    fresh = daily_since(later, 45)
+    assert extended["trade_date"].min() > held["trade_date"].min()
+    assert extended["trade_date"].max() == days[64]
+    pd.testing.assert_frame_equal(extended, fresh)
+    pd.testing.assert_frame_equal(features(extended), features(fresh))
+
+
 README_SEEDED_STRATEGY = '''import numpy as np
 
 {name} = {seed}
@@ -741,6 +849,7 @@ def fit(context):
 
 
 def generate_orders(context):
+    np.save(context.state_dir + "/decided.npy", np.array([1]))
     return [{
         "symbol": "000001.SZ",
         "action": "buy",
