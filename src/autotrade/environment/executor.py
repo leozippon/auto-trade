@@ -26,7 +26,12 @@ from .contract_fingerprint import (
 )
 from .gpu import device_request, gpu_memory_contention
 from .pretrained import PretrainedStoreError, require_pretrained_store
-from .sandbox import DockerSandbox, SandboxConfig, container_thread_env
+from .sandbox import (
+    DockerSandbox,
+    SandboxConfig,
+    container_thread_env,
+    remove_sandbox_tree,
+)
 from .strategy import (
     AccountSnapshot,
     BarTable,
@@ -310,6 +315,18 @@ class FittableStrategyExecutor(StrategyExecutor, Protocol):
     context_pretrained_dir: str
 
     def fit(self, context: StrategyContext) -> None: ...
+
+
+def discard_strategy_state(state_dir: Path) -> None:
+    """Remove a strategy state directory with everything the strategy wrote.
+
+    What a sandbox worker writes belongs to its subuid, and the host cannot
+    unlink entries of a directory the worker created, so ``remove_sandbox_tree``
+    deletes what remains from a container. A tree that survives raises.
+    """
+
+    if not remove_sandbox_tree(state_dir):
+        raise OSError(f"cannot remove strategy state: {state_dir}")
 
 
 class TrustedStrategyExecutor:
@@ -1283,6 +1300,7 @@ __all__ = [
     "StrategyRaised",
     "TrustedStrategyExecutor",
     "attach_strategy_resources",
+    "discard_strategy_state",
     "raised_by_strategy",
     "strategy_resource_usage",
     "strategy_resources_of",

@@ -870,6 +870,57 @@ def generate_orders(context):
     assert not first_state.exists() and not second_state.exists()
 
 
+@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+def test_real_sandbox_replay_discards_a_subdirectory_generate_orders_wrote(tmp_path: Path):
+    """What a sandbox worker writes belongs to its subuid, and the host cannot
+    unlink the entries of a directory the worker created. A replay whose
+    strategy kept a partitioned table in its state directory still ends with
+    that directory gone."""
+
+    revision = tmp_path / "revision" / "output"
+    revision.mkdir(parents=True)
+    (tmp_path / "revision" / "models").mkdir()
+    for directory in (revision, tmp_path / "revision" / "models"):
+        directory.chmod(0o755)
+    (revision / "main.py").write_text(
+        '''import pandas as pd
+
+
+def generate_orders(context):
+    day = context.inference_at.strftime("%Y%m%d")
+    panel = context.state_dir + "/panel"
+    pd.DataFrame({"day": [day], "value": [1.0]}).to_parquet(panel, partition_cols=["day"])
+    return [{
+        "symbol": "000001.SZ",
+        "action": "buy",
+        "quantity": 100,
+        "execute_at": "2099-01-01T09:30:00+08:00",
+        "days_held": len(pd.read_parquet(panel)),
+    }]
+''',
+        encoding="utf-8",
+    )
+    days = ["20240328", "20240329"]
+    snapshot, replay = _pit_bundle(tmp_path, days)
+    backend = PITDailyEvaluationBackend(
+        tmp_path / "results", execution_mode="sandbox", benchmark_index=DEFAULT_BENCHMARK_INDEX
+    )
+    result = backend.evaluate(
+        EvaluationRequest(
+            ArtifactRevision("revision_fit", revision, revision.parent / "models"),
+            SnapshotBundle("snap_fit", str(snapshot), str(replay), generation_id="generation_fit"),
+            "valid",
+            days[0],
+            days[-1],
+            StrategySchedule("day", "08:30"),
+            BrokerProfile(initial_cash=1_000_000),
+        )
+    )
+    record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+    assert [order["days_held"] for order in record["pending_orders"]] == [1, 2]
+    assert not (Path(result.result_ref).parent / "state").exists()
+
+
 def test_a_fit_strategy_that_leaves_no_state_fails_the_first_decision(tmp_path: Path):
     revision = tmp_path / "revision" / "output"
     revision.mkdir(parents=True)

@@ -52,6 +52,7 @@ from autotrade.environment.data.snapshot import (
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     TrustedStrategyExecutor,
+    discard_strategy_state,
 )
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.null_control import (
@@ -1165,7 +1166,7 @@ class PITDailyEvaluationBackend:
             return EvaluationResult(dict(summary), str(target))
         finally:
             _discard_ephemeral_asof(asof_dir)
-            _discard_strategy_state(state_dir)
+            discard_strategy_state(state_dir)
             if not keep_result_dir:
                 shutil.rmtree(result_dir, ignore_errors=True)
 
@@ -1287,17 +1288,6 @@ def _revision_models_dir(models_path: Path | None) -> Path | None:
     if not path.is_dir():
         raise FileNotFoundError(f"strategy revision models directory is missing: {path}")
     return path
-
-
-def _discard_strategy_state(state_dir: Path) -> None:
-    """Drop the per-replay strategy state; it is never an artifact of the result."""
-
-    if not state_dir.exists():
-        return
-    try:
-        shutil.rmtree(state_dir)
-    except OSError as exc:
-        raise RuntimeError(f"cannot discard strategy state: {state_dir}: {exc}") from exc
 
 
 def _discard_ephemeral_asof(asof_dir: Path) -> None:

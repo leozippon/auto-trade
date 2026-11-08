@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, mkdtemp
 
 import pandas as pd
 
@@ -38,6 +38,7 @@ from autotrade.environment.executor import (
     StrategyExecutor,
     TrustedStrategyExecutor,
     attach_strategy_resources,
+    discard_strategy_state,
     raised_by_strategy,
     strategy_resource_usage,
 )
@@ -175,8 +176,7 @@ class DailyStrategyPipeline:
         # Every replay starts from an empty state directory: it is created here
         # and discarded with the run, so nothing an earlier run wrote reaches
         # it. World-writable for the sandbox's non-root workers.
-        state = TemporaryDirectory(prefix="strategy_state_")
-        state_dir = Path(state.name)
+        state_dir = Path(mkdtemp(prefix="strategy_state_"))
         state_dir.chmod(0o777)
         try:
             executor = self._create_executor(state_dir)
@@ -202,7 +202,7 @@ class DailyStrategyPipeline:
                 raise
             return replace(replay, resources=strategy_resource_usage(executor))
         finally:
-            state.cleanup()
+            discard_strategy_state(state_dir)
 
     def _create_executor(self, state_dir: Path) -> StrategyExecutor:
         if self.executor_factory is not None:

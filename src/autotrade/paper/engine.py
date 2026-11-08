@@ -49,6 +49,7 @@ from autotrade.environment.executor import (
     DockerStrategyExecutor,
     FittableStrategyExecutor,
     StrategyExecutor,
+    discard_strategy_state,
 )
 from autotrade.environment.pretrained import require_pretrained_store
 from autotrade.environment.replay.engine import (
@@ -494,7 +495,7 @@ class DailyPaperEngine:
         except BaseException:
             if executor is not None:
                 executor.close()
-            _remove_tree(state_dir)
+            discard_strategy_state(state_dir)
             raise
         executor.close()
         self._publish_state(state_dir, trade_date)
@@ -604,7 +605,7 @@ class DailyPaperEngine:
     def _publish_state(self, staged: Path, trade_date: str) -> None:
         target = self.state_root / STRATEGY_STATE_NAME / trade_date
         if target.exists():
-            _remove_tree(target)  # left by a run that crashed before its checkpoint
+            discard_strategy_state(target)  # left by a run that crashed before its checkpoint
         staged.rename(target)
 
     def _prune_states(self, state: dict[str, object]) -> list[str]:
@@ -619,7 +620,7 @@ class DailyPaperEngine:
             if entry.name == state["fit_state"]:
                 continue
             try:
-                _remove_tree(entry)
+                discard_strategy_state(entry)
             except OSError as exc:
                 warnings.append(f"cannot remove superseded strategy state {entry.name}: {exc}")
         return warnings
@@ -809,18 +810,6 @@ def _open_tree(root: Path) -> None:
         Path(directory).chmod(0o777)
         for name in filenames:
             (Path(directory) / name).chmod(0o666)
-
-
-def _remove_tree(root: Path) -> None:
-    """Remove a tree this book owns. Only directories are made writable: a
-    file's mode is its inode's, so it is never changed on the way out."""
-
-    for directory, _dirnames, _filenames in os.walk(root):
-        try:
-            Path(directory).chmod(0o755)
-        except OSError:
-            pass  # a directory the sandbox user created; rmtree reports it
-    shutil.rmtree(root)
 
 
 __all__ = [

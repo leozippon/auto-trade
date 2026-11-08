@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
+from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.paper import DailyPaperEngine, PaperEngineError
 from autotrade.paper.engine import PaperDataNotReady
@@ -24,6 +26,7 @@ from autotrade.paper.orders import (
     render_orders,
     write_orders,
 )
+from tests.unit.fixtures_sandbox import docker_available
 
 SESSIONS = ("20260105", "20260106", "20260107", "20260108", "20260109", "20260112")
 SYMBOL = "000001.SZ"
@@ -279,6 +282,34 @@ def test_every_decision_publishes_the_state_it_wrote_and_a_failed_one_publishes_
     state = book.state()
     assert state["fit_state"] == "20260106"
     assert [row["trade_date"] for row in state["decisions"]] == ["20260105", "20260106"]
+
+
+@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+def test_real_superseded_state_with_a_container_written_subdirectory_is_pruned(
+    tmp_path: Path,
+):
+    """A sandbox worker's subdirectory belongs to its subuid, so the host
+    cannot empty it; pruning the state it superseded still removes it."""
+
+    if subprocess.run(["docker", "image", "inspect", DEFAULT_IMAGE], capture_output=True, check=False).returncode:
+        pytest.skip(f"local sandbox image is unavailable: {DEFAULT_IMAGE}")
+    book = _Book(tmp_path, STATE_STRATEGY, sessions=("20260102", *SESSIONS))
+    states = book.root / ".strategy_state"
+    book.run("20260105")
+    published = states / "20260105"
+    subprocess.run(
+        [
+            "docker", "run", "--rm", "--pull", "never", "--network", "none",
+            "--user", SandboxSpec().user, "--mount", f"type=bind,src={published},dst=/state",
+            "--entrypoint", "sh", DEFAULT_IMAGE, "-c", "mkdir /state/cache && echo x > /state/cache/x",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    book.run("20260106")
+    assert [entry.name for entry in states.iterdir()] == ["20260106"]
+    assert (states / "20260106" / "cache" / "x").is_file()
+    assert book.state()["warnings"] == []
 
 
 def test_a_run_fails_fast_until_the_prior_session_is_committed(tmp_path: Path):
