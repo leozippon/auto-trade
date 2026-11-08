@@ -3,10 +3,11 @@
 These are the only prompts the main-conversation LLM sees. They are written
 in Chinese (the market, rules, and evidence are Chinese) with English JSON
 keys for stable parsing. Static content comes first and per-run facts last so
-the shared prefix stays byte-stable across sessions; the one fact-dependent
-line above the environment block is the orientation's GPU bullet, which closes
-that section only when the Sandbox has cards and names none of them, so every
-session with cards shares the whole prefix.
+the shared prefix stays byte-stable across sessions; the only fact-dependent
+lines above the environment block are the orientation's closing bullets: the
+GPU bullet, present only when the Sandbox has cards and naming none of them,
+and the compute-budget bullet, which states the experiment's two strategy time
+limits, so every attempt of an experiment shares the whole prefix.
 
 The static part follows the layout of minimal agent-harness prompts: an
 untitled opening paragraph (who the Agent is, what the harness does), the
@@ -14,10 +15,11 @@ research-and-backtesting process, the research orientation, how the work is
 read, the strategy contract pointer, the prohibitions and how to work in the
 harness, each rule stated once. It carries what the harness enforces, what the
 Agent cannot find out itself, and the owner's research orientation (the
-ambition and depth expected and, on a Sandbox with cards, full use of them;
-not a method); what a tool's parameter, limit or returned field means is the
-tool's description and schema, the strategy contract is ``output/README.md``,
-and how to research within that orientation is the Agent's own call. The
+ambition and depth expected, the strategy compute budget the experiment grants
+and, on a Sandbox with cards, full use of them; not a method); what a tool's
+parameter, limit or returned field means is the tool's description and schema,
+the strategy contract is ``output/README.md``, and how to research within that
+orientation is the Agent's own call. The
 dynamic part is the environment block: the run's dates, steps, threshold and
 validate allowance generated from the run facts (:func:`build_run_section`),
 the facts themselves behind an index of their keys, then the experiment's
@@ -52,11 +54,24 @@ SESSION_ORIENTATION_SECTION = """\
 - 预算是为深入研究准备的，不以提前结束为目标：在研究年里充分比较多个方向、迭代改进之后再开始测试。\
 """
 
-# The orientation's closing bullet when the run facts' ``runtime_tools.sandbox_gpus``
+# The orientation's GPU bullet when the run facts' ``runtime_tools.sandbox_gpus``
 # names cards; it names no card and no method (the facts state the hardware), and
-# a Sandbox without cards reads the orientation above unchanged
+# a Sandbox without cards reads the orientation without it
 # (``build_system_prompt``).
 SESSION_GPU_ORIENTATION_BULLET = "- 充分利用 Sandbox 可用的 GPU 算力。"
+
+# The orientation's compute-budget bullet, after the GPU bullet when that one is
+# present: the run facts' ``budgets.strategy_inference_timeout_seconds`` and
+# ``strategy_fit_timeout_seconds`` in words (:func:`build_budget_orientation_bullet`),
+# so it never claims a limit the experiment does not grant. Both are floors,
+# since ``validate`` scales them with its batch (BATCH_VALIDATE_FIT_TIMEOUT_NOTE).
+# The replay results report per-call seconds; the owner wants those read as
+# room for the method, not as a cost to cut.
+SESSION_BUDGET_ORIENTATION_BULLET = (
+    "- 策略的计算时间是为方法准备的预算：每个决策日的 `generate_orders` 至少有 {inference}，"
+    "每次 `fit` 至少有 {fit}（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
+    "不必为省时间简化方法，复杂度由研究需要决定。"
+)
 
 SESSION_READINGS_SECTION = """\
 # 读数
@@ -243,23 +258,54 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
     return "\n".join(lines)
 
 
+def chinese_duration(seconds: float) -> str:
+    """Whole seconds in Chinese, each non-zero unit once: 5400 is "1 小时 30 分钟"."""
+
+    hours, rest = divmod(int(seconds), 3600)
+    minutes, secs = divmod(rest, 60)
+    units = ((hours, "小时"), (minutes, "分钟"), (secs, "秒"))
+    return " ".join(f"{count} {unit}" for count, unit in units if count)
+
+
+def build_budget_orientation_bullet(experiment_facts: Mapping[str, object]) -> str:
+    """The orientation's compute-budget bullet; empty unless the facts state both strategy limits."""
+
+    budgets = experiment_facts.get("budgets")
+    if not isinstance(budgets, Mapping):
+        return ""
+    inference = budgets.get("strategy_inference_timeout_seconds")
+    fit = budgets.get("strategy_fit_timeout_seconds")
+    if inference is None or fit is None:
+        return ""
+    return SESSION_BUDGET_ORIENTATION_BULLET.format(
+        inference=chinese_duration(inference),  # type: ignore[arg-type]
+        fit=chinese_duration(fit),  # type: ignore[arg-type]
+    )
+
+
 def build_system_prompt(
     *,
     experiment_facts: Mapping[str, object] | None = None,
     exploration_directive: str = "",
     session_directive: str = "",
 ) -> str:
-    # The orientation's GPU bullet closes that section when the same
-    # ``runtime_tools.sandbox_gpus`` the facts JSON below carries names cards.
-    protocol = PROTOCOL_INSTRUCTION
-    runtime_tools = (experiment_facts or {}).get("runtime_tools")
+    # The orientation closes with the GPU bullet when the same
+    # ``runtime_tools.sandbox_gpus`` the facts JSON below carries names cards,
+    # then with the compute-budget bullet when the facts state both limits.
+    facts = experiment_facts or {}
+    closing: list[str] = []
+    runtime_tools = facts.get("runtime_tools")
     gpus = runtime_tools.get("sandbox_gpus") if isinstance(runtime_tools, Mapping) else None
     if gpus and gpus != NO_SANDBOX_GPUS:
-        protocol = protocol.replace(
-            SESSION_ORIENTATION_SECTION,
-            f"{SESSION_ORIENTATION_SECTION}\n{SESSION_GPU_ORIENTATION_BULLET}",
-            1,
-        )
+        closing.append(SESSION_GPU_ORIENTATION_BULLET)
+    budget = build_budget_orientation_bullet(facts)
+    if budget:
+        closing.append(budget)
+    protocol = PROTOCOL_INSTRUCTION.replace(
+        SESSION_ORIENTATION_SECTION,
+        "\n".join((SESSION_ORIENTATION_SECTION, *closing)),
+        1,
+    )
     context_parts: list[str] = []
     if experiment_facts:
         run = build_run_section(experiment_facts)

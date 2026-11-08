@@ -18,8 +18,10 @@ from autotrade.agent.experiment_facts import (
 )
 from autotrade.agent.prompts import (
     PROTOCOL_INSTRUCTION,
+    SESSION_BUDGET_ORIENTATION_BULLET,
     SESSION_GPU_ORIENTATION_BULLET,
     build_system_prompt,
+    chinese_duration,
 )
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
@@ -389,6 +391,50 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     prompt = build_system_prompt(experiment_facts=cpu)
     assert prompt.startswith(PROTOCOL_INSTRUCTION + "\n\n# 环境")
     assert "充分利用 Sandbox 可用的 GPU 算力" not in prompt
+
+
+def _orientation(facts: dict[str, object]) -> str:
+    prompt = build_system_prompt(experiment_facts=facts)
+    return prompt[prompt.index("# 研究取向") : prompt.index("# 读数")].rstrip()
+
+
+def test_the_orientation_states_the_strategy_limits_as_a_compute_budget() -> None:
+    """Replay results report each call's seconds, and the owner does not want
+    them read as a cost to cut: the orientation states the experiment's own
+    per-decision and per-fit limits as floors of the compute budget, so it never
+    claims an hour the experiment does not grant, and says nothing when the
+    facts state no limits. With cards it follows the GPU bullet."""
+
+    def limits(inference: float, fit: float, **overrides: object) -> dict[str, object]:
+        return _facts(
+            budgets={"strategy_inference_timeout_seconds": inference, "strategy_fit_timeout_seconds": fit},
+            **overrides,
+        )
+
+    hour = _orientation(limits(3600.0, 7200))
+    assert hour.endswith(
+        "\n- 策略的计算时间是为方法准备的预算：每个决策日的 `generate_orders` 至少有 1 小时，"
+        "每次 `fit` 至少有 2 小时（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
+        "不必为省时间简化方法，复杂度由研究需要决定。"
+    )
+    assert hour.count("\n- ") == 3
+    quarter = _orientation(limits(900, 5400))
+    assert quarter.endswith(SESSION_BUDGET_ORIENTATION_BULLET.format(inference="15 分钟", fit="1 小时 30 分钟"))
+    assert [chinese_duration(s) for s in (90, 360, 3661.0)] == ["1 分钟 30 秒", "6 分钟", "1 小时 1 分钟 1 秒"]
+
+    # Without both limits the static part is the protocol as written, and the
+    # bullet is the only line the limits add to it.
+    fit_only = _facts(budgets={"strategy_fit_timeout_seconds": 7200})
+    for facts in (_facts(), fit_only, {"identity": {"session_kind": "research"}}):
+        assert build_system_prompt(experiment_facts=facts).startswith(PROTOCOL_INSTRUCTION + "\n\n# 环境")
+    stable = build_system_prompt(experiment_facts=limits(3600, 7200)).split("# 环境")[0]
+    bullet = SESSION_BUDGET_ORIENTATION_BULLET.format(inference="1 小时", fit="2 小时")
+    assert stable.replace("\n" + bullet, "", 1) == PROTOCOL_INSTRUCTION + "\n\n"
+
+    gpu = SandboxSpec(gpu=(0,), gpu_count=1, gpu_name_filter="A100").to_record()
+    lines = _orientation(limits(3600, 7200, sandbox_spec=gpu)).splitlines()
+    assert lines[-2:] == [SESSION_GPU_ORIENTATION_BULLET, bullet]
+    assert len(lines) == 5
 
 
 def test_an_early_research_year_does_not_advertise_history_before_the_store() -> None:

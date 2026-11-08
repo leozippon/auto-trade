@@ -26,6 +26,7 @@ from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.experiment_facts import NO_SANDBOX_GPUS
 from autotrade.agent.prompts import (
     EXPERIMENT_FACTS_HEADER,
+    SESSION_BUDGET_ORIENTATION_BULLET,
     SESSION_DEFAULT_INSTRUCTION,
     SESSION_DYNAMIC_CONTEXT_HEADER,
     SESSION_GPU_ORIENTATION_BULLET,
@@ -40,6 +41,7 @@ from autotrade.agent.prompts import (
     WRAP_UP_PROMPT,
     build_exploration_section,
     build_session_directive_section,
+    chinese_duration,
 )
 from autotrade.agent.subagent import AGENT_TOOL_DESCRIPTION, subagent_system_prompt
 
@@ -72,7 +74,7 @@ def render() -> str:
         "- `src/autotrade/agent/subagent.py`",
         "- `src/autotrade/agent/compact.py`",
         "",
-        "系统提示词先放静态内容，再放本次运行的动态事实，使跨会话的共享前缀字节稳定；静态部分里唯一随运行事实变化的是研究取向末尾的 GPU 一条（1.3），只在 Sandbox 挂有 GPU 时出现。工具名、参数和可用性由每轮原生 function schema 注入；动态示例只说明结构，不替代当前 run 的事实制品。宿主 `AGENTS.md` 不注入。",
+        "系统提示词先放静态内容，再放本次运行的动态事实，使跨会话的共享前缀字节稳定；静态部分里随运行事实变化的只有研究取向末尾的两条（1.3）：GPU 一条只在 Sandbox 挂有 GPU 时出现，算力预算一条写出本实验策略的两项时间上限。工具名、参数和可用性由每轮原生 function schema 注入；动态示例只说明结构，不替代当前 run 的事实制品。宿主 `AGENTS.md` 不注入。",
         "",
         "## 导航",
         "",
@@ -84,7 +86,7 @@ def render() -> str:
         "",
         "## 1. 研究会话系统提示词",
         "",
-        "无标题的开场段与六个区块按「开场 → 研究与回测流程 → 研究取向 → 读数 → 策略 → 禁止事项 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里；研究取向只定目标的创新性与深度（Sandbox 挂有 GPU 时另加一条充分利用 GPU 的要求），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。",
+        "无标题的开场段与六个区块按「开场 → 研究与回测流程 → 研究取向 → 读数 → 策略 → 禁止事项 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里；研究取向只定目标的创新性与深度（另写出本实验策略的计算时间预算，Sandbox 挂有 GPU 时另加一条充分利用 GPU 的要求），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。",
         "",
         "### 1.1 开场段",
         "",
@@ -98,9 +100,14 @@ def render() -> str:
         "",
         _block(SESSION_ORIENTATION_SECTION),
         "",
-        f"Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `{NO_SANDBOX_GPUS}`），本区块末尾再加一条：",
+        f"Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `{NO_SANDBOX_GPUS}`），本区块再加一条：",
         "",
         _block(SESSION_GPU_ORIENTATION_BULLET),
+        "",
+        "运行事实 `budgets` 写明 `strategy_inference_timeout_seconds` 与 `strategy_fit_timeout_seconds` 两项时，本区块最后（GPU 一条之后）再加一条，"
+        f"两项秒数写成中文时长，只写不为零的小时、分钟与秒（如 5400 秒写作「{chinese_duration(5400)}」）：",
+        "",
+        _block(SESSION_BUDGET_ORIENTATION_BULLET),
         "",
         "### 1.4 读数",
         "",

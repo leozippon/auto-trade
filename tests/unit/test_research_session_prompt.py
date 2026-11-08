@@ -307,8 +307,9 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     # Beyond the orientation's ambition, how to research is the Agent's own
     # call, which a reference workspace may suggest: the stable prompt carries
     # no research protocol, evidence recipe, process quota, delegation style
-    # or compute advice (a Sandbox with cards adds only the orientation's
-    # one-sentence GPU bullet, test_experiment_facts_scope).
+    # or compute advice (the orientation adds only the experiment's strategy
+    # limits as a compute budget and, with cards, a one-sentence GPU bullet,
+    # test_experiment_facts_scope).
     for retired in (
         "# 研究协议",
         "# 证据标准",

@@ -5,12 +5,15 @@
 which ran the 2026-11-07 harness on the instance and spent its research years
 on LightGBM-and-ridge ensembles trained on the CPU while the A100 idled: the
 system prompt said nothing about the card, so the session only met it through
-`nvidia-smi`. This round differs from 20261107c in the harness, in when it compacts
-and in how many replays `validate` runs at once. The run facts state the
-sandbox GPU (count and device name) and, when the experiment has a card, the
-research-orientation block adds one sentence asking the session to make full
-use of the Sandbox's GPU compute. No compaction threshold is pinned, so every conversation
-compacts at its derived bound: 959,040 tokens for gpt-6-astra with
+`nvidia-smi`. This round differs from 20261107c in the harness, in when it compacts,
+in how many replays `validate` runs at once and in its per-decision limit. The run
+facts state the sandbox GPU (count and device name) and, when the experiment has a
+card, the research-orientation block adds one sentence asking the session to make
+full use of the Sandbox's GPU compute. One `generate_orders` call may take an hour
+instead of 20261107c's 15 minutes, and the orientation states that hour and the
+two-hour `fit` limit as the strategy's compute budget, so the per-call seconds
+the replay results report do not read as a cost to cut. No compaction threshold
+is pinned, so every conversation compacts at its derived bound: 959,040 tokens for gpt-6-astra with
 DeepSeek-V4.1-Flash compaction (the 1,000,000-token window less the
 32,768-token output budget and the 8,192-token safety margin), the sub-agents
 at the same figure, and the Agent is asked to compact itself at 90% of it.
@@ -19,7 +22,7 @@ replays were CPU-bound LightGBM fits that left the card and most of the
 instance's cores idle, so a six-candidate batch took about seven hours; the
 strategy containers of concurrent replays share the experiment's one card and
 both strategy deadlines scale with the batch's width. Model, pack, directive,
-geometry, budgets and card are 20261107c's.
+geometry, the other budgets and card are 20261107c's.
 
 The rest is round 20261107's: ten August-July research years
 2015-08-01..2025-07-31, of which `research_years` 7 are the session's and the
@@ -103,8 +106,9 @@ ROUND = Round(
         "max_llm_calls": 19_200,
         "max_research_minutes": 7_200,
         "max_null_controls": 36,
-        # This round's strategy limits; the session container takes the same memory.
-        "strategy_inference_timeout_seconds": 900,
+        # This round's strategy limits, which the prompt states as the compute
+        # budget; the session container takes the same memory.
+        "strategy_inference_timeout_seconds": 3_600,
         "strategy_fit_timeout_seconds": 7_200,
         "strategy_memory": "64g",
     },

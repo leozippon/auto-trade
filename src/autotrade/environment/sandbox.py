@@ -376,11 +376,13 @@ class SandboxConfig:
     # call; the pipeline knob ``strategy_fit_timeout_seconds`` sets the latter.
     # Both start only once the worker holds the decision inputs, so neither
     # bills container scheduling or host-side request materialization to the
-    # strategy. Both are runaway guards rather than budgets: the inference
-    # cap is sized like the fit cap, at roughly 6x the heaviest measured call
-    # on record (a rebalance day of a cross-sectional LightGBM experiment, median
-    # 60.7 s over 49 such days), so a genuine runaway still dies while host
-    # contention does not decide a verdict.
+    # strategy. The defaults are sized as runaway guards: the inference cap
+    # like the fit cap, at roughly 6x the heaviest measured call on record (a
+    # rebalance day of a cross-sectional LightGBM experiment, median 60.7 s
+    # over 49 such days), so a genuine runaway still dies while host
+    # contention does not decide a verdict. The system prompt states an
+    # experiment's two values as the floor of the strategy's compute budget
+    # (``prompts.SESSION_BUDGET_ORIENTATION_BULLET``).
     timeout_seconds: float = 360.0
     fit_timeout_seconds: float = 3600.0
     # Environment-side bound on bringing one strategy container up to its
