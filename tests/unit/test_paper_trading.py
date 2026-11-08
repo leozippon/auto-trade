@@ -4,6 +4,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -60,6 +61,20 @@ def generate_orders(context):
     fitted_on = int(np.load(context.state_dir + "/fitted_on.npy")[0])
     day = context.inference_at.strftime("%Y-%m-%d")
     return [{"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T09:30:00+08:00", "fitted_on": fitted_on}]
+"""
+
+
+# No fit: each decision leaves a file named by its day in the state directory,
+# and the one on 20260107 fails after writing its own.
+STATE_STRATEGY = """import numpy as np
+
+
+def generate_orders(context):
+    day = context.inference_at.strftime("%Y%m%d")
+    np.save(context.state_dir + "/" + day + ".npy", np.array([int(day)]))
+    if day == "20260107":
+        raise RuntimeError("generate_orders refuses this day")
+    return []
 """
 
 
@@ -206,16 +221,20 @@ def test_fitted_state_persists_and_refits_only_when_the_period_rolls(tmp_path: P
     book.run("20260130")
     fitted = [row["fitted_on"] for day in ("20260129", "20260130") for row in book.journal(f"orders_{day}.jsonl")]
     assert fitted == [20260129, 20260129]
+    # The decision of 20260130 fitted nothing but still published the state
+    # it ran on, under its own session.
     state = book.state()
-    assert (state["last_fit_date"], state["fit_state"]) == ("20260129", "20260129")
+    assert (state["last_fit_date"], state["fit_state"]) == ("20260129", "20260130")
+    published = book.root / ".strategy_state" / "20260130"
+    assert np.load(published / "fitted_on.npy").tolist() == [20260129]
 
-    # The February refit fails: the run fails, the January state is intact
+    # The February refit fails: the run fails, the published state is intact
     # and no staged copy is left behind.
     with pytest.raises(PaperEngineError, match="fit failed"):
         book.run("20260202")
     state = book.state()
     assert (state["last_fit_date"], len(state["decisions"])) == ("20260129", 2)
-    assert [entry.name for entry in (book.root / ".strategy_state").iterdir()] == ["20260129"]
+    assert [entry.name for entry in (book.root / ".strategy_state").iterdir()] == ["20260130"]
     snapshot = json.loads((book.root / "account_snapshot.json").read_text(encoding="utf-8"))
     assert snapshot["ok"] is False and "fit failed" in snapshot["error"]
 
@@ -228,6 +247,38 @@ def test_a_month_rollover_refits_into_a_new_state_and_drops_the_old_one(tmp_path
     assert [row["fitted_on"] for row in book.journal("orders_20260202.jsonl")] == [20260202]
     assert [entry.name for entry in (book.root / ".strategy_state").iterdir()] == ["20260202"]
     assert [row["fitted"] for row in book.state()["decisions"]] == [True, True]
+
+
+def test_every_decision_publishes_the_state_it_wrote_and_a_failed_one_publishes_nothing(
+    tmp_path: Path,
+):
+    """A strategy without fit gets a state directory too. Every decision runs
+    on a staged copy of the published state and publishes it only once the
+    decision succeeded, so the state persists from day to day like a replay's,
+    and a failed decision leaves the state the book last published."""
+
+    book = _Book(tmp_path, STATE_STRATEGY, sessions=("20260102", *SESSIONS))
+    states = book.root / ".strategy_state"
+    book.run("20260105")
+    assert [entry.name for entry in states.iterdir()] == ["20260105"]
+    book.run("20260106")
+    assert [entry.name for entry in states.iterdir()] == ["20260106"]
+    assert sorted(entry.name for entry in (states / "20260106").iterdir()) == [
+        "20260105.npy",
+        "20260106.npy",
+    ]
+    assert book.state()["fit_state"] == "20260106"
+
+    with pytest.raises(PaperEngineError, match="generate_orders failed"):
+        book.run("20260107")
+    assert [entry.name for entry in states.iterdir()] == ["20260106"]
+    assert sorted(entry.name for entry in (states / "20260106").iterdir()) == [
+        "20260105.npy",
+        "20260106.npy",
+    ]
+    state = book.state()
+    assert state["fit_state"] == "20260106"
+    assert [row["trade_date"] for row in state["decisions"]] == ["20260105", "20260106"]
 
 
 def test_a_run_fails_fast_until_the_prior_session_is_committed(tmp_path: Path):

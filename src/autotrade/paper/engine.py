@@ -12,15 +12,16 @@ names one target session ``D`` and does two things in order:
    inference time, so the orders exist before the market opens. They stay
    pending until the next run settles ``D``.
 
-What a research replay keeps across days, the book keeps too. Fitted state is
-persisted and refitted only when the strategy's ``REFIT_PERIOD`` rolls over,
-exactly as a replay refits. A replay also keeps one strategy worker alive for
-the whole window, so module-level state (a rebalance counter, say) carries from
-call to call; a Paper run cannot keep a process alive between mornings, so it
-re-establishes that state by re-issuing every earlier decision call of the book
-to a fresh worker, in order, with that day's PIT view and journaled account,
-and discards their outputs before the real call. The journals, not those
-re-issued calls, are the record of what the book decided.
+What a research replay keeps across days, the book keeps too. The strategy's
+state directory persists from decision to decision, and the strategy refits
+only when its ``REFIT_PERIOD`` rolls over, exactly as a replay refits. A replay
+also keeps one strategy worker alive for the whole window, so module-level
+state (a rebalance counter, say) carries from call to call; a Paper run cannot
+keep a process alive between mornings, so it re-establishes that state by
+re-issuing every earlier decision call of the book to a fresh worker, in order,
+with that day's PIT view and journaled account, and discards their outputs
+before the real call. The journals, not those re-issued calls, are the record
+of what the book decided.
 
 A book its owner switched to real fills settles every later session from the
 owner's recorded outcomes instead of the simulator's, so each decision sees the
@@ -81,8 +82,8 @@ PAPER_SOURCE = "paper_engine"
 PAPER_STATE_SCHEMA_VERSION = 4
 PAPER_STATE_NAME = ".paper_state.json"
 PAPER_LOCK_NAME = ".paper_engine.lock"
-# Persisted fitted state: one directory per fit, named by its session; only
-# the one ``fit_state`` names is current.
+# Persisted strategy state: one directory per decision, named by its session;
+# only the one ``fit_state`` names is current.
 STRATEGY_STATE_NAME = ".strategy_state"
 SNAPSHOT_NAME = "account_snapshot.json"
 # Run health is separate from the account: even startup failures can report
@@ -184,10 +185,10 @@ class PaperData(Protocol):
 # (book start, target session) -> that run's data. Called only when a run has
 # work to do, because building the PIT view is the expensive part.
 PaperDataFactory = Callable[[str, str], PaperData]
-# (strategy_path, sandbox, first data view, state directory or None, revision
-# models directory or None) -> executor.
+# (strategy_path, sandbox, first data view, state directory, revision models
+# directory or None) -> executor.
 ExecutorFactory = Callable[
-    [Path, SandboxConfig, StrategyDataView, Path | None, Path | None], StrategyExecutor
+    [Path, SandboxConfig, StrategyDataView, Path, Path | None], StrategyExecutor
 ]
 # A due decision's inference time -> None, or raises to refuse that decision.
 DecisionCheck = Callable[[datetime], None]
@@ -197,7 +198,7 @@ def docker_executor(
     strategy_path: Path,
     sandbox: SandboxConfig,
     view: StrategyDataView,
-    state_dir: Path | None,
+    state_dir: Path,
     models_dir: Path | None,
 ) -> StrategyExecutor:
     """The default ``ExecutorFactory``: the strategy container a replay starts."""
@@ -462,7 +463,7 @@ class DailyPaperEngine:
         fit_due = self.fit_schedule is not None and self.fit_schedule.is_due(
             trade_date, state["last_fit_date"] or None
         )
-        state_dir, staged = self._decision_state_dir(state, fit_due=fit_due, trade_date=trade_date)
+        state_dir = self._decision_state_dir(state, fit_due=fit_due, trade_date=trade_date)
         executor: StrategyExecutor | None = None
         matched = 0
         try:
@@ -493,12 +494,10 @@ class DailyPaperEngine:
         except BaseException:
             if executor is not None:
                 executor.close()
-            if staged:
-                _remove_tree(state_dir)
+            _remove_tree(state_dir)
             raise
         executor.close()
-        if staged:
-            self._publish_fit_state(state_dir, trade_date)
+        self._publish_state(state_dir, trade_date)
         # Display quotes for the order sheet: a held name at the close the
         # account was marked with, anything else at its last close.
         quotes = data.references({order.symbol for order in orders} | set(positions), trade_date)
@@ -525,7 +524,7 @@ class DailyPaperEngine:
         }]
         if fit_due:
             state["last_fit_date"] = trade_date
-            state["fit_state"] = trade_date
+        state["fit_state"] = trade_date
         if not state["start_date"]:
             state["start_date"] = trade_date
         pending.extend(orders)
@@ -538,7 +537,7 @@ class DailyPaperEngine:
         state["warnings"] = []
         self._checkpoint(state, broker, pending)
         self._reconcile_emissions(state)
-        warnings = self._prune_fit_states(state)
+        warnings = self._prune_states(state)
         if warnings:
             state["warnings"] = warnings
             write_json_atomic(self.state_root / PAPER_STATE_NAME, state, private=True, sort_keys=False)
@@ -564,7 +563,7 @@ class DailyPaperEngine:
             pretrained_dir=fittable.context_pretrained_dir if fittable is not None else "",
         )
 
-    def _executor(self, view: StrategyDataView, state_dir: Path | None) -> StrategyExecutor:
+    def _executor(self, view: StrategyDataView, state_dir: Path) -> StrategyExecutor:
         return self.executor_factory(
             self.strategy_path, self.sandbox, view, state_dir, self.models_dir
         )
@@ -574,47 +573,42 @@ class DailyPaperEngine:
         hidden = {"kind", "event_id", REFERENCE_KEY}
         return [{key: value for key, value in row.items() if key not in hidden} for row in rows]
 
-    # ---------------------------------------------------------- fit state
+    # ------------------------------------------------------ strategy state
 
-    def _decision_state_dir(
-        self, state: dict[str, object], *, fit_due: bool, trade_date: str
-    ) -> tuple[Path | None, bool]:
-        """(state directory the worker mounts, whether it is a staged copy).
+    def _decision_state_dir(self, state: dict[str, object], *, fit_due: bool, trade_date: str) -> Path:
+        """The staged copy of the current strategy state this decision mounts.
 
-        A due fit writes into a staged copy of the current state, published
-        only after the decision succeeds, so a failed fit never damages the
-        state the book's earlier decisions were taken with.
+        Every decision, ``fit`` and ``generate_orders`` alike, writes into a
+        copy that is published only after the decision succeeds, so a failed
+        decision never damages the state the book's earlier decisions left.
+        The first decision of a book starts from an empty directory.
         """
 
-        if self.fit_schedule is None:
-            return None, False
         root = self.state_root / STRATEGY_STATE_NAME
         current = root / str(state["fit_state"]) if state["fit_state"] else None
         if current is not None and not current.is_dir():
-            raise PaperEngineError(f"persisted fitted state is missing: {current}")
-        if not fit_due:
-            if current is None:
-                raise PaperEngineError("the book has no fitted state and no fit is due")
-            return current, False
+            raise PaperEngineError(f"persisted strategy state is missing: {current}")
+        if current is None and self.fit_schedule is not None and not fit_due:
+            raise PaperEngineError("the book has no fitted state and no fit is due")
         root.mkdir(parents=True, exist_ok=True)
         staged = root / f".{trade_date}.{uuid.uuid4().hex}.tmp"
         if current is not None:
             shutil.copytree(current, staged)
         else:
             staged.mkdir()
-        # The sandbox fit worker runs as a non-root user and overwrites files
-        # the host copied; the inference worker still binds it read-only.
+        # The sandbox workers run as a non-root user and overwrite files the
+        # host copied.
         _open_tree(staged)
-        return staged, True
+        return staged
 
-    def _publish_fit_state(self, staged: Path, trade_date: str) -> None:
+    def _publish_state(self, staged: Path, trade_date: str) -> None:
         target = self.state_root / STRATEGY_STATE_NAME / trade_date
         if target.exists():
             _remove_tree(target)  # left by a run that crashed before its checkpoint
         staged.rename(target)
 
-    def _prune_fit_states(self, state: dict[str, object]) -> list[str]:
-        """Remove superseded fitted states; a failure is reported, not fatal,
+    def _prune_states(self, state: dict[str, object]) -> list[str]:
+        """Remove superseded strategy states; a failure is reported, not fatal,
         because the decision it follows is already journaled."""
 
         root = self.state_root / STRATEGY_STATE_NAME
@@ -627,7 +621,7 @@ class DailyPaperEngine:
             try:
                 _remove_tree(entry)
             except OSError as exc:
-                warnings.append(f"cannot remove superseded fitted state {entry.name}: {exc}")
+                warnings.append(f"cannot remove superseded strategy state {entry.name}: {exc}")
         return warnings
 
     # ------------------------------------------------------------ storage

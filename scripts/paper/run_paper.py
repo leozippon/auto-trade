@@ -226,7 +226,7 @@ def _executor_on_free_gpus(
     strategy_path: Path,
     sandbox: SandboxConfig,
     view: StrategyDataView,
-    state_dir: Path | None,
+    state_dir: Path,
     models_dir: Path | None,
     *,
     card_wait: CardWait | None = None,
