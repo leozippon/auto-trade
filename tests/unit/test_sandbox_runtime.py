@@ -47,6 +47,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB, GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
+from autotrade.environment.replay.stats import compute_return_stats
 from autotrade.environment.sandbox import (
     EXPERIMENT_LABEL,
     SCREENING_TOOL_MOUNT,
@@ -84,6 +85,7 @@ from autotrade.pipelines.hitl_state import (
     select_gpus,
     write_gpu_claim,
 )
+from autotrade.pipelines.session_tools import batch_candidate_resources
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
 
 from .fixtures_sandbox import docker_available
@@ -167,6 +169,7 @@ def _executor_for_process(
     executor._fit_worker = None
     executor.gpu_indices = []
     executor._fit_seconds = []
+    executor._decision_seconds = []
     executor._monitor = ContainerResourceMonitor(executor.container_name)
     executor._worker_reading = {}
     executor._call_in_flight = False
@@ -2590,6 +2593,44 @@ def test_the_workers_reading_reaches_resources_only_for_answered_calls(tmp_path:
         assert usage["decision_timeout_seconds"] == 1.0
     finally:
         executor.close()
+
+
+def test_each_due_decision_is_timed_and_a_row_carries_their_summary(tmp_path: Path):
+    """A replay with N due days times N ``generate_orders`` calls.
+
+    Only due days call the strategy, so the count follows the schedule, not
+    the trading days, and equals ``decision_calls``. A batch row carries the
+    seconds as count, p50, p95 and max instead of the per-call list, and a
+    strategy without ``fit`` gets that summary all the same.
+    """
+
+    strategy = _strategy(tmp_path)
+    days = ("20260129", "20260130", "20260202", "20260203", "20260302")
+    daily = pd.DataFrame(
+        [
+            {"trade_date": day, "symbol": "000001.SZ", "open": 10.0, "close": 11.0, "pre_close": 11.0}
+            for day in days
+        ]
+    )
+    executor = _started_executor(
+        strategy, _worker_argv(strategy), _strategy_config(startup_timeout_seconds=30.0)
+    )
+    config = StrategyExperimentConfig(
+        strategy_path=strategy, schedule=StrategySchedule(period="month")
+    )
+    stats = compute_return_stats(
+        DailyStrategyPipeline(config, executor_factory=lambda _config: executor).run(daily)
+    )
+
+    assert stats["decision_calls"] == 3
+    assert len(stats["resources"]["decision_seconds"]) == 3
+    block = batch_candidate_resources(stats["resources"])["resources"]
+    summary = block["decision_seconds_summary"]
+    assert set(summary) == {"count", "p50", "p95", "max"}
+    assert summary["count"] == stats["decision_calls"]
+    assert 0 <= summary["p50"] <= summary["p95"] <= summary["max"]
+    assert "decision_seconds" not in block
+    assert "fit_seconds_summary" not in block
 
 
 def test_container_gpu_peak_counts_only_this_containers_own_processes(tmp_path: Path):

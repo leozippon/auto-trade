@@ -962,16 +962,18 @@ class BatchValidateRunTest(unittest.TestCase):
         fits that ran past the concurrency-scaled cap, reasoning about a
         ceiling neither of them had measured.
 
-        The fit seconds ride as a summary: a daily refit over a full span is
-        a list of ~1,941 readings, re-sent with every later model call. The
-        completed row's result_ref keeps the list.
+        The fit and generate_orders seconds ride as summaries: a daily refit
+        over a full span is a list of ~1,941 readings, re-sent with every later
+        model call. The completed row's result_ref keeps the lists.
         """
 
         fits = [335.7, 4.1, 3.9, 4.4, 1204.2]
+        decisions = [22.4, 0.4, 0.3, 21.9, 0.4, 23.1]
         usage = {
             "peak_memory_bytes": 7_883_149_312,
             "memory_limit_bytes": 17_179_869_184,
             "fit_seconds": fits,
+            "decision_seconds": decisions,
             "fit_timeout_seconds": 10_800.0,
             "decision_timeout_seconds": 1_080.0,
         }
@@ -985,6 +987,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 "p95": 1204.2,
                 "max": 1204.2,
             },
+            "decision_seconds_summary": {"count": 6, "p50": 0.4, "p95": 23.1, "max": 23.1},
             "fit_timeout_seconds": 10_800.0,
             "decision_timeout_seconds": 1_080.0,
         }
@@ -1002,6 +1005,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 )
             )
             self.assertEqual(record["stats"]["resources"]["fit_seconds"], fits)
+            self.assertEqual(record["stats"]["resources"]["decision_seconds"], decisions)
             self.assertEqual(rows["slow"]["status"], "failed")
             self.assertNotIn("stats", rows["slow"])
             self.assertEqual(rows["slow"]["resources"], summarised)

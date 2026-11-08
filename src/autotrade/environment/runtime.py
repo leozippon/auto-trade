@@ -116,7 +116,8 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     "replayed_trade_days",
     "phase_seconds",
     # Container telemetry of the replay: peak memory against the limit in
-    # force, per-fit seconds against the fit timeout, GPU headroom.
+    # force, per-fit seconds against the fit timeout, the seconds of each
+    # generate_orders call, GPU headroom.
     "resources",
 )
 

@@ -259,7 +259,8 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         "first/last trade_date and available_at on the last day replayed (how far "
         "back the view this window opened on reaches), the container resources block "
         "(peak memory against the container limit, per-fit seconds against the "
-        "fit timeout in force, and GPU memory for a GPU strategy), and the exact "
+        "fit timeout in force, the wall seconds of each generate_orders call as "
+        "timed by the host executor, and GPU memory for a GPU strategy), and the exact "
         "exception text on failure. It commits no revision, creates no Step, "
         "cannot be tested, and does not count against validates_per_step. Use it before "
         "validate instead of hand-writing a shell smoke test against "
@@ -1270,12 +1271,13 @@ def batch_candidate_resources(
     every row keeps it in the one place — its own top level. Absent when the
     replay measured nothing.
 
-    The fit seconds ride as their summary, not as the per-fit list: a strategy
-    that refits daily reads 1,941 fits over an eight-year span, and because a
-    batch result is re-sent with every later model call, two experiments' lists came
-    to about a fifth of their main input. A completed row's ``result_ref``
-    keeps the list under ``stats.resources``; ``smoke_backtest`` replays a few
-    days and returns it whole.
+    The fit and ``generate_orders`` seconds ride as their summaries, not as
+    the per-call lists: a strategy that refits daily reads 1,941 fits over an
+    eight-year span, and because a batch result is re-sent with every later
+    model call, two experiments' fit lists came to about a fifth of their main
+    input. A completed row's ``result_ref`` keeps the lists under
+    ``stats.resources``; ``smoke_backtest`` replays a few days and returns them
+    whole.
     """
 
     if not resources:
@@ -1283,25 +1285,30 @@ def batch_candidate_resources(
     block = dict(resources)
     fits = block.pop("fit_seconds", None)
     if fits:
-        block["fit_seconds_summary"] = _fit_seconds_summary(fits)
+        block["fit_seconds_summary"] = _seconds_summary(fits, first=True)
+    decisions = block.pop("decision_seconds", None)
+    if decisions:
+        block["decision_seconds_summary"] = _seconds_summary(decisions)
     return {"resources": block}
 
 
-def _fit_seconds_summary(fits: Sequence[float]) -> dict[str, float]:
-    """How many fits ran and the first (the cold one), p50, p95 and max seconds.
+def _seconds_summary(seconds: Sequence[float], *, first: bool = False) -> dict[str, float]:
+    """How many calls ran and their p50, p95 and max seconds.
 
-    The max is the reading the fit timeout bounds. Percentiles are taken at
-    nearest rank, so each is a measured fit rather than an interpolation.
+    ``first`` adds the first call's seconds, which for ``fit`` is the cold
+    one; the fit max is the reading the fit timeout bounds. Percentiles are
+    taken at nearest rank, so each is a measured call rather than an
+    interpolation.
     """
 
-    ordered = sorted(fits)
+    ordered = sorted(seconds)
 
     def rank(percent: int) -> float:
         return ordered[(percent * len(ordered) + 99) // 100 - 1]
 
     return {
         "count": len(ordered),
-        "first": fits[0],
+        **({"first": seconds[0]} if first else {}),
         "p50": rank(50),
         "p95": rank(95),
         "max": ordered[-1],
@@ -1453,9 +1460,12 @@ class ValidateTool(SessionTimeBudgetAware):
         "what the replay cost the strategy container it ran in (peak memory against "
         "that container's own limit; fit_seconds_summary, the number of fits and the "
         "first, p50, p95 and max seconds of one fit, the max being the one to read "
-        "against the fit timeout this batch's concurrency put in force; and for a GPU "
-        "strategy its peak video memory); a completed row's result_ref keeps the "
-        "per-fit list under stats.resources.fit_seconds. "
+        "against the fit timeout this batch's concurrency put in force; "
+        "decision_seconds_summary, the number of generate_orders calls and the p50, "
+        "p95 and max wall seconds of one call as timed by the host executor; and for "
+        "a GPU strategy its peak video memory); a completed row's result_ref keeps the "
+        "per-call lists under stats.resources.fit_seconds and "
+        "stats.resources.decision_seconds. "
         "Each completed row's result_ref reads back that candidate's full "
         "replay record, and its daily_series (validation/active_daily.csv in the "
         "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "

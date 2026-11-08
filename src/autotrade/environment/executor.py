@@ -462,9 +462,10 @@ class DockerStrategyExecutor:
         # it) is not in it, and the run's peak is then not this reading.
         self._worker_reading: dict[str, int] = {}
         self._call_in_flight = False
-        # Wall clock of each completed ``fit`` roundtrip, measured on the same
-        # clock ``fit_timeout_seconds`` bounds.
+        # Wall clock of each completed ``fit`` and ``generate_orders``
+        # roundtrip, measured on the same clock its timeout bounds.
         self._fit_seconds: list[float] = []
+        self._decision_seconds: list[float] = []
         self._process: subprocess.Popen[bytes] | None = None
         self._stdout_buffer = bytearray()
         self._stderr_tail: deque[bytes] = deque()
@@ -627,8 +628,9 @@ class DockerStrategyExecutor:
                 )
                 self._call_in_flight = False
                 if message_type == expected:
-                    if kind == "fit":
-                        self._fit_seconds.append(round(time.monotonic() - started, 1))
+                    (self._fit_seconds if kind == "fit" else self._decision_seconds).append(
+                        round(time.monotonic() - started, 1)
+                    )
                     self._transport_sequence = sequence
                     self._transport_inference_at = call.inference_at
                     self._transport_count = call.bar_count
@@ -772,6 +774,8 @@ class DockerStrategyExecutor:
         )
         if fit_seconds:
             record["fit_seconds"] = fit_seconds
+        if self._decision_seconds:
+            record["decision_seconds"] = list(self._decision_seconds)
         if self.fit_schedule is not None:
             record["fit_timeout_seconds"] = self.config.fit_timeout_seconds
         record["decision_timeout_seconds"] = self.config.timeout_seconds
