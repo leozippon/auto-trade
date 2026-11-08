@@ -224,7 +224,7 @@ BASE_OVERRIDES: dict[str, object] = {
     # 0.45 / 0.30; an experiment that wants other bars names them.
     "cost_stress_multiplier": 2.0,
     # The one research session's budgets, spent across every attempt.
-    "max_research_minutes": 2400,
+    "max_research_minutes": 10_080,
     "max_llm_calls": 6400,
 }
 

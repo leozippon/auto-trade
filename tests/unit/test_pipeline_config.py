@@ -73,7 +73,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "initial_control_mode": "auto",
     # The research session's budgets: minutes and calls, spent across every
     # attempt of the experiment's one session.
-    "max_research_minutes": 2400,
+    "max_research_minutes": 10_080,
     "max_llm_calls": 6400,
     "model": "gpt-6-astra",
     # The universe reaches the agent unfiltered; the strategy filters itself.
@@ -388,7 +388,7 @@ class ExperimentConfigValidationTest(unittest.TestCase):
         self.assertEqual(config.geometry, DEFAULT_RESEARCH_GEOMETRY)
         self.assertEqual(config.session_max_attempts, 3)
         self.assertEqual(config.research_directive, "")
-        self.assertEqual(config.max_research_minutes, 2400)
+        self.assertEqual(config.max_research_minutes, 10_080)
         self.assertEqual(
             (config.max_llm_calls, config.max_null_controls),
             (6400, 12),

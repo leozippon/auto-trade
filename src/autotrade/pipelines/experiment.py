@@ -58,6 +58,7 @@ from autotrade.environment.trace import agent_trace_path
 from .agent_inbox import expire_experiment_session_inbox
 from .calendar import FULL_SPAN, VALIDATION_SPAN, Slot
 from .config import (
+    DEFAULT_MAX_RESEARCH_MINUTES,
     AcceptanceRules,
     ArtifactStore,
     BudgetUsed,
@@ -131,9 +132,9 @@ from .verdict import (
 
 # A session deadline override may raise the research deadline above the
 # configured maximum, bounded by this absolute ceiling in minutes: twice the
-# default research budget (config.max_research_minutes), enough headroom for
-# one slow session without letting it run unattended for weeks.
-_MAX_DEADLINE_OVERRIDE_MINUTES = 4800
+# default research budget, two weeks, headroom for one slow session that still
+# bounds how long it runs unattended.
+_MAX_DEADLINE_OVERRIDE_MINUTES = 2 * DEFAULT_MAX_RESEARCH_MINUTES
 
 
 class EnvironmentBlockedAttempt(RuntimeError):

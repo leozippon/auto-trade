@@ -71,7 +71,8 @@ SNAPSHOT_CACHE_FORMAT_VERSION = 16
 DEFAULT_DEADLINE_GRACE_MINUTES = 10
 # A research session's time, null-control and model-call budgets are
 # experiment-level: one session per experiment spends them across every attempt.
-DEFAULT_MAX_RESEARCH_MINUTES = 2400
+# The time budget is a week of inference time (the owner's decision of 2026-11-08).
+DEFAULT_MAX_RESEARCH_MINUTES = 10_080
 DEFAULT_MAX_NULL_CONTROLS = 12
 DEFAULT_MAX_LLM_CALLS = 6400
 # What one experiment's research session may spend on hosted model APIs, in USD at the

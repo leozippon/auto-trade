@@ -999,7 +999,7 @@ def test_worker_params_reject_unknown_keys_and_a_bad_geometry(tmp_path: Path):
     options = load_worker_options(experiment, repo_root=repo)
     # A params file that states no geometry runs on the console's.
     assert options.experiment.geometry == DEFAULT_RESEARCH_GEOMETRY
-    assert options.experiment.max_research_minutes == 2400
+    assert options.experiment.max_research_minutes == 10_080
     for key, value in (
         ("typo_budget", 3),
         ("development_first_period", "2022"),

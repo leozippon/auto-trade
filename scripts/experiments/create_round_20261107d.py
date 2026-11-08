@@ -6,7 +6,8 @@ which ran the 2026-11-07 harness on the instance and spent its research years
 on LightGBM-and-ridge ensembles trained on the CPU while the A100 idled: the
 system prompt said nothing about the card, so the session only met it through
 `nvidia-smi`. This round differs from 20261107c in the harness, in when it compacts,
-in how many replays `validate` runs at once and in its per-decision limit. The run
+in how many replays `validate` runs at once, in its per-decision limit and in its
+research time, a week (10,080 minutes) instead of 7,200 minutes. The run
 facts state the sandbox GPU (count and device name) and, when the experiment has a
 card, the research-orientation block adds one sentence asking the session to make
 full use of the Sandbox's GPU compute. One `generate_orders` call may take an hour
@@ -32,7 +33,7 @@ ten-year profile and seed (`_profiles.FUND_TITLE_TEN_YEAR_CSI1000` on
 alpha 0.05); a CNY 200k account on the main board and ChiNext; gpt-6-astra at
 reasoning effort xhigh with sub-agents and compaction on DeepSeek-V4.1-Flash;
 the instance's one A100 with three replays at a time in `validate`; and the budgets of
-7,200 minutes, 19,200 model calls, USD 150 and 36 null controls.
+19,200 model calls, USD 150 and 36 null controls.
 
 It runs on the instance, whose fill loop creates it once the card is free:
 
@@ -101,10 +102,10 @@ ROUND = Round(
         "research_years": 7,
         "initial_cash": 200_000,
         "permitted_boards": ["main", "gem"],
-        # Round 20261107's budgets.
+        # Round 20261107's budgets, but a week of research time.
         "max_api_spend_usd": 150.0,
         "max_llm_calls": 19_200,
-        "max_research_minutes": 7_200,
+        "max_research_minutes": 10_080,
         "max_null_controls": 36,
         # This round's strategy limits, which the prompt states as the compute
         # budget; the session container takes the same memory.

@@ -400,7 +400,7 @@ def test_budgets_come_from_one_source_each():
     assert (limits.cpus, limits.memory, limits.pids) == (
         SandboxSpec().cpus, SandboxSpec().memory, SandboxSpec().pids
     )
-    assert (executor.timeout_seconds, executor.fit_timeout_seconds) == (360.0, 3600.0)
+    assert (executor.timeout_seconds, executor.fit_timeout_seconds) == (3600.0, 3600.0)
     # The pipeline knob defaults to the executor's fit wall clock and the
     # WebUI defaults read the pipeline dataclass.
     assert experiment_default("strategy_fit_timeout_seconds") == executor.fit_timeout_seconds
@@ -414,9 +414,9 @@ def test_budgets_come_from_one_source_each():
         experiment_default("max_research_minutes"),
         experiment_default("max_llm_calls"),
         experiment_default("max_null_controls"),
-    ) == (2400, 6400, 12)
+    ) == (10_080, 6400, 12)
     assert experiment_default("max_api_spend_usd") == 50.0
-    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * experiment_default("max_research_minutes") == 4800
+    assert _MAX_DEADLINE_OVERRIDE_MINUTES == 2 * experiment_default("max_research_minutes") == 20_160
 
     config = SimpleNamespace(
         max_llm_calls=experiment_default("max_llm_calls"),
@@ -426,8 +426,8 @@ def test_budgets_come_from_one_source_each():
     )
     budgets = _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60})
     grace = experiment_default("deadline_grace_minutes") * 60.0
-    assert budgets["deadline_seconds"] == 4800 * 60.0 + grace
-    with pytest.raises(ValueError, match="cannot exceed 4800 minutes"):
+    assert budgets["deadline_seconds"] == 20_160 * 60.0 + grace
+    with pytest.raises(ValueError, match="cannot exceed 20160 minutes"):
         _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60 + 1})
     # The spend cap overrides downward only, and keeps its cents.
     assert _session_budgets(config, {"max_api_spend_usd": 12.5})["max_api_spend_usd"] == 12.5
