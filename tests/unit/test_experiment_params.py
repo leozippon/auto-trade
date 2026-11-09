@@ -13,7 +13,6 @@ from __future__ import annotations
 import pytest
 
 from autotrade.pipelines.experiment_params import (
-    NON_PERSISTABLE_PARAMS,
     PARAMETERS,
     ExperimentParams,
     Surface,
@@ -23,12 +22,7 @@ from autotrade.pipelines.experiment_params import (
     read_param_or_default,
     session_models,
 )
-from autotrade.pipelines.hitl_state import (
-    WEB_CLOSED_PARAMS,
-    WEB_CREATE_DEFAULTS,
-    WEB_INTERNAL_PARAMS,
-    WEB_REQUIRED_PARAMS,
-)
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, WEB_INTERNAL_PARAMS
 from tests.unit.acceptance_fixture import CREATE_RULES
 
 ROOTS = {"experiments_root": "experiments", "work_root": ".runtime/sandboxes"}
@@ -45,17 +39,13 @@ def _created(**request: object) -> dict[str, object]:
 def test_every_console_surface_is_read_off_the_record() -> None:
     assert list(WEB_CREATE_DEFAULTS) == parameters(Surface.CONSOLE)
     assert WEB_INTERNAL_PARAMS == {name: PARAMETERS[name].stamp for name in parameters(Surface.MANAGED)}
-    assert WEB_CLOSED_PARAMS == {
-        *parameters(Surface.MANAGED),
-        *parameters(Surface.HOST),
-        *NON_PERSISTABLE_PARAMS,
-    }
-    assert WEB_REQUIRED_PARAMS == {"experiment_id", *CREATE_RULES, "research_start", "research_end", "forward_end", "heldout_end"}
+    required = {name for name, spec in PARAMETERS.items() if spec.required}
+    assert required == {"experiment_id", *CREATE_RULES, "research_start", "research_end", "forward_end", "heldout_end"}
     # The rule a create request must state, research_years, has no value
     # anywhere; alpha, the other required rule, carries the console's value
     # 0.05 and is no create-time requirement.
     assert all(WEB_CREATE_DEFAULTS[name] is None for name in ("experiment_id", *CREATE_RULES))
-    assert WEB_CREATE_DEFAULTS["alpha"] == 0.05 and "alpha" not in WEB_REQUIRED_PARAMS
+    assert WEB_CREATE_DEFAULTS["alpha"] == 0.05 and "alpha" not in required
 
 
 def test_a_created_experiment_reads_back_to_the_parameters_it_states() -> None:

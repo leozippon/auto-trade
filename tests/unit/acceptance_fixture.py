@@ -26,7 +26,7 @@ TEST_GEOMETRY = ResearchGeometry(
 REQUIRED_RULES: dict[str, object] = {"alpha": 0.05, "research_years": 1}
 RULES = AcceptanceRules(**REQUIRED_RULES)
 # What a console create request must state beside the geometry: the rules the
-# console has no value for (``hitl_state.WEB_REQUIRED_PARAMS``).
+# console has no value for (the required ``experiment_params.PARAMETERS``).
 CREATE_RULES: dict[str, object] = {key: REQUIRED_RULES[key] for key in ("research_years",)}
 # The prebuilt view cache a create request in a fixture repository names: none,
 # since the repository holds no seed and a named one, the console's default

@@ -33,6 +33,8 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 
 from .calendar import replay_window, yyyymmdd
 from .config import (
+    FORWARD_PHASE,
+    RESEARCH_PHASE,
     EvaluationBackend,
     EvaluationRequest,
     EvaluationResult,
@@ -43,7 +45,7 @@ from .config import (
     StrategyExperimentConfig,
 )
 from .experiment import DailyStrategyPipeline
-from .skills import _assert_skills_absent_from_formal
+from .skills import assert_skills_absent_from_formal
 
 
 class LocalDailySnapshotProvider:
@@ -63,7 +65,7 @@ class LocalDailySnapshotProvider:
         decision_time: datetime,
     ) -> SnapshotBundle:
         del decision_time
-        if phase not in {"valid", "heldout"}:
+        if phase not in {RESEARCH_PHASE, FORWARD_PHASE}:
             raise ValueError(f"unsupported local snapshot phase: {phase}")
         return SnapshotBundle(
             snapshot_id=f"local_daily_{phase}_{start}_{end}",
@@ -137,7 +139,7 @@ class LocalDailyEvaluationBackend:
         """
         if max_days is not None and max_days <= 0:
             raise ValueError("max_days must be a positive integer")
-        if request.mode not in {"valid", "heldout"}:
+        if request.mode not in {RESEARCH_PHASE, FORWARD_PHASE}:
             raise ValueError(f"unsupported local evaluation mode: {request.mode}")
         strategy_path = Path(request.revision.output_path) / "main.py"
         if not strategy_path.is_file():
@@ -245,7 +247,7 @@ class DeterministicBaselineDeveloper:
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         source = self.baseline_root
-        _assert_skills_absent_from_formal(source, None)
+        assert_skills_absent_from_formal(source, None)
         # Step ids reach the Agent-facing projections, so they carry the same
         # opaque refs every agent-visible surface uses.
         prefix = (

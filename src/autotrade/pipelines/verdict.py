@@ -60,9 +60,9 @@ from autotrade.environment.replay.stats import (
 from autotrade.environment.replay.style import (
     FACTOR_SERIES,
     MIN_REGRESSION_DAYS,
-    _series_pairs,
     active_analysis,
     factor_ols,
+    series_pairs,
 )
 
 from .calendar import FULL_SPAN
@@ -126,7 +126,7 @@ def _strategy_returns(
 ) -> list[tuple[str, float]]:
     return [
         (date, value)
-        for date, value in _series_pairs(analysis.get("strategy_daily"))
+        for date, value in series_pairs(analysis.get("strategy_daily"))
         if (not start or date >= start) and (not end or date <= end)
     ]
 
@@ -140,7 +140,7 @@ def _regression_rows(
     dropped for a non-finite value: a NaN is never read as a figure. A day
     missing a leg yields no row."""
 
-    legs = [dict(_series_pairs(analysis.get(series))) for _name, series in FACTOR_SERIES]
+    legs = [dict(series_pairs(analysis.get(series))) for _name, series in FACTOR_SERIES]
     rows = np.asarray(
         [
             (value, *(leg[date] for leg in legs))
@@ -414,7 +414,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
     """
 
     frame = pd.DataFrame(
-        _series_pairs(analysis.get("strategy_daily")),
+        series_pairs(analysis.get("strategy_daily")),
         columns=["trade_date", "strategy_return"],
     )
     for column, key in (
@@ -423,11 +423,11 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
         ("size_factor_return", "size_factor_daily"),
         ("value_factor_return", "value_factor_daily"),
     ):
-        frame[column] = frame["trade_date"].map(dict(_series_pairs(analysis.get(key))))
+        frame[column] = frame["trade_date"].map(dict(series_pairs(analysis.get(key))))
     active = active_analysis(analysis)
     if active is not None:
         # Day for day the strategy's own rows: active_analysis keeps their order.
-        graded = [value for _date, value in _series_pairs(active["strategy_daily"])]
+        graded = [value for _date, value in series_pairs(active["strategy_daily"])]
         path = compounded_path(graded)
         frame["active_return"] = graded
         frame["active_cumulative"] = [equity - 1.0 for equity, _drawdown in path]
@@ -489,7 +489,7 @@ def _compounded(series: object, start: str, end: str) -> float | None:
 
     values = [
         value
-        for date, value in _series_pairs(series)
+        for date, value in series_pairs(series)
         if (not start or date >= start) and (not end or date <= end)
     ]
     return compounded_return(values) if values else None

@@ -19,14 +19,7 @@ from autotrade.environment.gpu import (
     host_min_free_gpu_memory_mib,
 )
 
-from .experiment_params import (
-    NON_PERSISTABLE_PARAMS,
-    PARAMETERS,
-    Surface,
-    console_defaults,
-    managed_values,
-    parameters,
-)
+from .experiment_params import console_defaults, managed_values
 from .ledger import SessionKind
 
 HITL_STATE_SCHEMA_VERSION = 1
@@ -73,16 +66,11 @@ ENDED_STATES = frozenset({ExperimentState.COMPLETED, ExperimentState.FAILED, Exp
 
 
 # The console's views of the experiment parameters (``experiment_params.ExperimentParams``): what a
-# create request may name and what each defaults to, the values the console
-# stamps for the parameters it manages, the keys it refuses (managed, host-only
-# and the never-persistable endpoint overrides) and the ones a request must
-# state. Every one is read off the record's fields.
+# create request may name and what each defaults to, and the values the
+# console stamps for the parameters it manages. Both are read off the record's
+# fields.
 WEB_CREATE_DEFAULTS: dict[str, object] = console_defaults()
 WEB_INTERNAL_PARAMS: dict[str, object] = managed_values()
-WEB_CLOSED_PARAMS = frozenset(
-    {*parameters(Surface.MANAGED), *parameters(Surface.HOST), *NON_PERSISTABLE_PARAMS}
-)
-WEB_REQUIRED_PARAMS = frozenset(name for name, spec in PARAMETERS.items() if spec.required)
 
 
 @dataclass
@@ -93,15 +81,10 @@ class ControlState:
     # in-flight session is finished instead of replayed.
     restart_pending: bool = False
     directives: dict[str, str] = field(default_factory=dict)
-    skip_to_heldout: bool = False
     resource_overrides: dict[str, dict[str, object]] = field(default_factory=dict)
     # Per-session sandbox GPU allocation set before the session starts: that
     # many of the cards the experiment holds.
     gpu_counts: dict[str, int] = field(default_factory=dict)
-    # A pending re-run token per session: the worker re-runs the session
-    # whose latest ledger record has not absorbed this id yet.
-    rerun_sessions: dict[str, str] = field(default_factory=dict)
-    test_revealed: bool = False
     # When this state was last written, as the file recorded it; None for a
     # state that has not been written yet. Only ``write_control`` stamps it,
     # so a projection of the file dates the control from the file and not
@@ -116,11 +99,8 @@ class ControlState:
             "request": self.request,
             "restart_pending": self.restart_pending,
             "directives": dict(self.directives),
-            "skip_to_heldout": self.skip_to_heldout,
             "resource_overrides": dict(self.resource_overrides),
             "gpu_counts": dict(self.gpu_counts),
-            "rerun_sessions": dict(self.rerun_sessions),
-            "test_revealed": self.test_revealed,
             "updated_at": self.updated_at,
         }
 
@@ -137,11 +117,8 @@ def read_control(path: str | Path) -> ControlState:
         request=str(request) if request in ("pause", "stop") else None,
         restart_pending=bool(payload.get("restart_pending")),
         directives=_string_map(payload.get("directives")),
-        skip_to_heldout=bool(payload.get("skip_to_heldout")),
         resource_overrides=_object_map(payload.get("resource_overrides")),
         gpu_counts=_int_map(payload.get("gpu_counts")),
-        rerun_sessions=_string_map(payload.get("rerun_sessions")),
-        test_revealed=bool(payload.get("test_revealed")),
         updated_at=str(payload["updated_at"]) if payload.get("updated_at") else None,
     )
 
@@ -181,9 +158,7 @@ def consume_session_controls(
             state.resource_overrides,
             state.gpu_counts,
         ):
-            for key in list(mapping):
-                if key == session_key or key.startswith(f"{session_key}#"):
-                    mapping.pop(key, None)
+            mapping.pop(session_key, None)
         write_control(path, state)
         return state
 

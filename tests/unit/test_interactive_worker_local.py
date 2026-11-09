@@ -17,12 +17,12 @@ import pytest
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     LOCAL_QWEN_MODEL,
-    DeepSeekProxy,
     OpenAICompatibleProxy,
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
 )
+from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.hitl_state import (
@@ -404,7 +404,7 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     subagent = options.llm.build_gateway("subagent")
     assert isinstance(main, OpenAICompatibleProxy)
     assert main.provider == "vllm"
-    assert isinstance(subagent, DeepSeekProxy)
+    assert isinstance(subagent, OpenAICompatibleProxy)
     assert subagent.provider == "deepseek"
     assert subagent.model == "deepseek-flash"
     assert main.config.max_tokens == 32_768
@@ -675,9 +675,7 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
 def test_model_roles_share_one_session_call_budget():
     first = ScriptedLLM([ProviderResponse(content="main")])
     second = ScriptedLLM([ProviderResponse(content="subagent")])
-    shared = SessionCallBudget(
-        max_calls=1, deadline=__import__("time").monotonic() + 10
-    )
+    shared = SessionCallBudget(max_calls=1, time_budget=InferenceTimeBudget(duration_seconds=10))
     main = SessionBudgetLLM(first, budget=shared)
     subagent = SessionBudgetLLM(second, budget=shared)
     main.complete([])
@@ -1253,7 +1251,7 @@ def _console_params(repo: Path, experiments_root: Path, **overrides) -> dict:
             "experiments_root": str(experiments_root),
             "work_root": str(repo / ".runtime/sandboxes"),
             "_creation_surface": "webui",
-            # The rules a create request must state (``WEB_REQUIRED_PARAMS``).
+            # The rules a create request must state (the required parameters).
             **CREATE_RULES,
             **NO_SEED,
         }

@@ -16,7 +16,7 @@ from autotrade.pipelines.skills import (
     ExperimentSkillsStore,
     SkillsSnapshot,
     WriteSkillTool,
-    _assert_skills_absent_from_formal,
+    assert_skills_absent_from_formal,
     build_skills_index,
     install_workspace_skills,
     latest_skills_snapshot,
@@ -419,12 +419,12 @@ def test_formal_output_rejects_embedded_skill_tree(tmp_path: Path) -> None:
     models = tmp_path / "models"
     output.mkdir()
     models.mkdir()
-    _assert_skills_absent_from_formal(output, models)
+    assert_skills_absent_from_formal(output, models)
     copied = output / "skills" / "schema-notes"
     copied.mkdir(parents=True)
     (copied / "SKILL.md").write_text("# copied\n", encoding="utf-8")
     with pytest.raises(ValueError, match=r"formal output: output/skills") as error:
-        _assert_skills_absent_from_formal(output, models)
+        assert_skills_absent_from_formal(output, models)
     assert str(tmp_path) not in str(error.value)
 
 

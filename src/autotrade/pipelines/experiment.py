@@ -60,6 +60,8 @@ from .agent_inbox import expire_experiment_session_inbox
 from .calendar import FULL_SPAN, VALIDATION_SPAN, Slot
 from .config import (
     DEFAULT_MAX_RESEARCH_MINUTES,
+    FORWARD_PHASE,
+    RESEARCH_PHASE,
     AcceptanceRules,
     ArtifactStore,
     BudgetUsed,
@@ -91,12 +93,12 @@ from .ledger import (
     assert_no_registered_artifact_mutation,
     forward_record,
     is_registered_artifact_mutation,
+    link_head,
     recorded_path,
     registered_record,
     research_over,
     research_records,
 )
-from .pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from .session_resume import (
     REVISIONS_DIR,
     load_recorded_steps,
@@ -202,7 +204,7 @@ class DailyStrategyPipeline:
                 raise
             return replace(replay, resources=strategy_resource_usage(executor))
         finally:
-            discard_strategy_state(state_dir)
+            discard_strategy_state(state_dir, self.config.sandbox.spec)
 
     def _create_executor(self, state_dir: Path) -> StrategyExecutor:
         if self.executor_factory is not None:
@@ -371,14 +373,8 @@ class ExperimentPipeline:
         current_skills = self._current_skills()
         registered_id: str | None = None
         wrote_ledger_record = False
-        attempt = {
-            "experiment_id": self.config.experiment_id,
-            "epoch_id": Stage.RESEARCH,
-            "fold_id": SessionKind.RESEARCH,
-            "run_id": run_id,
-            "session_key": SessionKind.RESEARCH,
-            "phase": Stage.RESEARCH,
-        }
+        link = link_head(self.config.experiment_id, SessionKind.RESEARCH, run_id)
+        attempt = {**link, "phase": Stage.RESEARCH}
         # Evidence for a run that never gets to run its own except branch.
         self.run_markers.begin(attempt)
         try:
@@ -478,8 +474,7 @@ class ExperimentPipeline:
             trace = agent_trace_path(self.config.experiment_dir / "artifacts", run_id)
             record = {
                 "record_type": "research_session",
-                **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
-                "session_key": SessionKind.RESEARCH,
+                **link,
                 "conversation_id": session.conversation_id,
                 "finish_reason": session.finish_reason,
                 "outcome": session.outcome,
@@ -618,13 +613,7 @@ class ExperimentPipeline:
             require_prebuilt(request)
         result = self.evaluator.evaluate(request)
         replay, analysis = replay_and_analysis(result.result_ref)
-        head = {
-            "experiment_id": self.config.experiment_id,
-            "epoch_id": Stage.RESEARCH,
-            "fold_id": SessionKind.RESEARCH,
-            "run_id": run_id,
-            "session_key": SessionKind.RESEARCH,
-        }
+        head = link_head(self.config.experiment_id, SessionKind.RESEARCH, run_id)
         candidate = {
             "step_id": str(registered["source_step_id"]),
             "revision_id": str(registered["revision_id"]),
@@ -686,7 +675,7 @@ class ExperimentPipeline:
             }
 
         artifact_id, output, models = register(nominee)
-        analysis = _result_analysis(nominee.validation.result_ref)
+        analysis = result_analysis(nominee.validation.result_ref)
         statistics = graded_statistics(analysis)
         replicates = [registered_beside(step) for step in seed_replicates]
         forward = self.config.geometry.forward
@@ -703,7 +692,7 @@ class ExperimentPipeline:
                 start=research[0].start,
                 end=research[-1].end,
                 profile=self.config.broker_profile,
-                seed=null_control_seed(SessionKind.RESEARCH, "frozen"),
+                seed=FROZEN_NULL_SEED,
             )
         )
         return {
@@ -785,19 +774,9 @@ class ExperimentPipeline:
         context = dict(session_context or {})
         progress = _optional_hook(context.get("progress_hook"), "progress_hook")
         run_id = f"run_{uuid.uuid4().hex}"
-        attempt = {
-            "experiment_id": self.config.experiment_id,
-            "epoch_id": Stage.FORWARD,
-            "fold_id": SessionKind.FORWARD,
-            "run_id": run_id,
-            "session_key": SessionKind.FORWARD,
-            "phase": Stage.FORWARD,
-        }
-        head = {
-            "record_type": "forward",
-            **{key: attempt[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id")},
-            "session_key": SessionKind.FORWARD,
-        }
+        link = link_head(self.config.experiment_id, SessionKind.FORWARD, run_id)
+        attempt = {**link, "phase": Stage.FORWARD}
+        head = {"record_type": "forward", **link}
         self.run_markers.begin(attempt)
         wrote_ledger_record = False
 
@@ -1259,7 +1238,8 @@ def check_registration(
     if reasons:
         return {"passed": False, "reasons": reasons}
     try:
-        analysis = _style_analysis(experiment_dir, nominee)
+        # The row's result read where its experiment is now.
+        analysis = result_analysis(recorded_path(experiment_dir, str(nominee["validation_result_ref"])))
         graded_statistics(analysis)
         # The reading the registration records: a series it cannot read (one the
         # factor legs explain exactly, an all-cash book) is refused here,
@@ -1421,26 +1401,22 @@ def _seed_replicates(
     return {"replicates": entries}
 
 
-def _style_analysis(experiment_dir: str | Path, row: Mapping[str, object]) -> dict[str, object]:
-    """The style sidecar beside one Validation row's result, the row of the
-    experiment in ``experiment_dir`` read where that experiment is now
-    (``ledger.recorded_path``)."""
-
-    result = recorded_path(experiment_dir, str(row["validation_result_ref"]))
-    return read_json_object(result.parent / STYLE_ARTIFACT_NAME)
-
-
 def null_control_seed(key: str, role: str) -> int:
     """A stable 32-bit seed per session (or artifact) and role.
 
     Stable across processes and runs (``hash`` is not), so a re-run draws the
     same null and its percentile can be compared with the one the ledger
-    already holds. The session's ``run_null_control`` tool draws with the
-    ``frozen`` role, so its block is the one the registration would have drawn.
+    already holds.
     """
 
     digest = hashlib.blake2b(f"{key}:{role}".encode(), digest_size=4).digest()
     return int.from_bytes(digest, "big")
+
+
+# The research session's frozen null block: the session's ``run_null_control``
+# and the registration draw with this one seed, so the block the session read
+# is the one the registration would have drawn.
+FROZEN_NULL_SEED = null_control_seed(SessionKind.RESEARCH, "frozen")
 
 
 def _measured_or_none(analysis: Mapping[str, object]) -> dict[str, object] | None:
@@ -1463,24 +1439,19 @@ def validation_statistics(result_ref: str) -> dict[str, object] | None:
     live step listing reads its rows through this same function.
     """
 
-    path = Path(result_ref).parent / STYLE_ARTIFACT_NAME
-    return _measured_or_none(read_json_object(path))
+    return _measured_or_none(result_analysis(result_ref))
+
+
+def result_analysis(result_ref: str | Path) -> dict[str, object]:
+    """The style sidecar beside one completed replay's result."""
+
+    return read_json_object(Path(result_ref).parent / STYLE_ARTIFACT_NAME)
 
 
 def replay_and_analysis(result_ref: str) -> tuple[dict[str, object], dict[str, object]]:
     """One completed replay's result and the style sidecar beside it."""
 
-    path = Path(result_ref)
-    return (
-        read_json_object(path),
-        read_json_object(path.parent / STYLE_ARTIFACT_NAME),
-    )
-
-
-def _result_analysis(result_ref: str) -> dict[str, object]:
-    """The style sidecar beside one completed replay's result."""
-
-    return replay_and_analysis(result_ref)[1]
+    return read_json_object(result_ref), result_analysis(result_ref)
 
 
 def _replicate_identity(item: RegisteredArtifact) -> dict[str, object]:
@@ -1763,6 +1734,7 @@ def _session_budgets(
 
 
 __all__ = [
+    "FROZEN_NULL_SEED",
     "DailyStrategyPipeline",
     "EnvironmentBlockedAttempt",
     "ExperimentPipeline",
@@ -1773,6 +1745,7 @@ __all__ = [
     "one_line_change",
     "replay_and_analysis",
     "research_step_record",
+    "result_analysis",
     "seed_change",
     "validation_statistics",
 ]

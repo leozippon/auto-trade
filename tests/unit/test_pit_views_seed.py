@@ -21,13 +21,13 @@ from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
     DEFAULT_PIT_VIEWS_SEED,
     DEFAULT_PIT_VIEWS_SEED_WORKSPACE,
+    FORWARD_PHASE,
+    RESEARCH_PHASE,
     SNAPSHOT_CACHE_FORMAT_VERSION,
     SnapshotBundle,
 )
 from autotrade.pipelines.pit_backend import prebuild_asof_stash
 from autotrade.pipelines.pit_views_seed import (
-    FORWARD_PHASE,
-    RESEARCH_PHASE,
     pit_cache_provider_record,
     plan_seed,
     seed_pit_views,

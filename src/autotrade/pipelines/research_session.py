@@ -3,8 +3,9 @@ it composes, its shared call and time budget, the workspace it seeds and
 mounts, and the facts and records it publishes.
 
 The Agent-facing tools a research session runs on (``smoke_backtest``,
-``validate``, ``run_null_control``) and the Validation engine behind them
-live in :mod:`autotrade.pipelines.session_tools`; this module composes them.
+``validate``, ``run_null_control``, ``test``) and the Validation engine behind
+them live in :mod:`autotrade.pipelines.session_tools`; this module composes
+them.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.agent.experiment_facts import build_experiment_facts
-from autotrade.common.records import read_json_object_or_empty, write_json_atomic
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.artifacts import (
     WORKSPACE_DIR_MODE,
     WORKSPACE_FILE_MODE,
@@ -45,7 +46,12 @@ from autotrade.environment.llm.model_profiles import (
     AGENT_MAX_OUTPUT_TOKENS,
     token_prices,
 )
-from autotrade.environment.llm.pricing import FREE, ApiSpendExhausted, billed_tokens
+from autotrade.environment.llm.pricing import (
+    FREE,
+    ApiSpendExhausted,
+    CallBudgetExhausted,
+    billed_tokens,
+)
 from autotrade.environment.llm.proxy import output_shares_context_window
 from autotrade.environment.runtime import (
     RunManifest,
@@ -110,6 +116,7 @@ from .calendar import (
 )
 from .config import (
     DEFAULT_MAX_API_SPEND_USD,
+    TEST_STEP_NAMES,
     BudgetUsed,
     EvaluationBackend,
     ReplaySpan,
@@ -119,7 +126,7 @@ from .config import (
     StepResult,
     positive_spend_cap,
 )
-from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage
+from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage, link_head
 from .session_tools import (
     EnvironmentBlocked,
     NullControlTool,
@@ -189,28 +196,21 @@ class SessionCallBudget:
         self,
         *,
         max_calls: int,
+        time_budget: InferenceTimeBudget,
         max_api_spend_usd: float = DEFAULT_MAX_API_SPEND_USD,
-        deadline: float | None = None,
-        time_budget: InferenceTimeBudget | None = None,
     ) -> None:
         if max_calls <= 0:
             raise ValueError("max_calls must be positive")
-        if (deadline is None) == (time_budget is None):
-            raise ValueError("provide exactly one of deadline or time_budget")
         self.max_calls = max_calls
         self.max_api_spend_usd = positive_spend_cap(max_api_spend_usd)
         self.subagent_cap, self.parent_reserve = session_role_quotas(max_calls)
-        self.time_budget = time_budget or InferenceTimeBudget(deadline=deadline)
+        self.time_budget = time_budget
         self.calls = 0
         self.api_spend_usd = 0.0
         self._subagent_calls = 0
         self._main_calls = 0
         self._compact_calls = 0
         self._lock = threading.Lock()
-
-    @property
-    def deadline(self) -> float:
-        return self.time_budget.deadline
 
     @property
     def subagent_calls(self) -> int:
@@ -245,13 +245,13 @@ class SessionCallBudget:
                     f"${self.api_spend_usd:.2f} of ${self.max_api_spend_usd:.2f}"
                 )
             if self.calls >= self.max_calls:
-                raise RuntimeError("Agent session LLM call budget exhausted")
+                raise CallBudgetExhausted("Agent session LLM call budget exhausted")
             if role == "subagent" and self._subagent_calls >= self.subagent_cap:
-                raise RuntimeError("Agent session LLM call budget exhausted")
+                raise CallBudgetExhausted("Agent session LLM call budget exhausted")
             if role != "main":
                 parent_needed = max(0, self.parent_reserve - self._main_calls)
                 if self.max_calls - self.calls - 1 < parent_needed:
-                    raise RuntimeError("Agent session LLM call budget exhausted")
+                    raise CallBudgetExhausted("Agent session LLM call budget exhausted")
             self.calls += 1
             if role == "subagent":
                 self._subagent_calls += 1
@@ -277,19 +277,11 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
         self,
         delegate: LLMProxy,
         *,
-        max_calls: int | None = None,
-        deadline: float | None = None,
-        budget: SessionCallBudget | None = None,
+        budget: SessionCallBudget,
         role: str = "main",
     ) -> None:
         if role not in SESSION_LLM_CALL_ROLES:
             raise ValueError(f"unknown LLM call role: {role}")
-        if budget is None:
-            if max_calls is None or deadline is None:
-                raise ValueError(
-                    "max_calls and deadline are required without a shared budget"
-                )
-            budget = SessionCallBudget(max_calls=max_calls, deadline=deadline)
         self.delegate = delegate
         self.budget = budget
         self.role = role
@@ -303,10 +295,6 @@ class SessionBudgetLLM(SessionTimeBudgetAware):
             window if isinstance(window, int) and not isinstance(window, bool) else None
         )
         self.output_shares_context_window = output_shares_context_window(delegate)
-
-    @property
-    def calls(self) -> int:
-        return self.budget.calls
 
     @property
     def time_budget(self) -> InferenceTimeBudget:
@@ -809,14 +797,10 @@ class LLMResearchDeveloper:
         return RunManifest.create(
             paths.run_manifest,
             {
-                "experiment_id": request.experiment_id,
-                "epoch_id": Stage.RESEARCH,
                 # Raw on the host manifest (issue reports link on it);
                 # RunManifest's Agent-visible view and build_experiment_facts
-                # both project it through the experiment reference store.
-                "fold_id": request.session_key,
-                "run_id": request.run_id,
-                "session_key": request.session_key,
+                # both project ``fold_id`` through the experiment reference store.
+                **link_head(request.experiment_id, request.session_key, request.run_id),
                 "kind": Stage.RESEARCH,
                 "llm": {
                     "provider": str(self.llm.provider),
@@ -1104,11 +1088,7 @@ class LLMResearchDeveloper:
         # its step in the ledger and returns its results; the view stays. Its
         # candidate and seed replicates replay at validate's width.
         tools.append(
-            TestTool(
-                backtest,
-                trace_emit=trace.emit,
-                max_concurrency=request.batch_validate_max_concurrency,
-            )
+            TestTool(backtest, max_concurrency=request.batch_validate_max_concurrency)
         )
         return backtest, smoke, tools, null_control_tool
 
@@ -1278,7 +1258,7 @@ class LLMResearchDeveloper:
                 budget_total_seconds=request.deadline_seconds,
             )
             conversation_id = result.conversation_id
-            outcome, node_id, reason = _session_outcome(result.finish_value)
+            outcome, node_id, reason = "completed", _completed_candidate(result.finish_value), ""
             replicates = _seed_replicates(result.finish_value)
             finish_reason = "validation_period_complete"
         except AgentSessionBudgetExhausted as exc:
@@ -1463,14 +1443,16 @@ class LLMResearchDeveloper:
 
         ``build_experiment_facts`` is the single visibility contract: it reads
         the run manifest, the runtime env and the data summary and projects the
-        raw session id through the experiment reference store.
+        raw session id through the experiment reference store. Both files are
+        written before the facts, so a missing or unreadable one fails the
+        attempt rather than tell the Agent its data or tools are absent.
         """
         return {
             **build_experiment_facts(
                 manifest=dict(manifest.data),
                 ref_store=self.ref_store,
-                runtime_env=read_json_object_or_empty(paths.runtime_env),
-                data_summary=read_json_object_or_empty(paths.data_summary),
+                runtime_env=read_json_object(paths.runtime_env),
+                data_summary=read_json_object(paths.data_summary),
                 max_llm_calls=request.max_llm_calls,
                 context_compaction={
                     "enabled": self.compact_llm is not None,
@@ -1546,7 +1528,7 @@ def research_geometry_record(
         },
         "research_period": f"{research[0].start}..{research[-1].end}",
         "validation_period": f"{steps.start}..{steps.end}",
-        "step": STEP_NAMES[test_step_months],
+        "step": TEST_STEP_NAMES[test_step_months],
         "steps": steps.count,
         "steps_tested": steps_tested,
         "test_horizon": steps.horizon_after(steps_tested),
@@ -1593,8 +1575,6 @@ def experiment_record(steps: Sequence[StepResult]) -> dict[str, object]:
 
 # The read-only facts file of a session, under ``workspace/inputs``.
 SESSION_CONTEXT_NAME = "session_context.json"
-# How the run facts name a test step's length (``config.TEST_STEP_MONTHS``).
-STEP_NAMES = {1: "month", 3: "quarter"}
 
 # The ``forbidden`` fact of a research session.
 SESSION_FORBIDDEN = [
@@ -1614,9 +1594,9 @@ def _seed_replicates(finish: Mapping[str, object]) -> tuple[str, ...]:
     return tuple(str(item) for item in block.get("seed_replicates") or ())  # type: ignore[union-attr]
 
 
-def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str]:
-    """The last test's finish as the research session's outcome: ``completed``
-    with the candidate it took."""
+def _completed_candidate(finish: Mapping[str, object]) -> str:
+    """The node id of the candidate the last test took, which completed the
+    research session."""
 
     outcome = str(finish.get("outcome") or "")
     candidate = finish.get("candidate")
@@ -1625,7 +1605,7 @@ def _session_outcome(finish: Mapping[str, object]) -> tuple[str, str | None, str
         raise RuntimeError(f"research session finished with {outcome!r}")
     if not node_id:
         raise RuntimeError("the last test finished the session without naming its candidate")
-    return outcome, node_id, ""
+    return node_id
 
 
 _WORKSPACE_REFS_DIR = "refs"

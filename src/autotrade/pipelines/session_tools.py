@@ -44,9 +44,8 @@ from autotrade.environment.replay.null_control import (
 )
 from autotrade.environment.replay.stats import plain_statistics
 from autotrade.environment.replay.style import (
-    STYLE_ARTIFACT_NAME,
-    _series_pairs,
     active_analysis,
+    series_pairs,
 )
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
@@ -82,6 +81,7 @@ from .config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MIN_CANDIDATES,
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
+    RESEARCH_PHASE,
     AcceptanceRules,
     EvaluationBackend,
     EvaluationRequest,
@@ -92,14 +92,15 @@ from .config import (
     research_span,
 )
 from .experiment import (
+    FROZEN_NULL_SEED,
     check_registration,
-    null_control_seed,
     replay_and_analysis,
     research_step_record,
+    result_analysis,
 )
-from .ledger import ExperimentLedger, Stage
+from .ledger import ExperimentLedger, Stage, link_head
 from .session_resume import record_step_sidecar
-from .skills import _assert_skills_absent_from_formal
+from .skills import assert_skills_absent_from_formal
 from .validation_record import (
     SOURCE_TEST,
     ValidationSteps,
@@ -120,13 +121,6 @@ from .verdict import (
 
 def _rounded(value: float | None) -> float | None:
     return None if value is None else round(value, 6)
-
-
-def _step_analysis(step: StepResult) -> dict[str, object]:
-    """The style sidecar beside one recorded Validation's result."""
-
-    result_dir = Path(step.validation.result_ref).parent
-    return read_json_object(result_dir / STYLE_ARTIFACT_NAME)
 
 
 def _public_error_text(exc: Exception) -> str:
@@ -316,7 +310,6 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         self.broker_profile = broker_profile
         self.scratch_root = Path(scratch_root)
         self.time_budget = time_budget
-        self.runs = 0
 
     @property
     def session_time_budget(self) -> InferenceTimeBudget:
@@ -334,7 +327,6 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     def _invoke_exempt(
         self, days: int, start: str | None, path: str, directory: Path
     ) -> ToolResult:
-        self.runs += 1
         supply_readonly_files(
             self.output_dir, directory, who=f"smoke_backtest path {path}", path=path
         )
@@ -537,7 +529,6 @@ VALIDATION_RESULT_ATTACHMENT = "validation/result.json"
 # Only a research Validation is recorded here; the forward and Held-out replay
 # writes to the host's results root and never to a Step tree.
 VALIDATION_DAILY_ATTACHMENT = "validation/active_daily.csv"
-STEP_TREE_SEARCH_ROOT = "steps"
 # Summary blocks whose size scales with the replay: one row per closed position
 # and one per week of the window. A copy of them is therefore not a fixed cost
 # -- an audited session shipped 427 KB of ``per_stock`` into the conversation
@@ -554,7 +545,7 @@ def write_active_daily(result_ref: str) -> Path:
     """
 
     result_dir = Path(result_ref).parent
-    analysis = read_json_object(result_dir / STYLE_ARTIFACT_NAME)
+    analysis = result_analysis(result_ref)
     target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
     staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
     try:
@@ -618,6 +609,9 @@ class SessionValidations:
         experiment_dir: Path | None = None,
     ) -> None:
         self.request = request
+        # The run's acceptance rules (``AcceptanceRules.from_record``, which
+        # refuses a record without a required rule).
+        self.rules = AcceptanceRules.from_record(request.acceptance_rules)
         self.output_dir = output_dir
         self.models_dir = models_dir
         self.artifact_store = artifact_store
@@ -662,13 +656,7 @@ class SessionValidations:
     def ledger_head(self) -> dict[str, object]:
         """The link keys every ledger record of this session carries."""
 
-        return {
-            "experiment_id": self.request.experiment_id,
-            "epoch_id": Stage.RESEARCH,
-            "fold_id": self.request.session_key,
-            "run_id": self.request.run_id,
-            "session_key": self.request.session_key,
-        }
+        return link_head(self.request.experiment_id, self.request.session_key, self.request.run_id)
 
     def record_row(self, record: Mapping[str, object]) -> dict[str, object]:
         """One validation-record step as a test result lists it, as it was
@@ -764,13 +752,6 @@ class SessionValidations:
             seed_replicates=[rows[step_id] for step_id in seed_replicates],
         )
 
-    @property
-    def rules(self) -> AcceptanceRules:
-        """The run's acceptance rules (``AcceptanceRules.from_record``, which
-        refuses a record without a required rule)."""
-
-        return AcceptanceRules.from_record(self.request.acceptance_rules)
-
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
         """Every backtest attempt, successful or not, lands in the run manifest.
 
@@ -802,7 +783,7 @@ class SessionValidations:
                 f"{label} changed between modification_check and the "
                 "Validation snapshot"
             )
-        _assert_skills_absent_from_formal(revision.output_path, revision.models_path)
+        assert_skills_absent_from_formal(revision.output_path, revision.models_path)
         return revision
 
     def _parent_revision_id(self) -> str | None:
@@ -997,28 +978,27 @@ class EnvironmentBlocked(SessionInterrupt):
         self.reason = reason
 
 
-def _failure_cause(error: BaseException | None) -> str:
-    """Which of the two a failed candidate's replay measured; an error the
-    replay did not even report measured nothing about the strategy."""
+def _failure_cause(error: BaseException) -> str:
+    """Which of the two a failed candidate's replay measured."""
 
-    return (
-        BATCH_FAILURE_STRATEGY
-        if error is not None and raised_by_strategy(error)
-        else BATCH_FAILURE_ENVIRONMENT
-    )
+    return BATCH_FAILURE_STRATEGY if raised_by_strategy(error) else BATCH_FAILURE_ENVIRONMENT
 
 
 @dataclass(frozen=True)
 class _Replayed:
-    """One candidate's replay: its evaluation or the error it raised, the
-    ``time.perf_counter`` window it ran in, and the card it was pinned to
-    (None: every card of the experiment)."""
+    """One candidate's replay: its evaluation or the error it raised (exactly
+    one of them), the ``time.perf_counter`` window it ran in, and the card it
+    was pinned to (None: every card of the experiment)."""
 
     evaluation: EvaluationResult | None
     error: Exception | None
     started: float
     ended: float
     card: int | None = None
+
+    def __post_init__(self) -> None:
+        if (self.evaluation is None) == (self.error is None):
+            raise ValueError("a replay holds either its evaluation or its error")
 
     @property
     def seconds(self) -> float:
@@ -1215,7 +1195,7 @@ def year_readings(
     positive = sum(value for value in excesses if value > 0)  # type: ignore[operator, misc]
     first, last = bounds[best]
     outside = plain_statistics(
-        value for day, value in _series_pairs(active["strategy_daily"]) if not first <= day <= last
+        value for day, value in series_pairs(active["strategy_daily"]) if not first <= day <= last
     )["plain_excess"]
     readings["concentration"] = _rounded_row(
         {
@@ -1292,10 +1272,13 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     fan-out, and the whole-replay runaway is bounded elsewhere (the session's
     own deadline).
 
-    The batch owns the evaluator for the pool's lifetime — a session runs
-    one tool at a time — so mutating and restoring the shared config here is
-    safe. An evaluator without a strategy sandbox (trusted mode, test doubles)
-    has no clock to scale and is left alone.
+    The batch owns the evaluator's config for the pool's lifetime, so
+    mutating and restoring it here is safe: the parent runs its replaying
+    tools one at a time, and a sub-agent's ``smoke_backtest`` (the only other
+    replay) belongs to a role that can write, which the runner's writer
+    barrier keeps from overlapping ``validate`` or ``test``. An evaluator
+    without a strategy sandbox (trusted mode, test doubles) has no clock to
+    scale and is left alone.
     """
 
     config = getattr(evaluator, "sandbox", None)
@@ -1335,7 +1318,6 @@ def replay_legs(
     replay finished first.
     """
 
-    outcomes: list[_Replayed | None] = [None] * len(requests)
     workers = min(len(requests), max_concurrency)
     # One card per running leg, taken when the leg starts and handed back
     # when it ends, so a leg never lands on a card another running leg
@@ -1371,6 +1353,7 @@ def replay_legs(
 
     if workers <= 1:
         return [run_one(index) for index in range(len(requests))]
+    outcomes: dict[int, _Replayed] = {}
     interrupt: SessionInterrupt | None = None
     with (
         _batch_replay_timeouts(evaluator, workers),
@@ -1385,12 +1368,8 @@ def replay_legs(
                 interrupt = exc
     if interrupt is not None:
         raise interrupt
-    return [
-        outcome
-        if outcome is not None
-        else _Replayed(None, RuntimeError("replay did not run"), 0.0, 0.0)
-        for outcome in outcomes
-    ]
+    # Every leg returned its outcome or raised: none is missing here.
+    return [outcomes[index] for index in range(len(requests))]
 
 
 # A validate row's keys in the order the Agent reads them; a failed row has
@@ -1639,7 +1618,7 @@ class ValidateTool(SessionTimeBudgetAware):
         refunded = sum(
             1
             for replayed in outcomes
-            if replayed.evaluation is None
+            if replayed.error is not None
             and _failure_cause(replayed.error) == BATCH_FAILURE_ENVIRONMENT
         )
         # A batch does not re-check the deadline here: dropping N completed
@@ -1670,13 +1649,14 @@ class ValidateTool(SessionTimeBudgetAware):
                     "span": span.label,
                 }
                 if evaluation is None:
+                    assert error is not None  # a replay holds one of the two
                     shared = (
                         [
                             candidates[other].name
                             for other, sibling in enumerate(outcomes)
                             if other != index and sibling.shares_card_with(replayed)
                         ]
-                        if error is not None and gpu_contended(error)
+                        if gpu_contended(error)
                         else []
                     )
                     row.update(
@@ -1715,7 +1695,7 @@ class ValidateTool(SessionTimeBudgetAware):
         rules = self.backtest.rules
         thresholds: list[object] = []
         for row, step in recorded:
-            analysis = _step_analysis(step)
+            analysis = result_analysis(step.validation.result_ref)
             summary = step.validation.summary
             row["active"] = active_reading(analysis, summary, rules=rules)
             thresholds.append(row["active"].pop("threshold", None))  # type: ignore[attr-defined]
@@ -1958,7 +1938,7 @@ class ValidateTool(SessionTimeBudgetAware):
             # Recorded as what it was: every attempt reaches the run manifest.
             self.backtest.append_manifest_summary(
                 {
-                    "mode": "valid",
+                    "mode": RESEARCH_PHASE,
                     "status": "infrastructure_error",
                     "complete_validation": False,
                     "span": span.label,
@@ -2008,7 +1988,7 @@ class ValidateTool(SessionTimeBudgetAware):
         self.backtest.append_manifest_summary(
             {
                 "result_name": result_name,
-                "mode": "valid",
+                "mode": RESEARCH_PHASE,
                 "status": "ok",
                 "complete_validation": True,
                 **{key: metadata[key] for key in _BATCH_MANIFEST_KEYS},
@@ -2042,13 +2022,11 @@ class ValidateTool(SessionTimeBudgetAware):
     def _record_failure(
         self,
         result_name: str,
-        error: Exception | None,
+        error: Exception,
         batch_metadata: Mapping[str, object],
         *,
         shared_gpu: Sequence[str] = (),
     ) -> dict[str, object]:
-        if error is None:
-            error = RuntimeError("unknown replay failure")
         public_error = _public_validation_error(error)
         if shared_gpu:
             # The dead-end node and the manifest keep the note with the error.
@@ -2066,9 +2044,7 @@ class ValidateTool(SessionTimeBudgetAware):
             # so a dead end never becomes anybody's parent.
             self.backtest.tree.record_failed_attempt(
                 epoch_id=Stage.RESEARCH,
-                session_ref=self.backtest.ref_store.get_or_create(
-                    "session", request.session_key
-                ),
+                session_ref=self.backtest.session_ref,
                 run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
                 result_name=result_name,
                 error=public_error,
@@ -2078,7 +2054,7 @@ class ValidateTool(SessionTimeBudgetAware):
         self.backtest.append_manifest_summary(
             {
                 "result_name": result_name,
-                "mode": "valid",
+                "mode": RESEARCH_PHASE,
                 "status": "failed",
                 "complete_validation": False,
                 **{key: metadata[key] for key in (*_BATCH_MANIFEST_KEYS, "cause")},
@@ -2167,11 +2143,9 @@ class TestTool(SessionTimeBudgetAware):
         self,
         backtest: SessionValidations,
         *,
-        trace_emit: Callable[[TraceEvent, dict[str, object]], object] | None = None,
         max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     ) -> None:
         self.backtest = backtest
-        self._trace_emit = trace_emit
         # The replay width ``validate`` has (``batch_validate_max_concurrency``):
         # the candidate and its seed replicates replay as one batch's legs.
         self.max_concurrency = max_concurrency
@@ -2340,11 +2314,6 @@ class TestTool(SessionTimeBudgetAware):
             }
             for index, row in enumerate(step_table(replay, analysis, steps, through=step))
         ]
-        if self._trace_emit is not None:
-            self._trace_emit(
-                TraceEvent.TOOL_CALL_STARTED,
-                {"tool": "test", "status": "step_recorded", "step": step, "test_horizon": test_horizon},
-            )
         active = active_reading(analysis, evaluation.summary, rules=backtest.rules)
         # The record's own threshold is the one significance reads.
         active.pop("threshold", None)
@@ -2392,10 +2361,8 @@ def _failed_leg(outcomes: Sequence[_Replayed]) -> tuple[int, Exception] | None:
     is its reading."""
 
     for index, outcome in enumerate(outcomes):
-        if outcome.evaluation is not None:
-            continue
-        error = outcome.error or RuntimeError("unknown replay failure")
-        if index == 0 or _failure_cause(error) == BATCH_FAILURE_ENVIRONMENT:
+        error = outcome.error
+        if error is not None and (index == 0 or _failure_cause(error) == BATCH_FAILURE_ENVIRONMENT):
             return index, error
     return None
 
@@ -2471,7 +2438,7 @@ class NullControlTool(SessionTimeBudgetAware):
             "required": ["node_id"],
             "additionalProperties": False,
         },
-        # Sequential, and locked after finish, like a formal backtest: it
+        # Sequential, like a formal backtest: it
         # pauses the session clock and spends a capped budget.
         mutating=True,
         example={"node_id": NODE_REFERENCE_EXAMPLE},
@@ -2551,7 +2518,7 @@ class NullControlTool(SessionTimeBudgetAware):
                     end=span.end,
                     profile=self.backtest.broker_profile,
                     schedule=self.backtest.schedule,
-                    seed=null_control_seed(self.backtest.request.session_key, "frozen"),
+                    seed=FROZEN_NULL_SEED,
                 )
             except SessionInterrupt:
                 raise

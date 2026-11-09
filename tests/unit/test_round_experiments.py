@@ -33,7 +33,8 @@ from autotrade.pipelines.config import (
     SNAPSHOT_CACHE_FORMAT_VERSION,
     acceptance_for,
 )
-from autotrade.pipelines.hitl_state import WEB_CLOSED_PARAMS, WEB_CREATE_DEFAULTS
+from autotrade.pipelines.experiment_params import NON_PERSISTABLE_PARAMS
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from autotrade.pipelines.pit_views_seed import (
     UNFINISHED_BUILD_MARKER,
@@ -953,7 +954,7 @@ def test_an_experiment_may_run_its_own_account_and_an_experiment_that_states_non
     on the same account while the round file claimed otherwise.
     """
     assert "initial_cash" in WEB_CREATE_DEFAULTS
-    assert "initial_cash" not in WEB_CLOSED_PARAMS
+    assert "initial_cash" not in NON_PERSISTABLE_PARAMS
     rnd = _sealed_round(
         experiments={"states_it": {"initial_cash": 250_000}, "states_none": {}},
         overrides={"initial_cash": 100_000},

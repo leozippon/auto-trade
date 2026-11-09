@@ -511,6 +511,21 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     assert str(research_row["run_id"]) not in transcript_text
     assert "/Data2" not in transcript_text and str(options.work_root) not in transcript_text
     assert research_row["agent_trace_ref"].endswith(f"{research_row['run_id']}.jsonl")
+    # The console's trace view leaves no test call running: each finished.
+    from autotrade.webui.traces import project_trace_blocks
+
+    events = [
+        json.loads(line)
+        for line in Path(research_row["agent_trace_ref"]).read_text(encoding="utf-8").splitlines()
+    ]
+    test_rows = [
+        row
+        for block in project_trace_blocks(events)
+        if block["kind"] == "tool_group"
+        for row in block["tools"]
+        if row["name"] == "test"
+    ]
+    assert test_rows and all(row["running"] == 0 and row["ok"] == row["count"] for row in test_rows)
 
     # The research year is Y1; Y2 is the validation year, revealed one step
     # at a time through the test results alone. The session opened on the
@@ -1001,6 +1016,28 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     assert [row["record_type"] for row in rows] == ["attempt_failed", "attempt_failed"]
     assert "workspace of the interrupted attempt is missing" in rows[-1]["error"]
     assert read_status(experiment / "hitl" / "status.json")["state"] == "failed"
+
+
+def test_a_session_without_its_data_summary_fails_the_attempt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """The run facts read the published data summary strictly: a session
+    whose summary is missing fails its attempt instead of telling the Agent
+    that its minute bars, auction, events and text are unavailable."""
+
+    from autotrade.pipelines import research_session
+    from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
+
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm", session_max_attempts=1)
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    monkeypatch.setattr(research_session, "install_agent_data_contract", lambda *_args, **_kwargs: None)
+    options = load_worker_options(experiment, repo_root=repo)
+    with pytest.raises(FileNotFoundError, match=r"data_summary\.json"):
+        run_local_interactive_worker(
+            options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
+        )
+    [row] = ExperimentLedger(options.experiment.ledger_path).read()
+    assert row["record_type"] == "attempt_failed" and "data_summary.json" in row["error"]
 
 
 def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(

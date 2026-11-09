@@ -641,7 +641,7 @@ def skills_trees_equal(left: str | Path, right: str | Path) -> bool:
     return all(left_files[name].read_bytes() == right_files[name].read_bytes() for name in left_files)
 
 
-def _assert_skills_absent_from_formal(
+def assert_skills_absent_from_formal(
     output_dir: str | Path, models_dir: str | Path | None = None
 ) -> None:
     """Keep the shared knowledge tree out of every formal strategy revision."""
@@ -973,6 +973,7 @@ __all__ = [
     "SkillsSnapshot",
     "SkillsStats",
     "WriteSkillTool",
+    "assert_skills_absent_from_formal",
     "build_skills_index",
     "create_skill_library_snapshot",
     "curated_memory_source",

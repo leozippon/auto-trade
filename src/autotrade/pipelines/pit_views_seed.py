@@ -48,7 +48,11 @@ from autotrade.environment.data.contracts import (
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.runtime import chmod_tree, rmtree_keeping_file_modes
 from autotrade.pipelines.calendar import ResearchGeometry, Slot
-from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
+from autotrade.pipelines.config import (
+    FORWARD_PHASE,
+    RESEARCH_PHASE,
+    SNAPSHOT_CACHE_FORMAT_VERSION,
+)
 
 # What a finished view carries: a snapshot restates its manifest and a bundle
 # its data summary. Any other directory in the layout is a level the provider
@@ -60,10 +64,6 @@ _VIEW_MARKERS = ("manifest.json", "data_summary.json")
 # that failed or was killed at any point, leaves it behind.
 UNFINISHED_BUILD_MARKER = "prebuild_unfinished.json"
 
-# The provider phase each stage's slots are published under: research years
-# are validation replays, and the forward replay reads F and H as held-out data.
-RESEARCH_PHASE = "valid"
-FORWARD_PHASE = "heldout"
 # The research_years an experiment may choose on a seed: the seed carries a warm as-of
 # start at each validation start. A choice the geometry cannot take (it must
 # leave at least one validation year) is planned for nothing.
@@ -604,8 +604,6 @@ def _skip_seed_name(name: str) -> bool:
 
 __all__ = [
     "DEFAULT_RESEARCH_YEARS_CHOICES",
-    "FORWARD_PHASE",
-    "RESEARCH_PHASE",
     "UNFINISHED_BUILD_MARKER",
     "SeedPlan",
     "assert_seed_carries_bonus_split",

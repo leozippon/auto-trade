@@ -116,6 +116,16 @@ UNREADABLE_RUN_MARKER_ERROR = (
 UNKNOWN_MARKER_LINK_KEY = "unknown"
 
 
+def link_head(experiment_id: str, kind: str, run_id: str) -> dict[str, object]:
+    """The link keys every record of one run carries, and its ``session_key``:
+    the session's kind (a :class:`SessionKind`) names its stage and its key."""
+
+    return {
+        **dict(zip(LINK_KEYS, (experiment_id, Stage(kind), kind, run_id), strict=True)),
+        "session_key": kind,
+    }
+
+
 class RegisteredArtifactMutated(RuntimeError):
     """Frozen output/models changed during a replay of the registered artifact.
 

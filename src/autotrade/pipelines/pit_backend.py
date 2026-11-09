@@ -88,6 +88,8 @@ from autotrade.environment.strategy_loader import validate_strategy_package
 
 from .calendar import replay_window, yyyymmdd
 from .config import (
+    FORWARD_PHASE,
+    RESEARCH_PHASE,
     SNAPSHOT_CACHE_FORMAT_VERSION,
     EvaluationRequest,
     EvaluationResult,
@@ -102,7 +104,7 @@ from .pit_views_seed import (
     seed_pit_views,
 )
 
-_PHASES = frozenset({"valid", "heldout", "paper"})
+_PHASES = frozenset({RESEARCH_PHASE, FORWARD_PHASE, "paper"})
 # Manifest label of the unphased replay store. Never a phase, so a store can
 # never be handed to an evaluation as if it were a phase view.
 REPLAY_SOURCE_LABEL = "replay_source"
@@ -901,7 +903,7 @@ class PITDailyEvaluationBackend:
         timer = PhaseTimer()
         if max_days is not None and max_days <= 0:
             raise ValueError("max_days must be a positive integer")
-        if request.mode not in {"valid", "heldout"}:
+        if request.mode not in {RESEARCH_PHASE, FORWARD_PHASE}:
             raise ValueError(f"unsupported PIT evaluation mode: {request.mode}")
         strategy_path = Path(request.revision.output_path) / "main.py"
         if not strategy_path.is_file():
@@ -1166,7 +1168,7 @@ class PITDailyEvaluationBackend:
             return EvaluationResult(dict(summary), str(target))
         finally:
             _discard_ephemeral_asof(asof_dir)
-            discard_strategy_state(state_dir)
+            discard_strategy_state(state_dir, self.sandbox.spec)
             if not keep_result_dir:
                 shutil.rmtree(result_dir, ignore_errors=True)
 

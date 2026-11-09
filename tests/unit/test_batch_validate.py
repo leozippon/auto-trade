@@ -1729,12 +1729,9 @@ class BatchValidateContractTest(unittest.TestCase):
             },
         }
         runner = AgentSessionRunner.__new__(AgentSessionRunner)
-        runner._complete_validation_nodes = []
+        runner._complete_validation_nodes = set()
         runner._record_complete_validations(record)
-        self.assertEqual(
-            [item["node_id"] for item in runner._complete_validation_nodes],
-            ["n1", "n2"],
-        )
+        self.assertEqual(runner._complete_validation_nodes, {"n1", "n2"})
 
 
 class BatchTemplateFilesTest(unittest.TestCase):

@@ -35,11 +35,11 @@ from autotrade.environment.replay.stats import (
     window_activity,
     window_fees,
 )
-from autotrade.environment.replay.style import FACTOR_SERIES, _series_pairs
+from autotrade.environment.replay.style import FACTOR_SERIES, series_pairs
 
 from .calendar import Slot, step_windows
 from .config import ReplaySpan
-from .ledger import TEST_STEP_RECORD_TYPE
+from .ledger import LINK_KEYS, TEST_STEP_RECORD_TYPE, VerdictStatus
 from .verdict import null_p_value, residual_reading
 
 # The columns of one entry's daily rows, in order: the date, the book's return,
@@ -93,7 +93,7 @@ class ValidationSteps:
 
 
 def _in_window(series: object, start: str, end: str) -> list[tuple[str, float]]:
-    return [(day, value) for day, value in _series_pairs(series) if start <= day <= end]
+    return [(day, value) for day, value in series_pairs(series) if start <= day <= end]
 
 
 def step_entry(
@@ -239,7 +239,7 @@ def test_step_record(
             )
     return {
         "record_type": TEST_STEP_RECORD_TYPE,
-        **{key: head[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id", "session_key")},
+        **{key: head[key] for key in (*LINK_KEYS, "session_key")},
         "step": step,
         "steps": steps.count,
         "window": {"start": first, "end": last},
@@ -256,11 +256,6 @@ def test_step_record(
         # holds no replicate entry.
         **({"replicates": [dict(item) for item in replicates]} if replicates else {}),
     }
-
-
-# The state a registered strategy's readout gives its experiment: a registered strategy
-# with its validation record and its forward reading (``ledger.VerdictStatus``).
-REGISTERED_WITH_RECORD = "registered_with_record"
 
 
 def readout(
@@ -286,7 +281,8 @@ def readout(
 
     tests = test_step_records(records)
     block: dict[str, object] = {
-        "state": REGISTERED_WITH_RECORD,
+        # A registered strategy with its validation record and its forward reading.
+        "state": VerdictStatus.REGISTERED_WITH_RECORD,
         "record": {
             **record_significance([row["entry"] for row in tests], alpha=alpha),  # type: ignore[misc]
             "start": str(tests[0]["window"]["start"]) if tests else None,  # type: ignore[index]
@@ -339,7 +335,6 @@ def candidate_changes(records: Sequence[Mapping[str, object]]) -> int:
 
 __all__ = [
     "DAILY_COLUMNS",
-    "REGISTERED_WITH_RECORD",
     "SOURCE_HOST_COMPLETION",
     "SOURCE_TEST",
     "ValidationSteps",

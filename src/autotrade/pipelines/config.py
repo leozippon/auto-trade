@@ -197,9 +197,11 @@ def _required(text: str) -> Any:
     return field(kw_only=True, metadata={"help": text})
 
 
-# The step lengths a test may advance the test horizon by, in months:
-# a quarter by default, a month where a round wants finer steps.
-TEST_STEP_MONTHS = (1, 3)
+# The step lengths a test may advance the test horizon by, in months, and how
+# the run facts name each: a quarter by default, a month where a round wants
+# finer steps.
+TEST_STEP_NAMES = {1: "month", 3: "quarter"}
+TEST_STEP_MONTHS = tuple(TEST_STEP_NAMES)
 
 
 @dataclass(frozen=True)
@@ -702,6 +704,13 @@ class SnapshotBundle:
     generation_id: str = ""
 
 
+# The provider phase each stage's slots are published under, a snapshot's
+# ``phase`` and an evaluation's ``mode``: research years are validation
+# replays, and the forward replay reads F and H as held-out data.
+RESEARCH_PHASE = "valid"
+FORWARD_PHASE = "heldout"
+
+
 class SnapshotProvider(Protocol):
     def prepare(
         self,
@@ -1151,9 +1160,12 @@ __all__ = [
     "DEFAULT_MAX_NULL_CONTROLS",
     "DEFAULT_MAX_RESEARCH_MINUTES",
     "DEFAULT_RESEARCH_GEOMETRY",
+    "FORWARD_PHASE",
     "REQUIRED_ACCEPTANCE_KEYS",
+    "RESEARCH_PHASE",
     "SESSION_OUTCOMES",
     "TEST_STEP_MONTHS",
+    "TEST_STEP_NAMES",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",

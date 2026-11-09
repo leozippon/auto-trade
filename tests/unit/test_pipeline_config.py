@@ -33,7 +33,8 @@ from autotrade.pipelines.config import (
     ExperimentConfig,
     acceptance_for,
 )
-from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, WEB_REQUIRED_PARAMS
+from autotrade.pipelines.experiment_params import PARAMETERS
+from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from tests.unit.acceptance_fixture import (
     CREATE_RULES,
     NO_SEED,
@@ -473,12 +474,12 @@ class DefaultsDriftTest(unittest.TestCase):
         rules = AcceptanceRules(**REQUIRED_RULES).to_record()
         # Drawdowns and the mandate switch stay empty so the form does not pin
         # a mandate onto every experiment, and the research years have no console
-        # value: every request states them (WEB_REQUIRED_PARAMS). Every other
+        # value: every request states them (a required parameter). Every other
         # rule shows what an empty request would stamp.
         stated = {"research_years"}
         blank = {"max_drawdown", "active_max_drawdown", "tracking_error_cap", "beta_min", "beta_max", *stated}
         self.assertEqual(set(rules), set(ACCEPTANCE_KEYS))
-        self.assertLessEqual(stated, WEB_REQUIRED_PARAMS)
+        self.assertLessEqual(stated, {name for name, spec in PARAMETERS.items() if spec.required})
         for key, value in rules.items():
             if key in blank:
                 self.assertIsNone(WEB_CREATE_DEFAULTS[key], key)

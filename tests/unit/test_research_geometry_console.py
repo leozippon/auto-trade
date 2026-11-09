@@ -136,7 +136,7 @@ def test_the_create_form_is_seeded_with_the_research_geometry(tmp_path: Path):
     # required field, not a silent default.
     response = TestClient(create_app(tmp_path)).post(
         "/api/experiments",
-        json={"experiment_id": "no_calendar", "research_start": ""},
+        json={"params": {"experiment_id": "no_calendar", "research_start": ""}},
     )
     assert response.status_code == 400
     assert "research_start" in json.dumps(response.json())
