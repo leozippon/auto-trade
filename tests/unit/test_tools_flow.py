@@ -850,8 +850,8 @@ class StructuredSearchToolTest(unittest.TestCase):
                     self.assertNotIn("next_offset", page)
                     break
                 self.assertEqual(page["next_offset"], offset + page["returned"])
-                # The page was over the budget, so it was also spilled.
-                self.assertIn("result_ref", page)
+                # The file itself is the full result: nothing is spilled.
+                self.assertNotIn("result_ref", page)
                 offset = page["next_offset"]
             self.assertGreater(pages, 2)
             self.assertEqual(seen, lines)
@@ -1950,16 +1950,27 @@ class SpillAndRootContractTest(unittest.TestCase):
             paths, roots = self._layout(tmp)
             big = "\n".join(f"line {index} " + "x" * 40 for index in range(200)) + "\n"
             (paths.workspace / "inputs" / "big.txt").write_text(big, encoding="utf-8")
+            for index in range(200):
+                (paths.workspace / "inputs" / f"part_{index:03d}.txt").write_text("", encoding="utf-8")
             registry = ToolRegistry([ReadFileTool(roots), GlobTool(roots)])
             with patch.object(search_module, "MAX_RESULT_CHARS", 500):
-                first = registry.invoke("read_file", {"path": "inputs/big.txt"})
+                read = registry.invoke("read_file", {"path": "inputs/big.txt"})
+                first = registry.invoke(
+                    "glob", {"pattern": "inputs/part_*.txt", "head_limit": 1000}
+                )
+            # A truncated read continues from the file itself and spills nothing.
+            self.assertTrue(read.ok, read.error)
+            self.assertTrue(read.value["truncated"])
+            self.assertEqual(read.value["next_offset"], read.value["returned"])
+            for key in ("result_root", "result_ref", "result_hint"):
+                self.assertNotIn(key, read.value)
+            # A computed page (a listing) is spilled and referenced back.
             self.assertTrue(first.ok, first.error)
             self.assertTrue(first.value["truncated"])
-            self.assertEqual(first.value["next_offset"], first.value["returned"])
             self.assertNotIn("result_path", first.value)
             self.assertEqual(first.value["result_root"], "artifacts")
             ref = first.value["result_ref"]
-            self.assertTrue(ref.startswith("logs/tool_results/read_file_read_"), ref)
+            self.assertTrue(ref.startswith("logs/tool_results/glob_glob_"), ref)
             self.assertNotIn(str(os.getpid()), ref)
             rendered = json.dumps(first.value, ensure_ascii=False)
             self.assertIsNone(HOST_PATH_RE.search(rendered), rendered)

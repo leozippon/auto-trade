@@ -331,27 +331,14 @@ class _SearchToolBase:
         return _collect_rg_lines(proc, timeout_seconds=self.timeout_seconds, max_lines=max_lines)
 
     def _budget_lines(self, lines: list[str], *, tool_kind: str) -> tuple[list[str], dict[str, object]]:
-        """The leading whole lines of a page that fit the inline char budget.
+        """A search page within the inline budget, the whole page spilled when
+        it is not: a computed result cannot be re-read from a source file."""
 
-        Over budget, the whole page is spilled and only the lines that fit
-        whole stay inline, so the page's ``returned`` and ``next_offset`` count
-        exactly what the Agent saw. A cut inside a line used to leave the rest
-        of the page neither inline nor counted as missing: a 40 KB README read
-        in two pages never showed its lines ~387-419, and a char-cut file name
-        is a path that does not exist."""
-
-        text = "\n".join(lines)
-        if len(text) <= MAX_RESULT_CHARS:
+        kept = _whole_lines_within_budget(lines)
+        if len(kept) == len(lines):
             return lines, {}
-        stored = self.roots.store_tool_result(tool=self.spec.name, kind=tool_kind, content=text)
-        kept: list[str] = []
-        used = 0
-        for line in lines:
-            used += len(line) + (1 if kept else 0)
-            if used > MAX_RESULT_CHARS:
-                break
-            kept.append(line)
-        return kept, stored
+        text = "\n".join(lines)
+        return kept, self.roots.store_tool_result(tool=self.spec.name, kind=tool_kind, content=text)
 
 
 class GrepTool(_SearchToolBase):
@@ -635,7 +622,9 @@ class ReadFileTool(_SearchToolBase):
             f"{number}\t{line}"
             for number, line in enumerate(lines[offset : offset + limit], start=offset + 1)
         ]
-        shown, budget = self._budget_lines(page, tool_kind="read")
+        # No spill: the file itself is the full result, and the next page is
+        # read from it at ``next_offset``.
+        shown = _whole_lines_within_budget(page)
         if page and not shown:
             # One line longer than the whole budget (compact JSON, say): its
             # head is shown and counted, the description says such a line is
@@ -654,7 +643,6 @@ class ReadFileTool(_SearchToolBase):
             # trailing newline, so an Agent copying content through
             # ``write_file`` would silently drop it without being told.
             "final_newline": text.endswith("\n"),
-            **budget,
         })
 
 
@@ -766,6 +754,25 @@ def _validate_relative_pattern(pattern: str, *, label: str) -> None:
             f"{label} must not contain hidden path components",
             error_type="path_error", blocked_target=pattern,
         )
+
+
+def _whole_lines_within_budget(lines: list[str]) -> list[str]:
+    """The leading whole lines of a page that fit the inline char budget.
+
+    Only whole lines stay inline, so a page's ``returned`` and ``next_offset``
+    count exactly what the Agent saw. A cut inside a line used to leave the
+    rest of the page neither inline nor counted as missing: a 40 KB README read
+    in two pages never showed its lines ~387-419, and a char-cut file name is a
+    path that does not exist."""
+
+    kept: list[str] = []
+    used = 0
+    for line in lines:
+        used += len(line) + (1 if kept else 0)
+        if used > MAX_RESULT_CHARS:
+            break
+        kept.append(line)
+    return kept
 
 
 def _page_fields(*, offset: int, returned: int, total: int | None, more: bool) -> dict[str, object]:
