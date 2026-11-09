@@ -393,6 +393,16 @@ class SandboxConfig:
     # still fails explicitly instead of blocking the replay forever.
     startup_timeout_seconds: float = 900.0
     max_output_chars: int = 1_000_000
+    # What the replay's state directory may hold on disk (Docker size syntax,
+    # the experiment parameter ``strategy_state_disk``): the executor measures
+    # the directory after every ``fit`` and ``generate_orders`` call and fails
+    # the replay past it (``executor.StrategyStateExceeded``). 64 GiB is far
+    # more than a strategy's working store needs -- a full seven-year panel of
+    # 5,000 stocks with 200 float32 features is about 7 GB -- while three
+    # concurrent replays at the cap stay far below the disks the directories
+    # live on: 1.2 TB free on the local host, 552 TB on the A100 instance's
+    # shared filesystem.
+    state_disk: str = "64g"
     # Rendered as ``--label`` on the strategy container; the experiment's
     # labels from ``experiment_container_labels``.
     labels: Mapping[str, str] = field(default_factory=dict)
@@ -410,6 +420,15 @@ class SandboxConfig:
             or self.max_output_chars <= 0
         ):
             raise ValueError("sandbox max_output_chars must be a positive integer")
+        if not isinstance(self.state_disk, str) or not _MEMORY_LIMIT.fullmatch(self.state_disk):
+            raise ValueError("sandbox state_disk must be a positive Docker size")
+
+    @property
+    def state_disk_bytes(self) -> int:
+        """``state_disk`` in bytes, the unit a replay reports its state in
+        (``state_quota_bytes`` beside ``peak_state_bytes``)."""
+
+        return _memory_limit_bytes(self.state_disk)
 
     def on_devices(self, devices: tuple[int, ...] | None) -> SandboxConfig:
         """This boundary with its containers attaching exactly ``devices``.

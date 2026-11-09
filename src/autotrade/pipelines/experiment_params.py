@@ -201,6 +201,7 @@ class SandboxParams:
     strategy_inference_timeout_seconds: int = _param(experiment_default("strategy_inference_timeout_seconds"))
     strategy_cpus: float = _param(experiment_default("strategy_cpus"))
     strategy_memory: str = _param(experiment_default("strategy_memory"))
+    strategy_state_disk: str = _param(experiment_default("strategy_state_disk"))
     gpu_count: int = _param(SandboxSpec().gpu_count)
     agent_sandbox_image: str | None = _host(DEFAULT_IMAGE)
     # Left out: the strategy container's strategy_cpus and strategy_memory.

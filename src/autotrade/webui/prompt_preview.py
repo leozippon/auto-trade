@@ -181,6 +181,7 @@ def _research_prompt(
             "strategy_gpu_count": sandbox.spec.gpu_count,
             "strategy_cpus": sandbox.spec.cpus,
             "strategy_memory_bytes": sandbox.spec.memory_bytes,
+            "strategy_state_disk_bytes": sandbox.state_disk_bytes,
             "batch_validate_max_concurrency": config.batch_validate_max_concurrency,
             "used_before_this_attempt": BudgetUsed().to_record(),
         },

@@ -25,7 +25,8 @@ of what the book decided.
 
 Every decision runs on a staged copy of the published strategy state and
 publishes it once the decision succeeds, so a run holds two copies of the state
-on disk. A superseded state the run cannot remove does not fail a decision already
+on disk, up to twice the experiment's state quota, which the executor holds the
+staged copy to. A superseded state the run cannot remove does not fail a decision already
 journaled: it is recorded as a warning, which the order sheet and the console
 print, and every later decision retries every superseded entry until it is gone.
 

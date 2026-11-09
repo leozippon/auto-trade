@@ -196,6 +196,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_gpu_count": sandbox.spec.gpu_count,
         "strategy_cpus": sandbox.spec.cpus,
         "strategy_memory_bytes": sandbox.spec.memory_bytes,
+        "strategy_state_disk_bytes": sandbox.state_disk_bytes,
         "strategy_container_note": strategy_container_note(sandbox.spec.cpus, sandbox.spec.memory_bytes),
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
         "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,

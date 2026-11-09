@@ -45,8 +45,9 @@ BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
 
 # How a failed candidate's replay is read (pipelines.session_tools.ValidateTool).
 VALIDATION_FAILURE_NOTE = (
-    "回测失败的候选按失败归属记录：策略自身抛错，以及策略容器越过内存上限 `strategy_memory_bytes` "
-    "被 OOM kill（exit 137，那次回测没有峰值读数），都是策略自己的失败（行内 `cause: strategy`）；"
+    "回测失败的候选按失败归属记录：策略自身抛错，策略容器越过内存上限 `strategy_memory_bytes` "
+    "被 OOM kill（exit 137，那次回测没有峰值读数），以及状态目录越过磁盘上限 `strategy_state_disk_bytes`，"
+    "都是策略自己的失败（行内 `cause: strategy`）；"
     "环境失败（行内 `cause: environment`，如策略超时、共享 GPU 被别的进程占走、沙箱没起来）"
     "没有测出候选的任何信息——原样重投是合理的。"
 )
@@ -418,6 +419,10 @@ def _budget_facts(
             # under `shell` is measured against the number the formal replay
             # will enforce rather than extrapolated across two boundaries.
             "strategy_memory_bytes": memory_bytes,
+            # The disk the replay's state directory may hold, measured after
+            # every call, in the unit a replay reports its own in
+            # (``resources.peak_state_bytes``); past it the backtest fails.
+            "strategy_state_disk_bytes": budgets.get("strategy_state_disk_bytes"),
             # The two containers per candidate, their threads and cards, and
             # the batch's concurrent legs, in one passage.
             "strategy_container_note": (

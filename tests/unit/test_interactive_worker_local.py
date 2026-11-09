@@ -331,18 +331,29 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
 
     strategy, session = start()
     executor = SandboxConfig()
-    assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds, strategy.fit_timeout_seconds) == (
+    assert (
+        strategy.spec.cpus,
+        strategy.spec.memory,
+        strategy.timeout_seconds,
+        strategy.fit_timeout_seconds,
+        strategy.state_disk,
+    ) == (
         executor.spec.cpus,
         executor.spec.memory,
         executor.timeout_seconds,
         executor.fit_timeout_seconds,
+        executor.state_disk,
     )
     assert (session.cpus, session.memory) == (SandboxSpec().cpus, SandboxSpec().memory)
 
     strategy, session = start(
-        strategy_cpus=16, strategy_memory="64g", strategy_inference_timeout_seconds=1080
+        strategy_cpus=16,
+        strategy_memory="64g",
+        strategy_inference_timeout_seconds=1080,
+        strategy_state_disk="8g",
     )
     assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds) == (16.0, "64g", 1080.0)
+    assert strategy.state_disk == "8g"
     assert (session.cpus, session.memory) == (16.0, "64g")
     developer = SimpleNamespace(evaluator=SimpleNamespace(sandbox=strategy))
     budgets = _facts(
@@ -352,14 +363,20 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
             "strategy_inference_timeout_seconds": (
                 LLMResearchDeveloper.decision_timeout_seconds.fget(developer)
             ),
+            "strategy_state_disk_bytes": (
+                LLMResearchDeveloper.strategy_state_disk_bytes.fget(developer)
+            ),
         }
     )["budgets"]
     assert (budgets["strategy_cpus"], budgets["strategy_memory_bytes"]) == (16.0, 64 * 1024**3)
+    assert budgets["strategy_state_disk_bytes"] == 8 * 1024**3
     assert budgets["strategy_inference_timeout_seconds"] == 1080.0
     note = budgets["strategy_container_note"]
     assert "16 个 CPU" in note and "都设为 16" in note and "内存上限 64 GiB" in note
     with pytest.raises(ValueError, match="strategy_memory must be a positive Docker memory limit"):
         start(strategy_memory="64 GB")
+    with pytest.raises(ValueError, match="strategy_state_disk must be a positive Docker memory limit"):
+        start(strategy_state_disk="64 GB")
 
 
 def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(

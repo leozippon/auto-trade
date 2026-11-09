@@ -546,6 +546,9 @@ def resolve_worker_options(
         ),
         strategy_cpus=_positive_float(read_param(params, "strategy_cpus"), "strategy_cpus"),
         strategy_memory=_memory_limit(read_param(params, "strategy_memory"), "strategy_memory"),
+        strategy_state_disk=_memory_limit(
+            read_param(params, "strategy_state_disk"), "strategy_state_disk"
+        ),
         # A tracking mandate exactly where the request named a cap; every
         # limit absent or null takes its default, and the rules check each
         # value's type and range (``config.acceptance_for``).
@@ -602,6 +605,7 @@ def strategy_boundary(config: ExperimentConfig) -> dict[str, Any]:
         "inference_timeout_seconds": config.strategy_inference_timeout_seconds,
         "cpus": config.strategy_cpus,
         "memory": config.strategy_memory,
+        "state_disk": config.strategy_state_disk,
     }
 
 
@@ -612,12 +616,13 @@ def strategy_sandbox_from_spec(
     inference_timeout_seconds: float | None = None,
     cpus: float | None = None,
     memory: str | None = None,
+    state_disk: str | None = None,
     experiment_id: str | None = None,
 ) -> SandboxConfig:
     """The strategy container's boundary, derived from the Agent session's spec.
 
-    The wall clocks, CPU quota and memory ceiling are the experiment's own
-    (``ExperimentConfig.strategy_*``); one left as None keeps the
+    The wall clocks, CPU quota, memory ceiling and state disk quota are the
+    experiment's own (``ExperimentConfig.strategy_*``); one left as None keeps the
     executor's default (``SandboxConfig``, ``SandboxSpec``), which is also the
     experiment default. The process guard, ``/dev/shm`` and the user are the
     container defaults and ``/tmp`` is ``STRATEGY_TMPFS_SIZE``, whatever the
@@ -646,9 +651,11 @@ def strategy_sandbox_from_spec(
         resources["cpus"] = float(cpus)
     if memory is not None:
         resources["memory"] = memory
-    clocks: dict[str, Any] = {"fit_timeout_seconds": float(fit_timeout_seconds)}
+    limits: dict[str, Any] = {"fit_timeout_seconds": float(fit_timeout_seconds)}
     if inference_timeout_seconds is not None:
-        clocks["timeout_seconds"] = float(inference_timeout_seconds)
+        limits["timeout_seconds"] = float(inference_timeout_seconds)
+    if state_disk is not None:
+        limits["state_disk"] = state_disk
     return SandboxConfig(
         spec=SandboxSpec(
             image=session.image,
@@ -661,7 +668,7 @@ def strategy_sandbox_from_spec(
             **resources,
         ),
         labels=experiment_container_labels(experiment_id) if experiment_id else {},
-        **clocks,
+        **limits,
     )
 
 

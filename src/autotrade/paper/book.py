@@ -58,11 +58,13 @@ from .pit import require_audited_fundamentals
 from .storage import read_jsonl
 
 BOOK_NAME = "book.json"
-# 4: no candidate source, since every book trades its experiment's registered
-# strategy; 3 added the pinned verdict rules, and the snapshot configuration
-# and the strategy sandbox as their own records (``SnapshotConfig.to_record``,
-# ``SandboxConfig.to_record``). A book of another schema is refused.
-BOOK_SCHEMA_VERSION = 4
+# 5: the strategy sandbox carries the state directory's disk quota
+# (``SandboxConfig.state_disk``); 4 dropped the candidate source, since every
+# book trades its experiment's registered strategy; 3 added the pinned verdict
+# rules, and the snapshot configuration and the strategy sandbox as their own
+# records (``SnapshotConfig.to_record``, ``SandboxConfig.to_record``). A book of
+# another schema is refused.
+BOOK_SCHEMA_VERSION = 5
 STRATEGY_COPY_NAME = "strategy"
 # Books open at once; a killed book does not count.
 BOOK_CAP = 4

@@ -246,7 +246,7 @@ def _kill(root: Path, day: str = "20260105") -> None:
 def test_a_new_book_pins_its_verdict_rules(tmp_path: Path):
     book = _registered_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
-    assert record["schema_version"] == 4
+    assert record["schema_version"] == 5
     rules = record["verdict_rules"]
     assert (rules["checkpoint_days"], rules["kill_confidence"], rules["confirm_confidence"]) == (126, 0.841, 0.977)
     assert (rules["max_drawdown"], rules["active_max_drawdown"]) == (0.45, 0.30)
@@ -383,12 +383,15 @@ def test_a_book_without_fundamentals_never_asks_the_audit(tmp_path: Path):
 
 
 def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
-    """Schema 3 recorded a candidate source every book shared; such a book is
-    refused, not read without it."""
+    """Schema 3 recorded a candidate source every book shared and schema 4 a
+    sandbox without the state disk quota; such a book is refused, not read
+    without them."""
     book = _registered_book(tmp_path)
     record = read_json_object(book.root / BOOK_NAME)
-    for older in (1, 3):
-        stale = {**record, "schema_version": older, "candidate_source": "registered"}
+    assert record["sandbox"]["state_disk"] == "64g"
+    sandbox = {key: value for key, value in record["sandbox"].items() if key != "state_disk"}
+    for older in (1, 3, 4):
+        stale = {**record, "schema_version": older, "candidate_source": "registered", "sandbox": sandbox}
         (book.root / BOOK_NAME).write_text(json.dumps(stale), encoding="utf-8")
         with pytest.raises(ValueError, match=f"unsupported Paper account schema {older}"):
             load_book(book.root)

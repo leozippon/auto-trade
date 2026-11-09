@@ -522,6 +522,8 @@ _FIELDS: list[dict[str, object]] = [
      "help": "每个策略容器（fit 与推断各一个）的 CPU 配额，线程变量随之设定；研究会话容器取同一个值。并发路数乘以它要放得下宿主的 CPU。"},
     {"key": "strategy_memory", "group": "预算与验收", "label": "策略容器内存上限", "type": "string", "advanced": True,
      "help": "每个策略容器的内存上限（Docker 写法，如 32g），不带交换；研究会话容器取同一个值。并发路数乘以它要放得下宿主的内存。"},
+    {"key": "strategy_state_disk", "group": "预算与验收", "label": "策略状态目录磁盘上限", "type": "string", "advanced": True,
+     "help": "一场回放的状态目录（context.state_dir）最多占用的磁盘（Docker 写法，如 64g）：每次 fit 与 generate_orders 调用之后在宿主上测量，超过即整场回测失败，记为策略自身的失败。并发路数乘以它要放得下宿主的磁盘；Paper 账户每次运行另有一份暂存副本。"},
     {"key": "record_failed_attempts", "group": "预算与验收", "label": "记录失败尝试节点", "type": "bool", "advanced": True,
      "help": "Step 树中记录未通过验证的轻量 [failed] 节点，提示会话避开死路。"},
     # Broker 账户

@@ -263,6 +263,7 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "strategy_inference_timeout_seconds",
     "strategy_cpus",
     "strategy_memory",
+    "strategy_state_disk",
     "initial_cash",
     # null: the console stamps the boards the initial cash qualifies for.
     "permitted_boards",

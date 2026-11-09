@@ -40,6 +40,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             strategy_inference_timeout_seconds=360,
             strategy_cpus=8.0,
             strategy_memory="32g",
+            strategy_state_disk="64g",
             workspace_reference="configs/workspace_refs/pack",
             skill_library="curated",
             benchmark_index=DEFAULT_BENCHMARK_INDEX,

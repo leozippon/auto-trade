@@ -39,6 +39,7 @@ from autotrade.environment.executor import (
     StrategyExecutionError,
     StrategyMemoryExceeded,
     StrategyRaised,
+    StrategyStateExceeded,
     _run_limited_capture,
     attach_strategy_resources,
     raised_by_strategy,
@@ -136,7 +137,9 @@ def _strategy_config(**fields: object) -> SandboxConfig:
 
     clocks = {
         name: fields.pop(name)
-        for name in ("timeout_seconds", "fit_timeout_seconds", "startup_timeout_seconds", "max_output_chars")
+        for name in (
+            "timeout_seconds", "fit_timeout_seconds", "startup_timeout_seconds", "max_output_chars", "state_disk"
+        )
         if name in fields
     }
     spec = SandboxSpec(**{"gpu": None, "tmpfs_size": STRATEGY_TMPFS_SIZE, **fields})
@@ -172,6 +175,7 @@ def _executor_for_process(
     executor._monitor = ContainerResourceMonitor(executor.container_name)
     executor._worker_reading = {}
     executor._call_in_flight = False
+    executor._peak_state_bytes = None
     executor._reset_transport_state()
     if drain_stderr:
         thread = threading.Thread(target=executor._drain_stderr, daemon=True)
@@ -2000,6 +2004,97 @@ def test_a_call_killed_at_the_memory_cap_is_the_strategys_own_failure():
     replay_failure.__cause__ = error.value
     assert raised_by_strategy(replay_failure)
     assert executor._process is None
+
+
+# A strategy that leaves one ``size``-byte array in its working directory,
+# which the worker process below runs in: the host-process stand-in for the
+# container writing into its bind-mounted state directory.
+_STATE_WRITER = """import numpy as np
+
+
+def generate_orders(context):
+    np.save("panel.npy", np.zeros({size}, dtype=np.uint8))
+    return []
+"""
+
+
+def _state_writer(tmp_path: Path, *, size: int, quota: str) -> tuple[DockerStrategyExecutor, Path]:
+    state = tmp_path / "state"
+    state.mkdir()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "autotrade.environment.strategy_worker",
+            str(_strategy(tmp_path, _STATE_WRITER.format(size=size))),
+        ],
+        cwd=state,
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    executor = _executor_for_process(process, config=_strategy_config(state_disk=quota), drain_stderr=True)
+    executor.state_dir = state
+    return executor, state
+
+
+def test_a_state_directory_within_its_quota_passes_and_reports_its_peak(tmp_path: Path):
+    executor, state = _state_writer(tmp_path, size=1024, quota="4k")
+    try:
+        assert executor.execute(_context()) == []
+        written = (state / "panel.npy").stat().st_size
+        usage = executor.resource_usage()
+        assert (usage["peak_state_bytes"], usage["state_quota_bytes"]) == (written, 4096)
+    finally:
+        with patch.object(executor, "_remove_container"):
+            executor.close()
+
+
+def test_a_state_directory_past_its_quota_is_the_strategys_own_failure(tmp_path: Path):
+    """The host measures the state directory after every call, so a call that
+    leaves it past the published quota measured the strategy, like the memory
+    cap; the failure names what was measured against what, and the resources
+    carry both."""
+
+    executor, state = _state_writer(tmp_path, size=4096, quota="4k")
+    with (
+        patch.object(executor, "_remove_container"),
+        pytest.raises(StrategyStateExceeded) as error,
+    ):
+        executor.execute(_context())
+    written = (state / "panel.npy").stat().st_size
+    assert written > 4096
+    assert str(error.value) == (
+        f"Docker strategy inference failed: the strategy state directory holds {written:,} "
+        "bytes, over its 4,096-byte quota (4k, budgets.strategy_state_disk_bytes)"
+    )
+    assert raised_by_strategy(error.value)
+    assert executor._process is None
+    usage = executor.resource_usage()
+    assert (usage["peak_state_bytes"], usage["state_quota_bytes"]) == (written, 4096)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads any directory")
+def test_a_state_directory_the_host_cannot_read_fails_rather_than_undercounts(tmp_path: Path):
+    """A subdirectory the container made unreadable to the host hides its
+    size, so the directory cannot be shown to be within its quota."""
+
+    executor, state = _state_writer(tmp_path, size=16, quota="4k")
+    hidden = state / "cache"
+    hidden.mkdir()
+    (hidden / "blob").write_bytes(b"x" * 8192)
+    hidden.chmod(0)
+    try:
+        with (
+            patch.object(executor, "_remove_container"),
+            pytest.raises(StrategyStateExceeded, match="'cache' in it is unreadable to the host") as error,
+        ):
+            executor.execute(_context())
+        assert "4,096-byte quota" in str(error.value)
+        assert raised_by_strategy(error.value)
+        assert "peak_state_bytes" not in executor.resource_usage()
+    finally:
+        hidden.chmod(0o700)
 
 
 def test_a_worker_killed_while_starting_stays_a_startup_failure(tmp_path: Path):

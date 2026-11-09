@@ -895,6 +895,19 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
                 self.assertTrue(fields[key].get("label"))
                 self.assertTrue(fields[key].get("help"), f"{key} has no help text")
 
+    def test_the_state_disk_quota_is_an_advanced_field_beside_the_memory_cap(self) -> None:
+        from autotrade.environment.sandbox import SandboxConfig
+        from autotrade.webui.params_schema import parameter_schema
+
+        [group] = [group for group in parameter_schema()["groups"] if group["name"] == "预算与验收"]
+        keys = [field["key"] for field in group["fields"]]
+        self.assertEqual(keys.index("strategy_state_disk"), keys.index("strategy_memory") + 1)
+        field = group["fields"][keys.index("strategy_state_disk")]
+        self.assertEqual(
+            (field["type"], field["advanced"], field["default"]),
+            ("string", True, SandboxConfig().state_disk),
+        )
+
     def test_every_rendered_field_is_a_parameter_the_worker_accepts(self) -> None:
         from autotrade.pipelines.experiment_params import PARAMETERS
 

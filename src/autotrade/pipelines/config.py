@@ -604,6 +604,9 @@ class ExperimentConfig:
     strategy_inference_timeout_seconds: int = int(SandboxConfig().timeout_seconds)
     strategy_cpus: float = SandboxConfig().spec.cpus
     strategy_memory: str = SandboxConfig().spec.memory
+    # The disk the replay's state directory may hold (a Docker size), the
+    # executor's ``SandboxConfig.state_disk``.
+    strategy_state_disk: str = SandboxConfig().state_disk
     # Optional experiment-level exploration direction injected into every
     # research session prompt. Per-session directives are additive.
     research_directive: str = ""
@@ -644,8 +647,10 @@ class ExperimentConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
-        # The executor's own checks on a CPU quota and a Docker memory limit.
+        # The executor's own checks on a CPU quota, a Docker memory limit and a
+        # state disk quota.
         SandboxSpec(cpus=self.strategy_cpus, memory=self.strategy_memory, gpu=None)
+        SandboxConfig(state_disk=self.strategy_state_disk)
         for name in (
             "max_null_controls",
             "deadline_grace_minutes",

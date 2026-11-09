@@ -506,6 +506,12 @@ class LLMResearchDeveloper:
         return int(_strategy_sandbox(self.evaluator).spec.memory_bytes)
 
     @property
+    def strategy_state_disk_bytes(self) -> int:
+        """The disk the formal replay's state directory may hold, in bytes."""
+
+        return int(_strategy_sandbox(self.evaluator).state_disk_bytes)
+
+    @property
     def strategy_gpu_count(self) -> int:
         """GPUs attached to the formal executor's strategy container.
 
@@ -869,6 +875,8 @@ class LLMResearchDeveloper:
                     # The CPU quota and memory ceiling of that container.
                     "strategy_cpus": self.strategy_cpus,
                     "strategy_memory_bytes": self.strategy_memory_bytes,
+                    # The disk quota of the replay's state directory.
+                    "strategy_state_disk_bytes": self.strategy_state_disk_bytes,
                     # How many replays one validate call runs at once,
                     # and so the factor both wall clocks above are scaled by.
                     "batch_validate_max_concurrency": request.batch_validate_max_concurrency,

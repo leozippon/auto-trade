@@ -6,6 +6,7 @@ import json
 import os
 import selectors
 import shutil
+import stat
 import subprocess
 import threading
 import time
@@ -106,8 +107,9 @@ class StrategyRaised(StrategyExecutionError):
     """The strategy's own code raised inside a ``fit`` or ``generate_orders`` call.
 
     That is a measurement of the strategy -- it cannot run on this data -- and,
-    with ``StrategyMemoryExceeded`` below and a call's output over the published
-    protocol cap (``_protocol_cap_message``), the only executor failure that is:
+    with ``StrategyMemoryExceeded`` and ``StrategyStateExceeded`` below and a
+    call's output over the published protocol cap (``_protocol_cap_message``),
+    the only executor failure that is:
     a timeout, a broken pipe, a worker that never started or broke protocol
     stays a plain ``StrategyExecutionError``, because it measured the
     environment, not the strategy.
@@ -122,6 +124,37 @@ class StrategyMemoryExceeded(StrategyRaised):
     worker there measured the strategy on this data exactly as an exception
     its own code raised does, and is charged the same way.
     """
+
+
+class StrategyStateExceeded(StrategyRaised):
+    """The replay's state directory outgrew its disk quota after a call.
+
+    The quota is a budget published to the session
+    (``budgets.strategy_state_disk_bytes``, ``SandboxConfig.state_disk``) and is
+    measured on the host after every ``fit`` and ``generate_orders`` call, so
+    passing it measured the strategy on this data exactly as an exception its
+    own code raised does. A directory the host cannot read (one the container
+    created with a restrictive mode) cannot be shown to be within the quota and
+    fails the same way, rather than being undercounted.
+    """
+
+
+def _tree_bytes(root: Path) -> int:
+    """Every entry's own ``st_size`` under ``root``, following no symlink.
+
+    An entry the host cannot list or stat raises ``OSError``.
+    """
+
+    total = 0
+    pending = [str(root)]
+    while pending:
+        with os.scandir(pending.pop()) as entries:
+            for entry in entries:
+                info = entry.stat(follow_symlinks=False)
+                total += info.st_size
+                if stat.S_ISDIR(info.st_mode):
+                    pending.append(entry.path)
+    return total
 
 
 class _WorkerKilled(BrokenPipeError):
@@ -460,6 +493,9 @@ class DockerStrategyExecutor:
         # it) is not in it, and the run's peak is then not this reading.
         self._worker_reading: dict[str, int] = {}
         self._call_in_flight = False
+        # The largest size of the state directory measured after a call
+        # (``_hold_state_quota``); None until one is measured.
+        self._peak_state_bytes: int | None = None
         # Wall clock of each completed ``fit`` and ``generate_orders``
         # roundtrip, measured on the same clock its timeout bounds.
         self._fit_seconds: list[float] = []
@@ -627,6 +663,8 @@ class DockerStrategyExecutor:
                     (self._fit_seconds if kind == "fit" else self._decision_seconds).append(
                         round(time.monotonic() - started, 1)
                     )
+                    if self.state_dir is not None:
+                        self._hold_state_quota(label)
                     self._transport_sequence = sequence
                     self._transport_inference_at = call.inference_at
                     self._transport_count = call.bar_count
@@ -665,6 +703,35 @@ class DockerStrategyExecutor:
         except StrategyExecutionError:
             self._abort()
             raise
+
+    def _hold_state_quota(self, label: str) -> None:
+        """Measure the state directory after a call; past its quota, fail.
+
+        The call's clock has stopped, so the scan is not billed to it. The
+        peak is recorded before the check, so a replay that failed here still
+        reports what it reached.
+        """
+
+        assert self.state_dir is not None
+        quota = self.config.state_disk_bytes
+        try:
+            size = _tree_bytes(self.state_dir)
+        except OSError as exc:
+            entry = os.path.relpath(exc.filename, self.state_dir) if exc.filename else "an entry"
+            raise StrategyStateExceeded(
+                f"Docker {label} failed: cannot measure the strategy state directory "
+                f"against its {quota:,}-byte quota ({self.config.state_disk}): "
+                f"{entry!r} in it is unreadable to the host ({exc.strerror or exc}); "
+                "keep every directory the strategy creates there readable, "
+                "not restricted to its owner (such as mode 0o700)"
+            ) from exc
+        self._peak_state_bytes = max(self._peak_state_bytes or 0, size)
+        if size > quota:
+            raise StrategyStateExceeded(
+                f"Docker {label} failed: the strategy state directory holds {size:,} "
+                f"bytes, over its {quota:,}-byte quota ({self.config.state_disk}, "
+                "budgets.strategy_state_disk_bytes)"
+            )
 
     def _prepare_execute(
         self,
@@ -775,6 +842,17 @@ class DockerStrategyExecutor:
         if self.fit_schedule is not None:
             record["fit_timeout_seconds"] = self.config.fit_timeout_seconds
         record["decision_timeout_seconds"] = self.config.timeout_seconds
+        if self.state_dir is not None:
+            # Both containers write the one directory; its largest measured
+            # size beside the quota it is held to.
+            peaks = [
+                container._peak_state_bytes
+                for container in containers
+                if container._peak_state_bytes is not None
+            ]
+            if peaks:
+                record["peak_state_bytes"] = max(peaks)
+            record["state_quota_bytes"] = self.config.state_disk_bytes
         return record
 
     def close(self) -> None:
@@ -1298,6 +1376,7 @@ __all__ = [
     "StrategyExecutor",
     "StrategyMemoryExceeded",
     "StrategyRaised",
+    "StrategyStateExceeded",
     "TrustedStrategyExecutor",
     "attach_strategy_resources",
     "discard_strategy_state",
