@@ -19,8 +19,17 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
-from autotrade.common.time import CN_TZ
-from autotrade.environment.data.pit import concat_rows, first_seen_at, key_strings
+from autotrade.common.time import CN_TZ, cn_today
+from autotrade.environment.data.contracts import (
+    BOARD_TRADING_DATASETS,
+    STK_AUCTION_PRICE_ABS_TOLERANCE,
+)
+from autotrade.environment.data.pit import (
+    concat_rows,
+    first_seen_at,
+    key_strings,
+    partition_value,
+)
 
 from . import common as core
 from . import versions
@@ -48,7 +57,6 @@ from .common import (
     SHARE_FLOAT_FIELDS,
     SHARE_FLOAT_ROW_LIMIT,
     SHARE_FLOAT_UNLOCK_TITLE_PATTERN,
-    STK_AUCTION_PRICE_ABS_TOLERANCE,
     STK_MINS_API_NAME,
     STK_MINS_BATCH_CODES,
     STK_MINS_BY_DATE_DATASET,
@@ -63,25 +71,21 @@ from .common import (
     WRITTEN_OUTCOMES,
     ApiResult,
     DatasetSpec,
-    DefectiveAnswer,
     FetchStrategy,
     TuShareClient,
     active_year_windows,
-    answer_defects,
     as_datetime_window,
+    augment_board_frame,
     augment_event_frame,
     augment_macro_frame,
     augment_stk_mins_frame,
     augment_text_frame,
-    committed_partition_intact,
     date_range_days,
     format_yyyymmdd,
     frame,
     history_floor,
-    inherited_updater_lock_fd,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
-    list_versions,
     load_minute_universe,
     load_sse_open_dates,
     load_stock_codes,
@@ -95,15 +99,10 @@ from .common import (
     normalized_date_keys,
     normalized_holder_keys,
     official_client,
-    parquet_rows,
     parse_yyyymmdd,
     physical_identity_index,
-    publish,
     quarter_periods,
     query_paged,
-    read_many,
-    record_defect,
-    report_complete,
     resolve_revision_ledger,
     retained_range_start,
     safe_partition_value,
@@ -129,12 +128,25 @@ from .common import (
     stk_mins_by_date_path,
     undated_duplicate_mask,
     validate_stk_mins_by_date_frame,
-    version_dir,
-    write_board_result,
-    write_macro_result,
-    write_parquet,
+    write_frame,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
+)
+from .io import (
+    committed_partition_intact,
+    manual_production_write,
+    parquet_rows,
+    read_many,
+    write_parquet,
+)
+from .versions import (
+    DefectiveAnswer,
+    answer_defects,
+    list_versions,
+    publish,
+    record_defect,
+    report_complete,
+    version_dir,
 )
 
 
@@ -161,9 +173,9 @@ def download_reference(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    refresh_datasets = set(getattr(args, "refresh_reference_datasets", None) or [])
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
-    trade_cal_end_date = getattr(args, "trade_cal_end_date", None) or args.end_date
+    refresh_datasets = set(args.refresh_reference_datasets)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
+    trade_cal_end_date = args.trade_cal_end_date or args.end_date
 
     def should_force(dataset: str) -> bool:
         return bool(args.force or dataset in refresh_datasets)
@@ -552,10 +564,10 @@ def download_daily(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
-    refresh_datasets = set(getattr(args, "refresh_daily_datasets", None) or [])
+    refresh_datasets = set(args.refresh_daily_datasets)
     required_zero_skipped: list[str] = []
     for dataset in selected_daily_datasets(args):
         if dataset == "stk_auction":
@@ -604,7 +616,7 @@ def _auction_capture_min_rows(
     previous = sorted(
         path
         for path in (raw_dir / "stk_auction").glob("trade_date=*.parquet")
-        if path.stem.split("=", 1)[-1] < trade_date
+        if partition_value(path) < trade_date
     )
     previous_rows = (
         _auction_stock_rows(pd.read_parquet(previous[-1], columns=["ts_code"])["ts_code"])
@@ -847,7 +859,7 @@ def capture_open_auction(args: argparse.Namespace) -> int:
         pages,
         args.page_limit,
         "cn_open_auction_capture_0927",
-        getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        args.revision_ledger,
     )
     if published not in WRITTEN_OUTCOMES | {"unchanged"}:
         raise RuntimeError(f"stk_auction trade_date={trade_date} complete frame was not published: {published}")
@@ -878,7 +890,7 @@ def recheck_stk_auction(args: argparse.Namespace) -> int:
     by the nightly audit (missing expected partition) instead of poisoning
     the batch's other datasets."""
     end_day = normalize_date_key(args.end_date)
-    start_day = normalize_date_key(getattr(args, "start_date", "") or args.end_date)
+    start_day = normalize_date_key(args.start_date)
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     open_days = load_sse_open_dates(raw_dir, start_day, end_day, allow_empty=True)
@@ -936,8 +948,8 @@ def _recheck_stk_auction_day(args: argparse.Namespace, repo_root: Path, raw_dir:
         result,
         pages,
         args.page_limit,
-        getattr(args, "landing_job", "cn_evening_auction_backfill"),
-        getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        args.landing_job,
+        args.revision_ledger,
     )
     if published not in WRITTEN_OUTCOMES:
         # Staged (a correction dropping most rows) or unchanged: the morning
@@ -1106,8 +1118,8 @@ def download_macro(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
-    retained_start_date = getattr(args, "macro_start_date", None) or args.start_date
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
+    retained_start_date = args.macro_start_date or args.start_date
     for dataset in selected_macro_datasets(args):
         spec = MACRO_SPECS[dataset]
         spec_floor = history_floor(spec.start_date, args)
@@ -1152,7 +1164,7 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Data
     params = {"start_q": start_q, "end_q": end_q}
     with answer_defects(path, ledger=revision_ledger):
         result = client.query(spec.api_name, params, spec.fields)
-        rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger)
+        _, rows = write_frame(path, augment_macro_frame(frame(result), spec), spec, {**params, **coverage_params}, revision_ledger)
         prune_stale_range_files(path)
         print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
@@ -1167,7 +1179,7 @@ def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: Datase
     params = {"start_m": start_m, "end_m": end_m}
     with answer_defects(path, ledger=revision_ledger):
         result = client.query(spec.api_name, params, spec.fields)
-        rows = write_macro_result(path, result, spec, {**params, **coverage_params}, revision_ledger)
+        _, rows = write_frame(path, augment_macro_frame(frame(result), spec), spec, {**params, **coverage_params}, revision_ledger)
         prune_stale_range_files(path)
         print(f"{spec.api_name} months {start_m}-{end_m} rows={rows}")
 
@@ -1498,7 +1510,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     datasets = selected_event_flow_download_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     trade_dates: list[str] = []
     stamping_dates: list[str] | None = None
     trade_end_date = args.end_date
@@ -1569,7 +1581,7 @@ def download_event_flow(args: argparse.Namespace) -> int:
         else:
             raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {dataset}")
     if required_zero_skipped:
-        if getattr(args, "zero_rows_not_ready", False):
+        if args.zero_rows_not_ready:
             # Pre-open attempts hit the source before T-1 margin publication;
             # an empty response is a regular not-ready event, not a failure.
             # Exit 75 keeps the auction-capture no-mutation contract: cron
@@ -1778,7 +1790,7 @@ def download_board_trading(args: argparse.Namespace) -> int:
     raw_dir = repo_root / args.raw_dir
     datasets = selected_board_trading_datasets(args)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     trade_dates: list[str] = []
     if any(BOARD_TRADING_SPECS[name].strategy != FetchStrategy.STATIC_FULL for name in datasets):
         ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
@@ -1820,7 +1832,7 @@ def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: Da
     path = raw_dir / spec.api_name / f"{spec.api_name}.parquet"
     with answer_defects(path, ledger=revision_ledger):
         result = client.query(spec.api_name, {}, spec.fields)
-        rows = write_board_result(path, result, spec, {}, revision_ledger)
+        _, rows = write_frame(path, augment_board_frame(frame(result), spec, {}), spec, {}, revision_ledger)
         print(f"{spec.api_name} static rows={rows}")
 
 def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
@@ -1838,9 +1850,10 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
             meta_params = dict(params)
             meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+            total_rows += rows
             total_pages += pages
-            written += 1
+            written += landed
         if index % 250 == 0:
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1866,9 +1879,10 @@ def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: DatasetS
                 meta_params = dict(params)
                 meta_params["tag_partition"] = tag_part
                 meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+                total_rows += rows
                 total_pages += pages
-                written += 1
+                written += landed
             if task_index % 250 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1894,9 +1908,10 @@ def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: Da
                 meta_params = dict(params)
                 meta_params["limit_type_partition"] = limit_type_part
                 meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+                total_rows += rows
                 total_pages += pages
-                written += 1
+                written += landed
             if task_index % 250 == 0:
                 print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1933,9 +1948,10 @@ def download_board_hot_by_market(
                     meta_params = dict(params)
                     meta_params["market_partition"] = market_part
                     meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                    total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                    landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+                    total_rows += rows
                     total_pages += pages
-                    written += 1
+                    written += landed
                 if task_index % 250 == 0:
                     print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -1976,9 +1992,10 @@ def download_board_dc_hot(
                         meta_params["market_partition"] = market_part
                         meta_params["hot_type_partition"] = hot_type_part
                         meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                        total_rows += write_board_result(path, result, spec, meta_params, revision_ledger)
+                        landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+                        total_rows += rows
                         total_pages += pages
-                        written += 1
+                        written += landed
                     if task_index % 250 == 0:
                         print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
@@ -2055,7 +2072,7 @@ def download_share_float_ann_dates(client: TuShareClient, raw_dir: Path, args: a
             {"ann_date": day},
             "ann_date",
             args.force,
-            getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            args.revision_ledger,
         )
         written += 0 if result["skipped"] else 1
         skipped += 1 if result["skipped"] else 0
@@ -2146,15 +2163,15 @@ def unique_ordered(values: list[str]) -> list[str]:
 
 def explicit_rescue_stock_codes(args: argparse.Namespace) -> list[str]:
     requested: list[str] = []
-    requested.extend(getattr(args, "rescue_code", []) or [])
-    codes_file = getattr(args, "rescue_codes_file", None)
+    requested.extend(args.rescue_code)
+    codes_file = args.rescue_codes_file
     if codes_file:
         text = Path(codes_file).read_text(encoding="utf-8")
         requested.extend(re.split(r"[\s,]+", text))
     return unique_ordered(requested)
 
 def selected_share_float_rescue_dates(args: argparse.Namespace, ann_limit_hits: list[str]) -> tuple[list[str], list[str]]:
-    explicit = unique_ordered(getattr(args, "rescue_ann_date", []) or [])
+    explicit = unique_ordered(args.rescue_ann_date)
     auto: list[str] = []
     skipped_auto: list[str] = []
     if args.rescue_ann_limit_hits:
@@ -2356,7 +2373,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
     output = (repo_root / args.union_output).resolve()
     revision_ledger = resolve_revision_ledger(
         raw_dir,
-        getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+        args.revision_ledger,
         repo_root=repo_root,
     )
     if not output.exists():
@@ -2518,7 +2535,7 @@ def write_share_float_union(raw_dir: Path, args: argparse.Namespace, report: dic
 def download_share_float_complete(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
-    args.revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    args.revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     report: dict[str, Any] = {
         "created_at": datetime.now(UTC).isoformat(),
@@ -2559,7 +2576,7 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
             dataset_dir="share_float_ann_date_ts_code",
             source="ann_date_ts_code",
             force=args.force,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=args.revision_ledger,
         )
     report["ann_date_ts_code_skipped_limit_days"] = skipped_ann_rescue
 
@@ -2572,7 +2589,7 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
             dataset_dir="share_float_float_date_ts_code",
             source="float_date_ts_code",
             force=args.force,
-            revision_ledger=getattr(args, "revision_ledger", REVISION_EVENTS_PATH),
+            revision_ledger=args.revision_ledger,
         )
 
     if args.write_union:
@@ -2601,16 +2618,16 @@ def download_fundamental(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     datasets = selected_fundamental_datasets(args.datasets)
     stock_codes: list[str] = []
     if any(FUNDAMENTAL_SPECS[name].strategy == FetchStrategy.TS_CODE for name in datasets):
-        explicit_codes = [str(code).strip() for code in (getattr(args, "codes", None) or []) if str(code).strip()]
+        explicit_codes = [str(code).strip() for code in (args.codes or []) if str(code).strip()]
         stock_codes = sorted(set(explicit_codes)) if explicit_codes else load_stock_codes(raw_dir)
         if args.max_codes:
             stock_codes = stock_codes[: args.max_codes]
-    refresh_periods = set(recent_quarter_periods(args.end_date, getattr(args, "fundamental_refresh_period_count", 0)))
-    refresh_months = set(recent_month_keys(args.end_date, getattr(args, "fundamental_refresh_ann_month_count", 0)))
+    refresh_periods = set(recent_quarter_periods(args.end_date, args.fundamental_refresh_period_count))
+    refresh_months = set(recent_month_keys(args.end_date, args.fundamental_refresh_ann_month_count))
     periods = sorted(set(quarter_periods(args.start_date, args.end_date)) | refresh_periods)
     windows = fundamental_ann_month_windows(args.start_date, args.end_date, refresh_months)
 
@@ -2629,7 +2646,7 @@ def download_fundamental(args: argparse.Namespace) -> int:
         spec = FUNDAMENTAL_SPECS[dataset]
         download_fundamental_ann_month_dataset(client, raw_dir, spec, windows, args.force, spec_page_limit(spec, args.page_limit), refresh_months, revision_ledger)
 
-    affected_days = int(getattr(args, "fundamental_refresh_event_days", 90) or 0)
+    affected_days = args.fundamental_refresh_event_days
     affected_start = format_yyyymmdd(parse_yyyymmdd(args.end_date) - timedelta(days=max(affected_days, 1) - 1))
     affected_codes = recent_fundamental_event_codes(
         raw_dir,
@@ -2641,9 +2658,9 @@ def download_fundamental(args: argparse.Namespace) -> int:
         args.end_date,
     )
     dividend_probe_codes: set[str] = set()
-    if "dividend" in ts_code_datasets and getattr(args, "fundamental_dividend_probe_days", 0):
+    if "dividend" in ts_code_datasets and args.fundamental_dividend_probe_days:
         dividend_probe_codes = probe_recent_dividend_codes(client, args.end_date, args.fundamental_dividend_probe_days, args.page_limit)
-    refresh_ts_code_datasets = set(getattr(args, "fundamental_refresh_ts_code_datasets", []) or [])
+    refresh_ts_code_datasets = set(args.fundamental_refresh_ts_code_datasets)
     for dataset in ts_code_datasets:
         spec = FUNDAMENTAL_SPECS[dataset]
         force_codes = set()
@@ -2986,11 +3003,11 @@ def read_stk_mins_source_subset(path: Path, trade_dates: set[str]) -> pd.DataFra
 def source_stk_mins_files(raw_dir: Path, args: argparse.Namespace, years: set[str]) -> list[Path]:
     files = sorted((raw_dir / STK_MINS_DATASET).glob("ts_code=*/year=*.parquet"))
     if years:
-        files = [path for path in files if path.stem.split("=", 1)[-1] in years]
-    if getattr(args, "codes", None):
+        files = [path for path in files if partition_value(path) in years]
+    if args.codes:
         wanted = {safe_partition_value(str(code).strip()) for code in args.codes if str(code).strip()}
         files = [path for path in files if path.parent.name.split("=", 1)[-1] in wanted]
-    if getattr(args, "max_codes", None):
+    if args.max_codes:
         selected_codes = sorted({path.parent.name for path in files})[: int(args.max_codes)]
         files = [path for path in files if path.parent.name in set(selected_codes)]
     return files
@@ -3024,7 +3041,7 @@ def write_stk_mins_by_date(
 def compact_intraday_by_date(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     output_dataset = args.output_dataset
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     month_to_dates: dict[str, list[str]] = {}
@@ -3051,7 +3068,7 @@ def compact_intraday_by_date(args: argparse.Namespace) -> int:
         buffers: dict[str, list[pd.DataFrame]] = {trade_date: [] for trade_date in needed_dates}
         scanned = 0
         for source_path in source_files:
-            if source_path.stem.split("=", 1)[-1] not in {date[:4] for date in date_set}:
+            if partition_value(source_path) not in {date[:4] for date in date_set}:
                 continue
             subset = read_stk_mins_source_subset(source_path, date_set)
             scanned += 1
@@ -3106,7 +3123,7 @@ def compact_intraday_by_date(args: argparse.Namespace) -> int:
 def update_intraday_by_date(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
@@ -3114,7 +3131,7 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
     written = 0
     skipped = 0
     total_rows = 0
-    force_from = str(getattr(args, "force_from", None) or "")
+    force_from = str(args.force_from or "")
     for trade_date in trade_dates:
         day_force = args.force or (force_from != "" and trade_date >= force_from)
         path = stk_mins_by_date_path(raw_dir, args.output_dataset, trade_date)
@@ -3122,11 +3139,11 @@ def update_intraday_by_date(args: argparse.Namespace) -> int:
             existing = pd.read_parquet(path)
             if args.expected_codes_source == "minute" and not existing.empty:
                 expected_codes = set(existing["ts_code"].dropna().astype(str))
-                if getattr(args, "max_codes", None):
+                if args.max_codes:
                     expected_codes = set(sorted(expected_codes)[: int(args.max_codes)])
             else:
                 expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date) or set()
-            existing_allow_missing = max(int(args.allow_missing_codes), int(getattr(args, "existing_allow_missing_codes", 0)))
+            existing_allow_missing = max(int(args.allow_missing_codes), int(args.existing_allow_missing_codes))
             ok, _ = validate_stk_mins_by_date_frame(
                 existing,
                 trade_date,
@@ -3279,7 +3296,7 @@ def download_text(args: argparse.Namespace) -> int:
                 flush=True,
             )
             return NO_MUTATION_FAILURE_EXIT_CODE
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     windows = month_windows(args.start_date, args.end_date)
     days = date_range_days(args.start_date, args.end_date)
     for dataset in datasets:
@@ -3302,26 +3319,6 @@ def download_text(args: argparse.Namespace) -> int:
     print(f"Text download finished under {raw_dir}")
     return 0
 
-def write_text_result(
-    path: Path,
-    result: ApiResult,
-    spec: DatasetSpec,
-    params: dict[str, Any],
-    revision_ledger: Path | str | None = None,
-) -> int:
-    df = augment_text_frame(frame(result), spec)
-    outcome = publish(
-        path,
-        df,
-        api_name=spec.api_name,
-        params=params,
-        fields=list(df.columns),
-        key_columns=list(spec.key_columns),
-        ledger=revision_ledger,
-        deduplicate=spec.unique_key,
-    )
-    return len(df) if outcome in WRITTEN_OUTCOMES else 0
-
 def landing_first_seen(path: Path, answer: pd.DataFrame, key_columns: list[str] | tuple[str, ...]) -> pd.Series:
     """When the lake first held each row of a vendor answer about to be merged
     into the partition at ``path`` (CN time, NaT where it keeps no such time):
@@ -3336,7 +3333,7 @@ def landing_first_seen(path: Path, answer: pd.DataFrame, key_columns: list[str] 
     if versions.records_observations(path):
         held = key_strings(pd.read_parquet(path, columns=list(key_columns)), key_columns) if path.exists() else pd.Series()
         landing = seen.isna() & ~key_strings(answer, key_columns).isin(set(held))
-        seen = seen.mask(landing, pd.Timestamp(versions.utc_now()).tz_convert(CN_TZ))
+        seen = seen.mask(landing, pd.Timestamp(versions.utc_now("microseconds")).tz_convert(CN_TZ))
     return seen
 
 
@@ -3456,8 +3453,8 @@ def download_text_news_src_day(
                 meta_params = dict(params)
                 meta_params["date"] = day
                 meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                rows = write_text_result(path, result, spec, meta_params, revision_ledger)
-                written += 1
+                landed, rows = write_frame(path, augment_text_frame(frame(result), spec), spec, meta_params, revision_ledger)
+                written += landed
                 total_rows += rows
             if index % 250 == 0:
                 print(f"{spec.api_name}/{source_suffix} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -3475,8 +3472,8 @@ def download_text_day(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, d
         params = {spec.date_column or "date": day}
         with answer_defects(path, ledger=revision_ledger):
             result = client.query(spec.api_name, params, spec.fields)
-            rows = write_text_result(path, result, spec, params, revision_ledger)
-            written += 1
+            landed, rows = write_frame(path, augment_text_frame(frame(result), spec), spec, params, revision_ledger)
+            written += landed
             total_rows += rows
         if index % 250 == 0:
             print(f"{spec.api_name} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
@@ -3590,7 +3587,7 @@ def update_share_float_complete_data(
 ) -> None:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     run_update_step(
         "share_float_complete",
         download_share_float_complete,
@@ -3625,16 +3622,16 @@ def update_share_float_complete_data(
 def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]]) -> None:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
-    revision_ledger = resolve_revision_ledger(raw_dir, getattr(args, "revision_ledger", REVISION_EVENTS_PATH), repo_root=repo_root)
+    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     start_date = args.start_date
     if parse_yyyymmdd(start_date) > parse_yyyymmdd(args.end_date):
         raise RuntimeError(f"start_date {start_date} is after end_date {args.end_date}")
     macro_floor = args.macro_start_date
     macro_start_date = min(start_date, macro_floor, key=parse_yyyymmdd)
-    refresh_open_window = bool(getattr(args, "refresh_open_window", False))
+    refresh_open_window = args.refresh_open_window
     force_open_window = bool(args.force or refresh_open_window)
     trade_cal_end_date = format_yyyymmdd(
-        parse_yyyymmdd(args.end_date) + timedelta(days=max(int(getattr(args, "trade_cal_lookahead_days", 0) or 0), 0))
+        parse_yyyymmdd(args.end_date) + timedelta(days=max(args.trade_cal_lookahead_days, 0))
     )
     run_update_step(
         "reference",
@@ -3649,9 +3646,8 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             datasets=None,
             force=args.force,
             page_limit=args.page_limit,
-            refresh_reference_datasets=getattr(args, "refresh_reference_datasets", []),
             revision_ledger=revision_ledger,
-            min_interval_seconds=getattr(args, "reference_min_interval_seconds", None) or args.min_interval_seconds,
+            min_interval_seconds=args.reference_min_interval_seconds or args.min_interval_seconds,
             timeout_seconds=args.timeout_seconds,
         ),
         summary,
@@ -3665,7 +3661,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             start_date=start_date,
             end_date=args.end_date,
             datasets=args.daily_datasets,
-            refresh_daily_datasets=getattr(args, "refresh_daily_datasets", []),
             revision_ledger=revision_ledger,
             force=args.force,
             page_limit=args.page_limit,
@@ -3720,6 +3715,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             start_date=start_date,
             end_date=args.end_date,
             datasets=args.event_datasets,
+            zero_rows_not_ready=False,
             force=force_open_window,
             page_limit=args.page_limit,
             revision_ledger=revision_ledger,
@@ -3732,7 +3728,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
         intraday_start_date = start_date
         intraday_force = args.force
         intraday_force_from = None
-        intraday_lookback = int(getattr(args, "intraday_refresh_lookback_days", 0) or 0)
+        intraday_lookback = args.intraday_refresh_lookback_days
         if refresh_open_window and intraday_lookback > 0:
             # Scope FORCE to the tail only, but keep the full window as the
             # scan range: earlier days whose by-date file is missing or
@@ -3797,11 +3793,6 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
             start_date=start_date,
             end_date=args.end_date,
             datasets=args.fundamental_datasets,
-            fundamental_refresh_period_count=getattr(args, "fundamental_refresh_period_count", 6),
-            fundamental_refresh_ann_month_count=getattr(args, "fundamental_refresh_ann_month_count", 3),
-            fundamental_refresh_ts_code_datasets=getattr(args, "fundamental_refresh_ts_code_datasets", ["dividend", "fina_audit", "fina_mainbz_vip"]),
-            fundamental_refresh_event_days=getattr(args, "fundamental_refresh_event_days", 90),
-            fundamental_dividend_probe_days=getattr(args, "fundamental_dividend_probe_days", 90),
             force=args.force,
             page_limit=args.page_limit,
             revision_ledger=revision_ledger,
@@ -3849,7 +3840,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(parser)
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--bak-start-date", default="20160101")
-    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    parser.add_argument("--end-date", default=cn_today())
     parser.add_argument("--trade-cal-end-date", help="Optional reference-tier lookahead end date used only for trade_cal coverage.")
     parser.add_argument("--datasets", nargs="+")
     parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_DOWNLOAD_DATASETS, default=[])
@@ -3884,11 +3875,13 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     core.add_board_filter_args(parser)
     core.add_macro_filter_args(parser)
     core.add_runtime_args(parser, min_interval=None, timeout=None)
+    # Only update sets a retained macro floor; a tier download starts at --start-date.
+    parser.set_defaults(macro_start_date=None)
 
 def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("update", help="fill missing TuShare data across all retained domains")
     core.add_raw_arg(parser)
-    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    parser.add_argument("--end-date", default=cn_today())
     parser.add_argument("--start-date", required=True, help="Fill missing data from this date through --end-date across all retained data domains.")
     parser.add_argument("--bak-start-date", help="Optional bak_basic lower bound. Defaults to --start-date.")
     parser.add_argument(
@@ -3958,7 +3951,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         help="Retained lower bound for macro/global range-style datasets during rolling updates; prevents short-window range files from replacing full-context coverage.",
     )
     parser.add_argument("--event-datasets", nargs="+", choices=[dataset for dataset in core.EVENT_FLOW_DATASETS if dataset != "share_float"])
-    parser.add_argument("--board-datasets", nargs="+", choices=core.BOARD_TRADING_DATASETS)
+    parser.add_argument("--board-datasets", nargs="+", choices=BOARD_TRADING_DATASETS)
     parser.add_argument(
         "--include-board-trading",
         action=argparse.BooleanOptionalAction,
@@ -4048,6 +4041,7 @@ def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     compact.add_argument("--force", action="store_true")
     compact.add_argument("--allow-empty", action="store_true")
     compact.add_argument("--allow-validation-warnings", action="store_true")
+    compact.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
 
     update = sub.add_parser("update-intraday-by-date", help="download/retry trade dates directly into final daily minute files")
     core.add_intraday_by_date_common_args(update, expected_codes_choices=["daily", "active", "minute"], expected_codes_default="minute")
@@ -4058,14 +4052,16 @@ def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--page-limit", type=int)
     update.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     core.add_runtime_args(update, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
+    # Only update's open-window refresh forces a trailing tail.
+    update.set_defaults(force_from=None)
 
 def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("download-share-float-complete", help="download share_float through ann_date and targeted ts_code rescue paths")
     core.add_raw_arg(parser)
     parser.add_argument("--ann-start-date", default="20100101")
-    parser.add_argument("--ann-end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    parser.add_argument("--ann-end-date", default=cn_today())
     parser.add_argument("--float-start-date", default="20200101")
-    parser.add_argument("--float-end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    parser.add_argument("--float-end-date", default=cn_today())
     parser.add_argument("--skip-ann-date", action="store_true")
     parser.add_argument("--rescue-ann-limit-hits", action="store_true", help="Retry ann_date partitions that hit 6000 rows by ann_date + ts_code.")
     parser.add_argument("--rescue-ann-date", action="append", default=[], help="Specific ann_date to retry by ts_code; repeatable.")
@@ -4128,31 +4124,16 @@ def _production_repo_root() -> Path:
 
 
 def _refuse_manual_production_write(args: argparse.Namespace) -> None:
-    """The cron runner is the ONLY production-lake write entrance.
-
-    It alone provides the generation record, per-job state, failure alerting
-    and the exclusive flock; a direct manual command against production
-    data/raw would bypass all four, so it is refused with the runner
-    equivalent (data docs §2.2). Only a genuine runner child -- proven by the
-    inherited lock fd, not by an environment flag -- passes; non-production
-    raw dirs (tests, local lakes) are unaffected."""
-    if inherited_updater_lock_fd(_production_repo_root()) is not None:
-        return  # genuine cron-runner child (inherited the held lock fd)
-    production_raw = (_production_repo_root() / "data" / "raw").resolve()
-
-    def _targets_production(value: object) -> bool:
-        if not value:
-            return False
-        try:
-            resolved = Path(str(value)).resolve()
-        except OSError:
-            return False
-        # Subtree membership: --raw-dir <prod>/daily or a --union-output file
-        # under the production lake are production writes just the same.
-        return resolved == production_raw or production_raw in resolved.parents
-
-    if not (_targets_production(getattr(args, "raw_dir", "data/raw"))
-            or _targets_production(getattr(args, "union_output", None))):
+    """A direct manual command against the production data/raw is refused with
+    its runner equivalent (data docs §2.2; ``manual_production_write``);
+    non-production raw dirs (tests, local lakes) are unaffected. Subtree
+    membership counts: --raw-dir <prod>/daily or a --union-output file under
+    the production lake are production writes just the same. Only the two
+    share_float subcommands have --union-output."""
+    repo_root = _production_repo_root()
+    production_raw = repo_root / "data" / "raw"
+    targets = (args.raw_dir, getattr(args, "union_output", None))
+    if not any(manual_production_write(repo_root, production_raw, target) for target in targets):
         return
     raise SystemExit(
         "direct manual writes to the production lake are not supported; run the "

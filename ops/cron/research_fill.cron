@@ -1,5 +1,5 @@
 # ADM-Cube research experiment fill: keep the console's running slots occupied.
-# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block research
+# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_cron.py --block research
 #
 # The round files below, in order, are the experiment queue. Each file's `--fill`
 # asks /api/health how many of the console's slots and GPUs are free, skips

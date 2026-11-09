@@ -9,8 +9,6 @@
   "default_pit_root": "data/pit",
   "default_lock_wait_seconds": 900,
   "default_update_args": [
-    "--min-interval-seconds",
-    "0.80",
     "--timeout-seconds",
     "120"
   ],
@@ -59,14 +57,6 @@
         "daily_basic",
         "stk_limit",
         "suspend_d",
-        "--fundamental-refresh-period-count",
-        "6",
-        "--fundamental-refresh-ann-month-count",
-        "3",
-        "--fundamental-refresh-ts-code-datasets",
-        "dividend",
-        "fina_audit",
-        "fina_mainbz_vip",
         "--fundamental-refresh-event-days",
         "10",
         "--fundamental-dividend-probe-days",

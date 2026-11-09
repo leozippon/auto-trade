@@ -1,7 +1,7 @@
 # ADM-Cube TuShare scheduled updates.
 # Template for the managed ADM-Cube block. If the user already has other cron
 # jobs, append/refresh this block instead of replacing the whole crontab.
-# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py
+# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_cron.py
 #
 # The runner reads /Data2/lzp/auto-trade/.env when TUSHARE_TOKEN is not already
 # exported, writes every run outcome to its own 14-day log under
@@ -69,10 +69,10 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # Reduce whatever minute partitions have landed (cn_nightly_intraday_minutes) to
 # the derived stock-day tables (data/raw/intraday_flow, data/raw/intraday_stats).
 # Not a TuShare job: it fetches nothing and only reads the lake, so it is a
-# plain line rather than a runner job. It is incremental (existing trade dates
-# are skipped, a new one costs about two seconds), so a night without new
-# minutes is a no-op.
-45 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/build_minute_derived.py
+# plain line rather than a runner job, logging to logs/data/minute_derived.log.
+# It is incremental (committed trade dates are skipped, a new one costs about
+# two seconds), so a night without new minutes is a no-op.
+45 2 * * * cd $REPO_ROOT && mkdir -p logs/data && $QUANT_PYTHON scripts/data/build_minute_derived.py >> logs/data/minute_derived.log 2>&1
 
 # Rebuild and audit ALL PIT-ready financial event availability partitions
 # after raw status refresh. Snapshot construction uses this layer to enforce

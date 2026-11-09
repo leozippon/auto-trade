@@ -11,13 +11,14 @@ import time
 from pathlib import Path
 
 
-BEGIN = "# BEGIN ADM-Cube TuShare update"
-END = "# END ADM-Cube TuShare update"
 REPO_ROOT = Path(__file__).resolve().parents[2]
-TEMPLATE = REPO_ROOT / "ops/cron/tushare_update.cron"
 # Each block owns its own marker pair, so installing one never touches another.
 BLOCKS = {
-    "tushare": (TEMPLATE, BEGIN, END),
+    "tushare": (
+        REPO_ROOT / "ops/cron/tushare_update.cron",
+        "# BEGIN ADM-Cube TuShare update",
+        "# END ADM-Cube TuShare update",
+    ),
     "paper": (REPO_ROOT / "ops/cron/paper.cron", "# BEGIN ADM-Cube Paper book", "# END ADM-Cube Paper book"),
     "research": (
         REPO_ROOT / "ops/cron/research_fill.cron",
@@ -56,14 +57,12 @@ def current_crontab() -> str:
     raise RuntimeError(f"crontab -l failed (rc={process.returncode}): {process.stderr.strip()}")
 
 
-def build_managed_block(template: Path = TEMPLATE, begin: str = BEGIN, end: str = END) -> str:
+def build_managed_block(template: Path, begin: str, end: str) -> str:
     body = template.read_text(encoding="utf-8").strip()
     return f"{begin}\n{body}\n{end}\n"
 
 
-def validate_managed_markers(
-    text: str, *, source: str, required: bool = False, begin: str = BEGIN, end: str = END
-) -> None:
+def validate_managed_markers(text: str, *, source: str, begin: str, end: str, required: bool = False) -> None:
     """Reject unmatched, duplicated, reversed, or nested managed markers.
 
     ``required`` also rejects a *complete absence* of markers. Only the current
@@ -91,7 +90,7 @@ def validate_managed_markers(
         )
 
 
-def strip_managed_block(current: str, *, begin: str = BEGIN, end: str = END) -> str:
+def strip_managed_block(current: str, *, begin: str, end: str) -> str:
     """The crontab with this managed block removed and nothing else touched.
 
     Pausing a managed job is the same transaction as installing one -- the
@@ -114,7 +113,7 @@ def strip_managed_block(current: str, *, begin: str = BEGIN, end: str = END) -> 
     return f"{result}\n" if result else ""
 
 
-def replace_managed_block(current: str, managed: str, *, begin: str = BEGIN, end: str = END) -> str:
+def replace_managed_block(current: str, managed: str, *, begin: str, end: str) -> str:
     validate_managed_markers(managed, source="generated block", required=True, begin=begin, end=end)
     kept = strip_managed_block(current, begin=begin, end=end).rstrip()
     if kept:
@@ -122,9 +121,7 @@ def replace_managed_block(current: str, managed: str, *, begin: str = BEGIN, end
     return kept + managed
 
 
-def verify_installed_crontab(
-    expected: str, installed: str, *, begin: str = BEGIN, end: str = END, required: bool = True
-) -> None:
+def verify_installed_crontab(expected: str, installed: str, *, begin: str, end: str, required: bool = True) -> None:
     """``required=False`` is the removal case, where the markers must be gone;
     a leftover half of the pair is still rejected."""
     validate_managed_markers(installed, source="installed crontab", required=required, begin=begin, end=end)

@@ -15,6 +15,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 
+from autotrade.environment.data.contracts import updater_lock_path
+
 # The sidecar read contract and the footer identity are owned by the
 # environment's PIT layer.
 from autotrade.environment.data.pit import (
@@ -203,11 +205,6 @@ def has_pagination_probe(path: Path) -> bool:
 UPDATER_LOCK_FD_ENV = "TUSHARE_UPDATE_LOCK_FD"
 
 
-def updater_lock_path(repo_root: Path) -> Path:
-    """The one updater lock file the cron runner flocks exclusively."""
-    return repo_root / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
-
-
 def inherited_updater_lock_fd(repo_root: Path) -> int | None:
     """The runner's updater-lock fd this process inherited, or None.
 
@@ -253,3 +250,22 @@ def inherited_updater_lock_fd(repo_root: Path) -> int | None:
         return None
     finally:
         os.close(probe)
+
+
+def manual_production_write(repo_root: Path, protected_dir: Path, target: object) -> bool:
+    """Whether writing ``target`` would change ``protected_dir`` (or anything
+    under it) from outside the cron runner.
+
+    The runner is the only production write entrance: it alone provides the
+    generation record, per-job state, failure alerting and the exclusive
+    flock. Only a genuine runner child -- proven by the inherited lock fd, not
+    by an environment flag -- may write there; an empty ``target`` writes
+    nothing."""
+    if not target or inherited_updater_lock_fd(repo_root) is not None:
+        return False
+    try:
+        resolved = Path(str(target)).resolve()
+        protected = protected_dir.resolve()
+    except OSError:
+        return False
+    return resolved == protected or protected in resolved.parents

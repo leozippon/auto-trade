@@ -95,7 +95,7 @@ class _DailyClient:
     def query(self, api_name, params=None, fields="", retries=5):
         params = params or {}
         if (api_name, params.get("trade_date")) == self.defective:
-            raise common.DefectiveAnswer(f"{api_name} answered without requested fields ['adj_factor']")
+            raise versions.DefectiveAnswer(f"{api_name} answered without requested fields ['adj_factor']")
         columns = fields.split(",")
         row = [params.get("trade_date") if c == "trade_date" else "000001.SZ" if c == "ts_code" else 1.0 for c in columns]
         return common.ApiResult(columns, [row])

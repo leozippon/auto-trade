@@ -436,7 +436,9 @@ def yyyymmdd(value: date | datetime | str) -> str:
         raise ValueError(f"cannot parse date value as YYYYMMDD: {value!r}") from exc
 
 
-def parse_partition_date(path: Path) -> str:
+def partition_value(path: Path) -> str:
+    """The value of a ``key=value`` partition file: its stem after the first
+    ``=``, or "" for a file named otherwise."""
     stem = path.stem
     return stem.split("=", 1)[1] if "=" in stem else ""
 
@@ -454,7 +456,7 @@ class PITDataStore:
     def trade_dates(self, dataset: str) -> list[str]:
         return sorted(
             key
-            for key in (parse_partition_date(path) for path in self.dataset_dir(dataset).glob("trade_date=*.parquet"))
+            for key in (partition_value(path) for path in self.dataset_dir(dataset).glob("trade_date=*.parquet"))
             if key
         )
 

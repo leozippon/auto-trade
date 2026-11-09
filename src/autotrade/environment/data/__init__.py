@@ -7,9 +7,8 @@ modules — ``snapshot`` (PIT snapshot & replay-slot builder), ``research_releas
 summary) — are imported directly as submodules.
 """
 
-from .contracts import default_tushare_contracts
+from .contracts import FUNDAMENTAL_EVENT_DATASETS, default_tushare_contracts
 from .fundamental_events import (
-    FUNDAMENTAL_EVENT_DATASETS,
     FundamentalEventsBuilder,
     FundamentalEventsConfig,
     audit_fundamental_events,

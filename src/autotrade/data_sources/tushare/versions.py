@@ -70,6 +70,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
+from autotrade.common.time import utc_now
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.data.pit import (
     FIRST_SEEN_COLUMN,
@@ -152,10 +153,6 @@ class DefectiveAnswer(RuntimeError):
     is missing, fields changed while paging, a page repeated or a page boundary
     did not hold. The partition keeps its current version and the defect is
     recorded as an issue; the job goes on with the next partition."""
-
-
-def utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 @dataclass(frozen=True)
@@ -402,7 +399,7 @@ def _report(dataset: str, partition: str, outcome: str, *, detail: str = "", ver
     if not report:
         return
     line = json.dumps(
-        {"dataset": dataset, "partition": partition, "outcome": outcome, "detail": detail, "version": version, "at": utc_now()},
+        {"dataset": dataset, "partition": partition, "outcome": outcome, "detail": detail, "version": version, "at": utc_now("microseconds")},
         ensure_ascii=False,
         sort_keys=True,
     ) + "\n"
@@ -610,7 +607,7 @@ def publish(
         report_outcome(path, outcome)
         return outcome
 
-    instant = utc_now()
+    instant = utc_now("microseconds")
     write_id = str(uuid.uuid4())
     superseded = _keep_version(path, instant, SUPERSEDED) if outcome == "restated" else ""
     metadata = _with_availability({**(extra_metadata or {}), "visible_since": instant}, meta, instant, len(df))
@@ -684,7 +681,7 @@ def _stage(
             # open on the version already staged.
             report_outcome(path, "staged", version=staged[-1])
             return "staged"
-    instant = utc_now()
+    instant = utc_now("microseconds")
     version = f"{_version_stamp(instant)}-{STAGED}"
     write_id = str(uuid.uuid4())
     target = version_dir(path) / f"{version}.parquet"
@@ -720,7 +717,7 @@ def restore(path: Path, version: str, *, ledger: Path | str | None, source: str 
     restored = pd.read_parquet(source_file)
     current = pd.read_parquet(path) if path.exists() else restored.iloc[:0]
     diff = diff_frames(current, restored, keys) if keys else None
-    instant = utc_now()
+    instant = utc_now("microseconds")
     superseded = _keep_version(path, instant, SUPERSEDED) if path.exists() else ""
     if keys and records_observations(path):
         _record_observations(path, diff.added, keys, instant, meta if path.exists() else None)

@@ -58,7 +58,7 @@ import numpy as np
 import pandas as pd
 
 from autotrade.environment.data.contracts import INTRADAY_STATS_CONTRACT
-from autotrade.environment.data.intraday_flow import MINUTE_COLUMNS, stamp_available_at
+from autotrade.environment.data.intraday_flow import MINUTE_COLUMNS
 
 INTRADAY_STATS_DATASET = "intraday_stats"
 # The flow columns plus the bar open, which prices the start of the path.
@@ -187,7 +187,7 @@ def aggregate_intraday_stats(minutes: pd.DataFrame) -> pd.DataFrame:
     defined = [column for column in _FLOAT_COLUMNS if column not in _FLAT_DAY_UNDEFINED]
     if not np.isfinite(out[defined].to_numpy()).all():
         raise ValueError("intraday_stats produced a non-finite value outside the flat-day moments")
-    return stamp_available_at(out, INTRADAY_STATS_CONTRACT)[list(INTRADAY_STATS_COLUMNS)]
+    return INTRADAY_STATS_CONTRACT.stamp(out)[list(INTRADAY_STATS_COLUMNS)]
 
 
 def _last_per_group(

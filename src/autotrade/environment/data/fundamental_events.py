@@ -11,12 +11,14 @@ import pyarrow.parquet as pq
 
 from autotrade.common.time import CN_TZ
 from autotrade.data_quality import build_quality_report, write_quality_report
+from autotrade.environment.data.contracts import FUNDAMENTAL_EVENT_DATASETS
 from autotrade.environment.data.pit import (
     FIRST_SEEN_COLUMN,
     concat_rows,
     first_seen_at,
     first_seen_later,
     parquet_meta,
+    partition_value,
     stamp_text,
     to_cn_timestamps,
     visible_from,
@@ -29,19 +31,6 @@ from autotrade.environment.data.pit import (
 FUNDAMENTAL_SIDECAR_COLUMNS = (
     "dataset", "source_path", "source_write_id", "source_row_id", "business_key",
     "available_month", "available_at", "available_at_rule",
-)
-
-FUNDAMENTAL_EVENT_DATASETS = (
-    "income_vip",
-    "balancesheet_vip",
-    "cashflow_vip",
-    "fina_indicator_vip",
-    "forecast_vip",
-    "express_vip",
-    "dividend",
-    "fina_audit",
-    "fina_mainbz_vip",
-    "disclosure_date",
 )
 
 BUSINESS_KEYS = {
@@ -89,7 +78,7 @@ RAW_PATTERNS = {
 }
 
 
-_STATEMENT_DATASETS = ("income_vip", "balancesheet_vip", "cashflow_vip")
+STATEMENT_DATASETS = ("income_vip", "balancesheet_vip", "cashflow_vip")
 
 
 class StatementAvailability(NamedTuple):
@@ -266,7 +255,7 @@ class FundamentalEventsBuilder:
         same period never hides an earlier one.
         """
         keyed: list[pd.DataFrame] = []
-        for dataset in (*_STATEMENT_DATASETS, "fina_indicator_vip"):
+        for dataset in (*STATEMENT_DATASETS, "fina_indicator_vip"):
             dataset_dir = self.raw_dir / dataset
             if not dataset_dir.exists():
                 continue
@@ -299,7 +288,7 @@ class FundamentalEventsBuilder:
             return dict(zip(zip(frame["ts_code"], frame["end_date"]), frame["available_at"]))
 
         return StatementAvailability(
-            statements=latest(combined[combined["dataset"].isin(_STATEMENT_DATASETS)]),
+            statements=latest(combined[combined["dataset"].isin(STATEMENT_DATASETS)]),
             with_indicators=latest(combined),
         )
 
@@ -319,9 +308,9 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
     for dataset in datasets:
         files = sorted(
             path for path in (root / dataset).glob("available_month=*.parquet")
-            if path.stem.split("=", 1)[1] in expected_months
+            if partition_value(path) in expected_months
         )
-        file_months = {path.stem.split("=", 1)[1] for path in files}
+        file_months = {partition_value(path) for path in files}
         missing_months = sorted(expected_months - file_months)
         if not files:
             checks.append({"severity": "error" if require_partitions else "warning", "check": f"{dataset}_partitions", "message": "no PIT event partitions", "details": {"missing_months": missing_months}})
@@ -354,7 +343,7 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
             unparseable += int(parsed.isna().sum())
             visible = visible_from(df, parsed)
             outside_window += int(((visible < start_ts) | (visible > end_ts)).sum())
-            expected_month = path.stem.split("=", 1)[1]
+            expected_month = partition_value(path)
             wrong_partition += int((df["available_month"].astype(str) != expected_month).sum())
             wrong_dataset += int((df["dataset"].astype(str) != expected_dataset).sum())
             disallowed_rules += int((~df["available_at_rule"].astype(str).map(_is_allowed_available_at_rule)).sum())
@@ -479,7 +468,7 @@ def read_fundamental_events(
             continue
         dataset_available_partition_count = 0
         for path in sorted(dataset_dir.glob("available_month=*.parquet")):
-            month = path.stem.split("=", 1)[1]
+            month = partition_value(path)
             if month > max_month and observed:
                 continue
             dataset_available_partition_count += 1
@@ -528,7 +517,7 @@ def _available_at_for_frame(
     ``None`` for ``statement_availability`` applies each dataset's own dates
     alone: how the statement map itself is built.
     """
-    if dataset in _STATEMENT_DATASETS:
+    if dataset in STATEMENT_DATASETS:
         return _first_available_frame(frame, ("f_ann_date", "ann_date"), "source:f_ann_date_or_ann_date")
     if dataset == "fina_indicator_vip":
         # The table has no f_ann_date and the vendor files a restated indicator

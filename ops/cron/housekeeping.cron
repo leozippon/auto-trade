@@ -1,5 +1,5 @@
 # ADM-Cube housekeeping: compress the provider conversation logs nothing reads.
-# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_tushare_cron.py --block housekeeping
+# Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_cron.py --block housekeeping
 #
 # data/llm_conversations is the redacted request/response audit log of every
 # provider, one JSONL file per process and UTC day, and it grows with every

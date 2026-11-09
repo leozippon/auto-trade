@@ -276,7 +276,7 @@ class IntradayStatsContractTest(unittest.TestCase):
 
 
 class MinuteDerivedBuildTest(unittest.TestCase):
-    def test_builder_writes_each_missing_dataset_and_skips_existing_ones(self):
+    def test_builder_writes_each_missing_dataset_and_skips_committed_ones(self):
         script = REPO_ROOT / "scripts" / "data" / "build_minute_derived.py"
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp)
@@ -304,6 +304,13 @@ class MinuteDerivedBuildTest(unittest.TestCase):
             )
             self.assertEqual(meta["api_name"], "derived:intraday_stats")
             self.assertEqual(meta["row_count"], 1)
+            # A run killed between the parquet and its sidecar leaves a
+            # partition that is not one committed write: the next run rebuilds
+            # it instead of skipping it forever.
+            (raw / "intraday_flow" / f"trade_date={TRADE_DATE}.parquet.meta.json").unlink()
+            healed = build()
+            self.assertEqual(healed["intraday_flow"]["partitions_written"], 1)
+            self.assertEqual(healed["intraday_stats"]["partitions_written"], 0)
 
 
 if __name__ == "__main__":

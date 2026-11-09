@@ -38,6 +38,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from autotrade.common.records import read_json_object
+from autotrade.common.time import utc_now
 from autotrade.environment.data.pit import complete_interrupted_commits
 from autotrade.environment.data.research_release import (
     pinned_generation,
@@ -57,27 +58,23 @@ from autotrade.pipelines.hitl_state import (
     status_pid_alive,
 )
 
-from .common import (
-    REVISION_EVENTS_PATH,
-    inherited_updater_lock_fd,
-    resolve_revision_ledger,
-)
+from .common import REVISION_EVENTS_PATH, resolve_revision_ledger
 from .cron_update import (
     DEFAULT_CONFIG,
     DEFAULT_LOCK_WAIT_SECONDS,
     RUN_LOG_ROOT,
     RunContext,
-    _issue_key,
-    _read_raw_generation_file,
     acquire_lock,
     begin_raw_generation_update,
     finish_raw_generation_update,
     history_repull_policy,
+    issue_key,
     load_config,
+    read_raw_generation_file,
     record_vintages,
     run_history_repull,
-    utc_now,
 )
+from .io import inherited_updater_lock_fd
 from .versions import (
     STAGED,
     SUPERSEDED,
@@ -108,7 +105,8 @@ def locked_generation(config: dict, raw_dir: Path, job: str) -> Iterator[dict]:
     """Hold the updater lock around one operator change. The yielded state's
     ``datasets`` and ``issues`` are what the new record carries; ``commit``
     says whether the lake changed (set it before changing anything)."""
-    lock = acquire_lock("tushare_update", int(config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS)))
+    # _lake works from the repository root.
+    lock = acquire_lock(Path.cwd(), int(config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS)))
     try:
         complete_interrupted_commits(raw_dir)
         transaction = {"job": job, "start_date": "", "end_date": ""}
@@ -138,13 +136,13 @@ def restore_partition(config_path: str, dataset: str, partition: str, version: s
     with locked_generation(config, raw_dir, f"operator:{'promote' if kind == STAGED else 'revert'}") as state:
         state["commit"] = True
         result = restore(path, version, ledger=ledger)
-        state["issues"][:] = [issue for issue in state["issues"] if _issue_key(issue) != ("staged", dataset, partition)]
+        state["issues"][:] = [issue for issue in state["issues"] if issue_key(issue) != ("staged", dataset, partition)]
         # A promoted restatement leaves the months outside it at the older
         # vintage, as an accepted one does.
         if (
             kind == STAGED
             and history_repull_policy(config).get(dataset) == "on_restatement"
-            and not any(_issue_key(issue) == ("history_repull", dataset, "") for issue in state["issues"])
+            and not any(issue_key(issue) == ("history_repull", dataset, "") for issue in state["issues"])
         ):
             state["issues"].append({"kind": "history_repull", "dataset": dataset, "partition": "", "since": utc_now(), "detail": "", "version": ""})
         record_vintages(raw_dir, state["datasets"], {dataset})
@@ -189,7 +187,7 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
         if generation:
             kept.setdefault(generation, []).append(reason)
 
-    keep(str(_read_raw_generation_file(raw_dir).get("generation_id") or ""), "raw generation record")
+    keep(str(read_raw_generation_file(raw_dir).get("generation_id") or ""), "raw generation record")
     data = repo_root / "data"
     for directory in sorted(path for pattern in ("*", "*/*") for path in data.glob(pattern) if path.is_dir()):
         name = directory.relative_to(repo_root)
@@ -246,7 +244,7 @@ def _updater_lock(config: dict, repo_root: Path) -> Iterator[None]:
     if inherited_updater_lock_fd(repo_root) is not None:
         yield
         return
-    lock = acquire_lock("tushare_update", int(config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS)))
+    lock = acquire_lock(repo_root, int(config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS)))
     try:
         yield
     finally:

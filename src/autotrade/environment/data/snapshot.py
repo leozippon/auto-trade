@@ -52,13 +52,15 @@ from autotrade.environment.data.auction import (
 )
 from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
+    FUNDAMENTAL_EVENT_DATASETS,
     MACRO_DATASET_CONTRACTS,
+    SELECTABLE_DATASETS,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
     DatasetContract,
     read_committed_raw_generation,
+    updater_lock_path,
 )
 from autotrade.environment.data.fundamental_events import (
-    FUNDAMENTAL_EVENT_DATASETS,
     FUNDAMENTAL_SIDECAR_COLUMNS,
     read_fundamental_events,
 )
@@ -67,6 +69,7 @@ from autotrade.environment.data.pit import (
     concat_rows,
     first_seen_between,
     first_seen_later,
+    partition_value,
     stamp_text,
     to_cn_timestamps,
     yyyymmdd,
@@ -254,152 +257,12 @@ DomainBuildTask = tuple[
 ]
 
 # ---- Agent-visible dataset scope -------------------------------------------
-# Two levels over one source. ``SELECTABLE_DATASETS`` is every dataset a domain
-# can load: the raw lake downloads and audits all of them and the fail-closed
-# unit registry classifies every one of their columns, so an experiment may
-# select any subset. ``DEFAULT_DATASETS`` is the narrower scope built when an
-# experiment selects nothing — the A-share daily/weekly stock material, one
-# series per concept. Selectable-but-not-default datasets stay downloadable,
-# auditable and opt-in per experiment; the scope and the evidence behind it are
-# in docs/DATA_DOCUMENTATION.md.
-#
-# Never selectable (raw keeps downloading; re-enable once the stated condition
-# is met):
-# - pledge_detail: 24% of in-window business keys carry contradictory versions
-#   (is_release/is_buyback/amount conflicts) with no version column — excluded
-#   until source identity rules exist (data docs §4).
-# - repurchase: same defect class at ~3% (conflicting amounts/price caps for
-#   one announcement) — excluded with the same re-inclusion condition.
-# - hm_list: daily-refreshed reference without PIT timestamps; contributed 0
-#   rows to every snapshot ever built and injected two all-null columns.
-# - slb_len_mm / slb_len: 转融通 feeds dead at source (last rows 2025-07-25,
-#   zero-row ever since); datasets decommissioned.
-# - cn_schedule: the source keeps only the current months, so it contributes
-#   nothing to a historical replay.
-SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
-    "events": (
-        # 两融
-        "margin",
-        "margin_detail",
-        "margin_secs",
-        # per-stock money flow (one official series plus two vendor variants)
-        # and the industry/concept aggregates derived from them
-        "moneyflow",
-        "moneyflow_dc",
-        "moneyflow_ths",
-        "moneyflow_ind_dc",
-        "moneyflow_ind_ths",
-        "moneyflow_cnt_ths",
-        # per-stock trading structure
-        "cyq_perf",
-        "bak_daily",
-        "block_trade",
-        # locally derived daily order flow: one tick-rule signed-imbalance row
-        # per stock-day, reduced from that day's own minute bars so a strategy
-        # can use signed flow without mounting the minute domain. Opt-in, never
-        # default: it duplicates no vendor series but only pays for itself in a
-        # strategy that actually models order flow.
-        "intraday_flow",
-        # its sibling from the same minute bars and build: realized variance,
-        # skewness, kurtosis and signed jumps plus the open/mid/close return
-        # and volume profile of one stock-day. Opt-in likewise: it pays for
-        # itself only in a strategy that models intraday dynamics.
-        "intraday_stats",
-        # shareholder structure and share supply
-        "stk_holdernumber",
-        "stk_holdertrade",
-        "top10_holders",
-        "top10_floatholders",
-        "stk_surv",
-        "new_share",
-        "share_float_complete",
-        # 龙虎榜 and the official full-market 涨跌停/炸板 list (history since
-        # 2020-01; row-level available_at at trade-date 16:00)
-        "top_list",
-        "top_inst",
-        "limit_list_d",
-        # board-trading / sentiment cluster (row-level available_at; day-end or
-        # next-morning labels — descriptive sentiment signals, never a truth
-        # source for fills, tradability or risk)
-        "kpl_list",
-        "limit_step",
-        "limit_cpt_list",
-        "limit_list_ths",
-        "ths_hot",
-        "dc_hot",
-        "hm_detail",
-        # sell-side earnings forecasts: the numeric/rating/coverage slice of
-        # the text dataset of the same name (raw available_at from
-        # create_time; the title stays in the text domain). ``quarter`` is the
-        # fiscal YEAR the forecast targets (2024Q4 = FY2024).
-        "report_rc",
-    ),
-    "macro": (
-        # CN macro releases
-        "cn_gdp",
-        "cn_cpi",
-        "cn_ppi",
-        "cn_pmi",
-        "cn_m",
-        "sf_month",
-        "eco_cal",
-        # money market and policy rates
-        "shibor",
-        "shibor_quote",
-        "shibor_lpr",
-        "repo_daily",
-        # A-share index and industry context
-        "index_daily",
-        "index_dailybasic",
-        "sw_daily",
-        # Month-end constituents and weights of the seven core indices. The
-        # only face in this domain that is per-stock rather than per-series:
-        # one row per (index, constituent, month-end trade date), keyed on
-        # ``con_code``, so a strategy can build and measure a book inside a
-        # benchmark instead of against it. Opt-in and never default — it is
-        # useless to a book built off the whole pool, and the SSE-composite
-        # cross-section alone is ~2,250 rows a month.
-        "index_weight",
-        "ci_daily",
-        "ths_daily",
-        # exchange aggregates and market-level money flow
-        "daily_info",
-        "sz_daily_info",
-        "moneyflow_mkt_dc",
-        "broker_recommend",
-        # offshore equity, FX and US yield curves
-        "index_global",
-        "fx_daily",
-        "us_tycr",
-        "us_trycr",
-        "us_tbr",
-        "us_tltr",
-        # derivatives and convertible bonds (non-tradable context; the Agent
-        # computes basis, PCR and conversion premium itself)
-        "fut_basic",
-        "fut_mapping",
-        "fut_daily",
-        "opt_basic",
-        "opt_daily",
-        "cb_basic",
-        "cb_daily",
-        "cb_call",
-    ),
-    "text": (
-        # per-stock text (every row carries ts_code)
-        "anns_d",
-        "research_report",
-        "report_rc",
-        "irm_qa_sh",
-        "irm_qa_sz",
-        # market-wide newswire (no ts_code on any row)
-        "major_news",
-        "news",
-        "cctv_news",
-        "npr",
-    ),
-    "fundamentals": FUNDAMENTAL_EVENT_DATASETS,
-}
+# Two levels over one source. ``SELECTABLE_DATASETS`` (contracts) is every
+# dataset a domain can load. ``DEFAULT_DATASETS`` is the narrower scope built
+# when an experiment selects nothing — the A-share daily/weekly stock material,
+# one series per concept. Selectable-but-not-default datasets stay
+# downloadable, auditable and opt-in per experiment; the scope and the evidence
+# behind it are in docs/DATA_DOCUMENTATION.md.
 
 # What a snapshot carries when the experiment selects nothing. Excluded by
 # default and why (measured on the 2025-12-31 decision snapshot; the share is
@@ -723,7 +586,7 @@ class SnapshotBuilder:
         mutation run, and fails fast if the lake changed under it anyway
         (a writer bypassing the lock). Lakes without the cron lock file
         (manual/test raw dirs) have no updater to exclude."""
-        lock_path = self.raw_dir.parent.parent / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
+        lock_path = updater_lock_path(self.raw_dir.parent.parent)
         fd = None
         if lock_path.exists():
             fd = os.open(lock_path, os.O_RDONLY)
@@ -1093,7 +956,7 @@ class SnapshotBuilder:
             )
         first_loadable_month = min(
             (
-                path.stem.split("=", 1)[1]
+                partition_value(path)
                 for dataset in datasets
                 for path in (self.fundamental_events_root / dataset).glob("available_month=*.parquet")
             ),
@@ -1509,7 +1372,7 @@ class SnapshotBuilder:
         announced in the month before. A slot outside it is refused with
         ``DividendHistoryError`` rather than served an empty table."""
         months = sorted(
-            path.stem.split("=", 1)[1]
+            partition_value(path)
             for path in (self.fundamental_events_root / "dividend").glob("available_month=*.parquet")
         )
         if not months or months[0] >= start_key[:6]:
@@ -1602,7 +1465,7 @@ class SnapshotBuilder:
         return [
             path
             for path in sorted(dataset_dir.glob("trade_date=*.parquet"))
-            if start_key <= path.stem.split("=", 1)[1] <= end_key
+            if start_key <= partition_value(path) <= end_key
         ]
 
     def _write_minutes_range(
@@ -2520,7 +2383,7 @@ def _require_event_months(
     gaps: dict[str, list[str]] = {}
     for dataset in datasets:
         built = {
-            path.stem.split("=", 1)[1]
+            partition_value(path)
             for path in (root / dataset).glob("available_month=*.parquet")
         }
         missing = [month for month in months if month not in built]
@@ -2571,23 +2434,13 @@ def _stamp_daily_available_at(daily: pd.DataFrame, contract) -> pd.DataFrame:
 
 def _stamp_contract_available_at(frame: pd.DataFrame, contract: DatasetContract, path: Path) -> pd.DataFrame:
     """Replace a union-domain row's raw stamp with its dataset contract's
-    (partition date at the contract clock; ``MACRO_DATASET_CONTRACTS``), in the
-    raw lake's ``YYYY-MM-DD HH:MM:SS+08:00`` form so the union column stays
-    uniform. An unparseable partition date leaves ``available_at`` empty: the
-    PIT wall then drops the row in the conservative direction and counts it,
-    exactly like an unparseable raw stamp."""
-    key = contract.partition_key
-    if key not in frame.columns:
-        raise ValueError(f"{path} has no {key} column; cannot apply the {contract.dataset} contract stamp")
-    out = frame.copy()
-    dates = pd.to_datetime(out[key].astype(str).str.strip(), format="%Y%m%d", errors="coerce")
-    clock = contract.available_time
-    stamped = dates + pd.Timedelta(
-        days=contract.lag_days, hours=clock.hour, minutes=clock.minute, seconds=clock.second
-    )
-    out["available_at"] = stamped.dt.strftime("%Y-%m-%d %H:%M:%S+08:00").fillna("")
-    out["available_at_rule"] = contract.rule
-    return out
+    (``MACRO_DATASET_CONTRACTS``; :meth:`DatasetContract.stamp`), in the raw
+    lake's form so the union column stays uniform."""
+    if contract.partition_key not in frame.columns:
+        raise ValueError(
+            f"{path} has no {contract.partition_key} column; cannot apply the {contract.dataset} contract stamp"
+        )
+    return contract.stamp(frame)
 
 
 def _filter_trade_dates(frame: pd.DataFrame, visible_dates: list[str]) -> pd.DataFrame:

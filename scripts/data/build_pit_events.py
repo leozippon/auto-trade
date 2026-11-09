@@ -30,22 +30,15 @@ from autotrade.environment.data import (
 
 
 def _refuse_manual_production_write(args: argparse.Namespace) -> None:
-    """The cron runner is the ONLY production PIT write entrance (generation
-    record, per-job state, alerting). Only a genuine runner child -- proven by the
-    inherited lock fd -- passes; non-production roots (tests, local lakes)
-    and read-only audits pass."""
-    from autotrade.data_sources.tushare.io import inherited_updater_lock_fd
+    """A manual build into the production PIT root (or under it) is refused
+    with its runner equivalent (``manual_production_write``); non-production
+    roots (tests, local lakes) and the read-only audit subcommand, which has
+    no --output-root, pass."""
+    from autotrade.data_sources.tushare.io import manual_production_write
 
-    if inherited_updater_lock_fd(Path(__file__).resolve().parents[2]) is not None:
-        return  # genuine cron-runner child (inherited the held lock fd)
-    output_root = getattr(args, "output_root", None)
-    if output_root is None:
-        return  # audit subcommand: read-only
     repo_root = Path(__file__).resolve().parents[2]
-    try:
-        if Path(output_root).resolve() != (repo_root / "data" / "pit" / "fundamental_events").resolve():
-            return
-    except OSError:
+    production_events = repo_root / "data" / "pit" / "fundamental_events"
+    if not manual_production_write(repo_root, production_events, getattr(args, "output_root", None)):
         return
     raise SystemExit(
         "direct manual writes to the production PIT root are not supported; run\n"

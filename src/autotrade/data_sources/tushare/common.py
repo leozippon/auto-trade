@@ -23,46 +23,22 @@ import numpy as np
 import pandas as pd
 import requests
 
+from autotrade.common.time import cn_today
+
 # Raw-lake research contract values are owned by the environment's PIT layer;
 # the ingest adapter imports them so producer and consumer cannot drift.
-# STK_AUCTION_PRICE_ABS_TOLERANCE is re-exported: download.py reads it from
-# this hub, like the .io re-exports below.
-from autotrade.environment.data.contracts import (  # noqa: F401
+from autotrade.environment.data.contracts import (
     BENCHMARK_INDEXES,
     BOARD_TRADING_DATASETS,
     DOMAIN_STATUS_FILES,
     REFRESH_NODES,
-    STK_AUCTION_PRICE_ABS_TOLERANCE,
     TEXT_DATASET_REFRESH_NODES,
     TEXT_NODE,
 )
-from autotrade.environment.data.pit import first_seen_at
+from autotrade.environment.data.pit import first_seen_at, partition_value
 
-from .io import (  # noqa: F401 -- re-exported via this hub (audit.py imports has_pagination_probe, download.py imports inherited_updater_lock_fd from common)
-    CorruptSidecarError,
-    append_jsonl_unique,
-    committed_partition_intact,
-    frames_content_equal,
-    has_pagination_probe,
-    inherited_updater_lock_fd,
-    parquet_meta,
-    parquet_rows,
-    read_many,
-    write_parquet,
-)
-from .versions import (  # noqa: F401 -- re-exported via this hub
-    REVISION_EVENT_FIELDS,
-    REVISION_EVENT_SCHEMA_VERSION,
-    DefectiveAnswer,
-    answer_defects,
-    diff_frames,
-    list_versions,
-    publish,
-    record_defect,
-    report_complete,
-    revision_event,
-    version_dir,
-)
+from .io import committed_partition_intact, parquet_meta, parquet_rows, read_many
+from .versions import DefectiveAnswer, publish
 
 DEFAULT_TUSHARE_RELAY_URL = "https://fast.xiaodefa.cn"
 
@@ -1870,9 +1846,6 @@ def selected_daily_datasets(args: argparse.Namespace, *, default: Iterable[str] 
         label="daily market",
     )
 
-def partition_date(path: Path) -> str:
-    return path.stem.split("=", 1)[1] if "=" in path.stem else ""
-
 def selected_fundamental_datasets(values: Iterable[str] | None) -> list[str]:
     return select_datasets(values, default=FUNDAMENTAL_DATASETS, allowed=FUNDAMENTAL_SPECS, label="fundamental")
 
@@ -2100,14 +2073,16 @@ def selected_eco_filter_values(args: argparse.Namespace, attr: str) -> list[str 
     values = [str(value).strip() for value in getattr(args, attr, None) or [] if str(value).strip()]
     return values or [None]
 
-def write_macro_result(
+def write_frame(
     path: Path,
-    result: ApiResult,
+    df: pd.DataFrame,
     spec: DatasetSpec,
     params: dict[str, Any],
     revision_ledger: Path | str | None = None,
-) -> int:
-    df = augment_macro_frame(frame(result), spec)
+) -> tuple[bool, int]:
+    """Publish one augmented answer at ``path`` under ``spec``'s key. Returns
+    whether the visible partition changed and the rows that change wrote (0
+    when ``publish`` wrote nothing)."""
     outcome = publish(
         path,
         df,
@@ -2116,8 +2091,10 @@ def write_macro_result(
         fields=list(df.columns),
         key_columns=list(spec.key_columns),
         ledger=revision_ledger,
+        deduplicate=spec.unique_key,
     )
-    return len(df) if outcome in WRITTEN_OUTCOMES else 0
+    written = outcome in WRITTEN_OUTCOMES
+    return written, len(df) if written else 0
 
 def selected_event_flow_datasets(args: argparse.Namespace) -> list[str]:
     return select_datasets(args.datasets, default=EVENT_FLOW_DATASETS, allowed=EVENT_FLOW_SPECS, label="event/flow")
@@ -2321,25 +2298,6 @@ def augment_board_frame(df: pd.DataFrame, spec: DatasetSpec, params: dict[str, A
     if spec.strategy == FetchStrategy.STATIC_FULL and out["available_at"].astype(str).str.strip().eq("").all():
         out["available_at_rule"] = "static_reference_no_pit_time"
     return out
-
-def write_board_result(
-    path: Path,
-    result: ApiResult,
-    spec: DatasetSpec,
-    params: dict[str, Any],
-    revision_ledger: Path | str | None = None,
-) -> int:
-    df = augment_board_frame(frame(result), spec, params)
-    outcome = publish(
-        path,
-        df,
-        api_name=spec.api_name,
-        params=params,
-        fields=list(df.columns),
-        key_columns=list(spec.key_columns),
-        ledger=revision_ledger,
-    )
-    return len(df) if outcome in WRITTEN_OUTCOMES else 0
 
 def selected_intraday_datasets(values: Iterable[str] | None) -> list[str]:
     aliases = {"stk_mins": STK_MINS_DATASET}
@@ -2776,7 +2734,7 @@ def repair_event_available_at(raw_dir: str, datasets: list[str]) -> dict[str, An
         partitions = sorted((raw / dataset).glob("trade_date=*.parquet"))
         if not partitions:
             raise RuntimeError(f"no partitions under {raw / dataset}")
-        open_dates = load_sse_open_dates(raw, partition_date(partitions[0]), latest_sse_calendar_date(raw))
+        open_dates = load_sse_open_dates(raw, partition_value(partitions[0]), latest_sse_calendar_date(raw))
         files, changed_rows = _rewrite_available_at(
             raw / dataset, partial(_restamp_event, spec=spec, trading_dates=open_dates), spec.key_columns
         )
@@ -2818,7 +2776,7 @@ def add_intraday_by_date_common_args(
     expected_choices = expected_codes_choices or ["none", "daily", "active", "minute"]
     add_raw_arg(parser)
     parser.add_argument("--start-date", default="20200101")
-    parser.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    parser.add_argument("--end-date", default=cn_today())
     parser.add_argument("--output-dataset", default=STK_MINS_BY_DATE_DATASET)
     parser.add_argument("--codes", nargs="+", help="Optional explicit ts_code list for window tests or targeted refreshes.")
     parser.add_argument("--max-codes", type=int, help="Optional first-N stock_basic/daily codes for window tests.")

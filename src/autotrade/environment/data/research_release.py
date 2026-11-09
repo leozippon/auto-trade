@@ -27,13 +27,13 @@ import uuid
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.data_quality import read_quality_report
 from autotrade.environment.data.contracts import (
     DOMAIN_REPORT_TYPES,
@@ -41,6 +41,7 @@ from autotrade.environment.data.contracts import (
     RAW_GENERATION_FILENAME,
     benchmark_index_label,
     require_committed_generation,
+    updater_lock_path,
 )
 from autotrade.environment.data.pit import (
     FIRST_SEEN_SUFFIX,
@@ -253,7 +254,7 @@ def pin_research_release(
                     experiment_dir, shared, quality_source=shared.baseline_quality_dir
                 )
 
-        update_lock = raw_dir.parent.parent / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
+        update_lock = updater_lock_path(raw_dir.parent.parent)
         generation_path = raw_dir / RAW_GENERATION_FILENAME
         if not update_lock.exists() and not generation_path.exists():
             _require_raw_datasets(raw_dir, required_raw_datasets, context=f"live raw dir {raw_dir}")
@@ -558,7 +559,7 @@ def _create_global_release(
             "schema_version": _SCHEMA_VERSION,
             "kind": "research_release",
             "generation_id": generation_id,
-            "created_at": _utc_now(),
+            "created_at": utc_now(),
             "raw_generation": generation,
             "fundamental_status_name": fundamental_status_name,
             "quality_files": quality_files,
@@ -604,7 +605,7 @@ def _publish_experiment_pin(
                 "schema_version": _SCHEMA_VERSION,
                 "kind": "experiment_research_release",
                 "generation_id": shared.generation_id,
-                "created_at": _utc_now(),
+                "created_at": utc_now(),
                 "quality_files": quality_files,
             },
             default=None,
@@ -999,10 +1000,6 @@ def _read_json(path: Path, *, description: str) -> dict[str, object]:
         return read_json_object(path)
     except (OSError, ValueError) as exc:
         raise RuntimeError(f"invalid {description}: {exc}") from exc
-
-
-def _utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 @contextmanager

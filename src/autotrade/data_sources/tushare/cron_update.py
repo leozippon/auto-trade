@@ -13,16 +13,18 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from autotrade.common.records import read_json_object
+from autotrade.common.time import utc_now
 from autotrade.environment.data.contracts import (
     GENERATION_COMMITTED,
     GENERATION_SCHEMA_VERSION,
     GENERATION_UPDATING,
     RAW_GENERATION_FILENAME,
+    updater_lock_path,
 )
 from autotrade.environment.data.pit import complete_interrupted_commits
 
@@ -36,9 +38,8 @@ from .common import (
     format_yyyymmdd,
     normalize_date_key,
     parse_yyyymmdd,
-    read_many,
 )
-from .io import UPDATER_LOCK_FD_ENV
+from .io import UPDATER_LOCK_FD_ENV, read_many
 from .versions import RUN_REPORT_ENV, dataset_vintage
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
@@ -718,11 +719,12 @@ class FileLock:
             os.close(self.fd)
 
 
-def acquire_lock(lock_name: str, wait_seconds: int) -> FileLock:
-    """Exclusive kernel flock: released automatically when the holder exits,
-    so a crashed/killed run can never leave a permanently stale lock (the old
-    PID-file scheme broke on PID reuse). pid/started_at are diagnostics only."""
-    lock = RUNTIME_ROOT / "locks" / f"{lock_name}.lock"
+def acquire_lock(repo_root: Path, wait_seconds: int) -> FileLock:
+    """Exclusive kernel flock on the updater lock of ``repo_root``: released
+    automatically when the holder exits, so a crashed/killed run can never
+    leave a permanently stale lock (the old PID-file scheme broke on PID
+    reuse). pid/started_at are diagnostics only."""
+    lock = updater_lock_path(repo_root)
     lock.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock, os.O_CREAT | os.O_RDWR)
     deadline = time.monotonic() + max(0, wait_seconds)
@@ -743,11 +745,7 @@ def acquire_lock(lock_name: str, wait_seconds: int) -> FileLock:
     return FileLock(lock, fd)
 
 
-def utc_now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds")
-
-
-def _read_raw_generation_file(raw_dir: Path) -> dict:
+def read_raw_generation_file(raw_dir: Path) -> dict:
     """Writer-side lenient read: a job must see an ``updating`` record too."""
     path = raw_dir / RAW_GENERATION_FILENAME
     if not path.exists():
@@ -775,7 +773,7 @@ def begin_raw_generation_update(raw_dir: Path, transaction: dict) -> dict:
     which the per-dataset refresh times show), and the updater lock already
     serialises writers. ``updating`` only tells consumers that the lake may
     differ from ``generation_id`` until this job commits."""
-    previous = _read_raw_generation_file(raw_dir)
+    previous = read_raw_generation_file(raw_dir)
     _write_raw_generation_file(raw_dir, {
         "schema_version": GENERATION_SCHEMA_VERSION,
         "state": GENERATION_UPDATING,
@@ -851,7 +849,7 @@ def read_run_report(path: Path | None) -> list[dict]:
     return outcomes
 
 
-def _issue_key(issue: dict) -> tuple[str, str, str]:
+def issue_key(issue: dict) -> tuple[str, str, str]:
     return str(issue.get("kind")), str(issue.get("dataset")), str(issue.get("partition") or "")
 
 
@@ -866,7 +864,7 @@ def fold_outcomes(datasets: dict, issues: list, outcomes: list[dict], *, at: str
     partitions was defective or staged in the same batch: a job that failed
     after landing the daily core refreshes the core and leaves the steps it
     never finished at their earlier time."""
-    open_issues = {_issue_key(issue): dict(issue) for issue in issues}
+    open_issues = {issue_key(issue): dict(issue) for issue in issues}
     pulled: set[str] = set()
     complete: set[str] = set()
     withheld: set[str] = set()
@@ -890,7 +888,7 @@ def fold_outcomes(datasets: dict, issues: list, outcomes: list[dict], *, at: str
             restated.add(dataset)
     for dataset in complete - withheld:
         datasets.setdefault(dataset, {})["refreshed_at"] = at
-    issues[:] = sorted(open_issues.values(), key=_issue_key)
+    issues[:] = sorted(open_issues.values(), key=issue_key)
     return pulled, restated
 
 
@@ -1066,7 +1064,7 @@ def run_history_repull(
     _, restated = fold_outcomes(datasets, issues, read_run_report(report), at=utc_now())
     defective = any(issue["kind"] == "defect" and issue["dataset"] == dataset for issue in issues)
     if code == 0 and not defective:
-        issues[:] = [issue for issue in issues if _issue_key(issue) != ("history_repull", dataset, "")]
+        issues[:] = [issue for issue in issues if issue_key(issue) != ("history_repull", dataset, "")]
     print(json.dumps({"note": "history_repull", "dataset": dataset, "returncode": code}, ensure_ascii=False))
     return code, restated
 
@@ -1095,13 +1093,13 @@ def finish_job(
     issues = [dict(issue) for issue in previous.get("issues") or []]
     pulled, restated = fold_outcomes(datasets, issues, read_run_report(report), at=utc_now())
     policy = history_repull_policy(ctx.config)
-    open_keys = {_issue_key(issue) for issue in issues}
+    open_keys = {issue_key(issue) for issue in issues}
     for dataset in sorted(restated):
         if policy.get(dataset) == "on_restatement" and ("history_repull", dataset, "") not in open_keys:
             issues.append({"kind": "history_repull", "dataset": dataset, "partition": "", "since": utc_now(), "detail": "", "version": ""})
-    issues.sort(key=_issue_key)
+    issues.sort(key=issue_key)
     for dataset in sorted(pulled) if repull else ():
-        if any(_issue_key(issue) == ("history_repull", dataset, "") for issue in issues):
+        if any(issue_key(issue) == ("history_repull", dataset, "") for issue in issues):
             _, repull_restated = run_history_repull(ctx, dataset, log_path, lock_fd, datasets, issues)
             restated |= repull_restated
             commit = True
@@ -1161,7 +1159,7 @@ def _run(args: argparse.Namespace) -> int:
         })
         log_outcome(log_path, {**record, "job": ctx.job_name})
         return 0
-    generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
+    generation = read_raw_generation_file(raw_dir) if mutates_lake else {}
     generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
     if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
         # A skip confirms the previous ok outcome: the state file keeps
@@ -1172,7 +1170,7 @@ def _run(args: argparse.Namespace) -> int:
 
     try:
         lock = acquire_lock(
-            "tushare_update",
+            ctx.repo_root,
             int(ctx.job.get("lock_wait_seconds", ctx.config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS))),
         )
     except RuntimeError as exc:
@@ -1198,7 +1196,7 @@ def _run(args: argparse.Namespace) -> int:
         if any(swept.values()):
             log_outcome(log_path, {"note": "interrupted_commits_rolled_forward", **swept, "job": ctx.job_name})
         job_state = read_job_state(ctx.job_name)
-        generation = _read_raw_generation_file(raw_dir) if mutates_lake else {}
+        generation = read_raw_generation_file(raw_dir) if mutates_lake else {}
         generation_committed = str(generation.get("state", GENERATION_COMMITTED)) == GENERATION_COMMITTED
         if should_skip_completed(ctx, args, job_state, payload) and generation_committed:
             log_outcome(log_path, {"status": "skipped_already_ok_after_lock", **payload})

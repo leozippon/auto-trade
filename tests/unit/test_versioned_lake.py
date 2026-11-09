@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from autotrade.data_sources.tushare import common, cron_update, versions
+from autotrade.data_sources.tushare import cron_update, versions
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data import research_release
 from autotrade.environment.data.pit import (
@@ -63,7 +63,7 @@ class VersionedPartitionTest(unittest.TestCase):
         return {row.ts_code: row.first_seen_at for row in table.itertuples()}
 
     def visible_since(self) -> str:
-        return common.parquet_meta(self.path)["visible_since"]
+        return tushare_io.parquet_meta(self.path)["visible_since"]
 
     def test_a_pure_append_replaces_the_partition_without_keeping_a_copy(self) -> None:
         self.assertEqual(self.publish(rows(("A", "20261001", 1.0), ("B", "20261002", 2.0))), "appended")
@@ -88,7 +88,7 @@ class VersionedPartitionTest(unittest.TestCase):
         self.assertTrue(superseded.endswith("-superseded"))
         kept = versions.version_dir(self.path) / f"{superseded}.parquet"
         self.assertTrue(pd.read_parquet(kept).equals(before))
-        self.assertTrue(common.committed_partition_intact(kept))
+        self.assertTrue(tushare_io.committed_partition_intact(kept))
         (event,) = self.events()
         self.assertEqual(
             {key: event[key] for key in ("kind", "partition", "old_keys", "added_keys", "removed_keys", "changed_keys")},
@@ -103,7 +103,7 @@ class VersionedPartitionTest(unittest.TestCase):
             result = versions.restore(self.path, superseded, ledger=self.ledger)
         self.assertEqual(result["kind"], "revert")
         self.assertTrue(pd.read_parquet(self.path).equals(before))
-        self.assertTrue(common.committed_partition_intact(self.path))
+        self.assertTrue(tushare_io.committed_partition_intact(self.path))
         # The revert swapped the pointer: the old file is visible again, the
         # content it replaced is kept, and the vintage is the old one.
         self.assertEqual(os.stat(self.path).st_ino, os.stat(kept).st_ino)
@@ -139,14 +139,14 @@ class VersionedPartitionTest(unittest.TestCase):
     def test_a_defective_answer_keeps_the_current_version(self) -> None:
         current = rows(("A", "20261001", 1.0))
         self.publish(current)
-        identity = common.parquet_meta(self.path)["write_id"]
+        identity = tushare_io.parquet_meta(self.path)["write_id"]
         report = self.root / "report.jsonl"
         with patch.dict(os.environ, {versions.RUN_REPORT_ENV: str(report)}):
             self.assertEqual(self.publish(current.iloc[:0]), "defect")
             with redirect_stdout(io.StringIO()), versions.answer_defects(self.path, ledger=self.ledger):
                 raise versions.DefectiveAnswer("repurchase returned inconsistent fields while paging")
         self.assertTrue(pd.read_parquet(self.path).equals(current))
-        self.assertEqual(common.parquet_meta(self.path)["write_id"], identity)
+        self.assertEqual(tushare_io.parquet_meta(self.path)["write_id"], identity)
         self.assertEqual([event["kind"] for event in self.events()], ["defect", "defect"])
         outcomes = [json.loads(line) for line in report.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(
@@ -157,7 +157,7 @@ class VersionedPartitionTest(unittest.TestCase):
     def test_the_observation_table_records_when_each_key_first_became_visible(self) -> None:
         # Keys visible before versioning started (a sidecar without
         # visible_since) have no row.
-        common.write_parquet(self.path, rows(("A", "20261001", 1.0)), api_name="repurchase", params={}, fields=[])
+        tushare_io.write_parquet(self.path, rows(("A", "20261001", 1.0)), api_name="repurchase", params={}, fields=[])
         self.publish(rows(("A", "20261001", 1.0), ("B", "20261002", 2.0)))
         first = self.observed()
         self.assertEqual(first, {"B": self.visible_since()})
@@ -194,7 +194,7 @@ class VersionedPartitionTest(unittest.TestCase):
         self.assertTrue(first_seen_between(path, datetime(2026, 1, 1, tzinfo=cn), datetime(2027, 1, 1, tzinfo=cn)))
 
     def test_rebuilt_observations_are_never_earlier_than_the_recorded_ones(self) -> None:
-        common.write_parquet(self.path, rows(("A", "20261001", 1.0)), api_name="repurchase", params={}, fields=[])
+        tushare_io.write_parquet(self.path, rows(("A", "20261001", 1.0)), api_name="repurchase", params={}, fields=[])
         self.publish(rows(("A", "20261001", 1.0), ("B", "20261002", 2.0)))
         self.publish(rows(("A", "20261001", 1.0), ("B", "20261002", 2.0), ("C", "20261003", 3.0)))
         self.publish(rows(("A", "20261001", 2.0), ("C", "20261003", 3.0)))  # restatement: copy kept
@@ -219,7 +219,7 @@ class VersionedPartitionTest(unittest.TestCase):
         with patch.object(versions, "_record_observations", side_effect=OSError("crash")), self.assertRaises(OSError):
             self.publish(restated)
         self.assertTrue(pd.read_parquet(self.path).equals(current))
-        self.assertTrue(common.committed_partition_intact(self.path))
+        self.assertTrue(tushare_io.committed_partition_intact(self.path))
         self.assertEqual(len(versions.list_versions(self.path)), 1)
 
         # 2. After the observation table, before the partition: its new rows
@@ -241,9 +241,9 @@ class VersionedPartitionTest(unittest.TestCase):
         with patch.object(tushare_io.os, "replace", side_effect=replace), self.assertRaises(OSError):
             self.publish(restated)
         self.assertTrue(pd.read_parquet(self.path).equals(restated))
-        self.assertFalse(common.committed_partition_intact(self.path))
+        self.assertFalse(tushare_io.committed_partition_intact(self.path))
         versions.complete_interrupted_commit(self.path)
-        self.assertTrue(common.committed_partition_intact(self.path))
+        self.assertTrue(tushare_io.committed_partition_intact(self.path))
         self.assertEqual(self.observed()["C"], self.visible_since())
         self.assertEqual(self.publish(restated), "unchanged")
 
@@ -285,7 +285,7 @@ class VersionedPartitionTest(unittest.TestCase):
         # The torn commit was finished, the one that never became visible dropped.
         self.assertEqual(pd.read_parquet(cloned / torn.name)["vol"].tolist(), [2.0])
         self.assertEqual(pd.read_parquet(cloned / unrenamed.name)["vol"].tolist(), [1.0])
-        self.assertTrue(common.committed_partition_intact(torn) and common.committed_partition_intact(unrenamed))
+        self.assertTrue(tushare_io.committed_partition_intact(torn) and tushare_io.committed_partition_intact(unrenamed))
         # A dataset built outside the updater lock may be mid-write: its
         # staged files are left alone.
         building = raw / "intraday_flow" / ".trade_date=20261023.parquet.0f1e2d3c.tmp"
@@ -300,7 +300,7 @@ class VersionedPartitionTest(unittest.TestCase):
         recorded = table.read_bytes()
         sidecar = versions.sidecar_path(self.path)
         sidecar.write_text("{", encoding="utf-8")
-        with self.assertRaises(common.CorruptSidecarError):
+        with self.assertRaises(tushare_io.CorruptSidecarError):
             versions.read_observations(self.path)
         with self.assertRaisesRegex(RuntimeError, "holds 1 first-seen rows but the sidecar .* records no visible_since"):
             self.publish(rows(("A", "20261001", 1.0), ("B", "20261002", 2.0)))
@@ -315,10 +315,10 @@ class VersionedPartitionTest(unittest.TestCase):
         refetched = {"available_at": "2026-10-23T23:32:00+08:00", "rule": "observed:recheck"}
         self.assertEqual(self.publish(rows(("A", "20261023", 1.0)), extra_metadata={"availability": refetched}), "staged")
         (staged,) = versions.list_versions(self.path)
-        self.assertEqual(common.parquet_meta(versions.version_dir(self.path) / f"{staged}.parquet")["availability"], refetched)
+        self.assertEqual(tushare_io.parquet_meta(versions.version_dir(self.path) / f"{staged}.parquet")["availability"], refetched)
         with redirect_stdout(io.StringIO()):
             versions.restore(self.path, staged, ledger=self.ledger)
-        self.assertEqual(common.parquet_meta(self.path)["availability"], refetched)
+        self.assertEqual(tushare_io.parquet_meta(self.path)["availability"], refetched)
 
     def test_duplicate_keys_are_dropped_the_same_way_whatever_the_order(self) -> None:
         served = rows(("A", "20261001", 2.0), ("A", "20261001", 1.0), ("B", "20261002", 1.0))

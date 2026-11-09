@@ -96,7 +96,6 @@ class ReleasePruneTest(unittest.TestCase):
         out = io.StringIO()
         with (
             chdir(self.root),
-            patch.object(cron_update, "RUNTIME_ROOT", self.root / ".runtime" / "tushare"),
             redirect_stdout(out),
         ):
             result = lake.prune_releases(str(self.config), apply=apply)

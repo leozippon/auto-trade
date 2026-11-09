@@ -6,8 +6,10 @@ stock-day for every dataset in ``DERIVED`` -- ``intraday_flow`` (signed order
 flow) and ``intraday_stats`` (realized moments and the intraday profile) -- and
 writes ``data/raw/<dataset>/trade_date=<D>.parquet`` with the lake's usual
 sidecar. One streamed pass, one minute partition in memory at a time and read
-once for all datasets still missing that day; existing output partitions are
-skipped unless ``--rebuild``, so the nightly run costs one trade date.
+once for all datasets still missing that day; an output partition whose
+parquet and sidecar are one committed write is skipped unless ``--rebuild``,
+so the nightly run costs one trade date, and a partition a killed run left
+half-committed is built again.
 
 Run it after the minute download has landed:
 
@@ -32,7 +34,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.data_sources.tushare.io import write_parquet
+from autotrade.data_sources.tushare.io import committed_partition_intact, write_parquet
 from autotrade.environment.data.intraday_flow import (
     INTRADAY_FLOW_DATASET,
     MINUTE_COLUMNS,
@@ -67,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--rebuild",
         action="store_true",
-        help="Recompute partitions that already exist instead of skipping them.",
+        help="Recompute partitions that are already committed instead of skipping them.",
     )
     return parser
 
@@ -102,7 +104,7 @@ def main() -> int:
         todo = [
             dataset
             for dataset in datasets
-            if args.rebuild or not (raw_dir / dataset / f"trade_date={day}.parquet").exists()
+            if args.rebuild or not committed_partition_intact(raw_dir / dataset / f"trade_date={day}.parquet")
         ]
         if not todo:
             continue

@@ -104,7 +104,7 @@ class ResearchReleaseTest(unittest.TestCase):
         # A release manifest is read back as written; a value rendered by str()
         # would read back as another type, so the write refuses it instead.
         with (
-            patch.object(research_release, "_utc_now", return_value=datetime(2026, 1, 3, tzinfo=UTC)),
+            patch.object(research_release, "utc_now", return_value=datetime(2026, 1, 3, tzinfo=UTC)),
             self.assertRaisesRegex(TypeError, "not JSON serializable"),
         ):
             self._pin("strict")

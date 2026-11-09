@@ -4,6 +4,8 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
 
+import pandas as pd
+
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
 
@@ -26,6 +28,12 @@ GENERATION_SCHEMA_VERSION = 3
 READABLE_GENERATION_SCHEMAS = frozenset({2, GENERATION_SCHEMA_VERSION})
 GENERATION_COMMITTED = "committed"
 GENERATION_UPDATING = "updating"
+
+
+def updater_lock_path(repo_root: Path) -> Path:
+    """The one updater lock file: the cron runner holds it exclusively for
+    every job, and readers of the live lake take it shared."""
+    return repo_root / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
 
 
 def require_committed_generation(payload: dict[str, object]) -> None:
@@ -160,6 +168,163 @@ BOARD_TRADING_DATASETS = [
     "dc_hot",
 ]
 
+FUNDAMENTAL_EVENT_DATASETS = (
+    "income_vip",
+    "balancesheet_vip",
+    "cashflow_vip",
+    "fina_indicator_vip",
+    "forecast_vip",
+    "express_vip",
+    "dividend",
+    "fina_audit",
+    "fina_mainbz_vip",
+    "disclosure_date",
+)
+
+# ---- Agent-visible dataset scope -------------------------------------------
+# Every dataset a domain can load: the raw lake downloads and audits all of
+# them and the fail-closed unit registry classifies every one of their columns,
+# so an experiment may select any subset. The snapshot's ``DEFAULT_DATASETS``
+# is the narrower scope built when an experiment selects nothing.
+#
+# Never selectable (raw keeps downloading; re-enable once the stated condition
+# is met):
+# - pledge_detail: 24% of in-window business keys carry contradictory versions
+#   (is_release/is_buyback/amount conflicts) with no version column — excluded
+#   until source identity rules exist (data docs §4).
+# - repurchase: same defect class at ~3% (conflicting amounts/price caps for
+#   one announcement) — excluded with the same re-inclusion condition.
+# - hm_list: daily-refreshed reference without PIT timestamps; contributed 0
+#   rows to every snapshot ever built and injected two all-null columns.
+# - slb_len_mm / slb_len: 转融通 feeds dead at source (last rows 2025-07-25,
+#   zero-row ever since); datasets decommissioned.
+# - cn_schedule: the source keeps only the current months, so it contributes
+#   nothing to a historical replay.
+SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
+    "events": (
+        # 两融
+        "margin",
+        "margin_detail",
+        "margin_secs",
+        # per-stock money flow (one official series plus two vendor variants)
+        # and the industry/concept aggregates derived from them
+        "moneyflow",
+        "moneyflow_dc",
+        "moneyflow_ths",
+        "moneyflow_ind_dc",
+        "moneyflow_ind_ths",
+        "moneyflow_cnt_ths",
+        # per-stock trading structure
+        "cyq_perf",
+        "bak_daily",
+        "block_trade",
+        # locally derived daily order flow: one tick-rule signed-imbalance row
+        # per stock-day, reduced from that day's own minute bars so a strategy
+        # can use signed flow without mounting the minute domain. Opt-in, never
+        # default: it duplicates no vendor series but only pays for itself in a
+        # strategy that actually models order flow.
+        "intraday_flow",
+        # its sibling from the same minute bars and build: realized variance,
+        # skewness, kurtosis and signed jumps plus the open/mid/close return
+        # and volume profile of one stock-day. Opt-in likewise: it pays for
+        # itself only in a strategy that models intraday dynamics.
+        "intraday_stats",
+        # shareholder structure and share supply
+        "stk_holdernumber",
+        "stk_holdertrade",
+        "top10_holders",
+        "top10_floatholders",
+        "stk_surv",
+        "new_share",
+        "share_float_complete",
+        # 龙虎榜 and the official full-market 涨跌停/炸板 list (history since
+        # 2020-01; row-level available_at at trade-date 16:00)
+        "top_list",
+        "top_inst",
+        "limit_list_d",
+        # board-trading / sentiment cluster (row-level available_at; day-end or
+        # next-morning labels — descriptive sentiment signals, never a truth
+        # source for fills, tradability or risk)
+        "kpl_list",
+        "limit_step",
+        "limit_cpt_list",
+        "limit_list_ths",
+        "ths_hot",
+        "dc_hot",
+        "hm_detail",
+        # sell-side earnings forecasts: the numeric/rating/coverage slice of
+        # the text dataset of the same name (raw available_at from
+        # create_time; the title stays in the text domain). ``quarter`` is the
+        # fiscal YEAR the forecast targets (2024Q4 = FY2024).
+        "report_rc",
+    ),
+    "macro": (
+        # CN macro releases
+        "cn_gdp",
+        "cn_cpi",
+        "cn_ppi",
+        "cn_pmi",
+        "cn_m",
+        "sf_month",
+        "eco_cal",
+        # money market and policy rates
+        "shibor",
+        "shibor_quote",
+        "shibor_lpr",
+        "repo_daily",
+        # A-share index and industry context
+        "index_daily",
+        "index_dailybasic",
+        "sw_daily",
+        # Month-end constituents and weights of the seven core indices. The
+        # only face in this domain that is per-stock rather than per-series:
+        # one row per (index, constituent, month-end trade date), keyed on
+        # ``con_code``, so a strategy can build and measure a book inside a
+        # benchmark instead of against it. Opt-in and never default — it is
+        # useless to a book built off the whole pool, and the SSE-composite
+        # cross-section alone is ~2,250 rows a month.
+        "index_weight",
+        "ci_daily",
+        "ths_daily",
+        # exchange aggregates and market-level money flow
+        "daily_info",
+        "sz_daily_info",
+        "moneyflow_mkt_dc",
+        "broker_recommend",
+        # offshore equity, FX and US yield curves
+        "index_global",
+        "fx_daily",
+        "us_tycr",
+        "us_trycr",
+        "us_tbr",
+        "us_tltr",
+        # derivatives and convertible bonds (non-tradable context; the Agent
+        # computes basis, PCR and conversion premium itself)
+        "fut_basic",
+        "fut_mapping",
+        "fut_daily",
+        "opt_basic",
+        "opt_daily",
+        "cb_basic",
+        "cb_daily",
+        "cb_call",
+    ),
+    "text": (
+        # per-stock text (every row carries ts_code)
+        "anns_d",
+        "research_report",
+        "report_rc",
+        "irm_qa_sh",
+        "irm_qa_sz",
+        # market-wide newswire (no ts_code on any row)
+        "major_news",
+        "news",
+        "cctv_news",
+        "npr",
+    ),
+    "fundamentals": FUNDAMENTAL_EVENT_DATASETS,
+}
+
 
 # Close-published daily tables: the row is public on its data date, after the
 # close at the latest, so the daily core and the same-day macro tables below
@@ -183,6 +348,22 @@ class DatasetContract:
         """``available_at_rule`` label for rows stamped by this contract."""
         lag = f"+{self.lag_days}d" if self.lag_days else ""
         return f"contract_{self.available_time:%H%M}{lag}_from:{self.partition_key}"
+
+    def stamp(self, frame: pd.DataFrame) -> pd.DataFrame:
+        """``frame`` with ``available_at``/``available_at_rule`` from this
+        contract: the row's partition date at the contract clock, in the raw
+        lake's ``YYYY-MM-DD HH:MM:SS+08:00`` form. An unparseable partition date
+        leaves ``available_at`` empty, which the PIT wall drops (and counts) in
+        the conservative direction like an unparseable raw stamp."""
+        dates = pd.to_datetime(frame[self.partition_key].astype(str).str.strip(), format="%Y%m%d", errors="coerce")
+        clock = self.available_time
+        stamped = dates + pd.Timedelta(
+            days=self.lag_days, hours=clock.hour, minutes=clock.minute, seconds=clock.second
+        )
+        out = frame.copy()
+        out["available_at"] = stamped.dt.strftime("%Y-%m-%d %H:%M:%S+08:00").fillna("")
+        out["available_at_rule"] = self.rule
+        return out
 
 
 # Locally derived events dataset: one order-flow row per stock-day, reduced

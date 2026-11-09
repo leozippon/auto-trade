@@ -141,6 +141,19 @@ class AvailableAtParsingTest(unittest.TestCase):
 
 
 class FundamentalEventsBuilderTest(unittest.TestCase):
+    def test_event_keys_and_raw_patterns_follow_the_raw_specs(self):
+        """The event layer restates each raw table's key and partition layout;
+        only disclosure_date's key differs, by design (its realised
+        actual_date is a second version of one record, not identity)."""
+        from autotrade.data_sources.tushare.common import FUNDAMENTAL_SPECS
+        from autotrade.environment.data import fundamental_events
+
+        for dataset in fundamental_events.FUNDAMENTAL_EVENT_DATASETS:
+            spec = FUNDAMENTAL_SPECS[dataset]
+            raw_key = tuple(column for column in spec.key_columns if (dataset, column) != ("disclosure_date", "actual_date"))
+            self.assertEqual(fundamental_events.BUSINESS_KEYS[dataset], raw_key, dataset)
+            self.assertEqual(fundamental_events.RAW_PATTERNS[dataset], f"{spec.strategy.value}=*.parquet", dataset)
+
     def test_builds_available_month_events_and_audit_report(self):
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp) / "raw"
@@ -1255,11 +1268,8 @@ class UnitRegistryProjectionTest(unittest.TestCase):
             fundamental_unit_rules,
             macro_unit_rules,
         )
-        from autotrade.data_sources.tushare.common import (
-            BOARD_TRADING_DATASETS,
-            EVENT_FLOW_SPECS,
-            MACRO_SPECS,
-        )
+        from autotrade.data_sources.tushare.common import EVENT_FLOW_SPECS, MACRO_SPECS
+        from autotrade.environment.data.contracts import BOARD_TRADING_DATASETS
         from autotrade.environment.data.units import FIELD_RULES
 
         registry_records = [rule.to_record() for rule in FIELD_RULES]

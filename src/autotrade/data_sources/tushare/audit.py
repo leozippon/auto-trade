@@ -8,7 +8,7 @@ import json
 import re
 from bisect import bisect_left
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,10 +16,16 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
-from autotrade.common.time import CN_TZ
+from autotrade.common.time import CN_TZ, cn_today
 from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
-from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
+from autotrade.environment.data.contracts import (
+    BOARD_TRADING_DATASETS,
+    SELECTABLE_DATASETS,
+    default_tushare_contracts,
+)
+from autotrade.environment.data.fundamental_events import STATEMENT_DATASETS
+from autotrade.environment.data.pit import partition_value
 from autotrade.environment.data.units import (
     UnresolvedUnitError,
     column_source_units,
@@ -31,7 +37,6 @@ from autotrade.environment.data.units import (
 from . import common as core
 from .common import (
     BAK_BASIC_SPEC,
-    BOARD_TRADING_DATASETS,
     BOARD_TRADING_SPECS,
     BOARD_TRADING_STATUS_PATH,
     CORE_MARKET_STATUS_PATH,
@@ -64,14 +69,10 @@ from .common import (
     FetchStrategy,
     TuShareClient,
     active_year_windows,
-    append_jsonl_unique,
     augment_board_frame,
     augment_event_frame,
-    committed_partition_intact,
     date_range_days,
-    diff_frames,
     frame,
-    has_pagination_probe,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
     load_minute_universe,
@@ -82,14 +83,9 @@ from .common import (
     margin_family_missing_exchanges,
     month_end_from_yyyymm,
     month_windows,
-    parquet_meta,
-    parquet_rows,
-    partition_date,
     quarter_periods,
     query_paged,
-    read_many,
     retained_range_start,
-    revision_event,
     safe_partition_value,
     select_datasets,
     selected_board_dc_hot_markets,
@@ -114,6 +110,16 @@ from .common import (
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
 )
+from .io import (
+    CorruptSidecarError,
+    append_jsonl_unique,
+    committed_partition_intact,
+    has_pagination_probe,
+    parquet_meta,
+    parquet_rows,
+    read_many,
+)
+from .versions import diff_frames, revision_event
 
 # The one-line summary every audit prints last, and the pattern the cron runner
 # reads it back by (``cron_update.summarize_failure_from_log``, which imports
@@ -146,7 +152,7 @@ TRAILING_ZERO_RUN_WARN_PARTITIONS = 60
 
 def audit_trade_date_dataset(raw_dir: Path, spec: DatasetSpec, expected_dates: set[str], add) -> None:
     files = sorted((raw_dir / spec.api_name).glob("trade_date=*.parquet"))
-    file_dates = {partition_date(path): path for path in files}
+    file_dates = {partition_value(path): path for path in files}
     row_counts = {trade_date: parquet_rows(path) for trade_date, path in file_dates.items()}
     zero_dates = sorted(d for d, count in row_counts.items() if count == 0)
     nonzero_dates = sorted(d for d, count in row_counts.items() if count > 0)
@@ -186,7 +192,7 @@ def audit_partition_keys(files: list[Path], spec: DatasetSpec, row_counts: dict[
     missing_key_column_files: list[str] = []
     key_columns = list(spec.key_columns)
     for path in files:
-        if row_counts[partition_date(path)] == 0:
+        if row_counts[partition_value(path)] == 0:
             continue
         schema = pq.ParquetFile(path).schema_arrow.names
         missing = [col for col in key_columns if col not in schema]
@@ -197,7 +203,7 @@ def audit_partition_keys(files: list[Path], spec: DatasetSpec, row_counts: dict[
         if "trade_date" in df:
             trade_dates = df["trade_date"].astype(str).str.strip()
             blank_trade_date += int(df["trade_date"].isna().sum() + (trade_dates == "").sum())
-            filename_mismatches += int((trade_dates != partition_date(path)).sum())
+            filename_mismatches += int((trade_dates != partition_value(path)).sum())
         if "ts_code" in df:
             ts_codes = df["ts_code"].astype(str).str.strip()
             blank_ts_code += int(df["ts_code"].isna().sum() + (ts_codes == "").sum())
@@ -483,7 +489,7 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
     deep_paths = files if args.full_scan else (files[len(files) - deep_limit:] if deep_limit else [])
     bad_days: list[dict[str, Any]] = []
     for path in deep_paths:
-        trade_date = path.stem.split("=", 1)[-1]
+        trade_date = partition_value(path)
         df = pd.read_parquet(path)
         expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date)
         ok, details = validate_stk_mins_by_date_frame(
@@ -524,11 +530,6 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
                     "available_at": "bar close time from trade_time",
                 }
             },
-            "conclusions": [
-                "The date-organized minute store is the preferred research/live-update layout for PIT daily replay.",
-                "The stock-year source store remains the historical download and traceability layer.",
-                "Rows must still be filtered by available_at <= decision_time inside PIT snapshot construction.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -651,11 +652,6 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         },
         findings=findings,
         metadata={
-            "conclusions": [
-                "Raw minute files are not modified by this audit.",
-                "Historical 09:30 minute auction bars should be corrected in the Environment snapshot layer when they are used as a proxy for live stk_auction.",
-                "Full-day minute sums should still align with daily units after the documented share/hand and CNY/thousand-CNY conversions.",
-            ]
         },
     )
     counts = report["finding_counts"]
@@ -762,7 +758,7 @@ def audit_stk_mins_sample(files: list[Path], row_counts: dict[str, int], sample_
         if "15:00" not in times:
             missing_1500_files.append(str(path))
         expected_code = path.parent.name.split("=", 1)[1]
-        expected_year = path.stem.split("=", 1)[1]
+        expected_year = partition_value(path)
         code_partition_mismatch += int((df["ts_code"].astype(str) != expected_code).sum())
         year_partition_mismatch += int((df["trade_date"].astype(str).str[:4] != expected_year).sum())
     has_issue = any([duplicate_key_rows, unparseable_trade_time_rows, unparseable_available_at_rows, missing_0930_files, missing_1500_files, code_partition_mismatch, year_partition_mismatch])
@@ -779,14 +775,9 @@ def audit_stk_mins_sample(files: list[Path], row_counts: dict[str, int], sample_
         "missing_1500_sample": missing_1500_files[:10],
     })
 
-def fundamental_partition_value(path: Path, prefix: str) -> str:
-    stem = path.stem
-    expected = f"{prefix}="
-    return stem[len(expected):] if stem.startswith(expected) else ""
-
 def audit_fundamental_dataset(raw_dir: Path, spec: DatasetSpec, expected: set[str], prefix: str, add) -> dict[str, int]:
     files = sorted((raw_dir / spec.api_name).glob(f"{prefix}=*.parquet"))
-    file_values = {fundamental_partition_value(path, prefix): path for path in files}
+    file_values = {partition_value(path): path for path in files}
     rows_by_path = {path: parquet_rows(path) for path in files}
     row_counts = {value: rows_by_path[path] for value, path in file_values.items()}
     zero_values = sorted(value for value, count in row_counts.items() if count == 0)
@@ -934,7 +925,7 @@ def audit_full_market_coverage(raw_dir: Path, api_names: list[str], add) -> None
     warn when a day falls under the measured floor."""
     datasets = [api for api in api_names if api in core.FULL_MARKET_COVERAGE_DATASETS]
     days_by_dataset = {
-        api: {partition_date(path): path for path in sorted((raw_dir / api).glob("trade_date=*.parquet"))}
+        api: {partition_value(path): path for path in sorted((raw_dir / api).glob("trade_date=*.parquet"))}
         for api in datasets
     }
     low: dict[str, list[dict[str, Any]]] = {api: [] for api in datasets}
@@ -1048,7 +1039,7 @@ def audit_trade_cal(raw_dir: Path, add) -> set[str]:
 
 def audit_bak_basic(raw_dir: Path, sse_open: set[str], end_date: str, add) -> None:
     files = sorted((raw_dir / "bak_basic").glob("trade_date=*.parquet"))
-    rows = {path.stem.split("=", 1)[1]: parquet_rows(path) for path in files}
+    rows = {partition_value(path): parquet_rows(path) for path in files}
     expected = {d for d in sse_open if "20160101" <= d <= end_date}
     scoped_rows = {d: count for d, count in rows.items() if d <= end_date}
     missing_dates = sorted(expected - set(scoped_rows))
@@ -1112,7 +1103,7 @@ def audit_ths_membership(raw_dir: Path, add) -> None:
     # indices only; other types are intentionally skipped, so the coverage
     # expectation must use the same filter.
     expected = set(catalog.loc[catalog["type"].astype(str).isin(["N", "I"]), "ts_code"].dropna().astype(str))
-    member_files = {path.stem.split("=", 1)[1] for path in (raw_dir / "ths_member").glob("ts_code=*.parquet")}
+    member_files = {partition_value(path) for path in (raw_dir / "ths_member").glob("ts_code=*.parquet")}
     missing = sorted(expected - member_files)
     stale = sorted(member_files - expected)
     add("error" if missing else "info", "ths_member_coverage", "ths_member files cover the N/I catalog", {
@@ -1142,7 +1133,7 @@ def audit_index_member_all(raw_dir: Path, classify: pd.DataFrame, stock_basic: p
     files = sorted((raw_dir / "index_member_all").glob("l1_code=*.parquet"))
     df = read_many(files)
     l1_codes = set(classify.loc[classify["level"].astype(str) == "L1", "index_code"].astype(str)) if not classify.empty else set()
-    file_codes = {path.stem.split("=", 1)[1] for path in files}
+    file_codes = {partition_value(path) for path in files}
     missing_in_basic: set[str] = set()
     if not df.empty and not stock_basic.empty:
         missing_in_basic = set(df["ts_code"].dropna().astype(str)) - set(stock_basic["ts_code"].dropna().astype(str))
@@ -1167,7 +1158,7 @@ def audit_index_member_history(raw_dir: Path, classify_sw2014: pd.DataFrame, add
     files = sorted((raw_dir / "index_member").glob("l1_code=*.parquet"))
     df = read_many(files)
     l1_codes = set(classify_sw2014.loc[classify_sw2014["level"].astype(str) == "L1", "index_code"].astype(str)) if not classify_sw2014.empty else set()
-    file_codes = {path.stem.split("=", 1)[1] for path in files}
+    file_codes = {partition_value(path) for path in files}
     details = {
         "files": len(files), "rows": len(df), "missing_l1_partitions": len(l1_codes - file_codes),
         "extra_l1_partitions": len(file_codes - l1_codes),
@@ -1205,7 +1196,7 @@ def audit_index_weight(raw_dir: Path, end_date: str, add) -> None:
     never from before a code's listing year."""
     dataset_dir = raw_dir / "index_weight"
     end_year = int(end_date[:4])
-    on_disk = [int(path.stem.split("=", 1)[1]) for path in dataset_dir.glob("index_code=*/year=*.parquet")]
+    on_disk = [int(partition_value(path)) for path in dataset_dir.glob("index_code=*/year=*.parquet")]
     first_year = min([int(RESEARCH_HISTORY_FLOOR[:4]), *on_disk])
     launched = index_launch_years(raw_dir)
     missing: list[str] = []
@@ -1233,7 +1224,6 @@ def audit_index_weight(raw_dir: Path, end_date: str, add) -> None:
                 months = int(trade_dates.str[:6].nunique())
                 if months < 12:
                     short_months[f"{code}/{year}"] = months
-    legacy = sorted(str(path) for path in dataset_dir.glob("index_code=*.parquet"))
     details = {
         "codes": len(DEFAULT_CN_INDEX_CODES),
         "first_year": first_year,
@@ -1242,12 +1232,10 @@ def audit_index_weight(raw_dir: Path, end_date: str, add) -> None:
         "missing_year_partitions": len(missing),
         "zero_row_year_partitions": len(zero_rows),
         "closed_years_with_missing_months": short_months,
-        "legacy_flat_partitions": len(legacy),
         "missing_sample": missing[:10],
         "zero_sample": zero_rows[:10],
-        "legacy_sample": legacy[:5],
     }
-    severity = "error" if missing or zero_rows else "warning" if short_months or legacy else "info"
+    severity = "error" if missing or zero_rows else "warning" if short_months else "info"
     add(severity, "index_weight", "core-index monthly weight partition checks", details)
     audit_business_payload(
         sorted(dataset_dir.rglob("year=*.parquet")), "index_weight", "index_weight_payload", add,
@@ -1508,20 +1496,13 @@ def audit_pit_availability(raw_dir: Path, add) -> None:
     add("info", "pit_available_at", "raw files carry fetch metadata but no row-level available_at; snapshot construction must enforce PIT rules", {
         "row_level_available_at_present": row_available_at,
         "sample_sidecar_has_fetched_at": sidecar_has_fetched_at,
-        "rules": {
-            "daily": "officially loaded after market close around 15:00-16:00; do not use same-day values for 09:25 decisions",
-            "daily_basic": "officially updated around 15:00-17:00; do not use same-day values for 09:25 decisions",
-            "stk_limit": "officially around 08:40 and covers A and B shares; keep explicit available_at in PIT layer",
-            "suspend_d": "released around 08:45 as a trading constraint; zero rows mean no suspended names that day, not a missing partition",
-            "adj_factor": "officially around 09:15-09:20, but raw trade_date alone is not enough for PIT-safe joins",
-            "namechange": "use ann_date or a derived available_at; start_date can be a future effective date",
-        },
+        "rules": {name: contract.rule for name, contract in default_tushare_contracts().items()},
     })
 
 def existing_partition_values(raw_dir: Path, datasets: list[str], prefix: str) -> dict[str, list[str]]:
     values: dict[str, list[str]] = {}
     for dataset in datasets:
-        values[dataset] = sorted(fundamental_partition_value(path, prefix) for path in (raw_dir / dataset).glob(f"{prefix}=*.parquet"))
+        values[dataset] = sorted(partition_value(path) for path in (raw_dir / dataset).glob(f"{prefix}=*.parquet"))
     return values
 
 def _grouped_rule_records(rules) -> dict[str, list[dict[str, object]]]:
@@ -1574,7 +1555,7 @@ def audit_integrated_filesystem(raw_dir: Path, datasets: list[str], add) -> None
     for path in parquet_files:
         try:
             parquet_meta(path)
-        except core.CorruptSidecarError:
+        except CorruptSidecarError:
             corrupt_sidecars.append(str(path))
             continue
         if not committed_partition_intact(path):
@@ -1604,7 +1585,6 @@ def audit_integrated_filesystem(raw_dir: Path, datasets: list[str], add) -> None
 # maximum at the time, while genuine period counts vary organically).
 # Cross-statement row ratios are NOT a usable signature: the repaired lake
 # shows the statements legitimately diverging per period by more than 2x.
-FUNDAMENTAL_STATEMENT_DATASETS = ("income_vip", "balancesheet_vip", "cashflow_vip")
 CAP_PLATEAU_MIN_PERIODS = 3
 CAP_PLATEAU_MIN_ROWS = 1000
 
@@ -1612,7 +1592,7 @@ def audit_fundamental_cap_plateau(period_rows: dict[str, dict[str, int]], add) -
     """Warn when a statement dataset has several periods pinned at exactly its
     maximum row count -- the truncation signature of an unknown per-call cap."""
     plateaus: list[dict[str, Any]] = []
-    for dataset in FUNDAMENTAL_STATEMENT_DATASETS:
+    for dataset in STATEMENT_DATASETS:
         rows = period_rows.get(dataset)
         if not rows:
             continue
@@ -1626,7 +1606,7 @@ def audit_fundamental_cap_plateau(period_rows: dict[str, dict[str, int]], add) -
         else "no statement dataset has multiple periods pinned at exactly its maximum row count"
     )
     add("warning" if plateaus else "info", "fundamental_statement_cap_plateau", message, {
-        "datasets_checked": [dataset for dataset in FUNDAMENTAL_STATEMENT_DATASETS if period_rows.get(dataset)],
+        "datasets_checked": [dataset for dataset in STATEMENT_DATASETS if period_rows.get(dataset)],
         "min_periods_at_max": CAP_PLATEAU_MIN_PERIODS,
         "min_rows": CAP_PLATEAU_MIN_ROWS,
         "plateaus": plateaus,
@@ -1665,7 +1645,7 @@ def audit_fundamental_completeness(raw_dir: Path, args: argparse.Namespace, add)
         spec = FUNDAMENTAL_SPECS[dataset]
         if spec.strategy == FetchStrategy.PERIOD:
             row_counts = audit_fundamental_dataset(raw_dir, spec, periods, "period", add)
-            if dataset in FUNDAMENTAL_STATEMENT_DATASETS:
+            if dataset in STATEMENT_DATASETS:
                 statement_period_rows[dataset] = row_counts
         elif spec.strategy == FetchStrategy.ANN_MONTH:
             audit_fundamental_dataset(raw_dir, spec, months, "ann_month", add)
@@ -1716,7 +1696,6 @@ class DomainAuditProfile:
     key_columns: tuple
     key_extra_columns: tuple       # extra columns joined into the keys read
     blank_mode: str                # "per_key_field" | "available_at_total" | "available_at_rows"
-    pit_rules: object
     partitions_message: str
     keys_message: str
     partition_prefix: str | None = None  # event: strategy partition glob + ignored tracking
@@ -1911,7 +1890,6 @@ def audit_domain_keys(files: list[Path], profile: DomainAuditProfile, row_counts
         "missing_available_at_files": len(missing_available_at_files),
         "missing_key_column_sample": missing_key_column_files[:10],
         "missing_available_at_sample": missing_available_at_files[:10],
-        "pit_rules": profile.pit_rules,
     })
     return details
 
@@ -1930,7 +1908,6 @@ def audit_text_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pat
         key_columns=tuple(spec.key_columns),
         key_extra_columns=("available_at", spec.time_column, spec.date_column),
         blank_mode="available_at_total",
-        pit_rules=text_pit_rules().get(spec.api_name, {}),
         partitions_message="text partition inventory",
         keys_message="text key and PIT checks",
         # Text feeds tolerate empty days, which is exactly why they need the
@@ -1941,18 +1918,6 @@ def audit_text_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pat
     ))
 
 
-def text_pit_rules() -> dict[str, dict[str, str]]:
-    return {
-        "anns_d": {"available_at": "rec_time within -1..+3 days of ann_date and not a bare midnight date; otherwise ann_date 23:59:59", "unit": "text/url, no numeric unit"},
-        "major_news": {"available_at": "pub_time", "unit": "text"},
-        "news": {"available_at": "datetime", "unit": "text"},
-        "cctv_news": {"available_at": "date at 23:59:59+08:00 conservative fallback", "unit": "text"},
-        "npr": {"available_at": "pubtime", "unit": "HTML/text"},
-        "irm_qa_sh": {"available_at": "pub_time; trade_date end-of-day fallback", "unit": "Q&A text"},
-        "irm_qa_sz": {"available_at": "pub_time; trade_date end-of-day fallback", "unit": "Q&A text"},
-        "research_report": {"available_at": "trade_date conservative end-of-day unless a more precise time is available", "unit": "text/summary/url"},
-        "report_rc": {"available_at": "create_time if present, otherwise report_date 22:00+08 based on documented nightly update", "unit": "mixed forecast fields; do not mix directly with P2 actual statements"},
-    }
 
 def expected_text_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
@@ -1986,7 +1951,6 @@ def audit_text_completeness(raw_dir: Path, args: argparse.Namespace, add) -> Non
         "datasets": datasets,
         "start_date": args.text_start_date,
         "end_date": text_end,
-        "dataset_pit_rules": text_pit_rules(),
     })
     for dataset in datasets:
         spec = TEXT_SPECS[dataset]
@@ -2016,15 +1980,10 @@ def audit_text_only(args: argparse.Namespace) -> int:
         },
         findings=findings,
         metadata={
-            "pit_rules": text_pit_rules(),
             "doc_refs": {
                 dataset: INTEGRATED_DOC_REFS[dataset]
                 for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
             },
-            "conclusions": [
-                "Text rows remain raw evidence; snapshot construction must apply each source's recorded availability rule.",
-                "Repeated delivery and republication are retained in raw data and deduplicated deterministically in the snapshot layer.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -2095,16 +2054,6 @@ def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_
         }
     raise RuntimeError(f"unsupported macro strategy {spec.strategy} for {spec.api_name}")
 
-def macro_pit_rules() -> dict[str, str]:
-    return {
-        "cn_schedule": "publish_date is the intended release date and should refine monthly/quarterly macro visibility when snapshot construction maps data_api to realized releases.",
-        "monthly_macro": "raw month-only indicators are stamped conservatively as month-end plus 31 days until cn_schedule or another release timestamp is applied.",
-        "quarterly_macro": "raw quarter-only indicators are stamped conservatively as quarter-end plus 45 days until a release schedule is applied.",
-        "daily_rates": "date-only rates and cross-market daily series are stamped at local end-of-day; do not use them for same-day open decisions without an explicit release time.",
-        "eco_cal": "date+time events use source time when parseable; all-day or missing-time events fall back to date end-of-day.",
-        "derivatives_daily": "fut_daily/fut_mapping/opt_daily/cb_daily rows are stamped at trade_date end-of-day and roll on the evening node: usable from the NEXT trading morning, never for same-day open decisions.",
-        "derivatives_registry": "fut_basic/opt_basic/cb_basic rows become visible at their list_date; cb_call announcements at ann_date end-of-day (redemption events are evening disclosures). WARNING: cb_basic is a nightly CURRENT-STATE refresh — conv_price/remain_size/newest_rating/delist_date must never feed historical backtests; derive the as-of conversion price from cb_daily (100 * stock close / cb_value), use cb_over_rate for as-of premium and cb_call for redemption outcomes.",
-    }
 
 def macro_unit_rules() -> dict[str, list[dict[str, object]]]:
     """Projection of the shared unit registry (environment/data/units.py) over all MACRO_SPECS datasets."""
@@ -2127,7 +2076,6 @@ def audit_macro_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         key_columns=tuple(spec.key_columns),
         key_extra_columns=("available_at", "available_at_rule"),
         blank_mode="per_key_field",
-        pit_rules=macro_pit_rules(),
         partitions_message="macro/global partition inventory",
         keys_message="key, PIT, and duplicate checks",
         expected_fields=spec_fields_tuple(spec),
@@ -2161,7 +2109,6 @@ def audit_macro_completeness(raw_dir: Path, args: argparse.Namespace, add) -> No
         "eco_country": selected_eco_filter_values(args, "eco_country"),
         "eco_currency": selected_eco_filter_values(args, "eco_currency"),
         "eco_event": selected_eco_filter_values(args, "eco_event"),
-        "dataset_pit_rules": macro_pit_rules(),
         "dataset_unit_rules": macro_unit_rules(),
     })
     for dataset in datasets:
@@ -2212,16 +2159,10 @@ def audit_macro_only(args: argparse.Namespace) -> int:
         findings=findings,
         metadata={
             "unit_rules": macro_unit_rules(),
-            "pit_rules": macro_pit_rules(),
             "doc_refs": {
                 dataset: INTEGRATED_DOC_REFS[dataset]
                 for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
             },
-            "conclusions": [
-                "Macro/global context is stored as raw evidence and regime context; snapshot construction must still apply release-time and event-specific PIT rules.",
-                "Monthly and quarterly macro tables use conservative availability fallbacks until cn_schedule or a more precise source release time is joined.",
-                "Economic-calendar values are heterogeneous by event and should not be turned into numeric signals without event-specific parsing.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -2279,30 +2220,11 @@ def event_unit_rules() -> dict[str, list[dict[str, object]]]:
     datasets = tuple(SNAPSHOT_EVENT_ID_BY_RAW.get(name, name) for name in EVENT_FLOW_SPECS)
     return dataset_rules_records(datasets)
 
-def event_pit_rules() -> dict[str, str]:
-    return {
-        "margin": "available_at uses 09:00+08 on the next SSE open day after trade_date.",
-        "margin_detail": "available_at uses 09:00+08 on the next SSE open day after trade_date.",
-        "margin_secs": "available_at uses same-day 09:00+08 from trade_date because this is a pre-open eligibility table.",
-        "moneyflow": "available_at uses 19:00+08 from trade_date.",
-        "moneyflow_dc": "available_at uses 19:00+08 from trade_date.",
-        "moneyflow_ths": "available_at uses 19:00+08 from trade_date.",
-        "moneyflow_ind_dc": "available_at uses 19:00+08 from trade_date.",
-        "moneyflow_ind_ths": "available_at uses 19:00+08 from trade_date.",
-        "moneyflow_cnt_ths": "available_at uses 19:00+08 from trade_date.",
-        "cyq_perf": "available_at uses 19:00+08 from trade_date.",
-        "bak_daily": "available_at uses 19:00+08 from trade_date.",
-        "block_trade": "available_at uses 21:00+08 from trade_date.",
-        "top10_holders": "available_at uses conservative end-of-day from ann_date.",
-        "top10_floatholders": "available_at uses conservative end-of-day from ann_date.",
-        "pledge_detail": "available_at uses conservative end-of-day from ann_date.",
-        "stk_surv": "available_at uses conservative surv_date+5d end-of-day: the source has no announcement column and rows keep landing for days after surv_date (disclosure due within 2 trading days), so surv_date EOD would be lookahead.",
-        "new_share": "available_at uses the second A-share trading day after ipo_date at end-of-day: ballot is announced 1-2 trading days after ipo_date, so the whole row is delayed with it.",
-        "stk_holdernumber": "available_at uses ann_date end-of-day.",
-        "stk_holdertrade": "available_at uses ann_date 19:00+08.",
-        "repurchase": "available_at uses ann_date end-of-day.",
-        "share_float": "available_at uses ann_date end-of-day; if ann_date is blank, raw layer falls back to float_date and snapshot layer must treat that as conservative event-date availability, not pre-event knowledge.",
-    }
+def declared_pit_rules(specs: dict[str, DatasetSpec]) -> dict[str, str]:
+    """The official availability rule each spec declares: the
+    ``available_at_rule`` its stamped rows carry. A spec without one stamps from
+    its own time or date column."""
+    return {name: spec.availability.rule for name, spec in specs.items() if spec.availability is not None}
 
 def event_partition_prefix(spec: DatasetSpec) -> str:
     if spec.strategy == FetchStrategy.TRADE_DATE:
@@ -2326,7 +2248,7 @@ def audit_margin_exchange_completeness(raw_dir: Path, api_name: str, add) -> Non
         return
     incomplete: list[dict[str, Any]] = []
     for path in sorted((raw_dir / api_name).glob("trade_date=*.parquet")):
-        trade_date = path.stem.split("=", 1)[1]
+        trade_date = partition_value(path)
         frame = pd.read_parquet(path, columns=[column])
         missing = margin_family_missing_exchanges(api_name, trade_date, frame)
         if missing:
@@ -2352,7 +2274,6 @@ def audit_event_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         key_columns=tuple(spec.key_columns),
         key_extra_columns=("available_at", "available_at_rule"),
         blank_mode="per_key_field",
-        pit_rules=event_pit_rules().get(spec.api_name, ""),
         partitions_message="event/flow partition inventory",
         keys_message="key, duplicate, and PIT checks",
         partition_prefix=event_partition_prefix(spec),
@@ -2550,7 +2471,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
         "covered_end_date": covered_end,
         "as_of": as_of.isoformat(timespec="seconds"),
         "published_end_dates": {dataset: end for dataset, end in dataset_ends.items() if end != covered_end},
-        "dataset_pit_rules": event_pit_rules(),
+        "dataset_pit_rules": declared_pit_rules(EVENT_FLOW_SPECS),
         "dataset_unit_rules": event_unit_rules(),
     })
     for dataset in datasets:
@@ -2576,17 +2497,11 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
         findings=findings,
         metadata={
             "unit_rules": event_unit_rules(),
-            "pit_rules": event_pit_rules(),
+            "pit_rules": declared_pit_rules(EVENT_FLOW_SPECS),
             "doc_refs": {
                 dataset: INTEGRATED_DOC_REFS[dataset]
                 for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
             },
-            "conclusions": [
-                "Event/flow raw data is sparse by design; zero-row event months or block-trade dates are expected for sparse event sources.",
-                "Daily flow tables must still be joined with explicit PIT availability; same-day open decisions cannot use post-close or next-day event/flow values.",
-                "share_float raw partitions and the optional share_float_complete union are audited together; exact 6000-row partitions remain source-cap risks.",
-                "Raw event rows are not deduplicated; downstream evidence/snapshot layers need deterministic event-key and availability rules.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -2644,7 +2559,6 @@ def audit_board_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         key_columns=tuple(spec.key_columns),
         key_extra_columns=("available_at", "available_at_rule", spec.date_column, spec.time_column),
         blank_mode="available_at_rows",
-        pit_rules=board_pit_rules().get(spec.api_name, {}),
         partitions_message="board-trading partition inventory",
         keys_message="board-trading key and PIT checks",
         availability_required=spec.strategy != FetchStrategy.STATIC_FULL,
@@ -2654,21 +2568,6 @@ def audit_board_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         zero_rows_ok=spec.zero_rows_ok if spec.strategy == FetchStrategy.TRADE_DATE else None,
     ))
 
-
-def board_pit_rules() -> dict[str, dict[str, str]]:
-    return {
-        "kpl_list": {"available_at": "official next-day 08:30 from trade_date", "usage": "next-day board sentiment/evidence; no same-day intraday lookahead"},
-        "limit_step": {"available_at": "conservative trade-date end-of-day", "usage": "market height and limit-up ladder after close"},
-        "limit_cpt_list": {"available_at": "conservative trade-date end-of-day", "usage": "topic strength and limit-up board rotation after close"},
-        "limit_list_d": {"available_at": "official 16:00 from trade_date (row-level available_at column)", "usage": "post-close official limit-up/down/broken labels; execution constraints come from stk_limit, not this table"},
-        "limit_list_ths": {"available_at": "official around 16:00 from trade_date", "usage": "post-close THS limit-up/down pool evidence; no same-day intraday lookahead"},
-        "top_list": {"available_at": "official 20:00 from trade_date", "usage": "next-day Dragon-Tiger list evidence"},
-        "top_inst": {"available_at": "official 20:00 from trade_date", "usage": "next-day institutional seat evidence"},
-        "hm_list": {"available_at": "daily-refreshed reference list without PIT timestamps; do not use as historical time-series signal without hm_detail rows"},
-        "hm_detail": {"available_at": "conservative trade-date end-of-day", "usage": "next-day hot-money seat evidence"},
-        "ths_hot": {"available_at": "rank_time when returned; is_new=Y falls back to 22:30", "usage": "intraday/evening hot-list evidence by observable rank_time"},
-        "dc_hot": {"available_at": "rank_time when returned; is_new=Y falls back to 22:30", "usage": "intraday/evening hot-list evidence by observable rank_time"},
-    }
 
 def board_unit_rules() -> dict[str, list[dict[str, object]]]:
     """Projection of the shared unit registry (environment/data/units.py) over
@@ -2696,7 +2595,7 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
         "dc_hot_markets": selected_board_dc_hot_markets(args),
         "dc_hot_types": selected_board_dc_hot_types(args),
         "hot_is_new": selected_board_hot_is_new(args),
-        "dataset_pit_rules": board_pit_rules(),
+        "dataset_pit_rules": declared_pit_rules(BOARD_TRADING_SPECS),
         "dataset_unit_rules": board_unit_rules(),
     })
     for dataset in datasets:
@@ -2715,16 +2614,11 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
         findings=findings,
         metadata={
             "unit_rules": board_unit_rules(),
-            "pit_rules": board_pit_rules(),
+            "pit_rules": declared_pit_rules(BOARD_TRADING_SPECS),
             "doc_refs": {
                 dataset: INTEGRATED_DOC_REFS[dataset]
                 for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
             },
-            "conclusions": [
-                "Board-trading raw data is a dedicated sentiment/event evidence domain for limit-up, ladder, topic, Dragon-Tiger, hot-money, and hot-list signals.",
-                "Most board-trading datasets are only valid after close or the next morning; intraday usage must rely on rank_time or a documented observable timestamp.",
-                "These raw rows complement limit_list_d and minute-derived labels; they do not replace PIT execution constraints built from stk_limit and 1-minute bars.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -2819,12 +2713,6 @@ def audit_core_market(args: argparse.Namespace) -> int:
                 dataset: INTEGRATED_DOC_REFS[dataset]
                 for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
             },
-            "conclusions": [
-                "Core-market audit covers reference tables and daily market quotes/constraints: the execution-critical inputs of every experiment.",
-                "Files are structurally usable when errors are zero, but source and semantic warnings require PIT-aware snapshot construction.",
-                "bak_basic and bak_daily are supplemental snapshots; neither should replace daily/daily_basic as the main daily market data source.",
-                "Do not compare amount, market value, or share fields across interfaces until each field is normalized to a common unit.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -2874,10 +2762,6 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
                     "end_date": args.fundamental_end_date or args.end_date,
                 },
             },
-            "conclusions": [
-                "Raw financial records are intentionally not deduplicated; the PIT event layer selects visible versions (revisions ranked by update_flag).",
-                "Raw-finance findings gate only fundamentals-enabled experiments; the derived PIT index carries its own enforced report.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -2890,7 +2774,7 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
     if getattr(args, "intraday_end_date", None) is None:
-        args.intraday_end_date = date.today().strftime("%Y%m%d")  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+        args.intraday_end_date = cn_today()
     output = (repo_root / (args.output or INTRADAY_MINUTES_STATUS_PATH)).resolve()
     findings: list[dict[str, Any]] = []
 
@@ -2922,11 +2806,6 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
                 }
             },
             "doc_refs": {STK_MINS_DATASET: INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
-            "conclusions": [
-                "Intraday minute data is stored as stock-year Parquet partitions and sidecar metadata under data/raw/stk_mins_1min.",
-                "TuShare stk_mins uses shares for vol and CNY for amount; do not mix it with daily.amount or bak_daily.amount without unit conversion.",
-                "Before stk_auction coverage begins, 09:30 minute rows remain the explicitly labelled opening-auction proxy; 15:00 close is the closing-auction clearing price.",
-            ],
         },
     )
     counts = report["finding_counts"]
@@ -2989,7 +2868,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event = sub.add_parser("event-flow", help="audit only event/flow raw data")
     core.add_raw_arg(event)
     event.add_argument("--start-date", default="20200101")
-    event.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    event.add_argument("--end-date", default=cn_today())
     event.add_argument("--datasets", nargs="+", choices=core.EVENT_FLOW_DATASETS)
     event.add_argument("--as-of", help="Audit time for publication-time expectations (ISO; naive = Asia/Shanghai). Defaults to now.")
     event.add_argument("--output", help=f"Defaults to {core.EVENT_FLOW_STATUS_PATH}.")
@@ -2997,7 +2876,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     macro = sub.add_parser("macro", help="audit macro, policy, and global-context raw data")
     core.add_raw_arg(macro)
     macro.add_argument("--start-date", default="20100101")
-    macro.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    macro.add_argument("--end-date", default=cn_today())
     macro.add_argument("--datasets", nargs="+", choices=core.MACRO_DATASETS)
     core.add_macro_filter_args(macro)
     macro.add_argument("--output", help=f"Defaults to {core.MACRO_CONTEXT_STATUS_PATH}.")
@@ -3005,7 +2884,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     text = sub.add_parser("text", help="audit only text-evidence raw data")
     core.add_raw_arg(text)
     text.add_argument("--start-date", dest="text_start_date", default="20100101")
-    text.add_argument("--end-date", dest="text_end_date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    text.add_argument("--end-date", dest="text_end_date", default=cn_today())
     text.add_argument("--text-datasets", nargs="+", choices=core.TEXT_DATASETS, dest="text_datasets")
     text.add_argument("--news-src", action="append", default=[])
     text.add_argument("--major-news-src", action="append", default=[])
@@ -3015,8 +2894,8 @@ def add_board_parser(sub: argparse._SubParsersAction) -> None:
     board = sub.add_parser("board-trading", help="audit 打板专题 raw data")
     core.add_raw_arg(board)
     board.add_argument("--start-date", default="20200101")
-    board.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
-    board.add_argument("--datasets", nargs="+", choices=core.BOARD_TRADING_DATASETS)
+    board.add_argument("--end-date", default=cn_today())
+    board.add_argument("--datasets", nargs="+", choices=BOARD_TRADING_DATASETS)
     core.add_board_filter_args(board)
     board.add_argument("--output", help=f"Defaults to {core.BOARD_TRADING_STATUS_PATH}.")
 
@@ -3024,7 +2903,7 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision = sub.add_parser("revision-sentinel", help="sample TuShare source partitions and compare them with local raw data without overwriting raw files")
     core.add_raw_arg(revision)
     revision.add_argument("--start-date", default="20200101")
-    revision.add_argument("--end-date", default=date.today().strftime("%Y%m%d"))  # noqa: DTZ011 - CLI default is a calendar date on the host's local clock
+    revision.add_argument("--end-date", default=cn_today())
     revision.add_argument(
         "--datasets",
         nargs="+",

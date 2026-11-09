@@ -503,6 +503,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             force=False,
+            force_from=None,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         output = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
@@ -529,6 +531,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             force=False,
+            force_from=None,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
     def _write_minute_calendar_and_universe(self, trade_dates, codes):
@@ -630,7 +634,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 "available_at_rule": "source:trade_time_bar_close",
             },
         ])
-        common.write_parquet(
+        tushare_io.write_parquet(
             minute_path,
             minute_rows,
             api_name=common.STK_MINS_API_NAME,
@@ -657,6 +661,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             page_limit=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=NoQueryClient()):
@@ -670,7 +675,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102",
              "holder_name": "h2", "share_type": "t", "float_share": 2.0, "float_ratio": 0.2},
         ])
-        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
         args = argparse.Namespace(
             union_output=str(output),
             ann_start_date="20200101",
@@ -678,12 +683,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             float_start_date="20200101",
             float_end_date="20200102",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "share_float_union_files", return_value=[]):
             report = {}
             download.write_share_float_union(self.raw_dir, args, report)
-        self.assertEqual(common.parquet_rows(output), 2)
+        self.assertEqual(tushare_io.parquet_rows(output), 2)
         self.assertTrue(report["union"]["baseline_inherited"])
 
         # Refreshed source rows precede the baseline and replace matching keys.
@@ -694,7 +700,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102",
              "holder_name": "h2", "share_type": "t", "float_share": 20.0, "float_ratio": 2.0},
         ])
-        common.write_parquet(source, rows, api_name="share_float", params={}, fields=list(rows.columns))
+        tushare_io.write_parquet(source, rows, api_name="share_float", params={}, fields=list(rows.columns))
         report = {}
         with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
             download.write_share_float_union(self.raw_dir, args, report)
@@ -714,16 +720,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         args = argparse.Namespace(
             union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
             float_start_date="20200101", float_end_date="20200102", skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         def publish(value: float) -> str:
             # Each round starts from a fresh baseline landing, which has no
             # observation table yet.
             versions.observation_path(output).unlink(missing_ok=True)
-            common.write_parquet(output, baseline, api_name="share_float", params={}, fields=list(baseline.columns))
+            tushare_io.write_parquet(output, baseline, api_name="share_float", params={}, fields=list(baseline.columns))
             active = baseline.copy()
             active["float_share"] = value
-            common.write_parquet(source, active, api_name="share_float", params={}, fields=list(active.columns))
+            tushare_io.write_parquet(source, active, api_name="share_float", params={}, fields=list(active.columns))
             with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
                 with patch.object(pd, "read_parquet", wraps=pd.read_parquet) as read_parquet:
                     download.write_share_float_union(self.raw_dir, args, {})
@@ -733,7 +740,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             ]
             self.assertEqual(len(output_reads), 1)
             return (
-                str(common.parquet_meta(output)["write_id"]),
+                str(tushare_io.parquet_meta(output)["write_id"]),
                 pd.read_parquet(output)["float_share"].tolist(),
             )
 
@@ -747,6 +754,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
             float_start_date="20200101", float_end_date="20200102",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "share_float_union_files") as list_files:
@@ -763,7 +771,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000002.SZ", "ann_date": "20200101", "float_date": "20200102",
              "holder_name": "h2", "share_type": "t", "float_share": 2.0, "float_ratio": 0.2},
         ])
-        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
         refreshed = pd.DataFrame([
             {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
              "holder_name": "h1", "share_type": "t", "float_share": 10.0, "float_ratio": 1.0},
@@ -773,11 +781,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
              "holder_name": "h1", "share_type": "t", "float_share": 20.0, "float_ratio": 2.0},
         ])
         source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
-        common.write_parquet(source, refreshed, api_name="share_float", params={}, fields=list(refreshed.columns))
+        tushare_io.write_parquet(source, refreshed, api_name="share_float", params={}, fields=list(refreshed.columns))
         args = argparse.Namespace(
             union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
             float_start_date="20200101", float_end_date="20200102",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
@@ -801,7 +810,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         recent = self.raw_dir / "share_float_ann_date" / "ann_date=20200102.parquet"
         historical = self.raw_dir / "share_float_ann_date" / "ann_date=20190101.parquet"
         for path in (recent, historical):
-            common.write_parquet(path, pd.DataFrame(), api_name="share_float", params={}, fields=[])
+            tushare_io.write_parquet(path, pd.DataFrame(), api_name="share_float", params={}, fields=[])
         args = argparse.Namespace(
             ann_start_date="20200101", ann_end_date="20200103",
             float_start_date="20200101", float_end_date="20200103",
@@ -818,9 +827,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
              "holder_name": "h1", "share_type": "t", "float_share": float(index), "float_ratio": 0.1}
             for index in range(7000)
         ])
-        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
         source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
-        common.write_parquet(
+        tushare_io.write_parquet(
             source,
             existing.iloc[:common.SHARE_FLOAT_ROW_LIMIT],
             api_name="share_float",
@@ -831,13 +840,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
             float_start_date="20200101", float_end_date="20200102",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         report = {}
         with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
             download.write_share_float_union(self.raw_dir, args, report)
 
-        self.assertEqual(common.parquet_rows(output), 7000)
+        self.assertEqual(tushare_io.parquet_rows(output), 7000)
         self.assertEqual(report["union"]["rows_after_dedup"], 7000)
         self.assertEqual(report["union"]["capped_groups_preserved"], 1)
 
@@ -847,25 +857,26 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
              "holder_name": "h1", "share_type": "t", "float_share": 1.0, "float_ratio": 0.1},
         ])
-        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
         refreshed = pd.DataFrame([
             {"ts_code": "000001.SZ", "ann_date": "20200101", "float_date": "20200102",
              "holder_name": "h1", "share_type": "t", "float_share": 10.0, "float_ratio": 1.0},
         ])
         capped = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         rescue = self.raw_dir / "share_float_ann_date_ts_code" / "ann_date=20200101" / "ts_code=000001.SZ.parquet"
-        common.write_parquet(
+        tushare_io.write_parquet(
             capped,
             pd.concat([refreshed] * common.SHARE_FLOAT_ROW_LIMIT, ignore_index=True),
             api_name="share_float",
             params={},
             fields=list(refreshed.columns),
         )
-        common.write_parquet(rescue, refreshed, api_name="share_float", params={}, fields=list(refreshed.columns))
+        tushare_io.write_parquet(rescue, refreshed, api_name="share_float", params={}, fields=list(refreshed.columns))
         args = argparse.Namespace(
             union_output=str(output), ann_start_date="20200101", ann_end_date="20200102",
             float_start_date="20200101", float_end_date="20200102",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         report = {}
@@ -902,7 +913,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000009.SZ", "ann_date": "20260630", "float_date": "20270712",
              "holder_name": "hB", "share_type": "首发原始股", "float_share": 3.0, "float_ratio": 0.3},
         ])
-        common.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={}, fields=list(existing.columns))
         source = self.raw_dir / "share_float_ann_date" / "ann_date=20260709.parquet"
         redated = pd.DataFrame([
             {"ts_code": "301583.SZ", "ann_date": "20260709", "float_date": "20270712",
@@ -910,12 +921,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "301583.SZ", "ann_date": "20260709", "float_date": "20270712",
              "holder_name": "基金(有限合伙)", "share_type": "首发原始股", "float_share": 9.0, "float_ratio": 0.9},
         ])
-        common.write_parquet(source, redated, api_name="share_float", params={}, fields=list(redated.columns))
+        tushare_io.write_parquet(source, redated, api_name="share_float", params={}, fields=list(redated.columns))
         args = argparse.Namespace(
             union_output=str(output),
             ann_start_date="20260701", ann_end_date="20260710",
             float_start_date="20260701", float_end_date="20280101",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
         with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
@@ -937,7 +949,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
             download.write_share_float_union(self.raw_dir, args, report)
         self.assertEqual(report["union"]["superseded_redated_groups"], 0)
-        self.assertEqual(common.parquet_rows(output), 3)
+        self.assertEqual(tushare_io.parquet_rows(output), 3)
 
     def test_share_float_active_window_holding_both_datings_heals(self):
         # The real production shape (301583.SZ): the refresh window covers the
@@ -954,13 +966,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         rows.append({"ts_code": "000009.SZ", "ann_date": "20260630", "float_date": "20270712",
                      "holder_name": "hB", "share_type": "首发原始股", "float_share": 9.0, "float_ratio": 0.9})
         existing = pd.DataFrame(rows)
-        common.write_parquet(output, existing, api_name="share_float", params={},
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={},
                              fields=list(existing.columns))
         files = []
         for ann in ("20260630", "20260701", "20260709"):
             path = self.raw_dir / "share_float_ann_date" / f"ann_date={ann}.parquet"
             part = existing[existing["ann_date"] == ann]
-            common.write_parquet(path, part, api_name="share_float", params={},
+            tushare_io.write_parquet(path, part, api_name="share_float", params={},
                                  fields=list(part.columns))
             files.append((path, "ann_date"))
         args = argparse.Namespace(
@@ -968,6 +980,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             ann_start_date="20260601", ann_end_date="20260731",
             float_start_date="20260601", float_end_date="20280101",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
         with patch.object(download, "share_float_union_files", return_value=files):
@@ -985,7 +998,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with patch.object(download, "share_float_union_files", return_value=files):
             download.write_share_float_union(self.raw_dir, args, report2)
         self.assertEqual(report2["union"]["superseded_redated_groups"], 0)
-        self.assertEqual(common.parquet_rows(output), 2)
+        self.assertEqual(tushare_io.parquet_rows(output), 2)
 
     def test_share_float_capped_newer_dating_does_not_prune_active(self):
         # A capped (truncated) partition proves nothing about rows it could not
@@ -995,10 +1008,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "301583.SZ", "ann_date": "20260630", "float_date": "20270712",
              "holder_name": "hA", "share_type": "首发原始股", "float_share": 1.0, "float_ratio": 0.1},
         ])
-        common.write_parquet(output, existing, api_name="share_float", params={},
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={},
                              fields=list(existing.columns))
         old_path = self.raw_dir / "share_float_ann_date" / "ann_date=20260630.parquet"
-        common.write_parquet(old_path, existing, api_name="share_float", params={},
+        tushare_io.write_parquet(old_path, existing, api_name="share_float", params={},
                              fields=list(existing.columns))
         capped = pd.DataFrame([
             dict(existing.iloc[0], ann_date="20260709", float_share=2.0),
@@ -1007,13 +1020,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                "float_ratio": 0.1} for i in range(common.SHARE_FLOAT_ROW_LIMIT - 1)],
         ])
         new_path = self.raw_dir / "share_float_ann_date" / "ann_date=20260709.parquet"
-        common.write_parquet(new_path, capped, api_name="share_float", params={},
+        tushare_io.write_parquet(new_path, capped, api_name="share_float", params={},
                              fields=list(capped.columns))
         args = argparse.Namespace(
             union_output=str(output),
             ann_start_date="20260601", ann_end_date="20260731",
             float_start_date="20260601", float_end_date="20280101",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
         with patch.object(download, "share_float_union_files",
@@ -1033,7 +1047,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "301583.SZ", "ann_date": "20260630", "float_date": "20270712",
              "holder_name": "hA", "share_type": "首发原始股", "float_share": 1.0, "float_ratio": 0.1},
         ])
-        common.write_parquet(output, existing, api_name="share_float", params={},
+        tushare_io.write_parquet(output, existing, api_name="share_float", params={},
                              fields=list(existing.columns))
         # Only a CAPPED partition carries the newer dating.
         capped = pd.DataFrame([
@@ -1043,13 +1057,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                "float_ratio": 0.1} for i in range(common.SHARE_FLOAT_ROW_LIMIT - 1)],
         ])
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20260709.parquet"
-        common.write_parquet(path, capped, api_name="share_float", params={},
+        tushare_io.write_parquet(path, capped, api_name="share_float", params={},
                              fields=list(capped.columns))
         args = argparse.Namespace(
             union_output=str(output),
             ann_start_date="20260701", ann_end_date="20260731",
             float_start_date="20260601", float_end_date="20280101",
             skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
         with patch.object(download, "share_float_union_files", return_value=[(path, "ann_date")]):
@@ -1072,7 +1087,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000009.SZ", "ann_date": "20260630", "float_date": "20270712",
              "holder_name": "hB", "share_type": "首发原始股", "float_share": 3.0, "float_ratio": 0.3},
         ])
-        common.write_parquet(union, rows, api_name="share_float_complete", params={},
+        tushare_io.write_parquet(union, rows, api_name="share_float_complete", params={},
                              fields=list(rows.columns))
         findings: list[dict] = []
 
@@ -1103,7 +1118,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             }
             for index in range(common.SHARE_FLOAT_ROW_LIMIT)
         ])
-        common.write_parquet(path, existing, api_name="share_float", params={}, fields=fields)
+        tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=fields)
 
         result = download.query_share_float_to_path(
             EmptyTradeDateClient(),
@@ -1117,7 +1132,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(result["skipped"])
         self.assertEqual(result["rows"], common.SHARE_FLOAT_ROW_LIMIT)
         self.assertTrue(result["source_cap_risk"])
-        self.assertEqual(common.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
+        self.assertEqual(tushare_io.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
 
     def test_share_float_extreme_shrink_is_staged_and_reported(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
@@ -1127,7 +1142,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             for index in range(100)
         ], columns=fields)
         existing = common.augment_event_frame(existing, common.EVENT_FLOW_SPECS["share_float"])
-        common.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
 
         class ShrunkClient:
             def query(self, api_name, params=None, fields="", retries=5):
@@ -1145,7 +1160,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             )
         self.assertTrue(result["staged"])
         self.assertTrue(result["skipped"])
-        self.assertEqual(common.parquet_rows(path), 100)
+        self.assertEqual(tushare_io.parquet_rows(path), 100)
         self.assertEqual(result["rows"], 100)  # reports the visible partition
 
     def test_existing_partition_resume_reports_every_key(self):
@@ -1156,7 +1171,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         fields = common.SHARE_FLOAT_FIELDS.split(",")
         frame = pd.DataFrame([["000001.SZ", "20200101", "20200102", "h", "type", 1.0, 0.1]], columns=fields)
         frame = common.augment_event_frame(frame, common.EVENT_FLOW_SPECS["share_float"])
-        common.write_parquet(path, frame, api_name="share_float", params={},
+        tushare_io.write_parquet(path, frame, api_name="share_float", params={},
                              fields=list(frame.columns))
 
         class Unused:
@@ -1183,9 +1198,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         old_codes = [f"{index:06d}.SZ" for index in range(100)]
         existing = pd.DataFrame([[code, day, "20200102", 1.0, 0.1, "h", "type"] for code in old_codes], columns=fields)
         existing = common.augment_event_frame(existing, common.EVENT_FLOW_SPECS["share_float"])
-        common.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
         rescued = self.raw_dir / "share_float_ann_date_ts_code" / f"ann_date={day}" / "ts_code=300227.SZ.parquet"
-        common.write_parquet(rescued, existing.head(1), api_name="share_float", params={}, fields=list(existing.columns))
+        tushare_io.write_parquet(rescued, existing.head(1), api_name="share_float", params={}, fields=list(existing.columns))
 
         class CappedNewIpoClient:
             def query(self, api_name, params=None, fields="", retries=5):
@@ -1205,7 +1220,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             limit_hits = download.download_share_float_ann_dates(CappedNewIpoClient(), self.raw_dir, args, report)
         self.assertEqual(limit_hits, [day])
         self.assertEqual(report["ann_date"]["staged_days"], [])
-        self.assertEqual(common.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
+        self.assertEqual(tushare_io.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
         self.assertEqual([version.split("-")[-1] for version in download.list_versions(path)], ["superseded"])
         events = [json.loads(line) for line in (self.root / "revision_events.jsonl").read_text().splitlines()]
         self.assertEqual([event["kind"] for event in events], ["restatement"])
@@ -1229,7 +1244,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 for index in range(rows)
             ], columns=fields)
             frame = common.augment_event_frame(frame, common.EVENT_FLOW_SPECS["share_float"])
-            common.write_parquet(path, frame, api_name="share_float", params={},
+            tushare_io.write_parquet(path, frame, api_name="share_float", params={},
                                  fields=list(frame.columns))
 
         capped_day, retracted_day = "20200101", "20200102"
@@ -1254,7 +1269,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(report["ann_date"]["limit_hit_days"], [capped_day])
         self.assertEqual(report["ann_date"]["staged_days"], [retracted_day])
         self.assertEqual(
-            common.parquet_rows(self.raw_dir / "share_float_ann_date" / f"ann_date={capped_day}.parquet"),
+            tushare_io.parquet_rows(self.raw_dir / "share_float_ann_date" / f"ann_date={capped_day}.parquet"),
             common.SHARE_FLOAT_ROW_LIMIT,
         )
 
@@ -1315,7 +1330,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_range_partition_skip_requires_sidecar_coverage(self):
         path = self.raw_dir / "anns_d" / "month=202605.parquet"
         existing = pd.DataFrame([{"ann_date": "20260528", "title": "old"}])
-        common.write_parquet(
+        tushare_io.write_parquet(
             path,
             existing,
             api_name="anns_d",
@@ -1344,7 +1359,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_sidecar_coverage_normalizes_date_and_datetime_bounds(self):
         path = self.raw_dir / "major_news" / "src=all" / "month=202605.parquet"
         existing = pd.DataFrame([{"pub_time": "2026-05-29 12:00:00", "title": "old"}])
-        common.write_parquet(
+        tushare_io.write_parquet(
             path,
             existing,
             api_name="major_news",
@@ -1357,7 +1372,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             requested_params={"start_date": "20260529000000", "end_date": "20260529235959"},
         ))
 
-        common.write_parquet(
+        tushare_io.write_parquet(
             path,
             existing,
             api_name="major_news",
@@ -1370,7 +1385,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             requested_params={"start_date": "20260529", "end_date": "20260529"},
         ))
 
-        common.write_parquet(
+        tushare_io.write_parquet(
             path,
             existing,
             api_name="major_news",
@@ -1396,7 +1411,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             frame = common.augment_macro_frame(
                 common.frame(CountingMacroClient().query("cn_schedule", {"m": month}, spec.fields)), spec
             )
-            common.write_parquet(
+            tushare_io.write_parquet(
                 path,
                 frame,
                 api_name="cn_schedule",
@@ -1481,7 +1496,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000001.SZ", "ann_date": "20260501", "amount": 1},
             {"ts_code": "000002.SZ", "ann_date": "20260515", "amount": 2},
         ])
-        common.write_parquet(
+        tushare_io.write_parquet(
             path,
             existing,
             api_name="repurchase",
@@ -1541,7 +1556,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # path: a rewrite from 202001 would prune the backfilled history away.
         backfilled = self.raw_dir / "cn_cpi" / "range=201407_latest.parquet"
         pd.DataFrame([{"month": "201407"}]).pipe(
-            lambda df: common.write_parquet(backfilled, df, api_name="cn_cpi", params={}, fields=list(df.columns))
+            lambda df: tushare_io.write_parquet(backfilled, df, api_name="cn_cpi", params={}, fields=list(df.columns))
         )
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -1583,7 +1598,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_macro_range_once_prunes_stale_end_suffixed_files(self):
         stale = self.raw_dir / "cn_cpi" / "range=202001_202605.parquet"
         pd.DataFrame([{"month": "202001"}]).pipe(
-            lambda df: common.write_parquet(stale, df, api_name="cn_cpi", params={}, fields=list(df.columns))
+            lambda df: tushare_io.write_parquet(stale, df, api_name="cn_cpi", params={}, fields=list(df.columns))
         )
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -1638,13 +1653,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000001.SZ", "ann_date": "20200105", "cash_div": 1.0},
             {"ts_code": "000001.SZ", "ann_date": "20200105", "cash_div": 1.0},  # duplicate business key
         ])
-        common.write_parquet(path, rows, api_name="dividend", params={}, fields=list(rows.columns))
+        tushare_io.write_parquet(path, rows, api_name="dividend", params={}, fields=list(rows.columns))
         ledger = self.root / "dupkey_revision_events.jsonl"
 
         def write(frame):
             output = io.StringIO()
             with redirect_stdout(output):
-                outcome = common.publish(
+                outcome = versions.publish(
                     path, frame, api_name="dividend", params={}, fields=list(frame.columns),
                     key_columns=["ts_code", "ann_date"], ledger=ledger,
                 )
@@ -1691,14 +1706,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             }
             for index in range(120)
         ])
-        common.write_parquet(
+        tushare_io.write_parquet(
             path, original, api_name="disclosure_date", params={}, fields=list(original.columns)
         )
         backfilled = original.assign(actual_date="20260826")
         ledger = self.root / "backfill_revision_events.jsonl"
 
         with redirect_stdout(io.StringIO()):
-            outcome = common.publish(
+            outcome = versions.publish(
                 path, backfilled, api_name="disclosure_date", params={}, fields=list(backfilled.columns),
                 key_columns=keys, ledger=ledger,
             )
@@ -1725,14 +1740,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             }
             for index in range(120)
         ])
-        common.write_parquet(
+        tushare_io.write_parquet(
             path, original, api_name="disclosure_date", params={}, fields=list(original.columns)
         )
         truncated = original.head(10).assign(actual_date="20260426")
         ledger = self.root / "retraction_revision_events.jsonl"
 
         with redirect_stdout(io.StringIO()):
-            outcome = common.publish(
+            outcome = versions.publish(
                 path, truncated, api_name="disclosure_date", params={}, fields=list(truncated.columns),
                 key_columns=keys, ledger=ledger,
             )
@@ -1770,7 +1785,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 }])
             else:
                 rows = pd.DataFrame(columns=columns)
-            common.write_parquet(
+            tushare_io.write_parquet(
                 self.raw_dir / "block_trade" / f"trade_date={trade_date}.parquet",
                 rows, api_name="block_trade", params={"trade_date": trade_date},
                 fields=columns,
@@ -1809,7 +1824,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 )
             else:
                 rows = pd.DataFrame(columns=columns)
-            common.write_parquet(
+            tushare_io.write_parquet(
                 self.raw_dir / "limit_list_d" / f"trade_date={trade_date}.parquet",
                 rows, api_name="limit_list_d", params={"trade_date": trade_date},
                 fields=columns,
@@ -1845,7 +1860,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                         spec,
                     )
                 path = self.raw_dir / "news" / f"src={source}" / f"date={day}.parquet"
-                common.write_parquet(
+                tushare_io.write_parquet(
                     path, rows, api_name="news", params={"src": source, "date": day},
                     fields=columns,
                 )
@@ -1957,12 +1972,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 for ex in ("SSE", "SZSE", "BSE")
             ])
             path = self.raw_dir / "margin" / f"trade_date={trade_date}.parquet"
-            common.write_parquet(path, rows, api_name="margin", params={"trade_date": trade_date}, fields=list(rows.columns))
+            tushare_io.write_parquet(path, rows, api_name="margin", params={"trade_date": trade_date}, fields=list(rows.columns))
             return path
 
         land_old("20260929", "20260930")  # same stamp under both rules, old label
         friday = land_old("20261009", "20261010")
-        fetched_at = common.parquet_meta(friday)["fetched_at"]
+        fetched_at = tushare_io.parquet_meta(friday)["fetched_at"]
         release_copy = self.root / "release_margin.parquet"
         os.link(friday, release_copy)
 
@@ -1972,10 +1987,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(set(live["available_at"]), {"2026-10-12 09:00:00+08:00"})
         self.assertEqual(set(live["available_at_rule"]), {"official_next_trading_day_09_from:trade_date"})
         self.assertEqual(live["rzye"].tolist(), [1.0, 1.0, 1.0])
-        self.assertTrue(common.committed_partition_intact(friday))
+        self.assertTrue(tushare_io.committed_partition_intact(friday))
         # A restamp is a restatement: the replaced partition is kept as a
         # superseded version, and the release's hard link keeps the old bytes.
-        self.assertNotEqual(common.parquet_meta(friday)["fetched_at"], fetched_at)
+        self.assertNotEqual(tushare_io.parquet_meta(friday)["fetched_at"], fetched_at)
         (superseded,) = versions.list_versions(friday)
         self.assertTrue(superseded.endswith("-superseded"))
         self.assertEqual(set(pd.read_parquet(release_copy)["available_at"]), {"2026-10-10 09:00:00+08:00"})
@@ -2024,6 +2039,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             page_limit=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         with patch.object(download, "load_token", return_value="token"), patch.object(
             download, "TuShareClient", return_value=NewShareClient()
@@ -2096,7 +2112,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                      "end_date": period, "report_type": "1", "comp_type": "1", "end_type": "1"}
                     for index in range(rows)
                 ])
-                common.write_parquet(
+                tushare_io.write_parquet(
                     self.raw_dir / dataset / f"period={period}.parquet",
                     frame, api_name=dataset, params={"period": period},
                     fields=list(frame.columns),
@@ -2115,11 +2131,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ])
 
     def test_index_weight_audit_checks_year_partitions_and_monthly_coverage(self):
-        def write_year(code, year, months, legacy=False):
-            if legacy:
-                path = self.raw_dir / "index_weight" / f"index_code={code}.parquet"
-            else:
-                path = self.raw_dir / "index_weight" / f"index_code={code}" / f"year={year}.parquet"
+        def write_year(code, year, months):
+            path = self.raw_dir / "index_weight" / f"index_code={code}" / f"year={year}.parquet"
             rows = pd.DataFrame([
                 {"index_code": code, "con_code": f"{m:06d}.SZ", "trade_date": f"{year}{m:02d}28", "weight": 1.0}
                 for m in months
@@ -2147,12 +2160,6 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             write_year("000300.SH", 2021, range(1, 13))
             severity, _, _, details = run_audit()
             self.assertEqual(severity, "info")
-
-            # Unmigrated flat legacy partitions (the pre-pagination layout) warn.
-            write_year("000300.SH", 2020, range(1, 13), legacy=True)
-            severity, _, _, details = run_audit()
-            self.assertEqual(severity, "warning")
-            self.assertEqual(details["legacy_flat_partitions"], 1)
 
     def test_index_weight_audit_follows_a_backfill_below_the_floor(self):
         # The expected years start at the earliest backfilled year, per code
@@ -2304,6 +2311,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 min_interval_seconds=0,
                 timeout_seconds=1,
                 **extra,
+                macro_start_date=None,
             )
             client = CountingMacroClient()
             with redirect_stdout(io.StringIO()), patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
@@ -2377,17 +2385,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         def write(frame, **extra):
             with redirect_stdout(io.StringIO()):
-                return common.publish(
+                return versions.publish(
                     path, frame, api_name="stk_auction", params={}, fields=list(frame.columns),
                     key_columns=keys, ledger=None, **extra,
                 )
 
         self.assertEqual(write(first, extra_metadata={"availability": availability}), "appended")
         self.assertEqual(write(first.copy()), "unchanged")
-        self.assertEqual(common.parquet_meta(path)["availability"], availability)
+        self.assertEqual(tushare_io.parquet_meta(path)["availability"], availability)
 
         self.assertEqual(write(first.assign(price=10.1)), "restated")
-        revised_availability = common.parquet_meta(path)["availability"]
+        revised_availability = tushare_io.parquet_meta(path)["availability"]
         self.assertEqual(revised_availability["rule"], "observed:source_revision_fetch")
         self.assertNotEqual(revised_availability["available_at"], availability["available_at"])
 
@@ -2436,7 +2444,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(query.call_count, 5)
         target = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
         self.assertEqual(len(pd.read_parquet(target)), 2)
-        availability = common.parquet_meta(target)["availability"]
+        availability = tushare_io.parquet_meta(target)["availability"]
         self.assertEqual(availability["rule"], "observed:cn_open_auction_capture")
         self.assertEqual(availability["row_count"], 2)
 
@@ -2450,7 +2458,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             patch.object(download.time, "sleep", return_value=None),
         ):
             self.assertEqual(download.capture_open_auction(args), 0)
-        self.assertEqual(common.parquet_meta(target)["availability"], availability)
+        self.assertEqual(tushare_io.parquet_meta(target)["availability"], availability)
         self.assertEqual(pd.read_parquet(target)["ts_code"].tolist(), ["000001.SZ", "600000.SH"])
 
     def test_capture_open_auction_timeout_does_not_replace_partition(self):
@@ -2459,7 +2467,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         original = pd.DataFrame(
             [{"trade_date": "20260713", "ts_code": "000001.SZ", "price": 9.9}]
         )
-        common.write_parquet(
+        tushare_io.write_parquet(
             target,
             original,
             api_name="stk_auction",
@@ -2645,6 +2653,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
+            start_date="20260713",
             end_date="20260713",
             landing_job="cn_evening_auction_backfill",
             page_limit=10000,
@@ -2671,7 +2680,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         code, out = run(return_value=(result(full, "a"), 1))
         self.assertEqual(code, 0)
         self.assertIn("recheck_published", out)
-        availability = common.parquet_meta(target)["availability"]
+        availability = tushare_io.parquet_meta(target)["availability"]
         self.assertEqual(availability["landing_job"], "cn_evening_auction_backfill")
         first_bytes = target.read_bytes()
 
@@ -2681,7 +2690,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("recheck_unchanged", out)
         self.assertEqual(target.read_bytes(), first_bytes)
-        self.assertEqual(common.parquet_meta(target)["availability"], availability)
+        self.assertEqual(tushare_io.parquet_meta(target)["availability"], availability)
 
         # Incomplete fetch (below the completeness floor): existing file kept,
         # the failure is surfaced, the batch does not fail.
@@ -2709,7 +2718,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn('"revised_existing": true', out)
         self.assertNotEqual(target.read_bytes(), first_bytes)
         self.assertNotEqual(
-            common.parquet_meta(target)["availability"]["available_at"],
+            tushare_io.parquet_meta(target)["availability"]["available_at"],
             availability["available_at"],
         )
 
@@ -2734,7 +2743,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # 20260709 already captured as an intact commit; 20260710 missing.
         existing = pd.DataFrame(day_rows("20260709"), columns=fields)
         target_dir = self.raw_dir / "stk_auction"
-        common.write_parquet(
+        tushare_io.write_parquet(
             target_dir / "trade_date=20260709.parquet",
             existing,
             api_name="stk_auction",
@@ -2757,6 +2766,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=str(self.root / "revision_events.jsonl"),
             min_interval_seconds=0.0,
             timeout_seconds=1.0,
+            landing_job="cn_evening_auction_backfill",
         )
         with (
             patch.object(download, "load_token", return_value="token"),
@@ -2789,7 +2799,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         target_dir.mkdir(parents=True, exist_ok=True)
         torn = target_dir / "trade_date=20260709.parquet"
         pd.DataFrame(day_rows("20260709"), columns=fields).to_parquet(torn, index=False)
-        self.assertFalse(common.committed_partition_intact(torn))
+        self.assertFalse(tushare_io.committed_partition_intact(torn))
 
         queried: list[str] = []
 
@@ -2806,6 +2816,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=str(self.root / "revision_events.jsonl"),
             min_interval_seconds=0.0,
             timeout_seconds=1.0,
+            landing_job="cn_evening_auction_backfill",
         )
         with (
             patch.object(download, "load_token", return_value="token"),
@@ -2816,7 +2827,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ):
             self.assertEqual(download.recheck_stk_auction(args), 0)
         self.assertEqual(queried, ["20260709", "20260710", "20260713"])
-        self.assertTrue(common.committed_partition_intact(torn))
+        self.assertTrue(tushare_io.committed_partition_intact(torn))
 
     def test_default_daily_download_excludes_stk_auction(self):
         selected = common.selected_daily_datasets(argparse.Namespace(datasets=None))
@@ -2863,6 +2874,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             page_limit=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         with (
             patch.object(download, "load_token", return_value="token"),
@@ -4008,30 +4020,26 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_cron_lock_blocks_while_held_and_releases_on_exit(self):
         # flock is per open-file-description: a second acquire in the same
         # process must block exactly like a second process would.
-        runtime = self.root / ".runtime" / "tushare"
-        with patch.object(cron_update, "RUNTIME_ROOT", runtime):
-            held = cron_update.acquire_lock("tushare_update", wait_seconds=0)
-            try:
-                with self.assertRaisesRegex(RuntimeError, "lock is held"):
-                    cron_update.acquire_lock("tushare_update", wait_seconds=0)
-            finally:
-                held.release()
-            reacquired = cron_update.acquire_lock("tushare_update", wait_seconds=0)
-            reacquired.release()
+        held = cron_update.acquire_lock(self.root, wait_seconds=0)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "lock is held"):
+                cron_update.acquire_lock(self.root, wait_seconds=0)
+        finally:
+            held.release()
+        reacquired = cron_update.acquire_lock(self.root, wait_seconds=0)
+        reacquired.release()
 
     def test_cron_lock_file_from_dead_process_never_blocks(self):
         # A leftover lock FILE (crash, kill -9, PID reuse) carries no kernel
         # flock, so the next run acquires immediately - no stale-lock heuristics.
-        runtime = self.root / ".runtime" / "tushare"
-        lock_file = runtime / "locks" / "tushare_update.lock"
+        lock_file = self.root / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
         lock_file.parent.mkdir(parents=True, exist_ok=True)
         lock_file.write_text("pid=999999999\nstarted_at=2020-01-01T00:00:00+00:00\n", encoding="utf-8")
 
-        with patch.object(cron_update, "RUNTIME_ROOT", runtime):
-            acquired = cron_update.acquire_lock("tushare_update", wait_seconds=0)
-            self.assertTrue(acquired.path.exists())
-            self.assertIn(f"pid={cron_update.os.getpid()}", acquired.path.read_text(encoding="utf-8"))
-            acquired.release()
+        acquired = cron_update.acquire_lock(self.root, wait_seconds=0)
+        self.assertEqual(acquired.path, lock_file)
+        self.assertIn(f"pid={cron_update.os.getpid()}", acquired.path.read_text(encoding="utf-8"))
+        acquired.release()
 
     def test_cron_multi_command_jobs_fail_fast(self):
         ctx = cron_update.RunContext(
@@ -4117,8 +4125,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             skip_bak_basic=True,
             force=False,
             refresh_reference_datasets=["stock_basic", "stock_company", "namechange", "index_classify", "index_member_all"],
+            trade_cal_end_date=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         client = ReferenceClient()
 
@@ -4169,8 +4179,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             skip_bak_basic=True,
             force=False,
             refresh_reference_datasets=["stock_company"],
+            trade_cal_end_date=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyReferenceClient()):
@@ -4384,14 +4396,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self._write_trade_cal("20200102")
         daily_rows = pd.DataFrame([{"trade_date": "20200102", "ts_code": "999999.SZ", "close": 1.0}])
         adj_rows = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 2.0}])
-        common.write_parquet(
+        tushare_io.write_parquet(
             self.raw_dir / "daily" / "trade_date=20200102.parquet",
             daily_rows,
             api_name="daily",
             params={"trade_date": "20200102"},
             fields=list(daily_rows.columns),
         )
-        common.write_parquet(
+        tushare_io.write_parquet(
             self.raw_dir / "adj_factor" / "trade_date=20200102.parquet",
             adj_rows,
             api_name="adj_factor",
@@ -4441,7 +4453,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 {"trade_date": "20200102", "ts_code": "000002.SZ", "close": 20.0, "adj_factor": 1.1},
             ])
             path = self.raw_dir / dataset / "trade_date=20200102.parquet"
-            common.write_parquet(
+            tushare_io.write_parquet(
                 path,
                 original,
                 api_name=dataset,
@@ -4471,7 +4483,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         pd.DataFrame([{"ts_code": "000001.SZ"}]).to_parquet(stock_basic, index=False)
         for dataset in ("dividend", "fina_audit", "fina_mainbz_vip"):
             path = self.raw_dir / dataset / "ts_code=000001.SZ.parquet"
-            common.write_parquet(
+            tushare_io.write_parquet(
                 path,
                 pd.DataFrame([{"ts_code": "000001.SZ", "ann_date": "20190101", "end_date": "20181231"}]),
                 api_name=dataset,
@@ -4485,13 +4497,16 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             datasets=["dividend", "fina_audit", "fina_mainbz_vip", "income_vip"],
             force=False,
             page_limit=None,
+            codes=None,
             max_codes=None,
             fundamental_refresh_period_count=2,
             fundamental_refresh_ann_month_count=0,
             fundamental_refresh_ts_code_datasets=["dividend", "fina_audit", "fina_mainbz_vip"],
+            fundamental_refresh_event_days=90,
             fundamental_dividend_probe_days=0,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         client = FundamentalClient()
@@ -4746,14 +4761,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_key_comparison_handles_missing_key_columns_and_duplicate_keys(self):
         # A missing key column reads as empty text: the old row's key differs.
-        missing = common.diff_frames(
+        missing = versions.diff_frames(
             pd.DataFrame([{"trade_date": "20200102", "open": 1.0}]),
             pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0}]),
             ["trade_date", "ts_code"],
         )
         self.assertEqual((len(missing.removed), len(missing.added)), (1, 1))
         # A repeated key compares as the multiset of its rows.
-        duplicate = common.diff_frames(
+        duplicate = versions.diff_frames(
             pd.DataFrame([
                 {"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0},
                 {"trade_date": "20200102", "ts_code": "000001.SZ", "open": 1.0},
@@ -4766,7 +4781,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_revision_comparison_canonicalizes_numeric_values(self):
         old_df = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 1}])
         new_df = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "adj_factor": 1.0}])
-        self.assertTrue(common.diff_frames(old_df, new_df, ["trade_date", "ts_code"]).empty)
+        self.assertTrue(versions.diff_frames(old_df, new_df, ["trade_date", "ts_code"]).empty)
 
     def test_revision_event_records_counts_without_samples(self):
         old_df = pd.DataFrame([
@@ -4779,15 +4794,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"trade_date": "20200102", "ts_code": "000002.SZ", "close": 20.0, "amount": 201.5},
             {"trade_date": "20200102", "ts_code": "000004.SZ", "close": 40.0, "amount": 400.0},
         ])
-        diff = common.diff_frames(old_df, new_df, ["trade_date", "ts_code"])
-        event = common.revision_event(
+        diff = versions.diff_frames(old_df, new_df, ["trade_date", "ts_code"])
+        event = versions.revision_event(
             "restatement", dataset="daily", partition="trade_date=20200102", source="unit",
             key_columns=["trade_date", "ts_code"], diff=diff, old_rows=3, new_rows=3,
             superseded_version="20261024T000000000000Z-superseded",
         )
 
-        self.assertEqual(tuple(event), common.REVISION_EVENT_FIELDS)
-        self.assertEqual(event["schema_version"], common.REVISION_EVENT_SCHEMA_VERSION)
+        self.assertEqual(tuple(event), versions.REVISION_EVENT_FIELDS)
+        self.assertEqual(event["schema_version"], versions.REVISION_EVENT_SCHEMA_VERSION)
         self.assertEqual((event["old_keys"], event["new_keys"]), (3, 3))
         self.assertEqual((event["changed_keys"], event["added_keys"], event["removed_keys"]), (2, 1, 1))
         self.assertEqual(event["changed_columns"], {"amount": 1, "close": 1})
@@ -4822,9 +4837,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         new_df = rows([f"新名{index}" for index in range(25)])
         self.assertFalse(old_df.duplicated(keys).any())
         self.assertEqual(int(old_df.duplicated(["trade_date", "ts_code"]).sum()), 1)
-        event = common.revision_event(
+        event = versions.revision_event(
             "probe", dataset="top_list", partition="trade_date=20240611", source="unit",
-            key_columns=keys, diff=common.diff_frames(old_df, new_df, keys), old_rows=len(old_df), new_rows=len(new_df),
+            key_columns=keys, diff=versions.diff_frames(old_df, new_df, keys), old_rows=len(old_df), new_rows=len(new_df),
         )
         self.assertEqual((event["changed_keys"], event["added_keys"], event["removed_keys"]), (26, 0, 0))
         self.assertEqual(event["changed_columns"], {"name": 26})
@@ -4884,7 +4899,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def _seed_shrinkable_partition(self, path: Path, columns: dict[str, list[str]], api_name: str) -> pd.DataFrame:
         original = pd.DataFrame(columns)
-        common.write_parquet(path, original, api_name=api_name, params={}, fields=list(original.columns))
+        tushare_io.write_parquet(path, original, api_name=api_name, params={}, fields=list(original.columns))
         return original
 
     def _assert_staged(self, path: Path, original: pd.DataFrame, ledger: Path) -> None:
@@ -5151,6 +5166,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             page_limit=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         with redirect_stdout(io.StringIO()), patch.object(download, "load_token", return_value="token"), patch.object(
             download, "TuShareClient", return_value=client
@@ -5190,10 +5206,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_empty_answer_defect_does_not_depend_on_a_ledger(self):
         path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
         original = pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}])
-        common.write_parquet(path, original, api_name="limit_list_d", params={}, fields=list(original.columns))
+        tushare_io.write_parquet(path, original, api_name="limit_list_d", params={}, fields=list(original.columns))
 
         with redirect_stdout(io.StringIO()):
-            outcome = common.publish(
+            outcome = versions.publish(
                 path,
                 pd.DataFrame(columns=list(original.columns)),
                 api_name="limit_list_d",
@@ -5217,6 +5233,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             page_limit=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
+            zero_rows_not_ready=False,
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyTradeDateClient()):
@@ -5235,6 +5253,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             zero_rows_not_ready=True,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyTradeDateClient()):
@@ -5268,6 +5287,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             zero_rows_not_ready=True,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=PartialMarginClient()):
             output = io.StringIO()
@@ -5571,7 +5591,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         old = pd.DataFrame({col: [f"{col}{i}" for i in range(40)] for col in keys})
         old["bz_sales"] = 1.0
         path = d / "ts_code=000001.SZ.parquet"
-        common.write_parquet(path, old, api_name=spec.api_name, params={}, fields=list(old.columns))
+        tushare_io.write_parquet(path, old, api_name=spec.api_name, params={}, fields=list(old.columns))
 
         class ShrunkClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
@@ -5614,7 +5634,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         self.assertEqual([api for api, _ in client.calls], ["margin_secs"])
         self.assertEqual((written, zero_skipped), (1, 0))
-        self.assertTrue(common.committed_partition_intact(orphan))
+        self.assertTrue(tushare_io.committed_partition_intact(orphan))
 
         # Once the pair is intact, the same covering run skips it.
         client.calls.clear()
@@ -5625,13 +5645,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # A replaced Parquet from an interrupted publish is also re-attempted:
         # its footer and row count no longer match the committed sidecar.
         pd.read_parquet(orphan).iloc[:2].to_parquet(orphan, index=False)
-        self.assertFalse(common.committed_partition_intact(orphan))
+        self.assertFalse(tushare_io.committed_partition_intact(orphan))
 
     def test_daily_skip_reattempts_partition_without_intact_sidecar(self):
         path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ"}]).to_parquet(path, index=False)
-        self.assertFalse(common.committed_partition_intact(path))
+        self.assertFalse(tushare_io.committed_partition_intact(path))
         client = DailyMarketClient()
         ledger = self.root / "daily_skip_heal.jsonl"
         with redirect_stdout(io.StringIO()):
@@ -5640,7 +5660,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             )
         self.assertEqual([api for api, _ in client.calls], ["daily"])
         self.assertEqual(zero_skipped, 0)
-        self.assertTrue(common.committed_partition_intact(path))
+        self.assertTrue(tushare_io.committed_partition_intact(path))
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_trade_date_dataset(
@@ -5651,14 +5671,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         meta = json.loads(sidecar.read_text(encoding="utf-8"))
         meta["write_id"] = "00000000-0000-0000-0000-000000000000"
         sidecar.write_text(json.dumps(meta), encoding="utf-8")
-        self.assertFalse(common.committed_partition_intact(path))
+        self.assertFalse(tushare_io.committed_partition_intact(path))
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_trade_date_dataset(
                 client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
             )
         self.assertEqual([api for api, _ in client.calls], ["daily"])
-        self.assertTrue(common.committed_partition_intact(path))
+        self.assertTrue(tushare_io.committed_partition_intact(path))
 
     def test_board_skip_reattempts_partition_without_intact_sidecar(self):
         spec = common.BOARD_TRADING_SPECS["limit_list_d"]
@@ -5678,11 +5698,30 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None)
         self.assertEqual([api for api, _ in client.calls], ["limit_list_d"])
-        self.assertTrue(common.committed_partition_intact(path))
+        self.assertTrue(tushare_io.committed_partition_intact(path))
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None)
         self.assertEqual(client.calls, [])
+
+    def test_board_progress_counts_only_partitions_publish_wrote(self):
+        spec = common.BOARD_TRADING_SPECS["limit_list_d"]
+
+        class LimitClient(EmptyTradeDateClient):
+            def query(self, api_name, params=None, fields="", retries=5):
+                columns = fields.split(",")
+                row = ["20200102" if col == "trade_date" else "000001.SZ" if col == "ts_code" else "U" for col in columns]
+                return common.ApiResult(columns, [row])
+
+        def run() -> str:
+            out = io.StringIO()
+            with redirect_stdout(out):
+                download.download_board_trade_date_dataset(LimitClient(), self.raw_dir, spec, ["20200102"], True, 5000, None)
+            return out.getvalue()
+
+        self.assertIn("written=1 rows_written=1", run())
+        # The same answer again: publish keeps the partition, so nothing is counted.
+        self.assertIn("written=0 rows_written=0", run())
 
     def test_share_float_skip_reattempts_partition_without_intact_sidecar(self):
         fields = common.SHARE_FLOAT_FIELDS.split(",")
@@ -5690,7 +5729,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         seeded = pd.DataFrame([["000001.SZ", "20200101", "20200102", 1.0, 0.1, "h1", "type"]], columns=fields)
         seeded.to_parquet(path, index=False)
-        self.assertFalse(common.committed_partition_intact(path))
+        self.assertFalse(tushare_io.committed_partition_intact(path))
 
         class FloatClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
@@ -5705,7 +5744,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             )
         self.assertEqual([api for api, _ in client.calls], ["share_float"])
         self.assertFalse(report["skipped"])
-        self.assertTrue(common.committed_partition_intact(path))
+        self.assertTrue(tushare_io.committed_partition_intact(path))
         client.calls.clear()
         report = download.query_share_float_to_path(
             client, path, {"ann_date": "20200101"}, "ann_date", False,
@@ -5722,7 +5761,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # The same row the vendor answers, written without a commit identity:
         # the identical answer is committed again to heal the pair.
         pd.DataFrame([answer], columns=keys).to_parquet(path, index=False)
-        self.assertFalse(common.committed_partition_intact(path))
+        self.assertFalse(tushare_io.committed_partition_intact(path))
 
         class PeriodClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
@@ -5733,7 +5772,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with redirect_stdout(io.StringIO()):
             download.download_fundamental_period_dataset(client, self.raw_dir, spec, ["20200331"], False, 5000)
         self.assertEqual([api for api, _ in client.calls], ["income_vip"])
-        self.assertTrue(common.committed_partition_intact(path))
+        self.assertTrue(tushare_io.committed_partition_intact(path))
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_fundamental_period_dataset(client, self.raw_dir, spec, ["20200331"], False, 5000)
@@ -5833,7 +5872,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "available_at": "2026-07-15 23:59:59+08:00",
             "available_at_rule": "conservative_date_eod",
         }])
-        common.write_parquet(month_path, month_frame, api_name="cn_schedule", params={}, fields=list(month_frame.columns))
+        tushare_io.write_parquet(month_path, month_frame, api_name="cn_schedule", params={}, fields=list(month_frame.columns))
 
         def partition_finding(end_date):
             findings = []
@@ -5869,6 +5908,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             zero_rows_not_ready=True,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "load_token", return_value="token"), \
@@ -5892,7 +5932,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         original = pd.DataFrame(
             [{"trade_date": "20200102", "exchange_id": f"EX{i:02d}", "rzye": 1.0} for i in range(30)]
         )
-        common.write_parquet(path, original, api_name="margin", params={}, fields=list(original.columns))
+        tushare_io.write_parquet(path, original, api_name="margin", params={}, fields=list(original.columns))
 
         class ShrunkMarginClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
@@ -5951,6 +5991,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             min_interval_seconds=0,
             timeout_seconds=1,
             zero_rows_not_ready=True,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=MarginOnlyClient()):
@@ -6085,7 +6126,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self._write_trade_cal()
         path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
         empty = pd.DataFrame(columns=common.STK_MINS_REQUIRED_COLUMNS)
-        common.write_parquet(path, empty, api_name=common.STK_MINS_API_NAME, params={}, fields=list(empty.columns))
+        tushare_io.write_parquet(path, empty, api_name=common.STK_MINS_API_NAME, params={}, fields=list(empty.columns))
         status_path = self.root / "status.json"
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -6123,7 +6164,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             rows.append(dict(rows[0]))
         path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / f"trade_date={trade_date}.parquet"
         df = pd.DataFrame(rows)
-        common.write_parquet(path, df, api_name=common.STK_MINS_API_NAME, params={}, fields=list(df.columns))
+        tushare_io.write_parquet(path, df, api_name=common.STK_MINS_API_NAME, params={}, fields=list(df.columns))
 
     def test_intraday_by_date_deep_checks_cover_the_newest_dates(self):
         # The head slice re-validated the window's FIRST trading days forever;
@@ -6288,7 +6329,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "ts_code": "000001.SZ", "ann_date": "20260710", "end_date": "20260630",
             "holder_num": 10000, "available_at": "2026-07-10T23:59:59+08:00", "available_at_rule": "ann_date_eod",
         }])
-        common.write_parquet(
+        tushare_io.write_parquet(
             self.raw_dir / "stk_holdernumber" / "month=202607.parquet",
             holders, api_name="stk_holdernumber", params={}, fields=list(holders.columns),
         )
@@ -6326,7 +6367,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 for exchange in ("SSE", "SZSE", "BSE")
             ])
             df = common.augment_event_frame(rows, spec, trading_dates=trading_dates)
-            common.write_parquet(
+            tushare_io.write_parquet(
                 self.raw_dir / "margin" / f"trade_date={trade_date}.parquet",
                 df, api_name="margin", params={}, fields=list(df.columns),
             )
@@ -6400,7 +6441,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "trade_date": "20260731", "ts_code": "000001.SZ", "q": "问题", "a": "回答",
             "pub_time": "2026-07-31 18:00:00",
         }])
-        common.write_parquet(
+        tushare_io.write_parquet(
             self.raw_dir / "irm_qa_sh" / "date=20260731.parquet",
             qa, api_name="irm_qa_sh", params={}, fields=list(qa.columns),
         )
@@ -6415,7 +6456,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         # The same window is clean once the calendar-day job has landed Saturday
         # (an empty vendor response still writes the partition).
-        common.write_parquet(
+        tushare_io.write_parquet(
             self.raw_dir / "irm_qa_sh" / "date=20260801.parquet",
             qa.iloc[0:0], api_name="irm_qa_sh", params={}, fields=list(qa.columns),
         )
@@ -6444,6 +6485,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             dc_hot_market=["A股市场"],
             dc_hot_type=["人气榜"],
             hot_is_new=["N"],
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=BoardClient()):
@@ -6461,7 +6503,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "available_at": "2023-11-01 16:00:00+08:00",
             "available_at_rule": "official_16_from:trade_date",
         }])
-        common.write_parquet(
+        tushare_io.write_parquet(
             self.raw_dir / "limit_list_d" / "trade_date=20231101.parquet",
             limit_rows,
             api_name="limit_list_d",
@@ -6481,6 +6523,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             dc_hot_type=["人气榜"],
             hot_is_new=["N"],
             output=str(status_path),
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         self.assertEqual(audit.audit_board_trading_only(audit_args), 0)
         status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -6507,6 +6550,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             page_limit=None,
             min_interval_seconds=0,
             timeout_seconds=1,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         client = CountingBoardClient()
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
@@ -6573,6 +6617,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             kpl_tag=["涨停"],
             ths_hot_market=["热股"],
             hot_is_new=["N"],
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         client = CountingBoardClient()
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
@@ -6600,6 +6645,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             dc_hot_market=["A股市场"],
             dc_hot_type=["人气榜"],
             hot_is_new=["N"],
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=NoQueryClient()):
@@ -6628,7 +6674,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         with redirect_stdout(io.StringIO()):
             download.download_text_day(DayClient([]), self.raw_dir, spec, ["20260809"], True)
-        self.assertEqual(common.parquet_rows(path), 0)
+        self.assertEqual(tushare_io.parquet_rows(path), 0)
 
         with redirect_stdout(io.StringIO()):
             download.download_text_day(DayClient([["20260809", "标题", "内容"]]), self.raw_dir, spec, ["20260809"], True)
@@ -6730,6 +6776,7 @@ class IntradayByDateTest(unittest.TestCase):
             force=False,
             allow_empty=False,
             allow_validation_warnings=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         self.assertEqual(self.module.compact_intraday_by_date(compact_args), 0)
 
@@ -6755,6 +6802,7 @@ class IntradayByDateTest(unittest.TestCase):
             full_scan=True,
             sample_limit=20,
             output=str(status_path),
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         self.assertEqual(self.module.audit_intraday_by_date(audit_args), 0)
         status = json.loads(status_path.read_text(encoding="utf-8"))
@@ -6942,7 +6990,7 @@ class CronFollowUpChainTest(unittest.TestCase):
             dry_run=False, force_run=False, then=then,
         )
 
-    def _lock(self, name: str, wait_seconds: int):
+    def _lock(self, repo_root: Path, wait_seconds: int):
         chain = self
         self.locks["acquired"] += 1
 
@@ -7177,7 +7225,7 @@ class CorruptSidecarTest(unittest.TestCase):
             Path(str(path) + ".meta.json").write_text("{broken", encoding="utf-8")
             out = io.StringIO()
             with redirect_stdout(out):
-                outcome = common.publish(
+                outcome = versions.publish(
                     path,
                     pd.DataFrame({"ts_code": ["000001.SZ"], "v": [2]}),
                     api_name="daily",
@@ -7190,7 +7238,7 @@ class CorruptSidecarTest(unittest.TestCase):
             alert_lines = [line for line in out.getvalue().splitlines() if "corrupt_sidecar_replaced" in line]
             self.assertEqual(len(alert_lines), 1)
             # The rewrite repaired the torn pair: the sidecar parses again.
-            self.assertTrue(common.committed_partition_intact(path))
+            self.assertTrue(tushare_io.committed_partition_intact(path))
 
     def test_audit_records_corrupt_sidecar_as_error(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -7245,6 +7293,17 @@ class ManualProductionWriteRefusalTest(unittest.TestCase):
         with self.assertRaisesRegex(SystemExit, "cron runner|tushare_cron_update"):
             self._run(["update", "--start-date", "20260101", "--end-date", "20260102"], "update_data", 0)
         self.assertFalse((self.root / "data" / "raw" / ".raw_generation.json").exists())
+
+    def test_the_guard_covers_the_protected_tree_and_nothing_beside_it(self) -> None:
+        protected = self.root / "data" / "pit" / "fundamental_events"
+        for target, refused in (
+            (protected, True),
+            (protected / "dividend", True),
+            (self.root / "data" / "pit" / "fundamental_events_dev", False),
+            (self.root / "elsewhere", False),
+            (None, False),
+        ):
+            self.assertEqual(tushare_io.manual_production_write(self.root, protected, target), refused, target)
 
     def test_genuine_cron_child_with_inherited_lock_fd_passes(self) -> None:
         # Only an INHERITED, exclusively-held lock fd proves a runner child:
@@ -7348,7 +7407,7 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
 
     def _write_baseline(self, rows: list[dict]) -> pd.DataFrame:
         frame = pd.DataFrame(rows)
-        common.write_parquet(
+        tushare_io.write_parquet(
             self.baseline, frame, api_name="share_float_complete", params={},
             fields=list(frame.columns),
         )
@@ -7390,15 +7449,16 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
         # supersession would otherwise delete the DATED baseline generation and
         # downgrade its availability to the float_date fallback.
         existing = pd.DataFrame([self._row(ann_date="20260630", float_share=1000.0)])
-        common.write_parquet(self.baseline, existing, api_name="share_float", params={},
+        tushare_io.write_parquet(self.baseline, existing, api_name="share_float", params={},
                              fields=list(existing.columns))
         source = self.raw_dir / "share_float" / "date=20270712.parquet"
         undated = pd.DataFrame([self._row(ann_date=None, float_share=2000.0)])
-        common.write_parquet(source, undated, api_name="share_float", params={},
+        tushare_io.write_parquet(source, undated, api_name="share_float", params={},
                              fields=list(undated.columns))
         args = argparse.Namespace(
             union_output=str(self.baseline), ann_start_date="20260601", ann_end_date="20260731",
             float_start_date="20270712", float_end_date="20270712", skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report: dict = {}
 
@@ -7412,19 +7472,20 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
 
     def test_undated_active_row_loses_the_newest_dating_comparison(self) -> None:
         existing = pd.DataFrame([self._row(ann_date="20260630", float_share=1000.0)])
-        common.write_parquet(self.baseline, existing, api_name="share_float", params={},
+        tushare_io.write_parquet(self.baseline, existing, api_name="share_float", params={},
                              fields=list(existing.columns))
         dated_path = self.raw_dir / "share_float_ann_date" / "ann_date=20260709.parquet"
         dated = pd.DataFrame([self._row(ann_date="20260709", float_share=1000.0)])
-        common.write_parquet(dated_path, dated, api_name="share_float", params={},
+        tushare_io.write_parquet(dated_path, dated, api_name="share_float", params={},
                              fields=list(dated.columns))
         undated_path = self.raw_dir / "share_float" / "date=20270712.parquet"
         undated = pd.DataFrame([self._row(ann_date=None, float_share=1000.0)])
-        common.write_parquet(undated_path, undated, api_name="share_float", params={},
+        tushare_io.write_parquet(undated_path, undated, api_name="share_float", params={},
                              fields=list(undated.columns))
         args = argparse.Namespace(
             union_output=str(self.baseline), ann_start_date="20260601", ann_end_date="20260731",
             float_start_date="20270712", float_end_date="20270712", skip_float_date_union=False,
+            revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report: dict = {}
 
@@ -7445,7 +7506,7 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
             self._row(ts_code="000009.SZ", ann_date="20260630"),
             self._row(ts_code="000009.SZ", ann_date="20260709"),
         ])
-        common.write_parquet(self.baseline, rows, api_name="share_float_complete", params={},
+        tushare_io.write_parquet(self.baseline, rows, api_name="share_float_complete", params={},
                              fields=list(rows.columns))
         findings: list[dict] = []
 
@@ -7557,7 +7618,7 @@ class TuShareClientTest(unittest.TestCase):
     def test_an_answer_without_a_requested_field_is_defective(self) -> None:
         _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code"], "items": [["000001.SZ"]]}})]
         client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
-        with self.assertRaisesRegex(common.DefectiveAnswer, r"without requested fields \['close'\]"):
+        with self.assertRaisesRegex(versions.DefectiveAnswer, r"without requested fields \['close'\]"):
             client.query("daily", {"trade_date": "20261023"}, "ts_code,close")
         # Casing alone is not a defect: the macro tier maps vendor casing.
         _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["MONTH", "PMI"], "items": [["202609", 49.8]]}})]

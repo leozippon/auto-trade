@@ -1,4 +1,4 @@
-"""Safety contract for the managed TuShare crontab installer."""
+"""Safety contract for the managed crontab installer."""
 
 import importlib.util
 import os
@@ -7,40 +7,41 @@ import unittest
 from pathlib import Path
 from stat import S_IMODE
 
-SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "cron" / "install_tushare_cron.py"
-SPEC = importlib.util.spec_from_file_location("install_tushare_cron", SCRIPT)
+SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "cron" / "install_cron.py"
+SPEC = importlib.util.spec_from_file_location("install_cron", SCRIPT)
 if SPEC is None or SPEC.loader is None:
     raise RuntimeError(f"cannot load {SCRIPT}")
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
+TEMPLATE, BEGIN, END = installer.BLOCKS["tushare"]
 
 
 class CronInstallerTest(unittest.TestCase):
     def test_replacement_preserves_unrelated_lines_and_has_one_marker_pair(self) -> None:
         current = "MAILTO=owner@example.com\n0 1 * * * unrelated\n"
-        managed = f"{installer.BEGIN}\n5 2 * * * managed\n{installer.END}\n"
-        updated = installer.replace_managed_block(current, managed)
+        managed = f"{BEGIN}\n5 2 * * * managed\n{END}\n"
+        updated = installer.replace_managed_block(current, managed, begin=BEGIN, end=END)
         self.assertIn("0 1 * * * unrelated", updated)
-        self.assertEqual(updated.count(installer.BEGIN), 1)
-        self.assertEqual(updated.count(installer.END), 1)
+        self.assertEqual(updated.count(BEGIN), 1)
+        self.assertEqual(updated.count(END), 1)
 
     def test_replacement_rejects_unpaired_or_duplicate_markers(self) -> None:
-        managed = f"{installer.BEGIN}\nmanaged\n{installer.END}\n"
+        managed = f"{BEGIN}\nmanaged\n{END}\n"
         invalid_tables = (
-            f"{installer.BEGIN}\nunterminated\n",
-            f"{installer.END}\n",
-            f"{installer.BEGIN}\na\n{installer.END}\n{installer.BEGIN}\nb\n{installer.END}\n",
-            f"{installer.END}\nreversed\n{installer.BEGIN}\n",
+            f"{BEGIN}\nunterminated\n",
+            f"{END}\n",
+            f"{BEGIN}\na\n{END}\n{BEGIN}\nb\n{END}\n",
+            f"{END}\nreversed\n{BEGIN}\n",
         )
         for current in invalid_tables:
             with self.subTest(current=current), self.assertRaisesRegex(RuntimeError, "invalid managed cron markers"):
-                installer.replace_managed_block(current, managed)
+                installer.replace_managed_block(current, managed, begin=BEGIN, end=END)
 
     def test_post_install_verification_requires_exact_content(self) -> None:
-        expected = f"unrelated\n{installer.BEGIN}\nmanaged\n{installer.END}\n"
-        installer.verify_installed_crontab(expected, expected.rstrip("\n"))
+        expected = f"unrelated\n{BEGIN}\nmanaged\n{END}\n"
+        installer.verify_installed_crontab(expected, expected.rstrip("\n"), begin=BEGIN, end=END)
         with self.assertRaisesRegex(RuntimeError, "differs from requested content"):
-            installer.verify_installed_crontab(expected, expected.replace("unrelated", "changed"))
+            installer.verify_installed_crontab(expected, expected.replace("unrelated", "changed"), begin=BEGIN, end=END)
 
     def test_the_weekly_sweep_chains_the_jobs_that_must_follow_it(self) -> None:
         """The audit and the PIT rebuild that follow the weekly fundamental
@@ -57,7 +58,7 @@ class CronInstallerTest(unittest.TestCase):
         ]
         lines = [
             line
-            for line in installer.TEMPLATE.read_text(encoding="utf-8").splitlines()
+            for line in TEMPLATE.read_text(encoding="utf-8").splitlines()
             if line[:1].isdigit()
         ]
         saturday = [line for line in lines if line.split()[4] == "6"]
@@ -78,7 +79,7 @@ class CronInstallerTest(unittest.TestCase):
 
     def test_the_paper_block_installs_beside_the_tushare_block(self) -> None:
         template, begin, end = installer.BLOCKS["paper"]
-        tushare = installer.build_managed_block()
+        tushare = installer.build_managed_block(TEMPLATE, BEGIN, END)
         paper = installer.build_managed_block(template, begin, end)
         current = f"0 1 * * * unrelated\n\n{tushare}"
         once = installer.replace_managed_block(current, paper, begin=begin, end=end)
