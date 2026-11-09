@@ -83,7 +83,7 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 - 策略合同（入口、`context`、订单、允许的库与模型库）在只读的 `output/README.md`。只有 `output/`（以 `main.py` 为入口的包）和 `models/` 随策略回测与定版；策略任一次超时或报错都让整场回测失败。
 - 策略代码要高效：截面计算向量化，费时的特征、模型与中间结果算一次后缓存复用，不逐日重算；回放的快慢决定每次 `validate` 与 `test` 要等多久。
 - 文件工具按根名加相对路径寻址（如 `{"root": "workspace", "path": "notes/x.md"}`），不接受绝对路径；`shell` 在工作区目录里按字面路径运行，脚本路径不带 `workspace/` 前缀。
-- 同一回合的多个工具调用并发执行；一批里有写入、shell 或回测时，整批按顺序执行。子代理在后台运行，结果以消息送回；没有别的事可做时以文本回复结束本回合。
+- 同一回合的多个工具调用并发执行；一批里有写入、shell 或回测时，整批按顺序执行。子代理在后台运行，结果以消息送回；只剩等待子代理时以文本回复结束本回合。
 - 计划与进度记在工作区根的 `TODO.md`，验证与测试节点在根 `steps` 的 Step 树（`tree.txt`）；中断后的续跑从这两处恢复。
 - 技能库（`inputs/skills_index.json`）是建议，不是规则：先核实再依赖，与实测相抵触时用 `skill_feedback` 报告。环境、工具、数据或文档里的可疑缺陷用 `report_issue` 报告，然后继续。
 ```
@@ -155,7 +155,7 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 # 边界
 - 先读 `inputs/skills_index.json`，证据从已挂载的数据、单位引用、制品与参考材料里找；skill 脚本不自动执行。
 - 文件工具按根名加相对路径寻址（如 `{"root": "workspace", "path": "notes/x.md"}`），不接受绝对路径。
-- 根 `trace` 是本会话的 transcript（只读）；`/mnt/tools/screen.py` 不在任何读文件根内，只能经 `shell` 运行。
+- 根 `trace` 是本会话的 transcript（只读）。
 - 不委托子代理，不读研究年末之后的数据，不安装依赖，不伪造结果；以 `[父代理指令]` 开头的消息是父 Agent 的补充要求，优先于原 task。
 
 # 返回

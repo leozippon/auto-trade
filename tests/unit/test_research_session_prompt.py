@@ -112,15 +112,23 @@ def _tool_descriptions() -> dict[str, str]:
     from autotrade.pipelines.skills import DeleteSkillTool, WriteSkillTool
 
     with tempfile.TemporaryDirectory() as tmp:
-        roots = SearchRoots(SafeWorkspace(Path(tmp)))
-        specs = [tool.spec for tool in (GlobTool(roots), GrepTool(roots), ReadFileTool(roots))]
+        workspace = SafeWorkspace(Path(tmp))
+        roots = SearchRoots(workspace)
+        specs = [
+            tool.spec
+            for tool in (
+                GlobTool(roots),
+                GrepTool(roots),
+                ReadFileTool(roots),
+                SandboxShellTool(workspace, object()),  # type: ignore[arg-type]
+            )
+        ]
     specs.extend(
         cls.spec
         for cls in (
             CompactTool,
             EditFileTool,
             WriteFileTool,
-            SandboxShellTool,
             ModificationCheckTool,
             StepRollbackTool,
             ReportIssueTool,

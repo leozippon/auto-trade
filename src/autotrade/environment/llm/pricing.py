@@ -71,6 +71,11 @@ class ApiSpendExhausted(RuntimeError):
     """A session's API spend reached its cap: no further model call is made."""
 
 
+class CallBudgetExhausted(RuntimeError):
+    """A session's model-call budget is spent (the shared cap, a role's cap or the
+    parent's reserve): no further model call is made for that role."""
+
+
 def _count(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return None

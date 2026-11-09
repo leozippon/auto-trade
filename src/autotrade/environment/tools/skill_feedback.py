@@ -172,18 +172,14 @@ class SkillFeedbackTool:
             origin = self.mounted.get(skill)
             if origin is None:
                 raise self._unknown_skill(skill)
-            claim = str(arguments["claim"]).strip()
-            if claim not in SKILL_CLAIMS:
-                raise ValueError("claim must be one of " + ", ".join(SKILL_CLAIMS))
+            # The schema already enforced the claim enum and the length caps;
+            # stripping can only shorten, so only the floor is checked again.
+            claim = str(arguments["claim"])
             evidence = str(arguments["evidence"]).strip()
             if len(evidence) < MIN_SKILL_EVIDENCE_CHARS:
                 raise ValueError(
                     "evidence must say what was tried and what the data showed "
                     f"in at least {MIN_SKILL_EVIDENCE_CHARS} characters"
-                )
-            if len(evidence) > MAX_SKILL_EVIDENCE_CHARS:
-                raise ValueError(
-                    f"evidence exceeds {MAX_SKILL_EVIDENCE_CHARS} characters"
                 )
             with self._lock:
                 if skill in self._filed:

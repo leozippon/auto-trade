@@ -152,8 +152,17 @@ def test_an_invalid_report_is_refused_and_nothing_is_written(
     tmp_path: Path, overrides: dict[str, str]
 ) -> None:
     tool, _manifest, experiment_dir = _session(tmp_path)
-    with pytest.raises(ToolError):
-        _report(tool, **overrides)
+    # Dispatched as the session does: the schema and the tool together refuse.
+    result = ToolRegistry([tool]).invoke(
+        "report_issue",
+        {
+            "category": "tool_output",
+            "summary": "验收脚本把 classic diff 的 <;> 前缀当成 unified diff 统计。",
+            "evidence": "对同一对文件分别跑两种 diff，统计行数相差一倍。",
+            **overrides,
+        },
+    )
+    assert not result.ok
     assert not issue_reports_path(experiment_dir).exists()
 
 

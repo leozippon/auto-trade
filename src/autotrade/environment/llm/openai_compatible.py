@@ -19,8 +19,7 @@ import ssl
 import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, field
-from dataclasses import fields as dataclass_fields
+from dataclasses import dataclass, field, replace
 from http.client import HTTPConnection, HTTPException, HTTPSConnection
 from pathlib import Path
 from typing import Any, Protocol, cast
@@ -30,8 +29,8 @@ from autotrade.environment.runtime import new_id, utc_now_iso
 
 from .conversation_log import (
     ConversationLogConfig,
-    _conversation_log_record,
-    _ensure_log_parent,
+    conversation_log_record,
+    ensure_log_parent,
 )
 from .proxy import (
     CONTEXT_OUTPUT_MAX_SHRINKS,
@@ -438,23 +437,14 @@ class OpenAICompatibleProxy:
     def with_thinking(
         self, *, enabled: bool, reasoning_effort: str | None
     ) -> OpenAICompatibleProxy:
-        """Clone this proxy with another thinking setting.
+        """Clone this proxy with another thinking setting; shares the
+        transport and clock."""
 
-        Shares the transport and clock; the config is rebuilt from its field
-        values so a compatibility facade config (DeepSeekConfig) clones too.
-        """
-
-        values = {
-            field.name: getattr(self.config, field.name)
-            for field in dataclass_fields(self.config)
-            if field.init
-        }
         if self.config.request_dialect == "mimo":
             # A sub-agent's level becomes plain on/off: MiMo has no levels.
             reasoning_effort = None
-        values.update(thinking_enabled=enabled, reasoning_effort=reasoning_effort)
         return OpenAICompatibleProxy(
-            OpenAICompatibleConfig(**values),
+            replace(self.config, thinking_enabled=enabled, reasoning_effort=reasoning_effort),
             transport=self._transport,
             sleep=self._sleep,
         )
@@ -611,7 +601,7 @@ class OpenAICompatibleProxy:
             include_next_payload = False
             self._write_conversation_log(
                 log_path,
-                _conversation_log_record(
+                conversation_log_record(
                     config=cast(ConversationLogConfig, self.config),
                     payload=body,
                     started_at=started_at,
@@ -728,7 +718,7 @@ class OpenAICompatibleProxy:
         # its credential redaction) is the same for success and failure.
         self._write_conversation_log(
             log_path,
-            _conversation_log_record(
+            conversation_log_record(
                 config=cast(ConversationLogConfig, self.config),
                 payload=payload,
                 started_at=started_at,
@@ -767,7 +757,7 @@ class OpenAICompatibleProxy:
             )
             line = json.dumps(safe_record, ensure_ascii=False, sort_keys=True) + "\n"
             with _CONVERSATION_LOG_LOCK:
-                _ensure_log_parent(path)
+                ensure_log_parent(path)
                 with path.open("a", encoding="utf-8") as handle:
                     handle.write(line)
         except OSError as exc:
@@ -934,7 +924,7 @@ def _decoded_response(raw: bytes) -> dict[str, Any] | None:
     return decoded if isinstance(decoded, dict) else None
 
 
-def _provider_response_validation_error(exc: ValueError) -> LLMProxyError:
+def provider_response_validation_error(exc: ValueError) -> LLMProxyError:
     # An empty response has not exposed any assistant action to the Runner, so
     # replay is safe. Other response-validation errors remain permanent.
     return LLMProxyError(str(exc), retryable=str(exc) == _EMPTY_PROVIDER_RESPONSE_ERROR)
@@ -975,7 +965,7 @@ def _malformed_tool_call_name(raw_call: object) -> str:
     return "<unnamed>"
 
 
-def _parse_complete_tool_call(
+def parse_complete_tool_call(
     raw_call: object,
     *,
     output_limited: bool = False,
@@ -1051,7 +1041,7 @@ def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
     raw_content = message.get("content")
     for raw_call in raw_calls:
         calls.append(
-            _parse_complete_tool_call(
+            parse_complete_tool_call(
                 raw_call,
                 output_limited=choice.get("finish_reason") == "length",
                 content=raw_content if isinstance(raw_content, str) else "",
@@ -1089,7 +1079,7 @@ def _parse_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
             reasoning_content=reasoning_content,
         )
     except ValueError as exc:
-        raise _provider_response_validation_error(exc) from exc
+        raise provider_response_validation_error(exc) from exc
 
 
 def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderResponse:
@@ -1222,7 +1212,7 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
         # Assembly finishes before complete() returns, so no partial tool call
         # can reach the Runner or produce an environment side effect.
         calls.append(
-            _parse_complete_tool_call(
+            parse_complete_tool_call(
                 {
                     "id": assembled["id"],
                     "function": {
@@ -1244,4 +1234,4 @@ def _parse_stream_response(raw: bytes, *, expected_model: str) -> ProviderRespon
             reasoning_content=assistant_reasoning,
         )
     except ValueError as exc:
-        raise _provider_response_validation_error(exc) from exc
+        raise provider_response_validation_error(exc) from exc

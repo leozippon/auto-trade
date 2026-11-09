@@ -7,7 +7,7 @@ change and a deterministic write boundary, plus a staleness check:
 Binary model weights are still written with shell/python.
 
 Bounded reading and searching live in ``tools.search``, which reaches the
-read-only PIT and prior-fold roots as well as this workspace.
+read-only PIT and inherited-artifact roots as well as this workspace.
 """
 
 from __future__ import annotations

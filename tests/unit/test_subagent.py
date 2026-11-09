@@ -48,6 +48,7 @@ from autotrade.agent.subagent import (
 )
 from autotrade.environment.llm import (
     MIMO_FLASH_MODEL,
+    CallBudgetExhausted,
     ChatMessage,
     MalformedToolCallError,
     OpenAICompatibleConfig,
@@ -55,6 +56,8 @@ from autotrade.environment.llm import (
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
+    clamp_requested_max_tokens,
+    context_request_fits,
 )
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
@@ -531,7 +534,7 @@ def test_subagent_and_main_share_one_session_call_budget() -> None:
         ]
     )
     budgeted = SessionBudgetLLM(
-        scripted, max_calls=1, deadline=time.monotonic() + 10
+        scripted, budget=SessionCallBudget(max_calls=1, time_budget=InferenceTimeBudget(duration_seconds=10))
     )
     result = SubAgentEngine(
         llm=budgeted,
@@ -705,9 +708,7 @@ def test_finish_session_allows_zero_subagent_and_emits_empty_trace_stats() -> No
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    result = runner.run("finish without delegation")
-
-    assert result.status == "finished"
+    runner.run("finish without delegation")
     assert finish.invoked == 1
     assert runner._subagent_attempts == 0
     assert runner._subagent_roles == set()
@@ -755,7 +756,7 @@ def test_failed_subagent_attempt_counts_for_its_role() -> None:
         config=_session_config(),
         subagent=subagent,
     )
-    assert runner.run("failed subagent is still traced").status == "finished"
+    runner.run("failed subagent is still traced")
     assert runner._subagent_attempts == 1
     assert runner._subagent_roles == {"general-purpose"}
     assert finish.invoked == 1
@@ -778,7 +779,7 @@ def test_subagent_attempt_counter_resets_on_new_run() -> None:
     )
     runner._subagent_attempts = 4
     runner._subagent_roles = {"Explore"}
-    assert runner.run("new session without subagent").status == "finished"
+    runner.run("new session without subagent")
     assert finish.invoked == 1
     assert runner._subagent_attempts == 0
     assert runner._subagent_roles == set()
@@ -793,7 +794,7 @@ def test_sessions_without_subagent_still_finish() -> None:
         tools=ToolRegistry([finish]),
         system_prompt="research",
     )
-    assert runner.run("no subagent configured").status == "finished"
+    runner.run("no subagent configured")
     assert finish.invoked == 1
 
 
@@ -982,8 +983,6 @@ def test_subagent_calls_still_track_attempts_and_roles() -> None:
     )
 
     result = runner.run("delegate when useful")
-
-    assert result.status == "finished"
     assert finish.invoked == 1
     assert runner._subagent_attempts == 3
     assert runner._subagent_roles == {"general-purpose", "Explore"}
@@ -1030,7 +1029,7 @@ def test_single_subagent_role_can_finish() -> None:
         config=_session_config(),
         subagent=subagent,
     )
-    assert runner.run("one delegated review is enough").status == "finished"
+    runner.run("one delegated review is enough")
     assert finish.invoked == 1
     assert runner._subagent_roles == {"Explore"}
 
@@ -1086,8 +1085,9 @@ def test_subagent_prompts_carry_the_path_and_argv_contract() -> None:
         assert '{"root": "workspace", "path": "notes/x.md"}' in prompt
         assert "不接受绝对路径" in prompt
         assert "根 `trace` 是本会话的 transcript" in prompt
-        assert "/mnt/tools/screen.py" in prompt
-    # The read-only role has no shell: no shell path rule and no argv.
+    # The read-only role has no shell: no shell path rule, no argv and no
+    # screening tool it could not run.
+    assert "/mnt/tools/screen.py" in writer and "screen.py" not in reader
     assert "脚本路径不带 `workspace/` 前缀" not in reader
     assert "argv" not in reader
     assert "不能写文件、执行 shell" in reader
@@ -1163,6 +1163,9 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
     # The session prompt says only that children run in the background; how
     # their results arrive and that they are not polled is the tool's text.
     assert "子代理在后台运行，结果以消息送回" in SESSION_WORKFLOW_SECTION
+    # A text-only reply ends the turn only to wait for children: any other
+    # one is answered with the no_tool_call nudge.
+    assert "只剩等待子代理时以文本回复结束本回合" in SESSION_WORKFLOW_SECTION
     assert "subagent_completed" in AGENT_TOOL_SPEC.description
     assert "不要轮询" in AGENT_TOOL_SPEC.description
     assert "Sleep" not in SESSION_WORKFLOW_SECTION
@@ -1432,8 +1435,7 @@ def test_parent_session_continues_before_subagent_finishes() -> None:
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
         ),
     )
-    result = runner.run("go")
-    assert result.status == "finished"
+    runner.run("go")
     assert finish.invoked == 1
     assert parent_calls["n"] == 2
 
@@ -1500,8 +1502,7 @@ def test_parent_text_only_waits_for_pending_subagent_then_resumes() -> None:
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
         ),
     )
-    result = runner.run("go")
-    assert result.status == "finished"
+    runner.run("go")
     assert finish.invoked == 1
     assert parent_calls["n"] == 3
     assert len(inner.calls) == 3
@@ -1526,7 +1527,6 @@ def test_parent_text_only_without_pending_subagent_still_nudges() -> None:
         ),
     )
     result = runner.run("go")
-    assert result.status == "finished"
     assert result.llm_calls == 2
     second = llm.calls[1]["messages"]
     assert isinstance(second, tuple)
@@ -1612,8 +1612,7 @@ def test_parent_text_only_wakes_on_first_completed_subagent() -> None:
             config=SubAgentConfig(max_concurrent=2),
         ),
     )
-    result = runner.run("go")
-    assert result.status == "finished"
+    runner.run("go")
     assert finish.invoked == 1
     assert parent_calls["n"] == 3
 
@@ -1717,7 +1716,7 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
         def complete(self, messages, **kwargs):
             del messages, kwargs
             self.calls += 1
-            raise RuntimeError("Agent session LLM call budget exhausted")
+            raise CallBudgetExhausted("Agent session LLM call budget exhausted")
 
     exhausted = Exhausted()
     result = SubAgentEngine(
@@ -1846,7 +1845,7 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
             return inner.complete(messages, **kwargs)
 
     t0 = time.monotonic()
-    result = AgentSessionRunner(
+    AgentSessionRunner(
         llm=Parent(),
         tools=ToolRegistry([finish]),
         system_prompt="research",
@@ -1861,7 +1860,6 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
         time_budget=InferenceTimeBudget(duration_seconds=600.0),
     ).run("go")
     elapsed = time.monotonic() - t0
-    assert result.status == "finished"
     # The barrier gave up (0.2s) long before the child could return, so the
     # finish went through with it still in flight: that is the wrap-up
     # exemption, and the session close is what cancels the child.
@@ -2232,7 +2230,7 @@ def test_parallel_safe_batch_runs_concurrently_and_mutating_batch_in_order() -> 
         system_prompt="research",
         config=_session_config(),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     # Turn 1: three parallel-safe calls overlapped.
     assert probe.max_active_by_turn[0] >= 2
     # Turn 2: one mutating call demoted the whole batch to in-order execution.
@@ -2302,8 +2300,7 @@ def test_subagent_launches_beyond_the_cap_queue_instead_of_failing() -> None:
             config=SubAgentConfig(max_concurrent=1),
         ),
     )
-    result = runner.run("go")
-    assert result.status == "finished"
+    runner.run("go")
     assert runner._subagent_attempts == 3
     assert all(job.record is not None for job in runner._subagent_jobs)
     assert sorted(
@@ -2549,7 +2546,7 @@ def test_tool_exception_in_a_parallel_batch_keeps_sibling_results() -> None:
         system_prompt="research",
         config=_session_config(),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     second = llm.calls[1]["messages"]
     results = {m.tool_call_id: json.loads(m.content) for m in second if m.role == "tool"}
     assert results["r"]["ok"] is True
@@ -2602,7 +2599,7 @@ def test_batch_validate_waits_for_running_subagent() -> None:
             llm=_SlowChild(), tools=ToolRegistry([DeclaredReadOnlyShell()])
         ),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     assert seen["children_done"] is True
     # The child's result was delivered to the conversation after the barrier.
     third = llm.calls[2]["messages"]
@@ -2656,7 +2653,7 @@ def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
         subagent=SubAgentEngine(llm=_Child(), tools=ToolRegistry()),
     )
     try:
-        assert runner.run("go").status == "finished"
+        runner.run("go")
     finally:
         release.set()
     # The backtest ran while the auditor was still pending; finish_session then
@@ -2879,7 +2876,7 @@ def test_a_parent_working_alone_is_never_nudged_to_delegate() -> None:
         ),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     assert not any(event == "delegation_reminder" for event, _payload in events)
     assert not any(
         "delegation_reminder" in str(message.content or "")
@@ -3457,7 +3454,7 @@ def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> Non
         config=_session_config(max_response_tokens=500),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     truncated = [payload for event, payload in events if event == "output_truncated"]
     assert truncated == [{"call_index": 1, "completion_tokens": 500, "max_tokens": 500}]
     second = llm.calls[1]["messages"]
@@ -3466,6 +3463,59 @@ def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> Non
     assert observation["observation"] == "output_truncated"
     assert "被截断" in observation["message"]
     assert not any('"no_tool_call"' in str(message.content or "") for message in second)
+
+
+def test_parent_truncation_is_measured_against_the_cap_the_window_left() -> None:
+    """Near the window the gateway lowers ``max_tokens``; an all-reasoning
+    reply cut at that lowered cap is still a truncation, not a text reply."""
+
+    class ClampingGateway:
+        provider = "scripted"
+        model = "scripted"
+        context_window_tokens = 12_000
+
+        def __init__(self) -> None:
+            self.calls: list[dict[str, object]] = []
+
+        def complete(self, messages, *, tools=(), tool_choice="auto", max_tokens=None):
+            # The gateway's own clamp (OpenAICompatibleProxy.complete).
+            _fits, prompt_tokens, window = context_request_fits(
+                self, messages, tools=tools, max_tokens=max_tokens
+            )
+            sent, _prompt_fits = clamp_requested_max_tokens(
+                requested_max_tokens=max_tokens,
+                estimated_prompt_tokens=prompt_tokens,
+                context_window=window,
+                output_shares_window=True,
+            )
+            self.calls.append({"messages": tuple(messages), "max_tokens": max_tokens, "sent": sent})
+            if len(self.calls) == 1:
+                return ProviderResponse(
+                    content="",
+                    reasoning_content="thinking until the cap",
+                    usage={"prompt_tokens": prompt_tokens, "completion_tokens": sent},
+                )
+            return ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),))
+
+    llm = ClampingGateway()
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([_FinishStub("test")]),
+        system_prompt="research",
+        config=_session_config(max_response_tokens=50_000),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    runner.run("go")
+    sent = llm.calls[0]["sent"]
+    assert sent < 50_000
+    observation = json.loads(str(llm.calls[1]["messages"][-1].content))
+    assert observation["observation"] == "output_truncated"
+    assert observation["max_tokens"] == sent
+    truncated = [payload for event, payload in events if event == "output_truncated"]
+    assert truncated == [{"call_index": 1, "completion_tokens": sent, "max_tokens": sent}]
+    # The runner sends the cap it measures against.
+    assert llm.calls[0]["max_tokens"] == sent
 
 
 def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
@@ -3499,7 +3549,7 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
             config=SubAgentConfig(max_tokens=500),
         ),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     completed = next(
         json.loads(str(message.content))
         for message in llm.calls[-1]["messages"]
@@ -3612,7 +3662,7 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
         config=_session_config(),
         subagent=SubAgentEngine(llm=Flaky(), tools=ToolRegistry([DeclaredReadOnlyShell()])),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     completed = next(
         json.loads(str(message.content))
         for message in llm.calls[-1]["messages"]
@@ -3724,7 +3774,7 @@ def test_provider_refusal_ends_the_child_refused_and_the_parent_is_told() -> Non
         ),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     assert transport.posts == 1
     completed = next(
         json.loads(str(message.content))
@@ -3839,7 +3889,7 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
         if event == "subagent_attempt"
         else None,
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     assert [payload["status"] for payload in attempts] == ["cancelled"]
     assert attempts[0]["ok"] is False
     observation = next(
@@ -3982,7 +4032,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         if event == "subagent_attempt"
         else None,
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     assert [payload["status"] for payload in attempts] == ["exhausted"]
     assert attempts[0]["ok"] is False
     observation = next(
@@ -4035,7 +4085,11 @@ def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:
         ),
         transport=transport,
     )
-    budgeted = SessionBudgetLLM(gateway, max_calls=4, deadline=time.monotonic() + 10, role="subagent")
+    budgeted = SessionBudgetLLM(
+        gateway,
+        budget=SessionCallBudget(max_calls=4, time_budget=InferenceTimeBudget(duration_seconds=10)),
+        role="subagent",
+    )
     events: list[tuple[str, dict[str, object]]] = []
     engine = SubAgentEngine(
         llm=budgeted,
@@ -4050,7 +4104,7 @@ def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:
         assert result["status"] == "completed" and result["thinking_applied"] is True
         assert transport.bodies[-1]["chat_template_kwargs"] == expected
     # The session's own gateway and call budget are untouched by the clones.
-    assert budgeted.calls == 2 and gateway.config.reasoning_effort == "xhigh"
+    assert budgeted.budget.calls == 2 and gateway.config.reasoning_effort == "xhigh"
     started = [payload for event, payload in events if event == "subagent_task"]
     assert [payload["thinking_applied"] for payload in started] == [True, True]
 
@@ -4103,7 +4157,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         time_budget=budget,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     notices = [payload for event, payload in events if event == "budget_notice"]
     assert {n["budget"] for n in notices} == {"inference_time"}
     assert [n["used_fraction"] for n in notices] == [0.5, 0.75, 0.9]
@@ -4143,7 +4197,7 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         time_budget=budget,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     notices = [payload for event, payload in events if event == "budget_notice"]
     assert [
         (notice["used_fraction"], notice["remaining_minutes"]) for notice in notices
@@ -4276,7 +4330,7 @@ def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path:
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert runner.tools.result_store() is roots
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     completed = next(
         json.loads(str(message.content))
         for message in llm.calls[-1]["messages"]
@@ -4356,7 +4410,7 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
             tools=ToolRegistry([DeclaredReadOnlyShell()]),
         ),
     )
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     completed = next(
         json.loads(str(message.content))
         for message in llm.calls[-1]["messages"]

@@ -754,10 +754,7 @@ def compaction_summary_message(
 
 
 def safe_error_summary(exc: BaseException, max_chars: int = 500) -> str:
-    text = f"{type(exc).__name__}: {exc}"
-    text = re.sub(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+", "Bearer [redacted]", text)
-    text = re.sub(r"(?i)(authorization\s*[:=]\s*)[^\s,;]+", r"\1[redacted]", text)
-    sanitized = sanitize_for_log(text)
+    sanitized = sanitize_for_log(f"{type(exc).__name__}: {exc}")
     if not isinstance(sanitized, str):
         sanitized = str(sanitized)
     return (

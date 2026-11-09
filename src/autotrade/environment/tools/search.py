@@ -7,15 +7,15 @@ sandbox roots and return paginated, budgeted observations.
 Deliberately retained although upstream agent CLIs moved to shell-only search
 (Codex never shipped model-facing file-search tools; Claude Code has since
 deprecated its Glob/Grep tools while keeping Read): under this framework's
-~128k-token main-conversation budget they are load-bearing — bounded paginated
+bounded main-conversation context they are load-bearing — bounded paginated
 observations, locator summaries that survive tool-result clearing, and the only
 concurrency-safe calls the runner may parallelize within a turn (shell is
 serialized by design). Shell `rg` stays available for pipelines; the overlap
 is a budget/parallelism boundary, not redundancy.
 
 The read-only roots reach beyond the writable workspace on purpose: the Agent
-authors against PIT decision inputs and prior-fold artifacts, so it must be
-able to locate and read them (``snapshot``/``train``/``valid`` PIT views,
+authors against PIT decision inputs and inherited artifacts, so it must be
+able to locate and read them (the ``snapshot`` PIT view,
 ``parent_output``/``parent_models`` inherited artifacts and the ``steps``
 lineage, which carries each Validation's own result attachment) without
 shelling out.
@@ -305,12 +305,11 @@ def _root_field(roots: SearchRoots, description: str) -> dict[str, object]:
     return {"type": "string", "enum": list(roots.names), "description": description}
 
 
-class _SearchToolBase:
-    """Shared root resolution, ripgrep runner and result budgeting."""
+class _RootsTool:
+    """Shared root resolution and spill store."""
 
-    def __init__(self, roots: SearchRoots, *, timeout_seconds: float = RG_TIMEOUT_SECONDS) -> None:
+    def __init__(self, roots: SearchRoots) -> None:
         self.roots = roots
-        self.timeout_seconds = timeout_seconds
 
     @property
     def result_store(self) -> SearchRoots:
@@ -318,6 +317,14 @@ class _SearchToolBase:
         other components spill through the same roots and read back the same way."""
 
         return self.roots
+
+
+class _SearchToolBase(_RootsTool):
+    """Ripgrep runner and result budgeting."""
+
+    def __init__(self, roots: SearchRoots, *, timeout_seconds: float = RG_TIMEOUT_SECONDS) -> None:
+        super().__init__(roots)
+        self.timeout_seconds = timeout_seconds
 
     def _run_rg(self, args: list[str], cwd: Path, *, max_lines: int) -> dict[str, object]:
         try:
@@ -555,11 +562,11 @@ class GlobTool(_SearchToolBase):
         })
 
 
-class ReadFileTool(_SearchToolBase):
+class ReadFileTool(_RootsTool):
     """Read a file under an allowlisted root with line numbers and pagination."""
 
-    def __init__(self, roots: SearchRoots, *, timeout_seconds: float = RG_TIMEOUT_SECONDS) -> None:
-        super().__init__(roots, timeout_seconds=timeout_seconds)
+    def __init__(self, roots: SearchRoots) -> None:
+        super().__init__(roots)
         self.spec = ToolSpec(
             "read_file",
             "Read a text file under a root, line-numbered like `cat -n`; prefer it over shell "
@@ -613,10 +620,12 @@ class ReadFileTool(_SearchToolBase):
                 ),
             )
         try:
-            text = target.read_text(encoding="utf-8", errors="replace")
+            # Bytes, not text mode: universal newlines would turn every lone
+            # ``\r`` into a line break that ripgrep does not count.
+            text = target.read_bytes().decode("utf-8", errors="replace")
         except OSError as exc:
             raise ToolError(f"read failed under root {root!r} for {path!r}: {exc.strerror or type(exc).__name__}", error_type="tool_error") from exc
-        lines = text.splitlines()
+        lines = file_lines(text)
         # cat -n style line numbering, paginated by line so large files stay bounded.
         page = [
             f"{number}\t{line}"
@@ -644,6 +653,21 @@ class ReadFileTool(_SearchToolBase):
             # ``write_file`` would silently drop it without being told.
             "final_newline": text.endswith("\n"),
         })
+
+
+def file_lines(text: str) -> list[str]:
+    """The lines ``read_file`` numbers: split on ``\\n`` only, as ripgrep and
+    every ``offset`` hint count, with a CRLF ending's ``\\r`` dropped.
+
+    ``str.splitlines`` also breaks on ``\\r``, form feeds and other separators,
+    which would number a line differently from ``grep`` (a progress bar on
+    stderr is a run of ``\\r``).
+    """
+
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return [line.removesuffix("\r") for line in lines]
 
 
 def _safe_subpath(base: Path, path: str) -> Path:

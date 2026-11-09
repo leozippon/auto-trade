@@ -19,8 +19,6 @@ from autotrade.environment.llm import (
     LOCAL_QWEN_MODEL,
     MODEL_CHOICES,
     ChatMessage,
-    DeepSeekConfig,
-    DeepSeekProxy,
     LLMProxyError,
     MalformedToolCallError,
     OpenAICompatibleConfig,
@@ -33,10 +31,17 @@ from autotrade.environment.llm import (
 )
 
 
-def make_config(**kwargs) -> DeepSeekConfig:
-    values = {"api_key": "secret", "conversation_log_dir": None}
+def make_config(**kwargs) -> OpenAICompatibleConfig:
+    values = {
+        "api_key": "secret",
+        "provider": "deepseek",
+        "model": "deepseek-flash",
+        "base_url": "https://api.deepseek.com",
+        "request_dialect": "deepseek",
+        "conversation_log_dir": None,
+    }
     values.update(kwargs)
-    return DeepSeekConfig(**values)
+    return OpenAICompatibleConfig(**values)
 
 
 class FakeTransport:
@@ -300,8 +305,7 @@ def test_config_repr_redacts_api_key():
 def test_config_rejects_unsupported_values():
     for update, message in (
         ({"api_key": ""}, "api_key"),
-        ({"base_url": "http://api.deepseek.com"}, "https"),
-        ({"model": "gpt-4"}, "unsupported DeepSeek model"),
+        ({"base_url": "http://api.deepseek.com"}, "HTTPS"),
         ({"max_tokens": 0}, "positive"),
         ({"max_retries": -1}, "negative"),
         ({"temperature": 3.0}, "temperature"),
@@ -333,7 +337,7 @@ def test_proxy_retries_timeout_and_parses_native_tool_call():
             ),
         ]
     )
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=1, retry_backoff_seconds=0, api_key="top-secret"),
         transport=transport,
         sleep=lambda _seconds: None,
@@ -351,7 +355,7 @@ def test_proxy_retries_timeout_and_parses_native_tool_call():
 @pytest.mark.parametrize("raw_call", INVALID_COMPLETE_TOOL_CALLS)
 def test_json_fallback_rejects_malformed_tool_call_without_retry(raw_call: object):
     transport = FakeTransport([_response({"content": None, "tool_calls": [raw_call]})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0),
         transport=transport,
     )
@@ -377,7 +381,7 @@ def test_nonstream_reasoning_is_normalized_and_replayed_with_assistant_message(
             _response({"content": "continued"}),
         ]
     )
-    proxy = DeepSeekProxy(make_config(), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(), transport=transport)
     initial = ChatMessage("user", "research")
 
     response = proxy.complete([initial])
@@ -396,7 +400,7 @@ def test_nonstream_reasoning_is_normalized_and_replayed_with_assistant_message(
 
 def test_response_without_reasoning_keeps_legacy_message_shape():
     transport = FakeTransport([_response({"content": "done"})])
-    response = DeepSeekProxy(make_config(), transport=transport).complete(
+    response = OpenAICompatibleProxy(make_config(), transport=transport).complete(
         [ChatMessage("user", "research")]
     )
 
@@ -409,7 +413,7 @@ def test_response_without_reasoning_keeps_legacy_message_shape():
 
 def test_proxy_sends_model_thinking_reasoning_user_id_and_response_budget():
     transport = FakeTransport([_response({"content": "done"})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(
             model="deepseek-flash",
             thinking_enabled=True,
@@ -434,7 +438,7 @@ def test_proxy_sends_model_thinking_reasoning_user_id_and_response_budget():
 def test_thinking_disabled_omits_reasoning_effort():
     # Any effort would switch DeepSeek's thinking back on.
     transport = FakeTransport([_response({"content": "done"})])
-    proxy = DeepSeekProxy(make_config(reasoning_effort="xhigh"), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(reasoning_effort="xhigh"), transport=transport)
     proxy.complete([ChatMessage("user", "hi")])
     body = transport.requests[0][2]
     assert body["thinking"] == {"type": "disabled"}
@@ -449,7 +453,7 @@ def test_shared_effort_scale_keeps_its_order_on_deepseek_tiers(level: str, wire:
     """DeepSeek's own tiers are low/high/max and it folds medium and xhigh into
     high; the experiment's three levels stay three distinct tiers instead."""
     transport = FakeTransport([_response({"content": "done"})])
-    proxy = DeepSeekProxy(make_config(), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(), transport=transport)
     child = proxy.with_thinking(enabled=True, reasoning_effort=level)
     child.complete([ChatMessage("user", "hi")])
     assert transport.requests[0][2]["reasoning_effort"] == wire
@@ -466,8 +470,6 @@ def test_catalog_refuses_names_deepseek_serves_as_flash(model: str):
     assert model not in MODEL_CHOICES
     with pytest.raises(ValueError, match=f"unsupported model '{model}'"):
         model_profile(model)
-    with pytest.raises(ValueError, match="unsupported DeepSeek model"):
-        make_config(model=model)
 
 
 def test_recorded_deepseek_flash_stream_with_usage_on_the_last_choice_chunk():
@@ -509,7 +511,7 @@ def test_recorded_deepseek_flash_stream_with_usage_on_the_last_choice_chunk():
         ),
     )
     transport = FakeTransport([raw])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(thinking_enabled=True, reasoning_effort="xhigh"), transport=transport
     )
 
@@ -566,7 +568,7 @@ def test_proxy_reassembles_streamed_native_tool_call():
         + "\n\ndata: [DONE]\n"
     ).encode()
     transport = FakeTransport([raw])
-    proxy = DeepSeekProxy(make_config(model="deepseek-flash"), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(model="deepseek-flash"), transport=transport)
     result = proxy.complete(
         [ChatMessage("user", "inspect")],
         tools=[{"type": "function"}],
@@ -602,7 +604,7 @@ def test_proxy_reassembles_streamed_reasoning_with_native_tool_call():
         },
         TOOL_CALLS_FINISH,
     )
-    proxy = DeepSeekProxy(make_config(), transport=FakeTransport([raw]))
+    proxy = OpenAICompatibleProxy(make_config(), transport=FakeTransport([raw]))
 
     response = proxy.complete(
         [ChatMessage("user", "inspect")], tools=[{"type": "function"}]
@@ -662,7 +664,7 @@ def test_a_response_cut_off_mid_body_is_a_retryable_failure():
             proxy.complete([ChatMessage("user", "complete")])
         assert caught.value.retryable is True
     transport = FakeTransport([http.client.IncompleteRead(b"data: {"), _response({"content": "ok"})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=1, retry_backoff_seconds=0),
         transport=transport,
         sleep=lambda _seconds: None,
@@ -993,7 +995,7 @@ def test_local_context_estimate_keeps_structured_json_prompts_usable():
 def test_retry_backoff_cannot_start_after_logical_call_budget_is_exhausted():
     failure = LLMProxyError("provider HTTP error 503", retryable=True, status_code=503)
     transport = FakeTransport([failure, _response({"content": "too late"})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(
             timeout_seconds=0.05,
             max_retries=2,
@@ -1009,7 +1011,7 @@ def test_retry_backoff_cannot_start_after_logical_call_budget_is_exhausted():
 
 def test_proxy_redacts_key_from_transport_error():
     transport = FakeTransport([RuntimeError("connection failed for top-secret")])
-    proxy = DeepSeekProxy(make_config(api_key="top-secret"), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(api_key="top-secret"), transport=transport)
     with pytest.raises(LLMProxyError) as caught:
         proxy.complete([ChatMessage("user", "hello")])
     assert "top-secret" not in str(caught.value)
@@ -1018,7 +1020,7 @@ def test_proxy_redacts_key_from_transport_error():
 
 def test_proxy_rejects_invalid_provider_payload_without_retry():
     transport = FakeTransport([{"choices": []}])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0),
         transport=transport,
     )
@@ -1033,7 +1035,7 @@ def test_provider_http_5xx_and_429_are_retryable(status_code: int):
         f"provider HTTP error {status_code}", retryable=True, status_code=status_code
     )
     transport = FakeTransport([failure])
-    proxy = DeepSeekProxy(make_config(max_retries=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(max_retries=0), transport=transport)
     with pytest.raises(LLMProxyError) as caught:
         proxy.complete([ChatMessage("user", "hello")])
     assert caught.value.status_code == status_code
@@ -1044,7 +1046,7 @@ def test_provider_http_5xx_and_429_are_retryable(status_code: int):
 def test_provider_http_500_retries_then_succeeds():
     failure = LLMProxyError("provider HTTP error 500", retryable=True, status_code=500)
     transport = FakeTransport([failure, _response({"content": "ok"})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=1, retry_backoff_seconds=0),
         transport=transport,
         sleep=lambda _seconds: None,
@@ -1057,7 +1059,7 @@ def test_transient_failures_back_off_exponentially_before_each_retry():
     failure = LLMProxyError("provider HTTP error 503", retryable=True, status_code=503)
     transport = FakeTransport([failure, failure, failure, _response({"content": "ok"})])
     delays: list[float] = []
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=3, retry_backoff_seconds=2.0, timeout_seconds=600),
         transport=transport,
         sleep=delays.append,
@@ -1083,7 +1085,7 @@ def test_a_dropped_connection_is_retried_and_the_call_completes(fault: Exception
     is not a dropped connection and stays final."""
     transport = FakeTransport([fault, fault, _response({"content": "ok"})])
     delays: list[float] = []
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=3, retry_backoff_seconds=2.0, timeout_seconds=600),
         transport=transport,
         sleep=delays.append,
@@ -1093,7 +1095,7 @@ def test_a_dropped_connection_is_retried_and_the_call_completes(fault: Exception
     assert delays == [2.0, 4.0]
     certificate = ssl.SSLCertVerificationError(1, "certificate verify failed")
     transport = FakeTransport([certificate, _response({"content": "ok"})])
-    proxy = DeepSeekProxy(make_config(max_retries=3, retry_backoff_seconds=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(max_retries=3, retry_backoff_seconds=0), transport=transport)
     with pytest.raises(LLMProxyError) as caught:
         proxy.complete([ChatMessage("user", "hello")])
     assert caught.value.retryable is False
@@ -1105,7 +1107,7 @@ def test_context_overflow_shrink_retries_without_backoff():
         [_tautology_overflow(1_200, window=8_192), _response({"content": "ok"})]
     )
     delays: list[float] = []
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=3, retry_backoff_seconds=2.0),
         transport=transport,
         sleep=delays.append,
@@ -1151,7 +1153,7 @@ def _length_cut_stream(arguments: str) -> bytes:
 def test_stream_tool_call_cut_at_max_tokens_is_rejected_once_and_names_the_cause():
     transport = FakeTransport([_length_cut_stream('{"path": "a.py", "content": "abc')])
     delays: list[float] = []
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=2.0),
         transport=transport,
         sleep=delays.append,
@@ -1202,7 +1204,7 @@ def test_stream_malformed_tool_call_is_rejected_once_and_keeps_the_assistant_tex
         ]
     )
     delays: list[float] = []
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=3, retry_backoff_seconds=2.0),
         transport=transport,
         sleep=delays.append,
@@ -1245,7 +1247,7 @@ def test_malformed_tool_call_recovery_replays_the_text_and_asks_for_the_call():
 
 def test_stream_tool_call_complete_at_max_tokens_is_still_delivered():
     transport = FakeTransport([_length_cut_stream('{"path": "a.py", "content": "abc"}')])
-    proxy = DeepSeekProxy(make_config(max_retries=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(max_retries=0), transport=transport)
     result = proxy.complete([ChatMessage("user", "hello")], tools=({"type": "function"},))
     assert [(call.name, call.arguments) for call in result.tool_calls] == [
         ("write_file", {"path": "a.py", "content": "abc"})
@@ -1273,7 +1275,7 @@ def test_json_tool_call_cut_at_max_tokens_is_rejected_without_retry():
         "usage": {"total_tokens": 3},
     }
     transport = FakeTransport([payload])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0, stream_tool_calls=False),
         transport=transport,
         sleep=lambda _seconds: None,
@@ -1287,7 +1289,7 @@ def test_json_tool_call_cut_at_max_tokens_is_rejected_without_retry():
 def test_non_retryable_provider_error_stops_after_one_attempt():
     failure = LLMProxyError("provider HTTP error 401", retryable=False, status_code=401)
     transport = FakeTransport([failure])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0), transport=transport
     )
     with pytest.raises(LLMProxyError) as caught:
@@ -1316,7 +1318,7 @@ def test_complete_writes_conversation_log(tmp_path: Path):
             }
         ]
     )
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(api_key=fake_secret, conversation_log_dir=tmp_path),
         transport=transport,
     )
@@ -1349,7 +1351,7 @@ def test_concurrent_callers_append_whole_conversation_log_records(tmp_path: Path
     transport = FakeTransport(
         [_response({"content": "x" * 20_000}) for _ in range(workers)]
     )
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=0, conversation_log_dir=tmp_path), transport=transport
     )
     prompt = [ChatMessage("user", "y" * 50_000)]
@@ -1379,7 +1381,7 @@ def test_failed_call_writes_conversation_log(tmp_path: Path):
     failure = LLMProxyError(
         "provider HTTP error 401 for " + fake_secret, retryable=False, status_code=401
     )
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(api_key=fake_secret, max_retries=0, conversation_log_dir=tmp_path),
         transport=FakeTransport([failure]),
     )
@@ -1397,7 +1399,7 @@ def test_failed_call_writes_conversation_log(tmp_path: Path):
 
 def test_every_attempt_of_a_retried_call_is_logged_under_one_call_id(tmp_path: Path):
     failure = LLMProxyError("provider HTTP error 503", retryable=True, status_code=503)
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(
             max_retries=1, retry_backoff_seconds=0, conversation_log_dir=tmp_path
         ),
@@ -1427,7 +1429,7 @@ def test_retryable_protocol_error_succeeds_on_third_attempt(
 ):
     delays = []
     transport = FakeTransport([failure, failure, _response({"content": "ok"})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(
             max_retries=2,
             retry_backoff_seconds=0.25,
@@ -1469,7 +1471,7 @@ def test_retryable_protocol_error_is_explicit_after_three_failures(
     error_message: str,
 ):
     transport = FakeTransport([failure, failure, failure])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0),
         transport=transport,
         sleep=lambda _seconds: None,
@@ -1500,7 +1502,7 @@ def test_invalid_message_content_type_is_not_retried(
         failure = _response({"content": invalid_content})
         tools = ()
     transport = FakeTransport([failure])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0),
         transport=transport,
     )
@@ -1523,7 +1525,7 @@ def test_invalid_reasoning_type_is_not_retried(field: str, stream: bool):
         failure = _response({"content": "done", field: invalid_reasoning})
         tools = ()
     transport = FakeTransport([failure])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0),
         transport=transport,
     )
@@ -1537,7 +1539,7 @@ def test_invalid_reasoning_type_is_not_retried(field: str, stream: bool):
 
 def test_missing_message_content_without_tool_calls_is_not_retried():
     transport = FakeTransport([_response({})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0),
         transport=transport,
     )
@@ -1552,7 +1554,7 @@ def test_missing_message_content_without_tool_calls_is_not_retried():
 @pytest.mark.parametrize("chunk", INVALID_STREAM_STRUCTURES)
 def test_invalid_stream_structure_is_not_retried(chunk: object):
     transport = FakeTransport([_stream_response(chunk)])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(max_retries=2, retry_backoff_seconds=0),
         transport=transport,
     )
@@ -1578,7 +1580,7 @@ def test_conversation_log_redacts_sensitive_dict_keys(tmp_path: Path):
         "notes": "provider echoed Authorization: Bearer plain-bearer-token",
         "nested": {"token": "plain-token", "total_tokens": 12},
     }
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(conversation_log_dir=tmp_path), transport=FakeTransport([payload])
     )
     proxy.complete(
@@ -1611,7 +1613,7 @@ def test_conversation_log_redacts_configured_credential_value_everywhere(
             "nested": {credential: [f"embedded-{credential}-value"]},
         },
     }
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(api_key=credential, conversation_log_dir=tmp_path),
         transport=FakeTransport([payload]),
     )
@@ -1630,7 +1632,7 @@ def test_conversation_log_failure_stops_before_provider_call(tmp_path: Path):
     blocked = tmp_path / "blocked"
     blocked.write_text("not a directory", encoding="utf-8")
     transport = FakeTransport([_response({"content": "unreachable"})])
-    proxy = DeepSeekProxy(
+    proxy = OpenAICompatibleProxy(
         make_config(conversation_log_dir=blocked), transport=transport
     )
     with pytest.raises(LLMProxyError, match="conversation log"):
@@ -1640,7 +1642,7 @@ def test_conversation_log_failure_stops_before_provider_call(tmp_path: Path):
 
 def test_conversation_logging_is_disabled_by_an_explicit_none(tmp_path: Path):
     with tempfile.TemporaryDirectory(dir=tmp_path) as tmpdir:
-        proxy = DeepSeekProxy(
+        proxy = OpenAICompatibleProxy(
             make_config(), transport=FakeTransport([_response({"content": "ok"})])
         )
         proxy.complete([ChatMessage("user", "hello")])
@@ -1799,7 +1801,10 @@ def test_model_factory_reads_deepseek_endpoint_from_fixed_env_key(tmp_path: Path
         encoding="utf-8",
     )
     proxy = build_model_gateway("deepseek-flash", env_file=path, max_tokens=8_000)
-    assert isinstance(proxy, DeepSeekProxy)
+    assert isinstance(proxy, OpenAICompatibleProxy)
+    assert (proxy.provider, proxy.config.request_dialect) == ("deepseek", "deepseek")
+    # The DeepSeek dialect is the one that sends a user id.
+    assert proxy.config.user_id == "autotrade-hl"
     assert proxy.config.base_url == "https://trusted-deepseek.example.test/v1"
     assert proxy.config.max_tokens == 8_000
     # What the account's GET /models reports for deepseek-flash.
@@ -1838,7 +1843,7 @@ def test_reasoning_only_response_is_accepted_without_retry() -> None:
     transport = FakeTransport(
         [_response({"content": "", "reasoning_content": "internal plan"})]
     )
-    proxy = DeepSeekProxy(make_config(max_retries=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(max_retries=0), transport=transport)
     parsed = proxy.complete([ChatMessage("user", "hello")])
     assert parsed.content == ""
     assert parsed.reasoning_content == "internal plan"

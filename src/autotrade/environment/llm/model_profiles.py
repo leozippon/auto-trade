@@ -6,9 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
-from . import deepseek as _deepseek
 from . import lighting as _lighting
-from .deepseek import DeepSeekConfig, DeepSeekProxy
 from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
@@ -18,13 +16,18 @@ from .pricing import FREE, TokenPrices
 from .proxy import LLMProxy, ScriptedLLM
 
 LOCAL_QWEN_MODEL = "qwen-3.8-27b-fp8"
+# The one model DeepSeek serves under its own name (DeepSeek-V4.1-Flash). The
+# legacy names deepseek-v4-flash, deepseek-chat and deepseek-reasoner, and
+# deepseek-v4-pro since 2026-09-14, are routed to it server-side, so an experiment
+# naming any of them would run on Flash under another label; they are refused.
+DEEPSEEK_FLASH_MODEL = "deepseek-flash"
 # Xiaomi's hosted models; the API takes ids in lower case only.
 MIMO_FLASH_MODEL = "mimo-v2.6-flash"
 MIMO_PRO_MODEL = "mimo-v2.6-pro"
 MIMO_MODELS = (MIMO_FLASH_MODEL, MIMO_PRO_MODEL)
 MODEL_CHOICES = (
     LOCAL_QWEN_MODEL,
-    *_deepseek.MODEL_CHOICES,
+    DEEPSEEK_FLASH_MODEL,
     *MIMO_MODELS,
     *_lighting.MODEL_CHOICES,
 )
@@ -192,7 +195,7 @@ def gateway_env_names() -> tuple[str, ...]:
 
 
 def model_profile(model: str) -> ModelProfile:
-    if model in _deepseek.MODEL_CHOICES:
+    if model == DEEPSEEK_FLASH_MODEL:
         return _DEEPSEEK_PROFILE
     if model == LOCAL_QWEN_MODEL:
         return _VLLM_PROFILE
@@ -289,27 +292,15 @@ def build_model_gateway(
             conversation_log_dir=conversation_log_dir,
             llm_key=llm_key,
         )
-    if profile.provider == "deepseek":
-        return cast(
-            LLMProxy,
-            DeepSeekProxy(
-                DeepSeekConfig(
-                    api_key=key,
-                    model=model,
-                    base_url=base_url,
-                    timeout_seconds=timeout_seconds,
-                    max_retries=max_retries,
-                    retry_backoff_seconds=retry_backoff_seconds,
-                    max_tokens=effective_max_tokens,
-                    temperature=temperature,
-                    thinking_enabled=thinking_enabled,
-                    reasoning_effort=reasoning_effort,
-                    conversation_log_dir=conversation_log_dir,
-                    context_window_tokens=profile.context_window_tokens,
-                    max_output_tokens=profile.max_output_tokens,
-                )
-            ),
-        )
+    deepseek = profile.request_dialect == "deepseek"
+    if deepseek:
+        # DeepSeek sends no level with thinking off, so the level rides as given.
+        effort = reasoning_effort
+    elif thinking_enabled and profile.request_dialect == "vllm-qwen":
+        effort = _qwen_reasoning_effort(reasoning_effort)
+    else:
+        # MiMo's thinking is on/off only: no effort level to send.
+        effort = None
     return cast(
         LLMProxy,
         OpenAICompatibleProxy(
@@ -326,13 +317,9 @@ def build_model_gateway(
                 max_output_tokens=profile.max_output_tokens,
                 temperature=temperature,
                 thinking_enabled=thinking_enabled,
-                # MiMo's thinking is on/off only: no effort level to send.
-                reasoning_effort=(
-                    _qwen_reasoning_effort(reasoning_effort)
-                    if thinking_enabled and profile.request_dialect == "vllm-qwen"
-                    else None
-                ),
-                user_id="",
+                reasoning_effort=effort,
+                # Only the DeepSeek dialect sends a user id.
+                user_id="autotrade-hl" if deepseek else "",
                 conversation_log_dir=conversation_log_dir,
                 context_window_tokens=profile.context_window_tokens,
                 output_shares_context_window=profile.output_shares_context_window,
@@ -343,6 +330,7 @@ def build_model_gateway(
 
 __all__ = [
     "AGENT_MAX_OUTPUT_TOKENS",
+    "DEEPSEEK_FLASH_MODEL",
     "DEFAULT_LLM_MAX_RETRIES",
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LLM_KEYS",

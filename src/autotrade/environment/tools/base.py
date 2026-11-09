@@ -20,7 +20,7 @@ class SessionInterrupt(Exception):
     """Control-flow signal (researcher stop at a gate): the session must abort.
 
     ``ToolRegistry.invoke`` converts every other exception a tool raises into
-    an error observation so an action can never kill the fold — this class is
+    an error observation so an action can never kill the session — this class is
     the deliberate exception: it re-raises through the dispatch so the
     worker's session loop can honor the stop immediately."""
 
@@ -158,12 +158,9 @@ class Tool(Protocol):
 
 
 # How long one Agent-written justification may be: a candidate's pre-registered
-# hypothesis, the reason a session ends an experiment. Both are asked for the same
-# thing -- the claim, the readings behind it and what stays untested -- so both
-# are bounded here rather than drifting apart. A 500-character bound was
-# measured twice against what that statement needs: sessions dropped the
-# falsification clause from a hypothesis, and 3 of 14 audited experiments had their
-# first ``no_edge`` refused for a reason of 519-554 characters.
+# hypothesis -- the claim, the readings behind it and what stays untested. A
+# 500-character bound was measured against what that statement needs: sessions
+# dropped the falsification clause from a hypothesis.
 AGENT_JUSTIFICATION_MAX_CHARS = 1_000
 
 # Tools that must run in order even though their spec is not mutating:
@@ -249,22 +246,7 @@ class ToolRegistry:
                 return store
         return None
 
-    def invoke(
-        self,
-        name: str,
-        arguments: Mapping[str, object],
-        *,
-        allowed_names: Collection[str] | None = None,
-    ) -> ToolResult:
-        if allowed_names is not None and name not in allowed_names:
-            available = ", ".join(sorted(str(item) for item in allowed_names))
-            return ToolResult(
-                False,
-                error=(
-                    f"tool is unavailable at this point of the session: {name}; "
-                    f"available now: {available}"
-                ),
-            )
+    def invoke(self, name: str, arguments: Mapping[str, object]) -> ToolResult:
         tool = self._tools.get(name)
         if tool is None:
             available = ", ".join(sorted(self._tools))
@@ -272,8 +254,6 @@ class ToolRegistry:
                 False,
                 error=f"unknown tool: {name}; tools in this session: {available}",
             )
-        if self._finished and tool.spec.mutating:
-            return ToolResult(False, error="the strategy workspace is locked after finish")
         try:
             # A tool may repair or reject its own call shape before the schema
             # runs (duck-typed like ``result_store``): a documented argument
@@ -302,7 +282,7 @@ class ToolRegistry:
             return ToolResult(False, error=str(exc))
         except SessionInterrupt:
             raise
-        except Exception as exc:  # noqa: BLE001 - a tool bug fails the call, not the fold
+        except Exception as exc:  # noqa: BLE001 - a tool bug fails the call, not the session
             return ToolResult(
                 False,
                 value={

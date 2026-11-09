@@ -45,13 +45,13 @@ NON_SECRET_TOKEN_KEYS = {
 }
 
 
-def _ensure_log_parent(path: Path) -> None:
+def ensure_log_parent(path: Path) -> None:
     # OSError propagates; the client's _write_conversation_log boundary wraps it
     # into the provider error type (importing it here would be a cycle).
     path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _conversation_log_record(
+def conversation_log_record(
     *,
     config: ConversationLogConfig,
     payload: dict[str, Any],

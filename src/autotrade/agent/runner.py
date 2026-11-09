@@ -38,6 +38,7 @@ from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
     CONTEXT_OUTPUT_MIN_TOKENS,
     ApiSpendExhausted,
+    CallBudgetExhausted,
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
@@ -84,12 +85,11 @@ from .subagent import (
     OUTPUT_TRUNCATED_CONTINUATION,
     AgentTool,
     SubAgentEngine,
-    _copy_chat_message,
-    _output_truncated,
-    allowed_subagent_tools,
     deliver_subagent_report,
     normalize_subagent_thinking,
+    output_truncated,
     resolve_subagent_max_turns,
+    subagent_role,
 )
 
 _LLM_FAILURE_CIRCUIT = 3
@@ -262,21 +262,6 @@ def _budget_spent_phrase(level: _BudgetLevel, fraction: float) -> str:
     return f"模型调用已用去上限的 {fraction:.0%}，剩余 {level.left:.0f} 次"
 
 
-def _candidate_entry(
-    value: Mapping[str, object], *, index: int
-) -> dict[str, object] | None:
-    """One complete Validation node as the runner counts it (the budget
-    notices and ``steps_used``)."""
-
-    node_id = value.get("node_id")
-    revision_id = value.get("revision_id")
-    if not isinstance(node_id, str) or not node_id:
-        return None
-    if not isinstance(revision_id, str) or not revision_id:
-        return None
-    return {"node_id": node_id, "revision_id": revision_id, "validation_index": index}
-
-
 def _inbox_trace_text(text: str) -> str:
     redacted = sanitize_for_log(text)
     if not isinstance(redacted, str):
@@ -307,7 +292,7 @@ class AgentSessionConfig:
             if getattr(self, name) <= 0:
                 raise ValueError(f"{name} must be positive")
         if self.deadline_grace_seconds < 0:
-            raise ValueError("session reserve cannot be negative")
+            raise ValueError("deadline_grace_seconds cannot be negative")
 
 
 @dataclass
@@ -333,15 +318,15 @@ class _SubAgentJob:
 
 @dataclass(frozen=True)
 class AgentSessionResult:
+    """A finished session (every other ending raises); ``session_end`` carries
+    the full closing record."""
+
     conversation_id: str
-    status: str
     finish_value: dict[str, object]
     llm_calls: int
     # Closed's session-summary ``token_usage`` block: the eight per-call totals
     # plus ``cache_hit_ratio`` and the Sub Agent roll-up with its own ratio.
     usage: dict[str, object] = field(default_factory=dict)
-    context_compactions: int = 0
-    steps_used: int = 0
 
 
 class AgentSessionRunner:
@@ -416,7 +401,9 @@ class AgentSessionRunner:
         self.conversation_id = conversation_id or f"conversation_{uuid.uuid4().hex}"
         self.event_sink = event_sink
         self.inbox = inbox
-        self._complete_validation_nodes: list[dict[str, object]] = []
+        # Node ids of the complete Validations: what the budget notices and
+        # ``steps_used`` count.
+        self._complete_validation_nodes: set[str] = set()
         self._wrap_up_sent = False
         self._subagent_attempts = 0
         self._subagent_roles: set[str] = set()
@@ -501,7 +488,7 @@ class AgentSessionRunner:
         backtests = dict.fromkeys(_BACKTEST_TOOLS, 0)
         messages = [
             ChatMessage("system", self.system_prompt),
-            *(_copy_chat_message(message) for message in preamble),
+            *preamble,
             ChatMessage("user", instruction.strip()),
         ]
         self._usage = _new_token_totals()
@@ -514,7 +501,7 @@ class AgentSessionRunner:
         llm_failure_streak = 0
         malformed_reissue_used = False
         context_overflow_recovery_used = False
-        self._complete_validation_nodes = []
+        self._complete_validation_nodes = set()
         for row in complete_validations:
             self._record_complete_validation(row)
         self._wrap_up_sent = False
@@ -565,7 +552,7 @@ class AgentSessionRunner:
             )
 
             try:
-                messages = self._prepare_context_request(
+                messages, output_cap = self._prepare_context_request(
                     messages,
                     provider_tools,
                     max(time_budget.remaining(), 0.0),
@@ -583,7 +570,7 @@ class AgentSessionRunner:
                     messages,
                     tools=provider_tools,
                     tool_choice="auto",
-                    max_tokens=self.config.max_response_tokens,
+                    max_tokens=output_cap,
                 )
                 llm_calls += 1
                 self._llm_calls = llm_calls
@@ -645,7 +632,7 @@ class AgentSessionRunner:
                         conversation_id=self.conversation_id,
                         llm_calls=llm_calls,
                     ) from exc
-                if "LLM call budget exhausted" in error:
+                if isinstance(exc, CallBudgetExhausted):
                     self._close_session(
                         {
                             "status": "call_budget_exhausted",
@@ -707,7 +694,7 @@ class AgentSessionRunner:
                 },
             )
             if not response.tool_calls:
-                if _output_truncated(response.usage, self.config.max_response_tokens):
+                if output_truncated(response.usage, output_cap):
                     # The whole budget went into thinking (or an unfinished
                     # essay): say so, ask for a concise continuation, and do
                     # not let the next turn silently repeat the same.
@@ -717,7 +704,7 @@ class AgentSessionRunner:
                         {
                             "call_index": llm_calls,
                             "completion_tokens": completion,
-                            "max_tokens": self.config.max_response_tokens,
+                            "max_tokens": output_cap,
                         },
                     )
                     messages.append(
@@ -727,9 +714,9 @@ class AgentSessionRunner:
                                 {
                                     "observation": "output_truncated",
                                     "completion_tokens": completion,
-                                    "max_tokens": self.config.max_response_tokens,
+                                    "max_tokens": output_cap,
                                     "message": OUTPUT_TRUNCATED_CONTINUATION.format(
-                                        limit=self.config.max_response_tokens
+                                        limit=output_cap
                                     ),
                                 },
                                 ensure_ascii=False,
@@ -820,16 +807,9 @@ class AgentSessionRunner:
                 )
                 return AgentSessionResult(
                     conversation_id=self.conversation_id,
-                    status="finished",
                     finish_value=finish,
                     llm_calls=llm_calls,
                     usage=token_usage,
-                    context_compactions=(
-                        self.compactor.compaction_count
-                        if self.compactor is not None
-                        else 0
-                    ),
-                    steps_used=accepted_steps,
                 )
             messages = self._apply_inbox(messages, safe_point=apply_point)
 
@@ -989,19 +969,16 @@ class AgentSessionRunner:
                 self._record_complete_validation(row)
 
     def _record_complete_validation(self, value: Mapping[str, object]) -> None:
+        # A complete Validation node carries both ids; a failed row has neither.
         node_id = value.get("node_id")
-        if not isinstance(node_id, str) or not node_id:
-            return
-        if any(
-            candidate.get("node_id") == node_id
-            for candidate in self._complete_validation_nodes
+        revision_id = value.get("revision_id")
+        if (
+            isinstance(node_id, str)
+            and node_id
+            and isinstance(revision_id, str)
+            and revision_id
         ):
-            return
-        entry = _candidate_entry(
-            value, index=len(self._complete_validation_nodes) + 1
-        )
-        if entry is not None:
-            self._complete_validation_nodes.append(entry)
+            self._complete_validation_nodes.add(node_id)
 
     def _dispatch_tool_calls(
         self, calls: tuple[ToolCall, ...], time_budget: InferenceTimeBudget
@@ -1303,7 +1280,7 @@ class AgentSessionRunner:
             transcript = previous.messages
             inherit = False
         parent_messages = (
-            tuple(_copy_chat_message(message) for message in self._live_messages)
+            tuple(self._live_messages)
             if inherit and self._live_messages
             else None
         )
@@ -1586,12 +1563,10 @@ class AgentSessionRunner:
             completed.wait(timeout=min(0.05, waitable))
 
     def _subagent_can_write(self, job: _SubAgentJob) -> bool:
-        """Whether the child's role holds a tool that mutates the workspace."""
+        """Whether the child's role can mutate the workspace: the writing role
+        is the one with the shell; the read-only role has no mutating tool."""
 
-        return bool(
-            allowed_subagent_tools(job.role)
-            & {"write_file", "edit_file", "shell", "write_skill", "delete_skill"}
-        )
+        return subagent_role(job.role).shell
 
     def _wait_subagent_jobs(self, *, writers_only: bool = False) -> list[dict[str, object]]:
         return self._collect_finished_subagents(
@@ -1889,75 +1864,68 @@ class AgentSessionRunner:
         messages: list[ChatMessage],
         provider_tools: tuple[dict[str, object], ...],
         remaining: float,
-        *,
-        allow_semantic_compaction: bool = True,
-    ) -> list[ChatMessage]:
-        fits, _prompt_tokens, _context_window = context_request_fits(
-            self.llm,
-            messages,
-            tools=provider_tools,
-            max_tokens=self.config.max_response_tokens,
+    ) -> tuple[list[ChatMessage], int]:
+        """Fit the next request into the window; return it with its output cap.
+
+        The cap is the gateway's own clamp of the configured ceiling to what
+        the window leaves, so the runner sends it as is and a reply cut at a
+        lowered cap still reads as truncated.
+        """
+
+        requested = self.config.max_response_tokens
+        fits, prompt_tokens, context_window = context_request_fits(
+            self.llm, messages, tools=provider_tools, max_tokens=requested
         )
-        if fits:
-            return messages
-        if allow_semantic_compaction:
+        if not fits:
             messages, _ = self._compact_if_needed(
                 messages, remaining, provider_tools, force=True
             )
-            fits, _prompt_tokens, _context_window = context_request_fits(
+            fits, prompt_tokens, context_window = context_request_fits(
+                self.llm, messages, tools=provider_tools, max_tokens=requested
+            )
+        if not fits:
+            messages, edit = fit_tool_results_to_context(
                 self.llm,
                 messages,
                 tools=provider_tools,
-                max_tokens=self.config.max_response_tokens,
+                max_tokens=requested,
+                result_store=self.tools.result_store(),
             )
-            if fits:
-                return messages
-        messages, edit = fit_tool_results_to_context(
-            self.llm,
-            messages,
-            tools=provider_tools,
-            max_tokens=self.config.max_response_tokens,
-            result_store=self.tools.result_store(),
-        )
-        if edit:
-            self._emit(TraceEvent.CONTEXT_EDIT, edit)
-        fits, prompt_tokens, context_window = context_request_fits(
-            self.llm,
-            messages,
-            tools=provider_tools,
-            max_tokens=self.config.max_response_tokens,
-        )
-        if fits:
-            return messages
-        if context_window is None:
+            if edit:
+                self._emit(TraceEvent.CONTEXT_EDIT, edit)
+            fits, prompt_tokens, context_window = context_request_fits(
+                self.llm, messages, tools=provider_tools, max_tokens=requested
+            )
+        if not fits and context_window is None:
             raise RuntimeError(
                 "context window is unavailable after the request did not fit"
             )
-        # Nothing more can be freed. The gateway does not insist on the whole
-        # output budget: it clamps ``max_tokens`` to what the window leaves
-        # and refuses only a prompt that leaves none, so the send/fail line
-        # here is the same clamp — the turn goes out with a smaller output
-        # ceiling unless not even a usable minimum remains.
         available, prompt_fits = clamp_requested_max_tokens(
-            requested_max_tokens=self.config.max_response_tokens,
+            requested_max_tokens=requested,
             estimated_prompt_tokens=prompt_tokens,
             context_window=context_window,
             output_shares_window=output_shares_context_window(self.llm),
         )
+        if fits:
+            return messages, available
+        # Nothing more can be freed. The gateway does not insist on the whole
+        # output budget: it refuses only a prompt that leaves no room, so the
+        # send/fail line here is the same clamp — the turn goes out with a
+        # smaller output ceiling unless not even a usable minimum remains.
         if prompt_fits and available >= CONTEXT_OUTPUT_MIN_TOKENS:
             self._emit(
                 TraceEvent.CONTEXT_OUTPUT_CLAMPED,
                 {
                     "estimated_prompt_tokens": prompt_tokens,
                     "context_window": context_window,
-                    "requested_max_output_tokens": self.config.max_response_tokens,
+                    "requested_max_output_tokens": requested,
                     "available_output_tokens": available,
                 },
             )
-            return messages
+            return messages, available
         raise context_overflow_error(
             estimated_prompt_tokens=prompt_tokens,
-            max_tokens=self.config.max_response_tokens,
+            max_tokens=requested,
             context_window=context_window,
         )
 
@@ -1966,17 +1934,12 @@ class AgentSessionRunner:
         messages: list[ChatMessage],
         provider_tools: tuple[dict[str, object], ...],
         remaining: float,
-        *,
-        allow_semantic_compaction: bool = True,
     ) -> tuple[list[ChatMessage], bool]:
         """Perform the sole post-provider overflow recovery for a session."""
 
-        recovered = messages
-        compacted = False
-        if allow_semantic_compaction:
-            recovered, compacted = self._compact_if_needed(
-                messages, remaining, provider_tools, force=True
-            )
+        recovered, compacted = self._compact_if_needed(
+            messages, remaining, provider_tools, force=True
+        )
         recovered, edit = fit_tool_results_to_context(
             self.llm,
             recovered,

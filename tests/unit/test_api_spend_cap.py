@@ -3,8 +3,6 @@ normaliser over every provider's usage shape, and the shared meter."""
 
 from __future__ import annotations
 
-import time
-
 import pytest
 
 from autotrade.environment.llm import (
@@ -23,6 +21,7 @@ from autotrade.environment.llm import (
     token_prices,
 )
 from autotrade.environment.llm.pricing import FREE
+from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.pipelines.config import BudgetUsed
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 
@@ -81,7 +80,7 @@ def test_cache_writes_are_billed_apart_at_the_write_price():
     assert billed_tokens(_response(usage), messages=MESSAGES) == (100, 600, 300, 300)
 
     budget = SessionCallBudget(
-        max_calls=4, max_api_spend_usd=1.0, deadline=time.monotonic() + 60
+        max_calls=4, max_api_spend_usd=1.0, time_budget=InferenceTimeBudget(duration_seconds=60)
     )
     SessionBudgetLLM(
         _priced("gpt-6-astra", "lighting", [_response(usage)]), budget=budget
@@ -174,7 +173,7 @@ def test_a_gpt6_call_past_the_relay_length_boundary_bills_at_its_long_context_ti
         "completion_tokens": 2_000,
     }
     budget = SessionCallBudget(
-        max_calls=4, max_api_spend_usd=50.0, deadline=time.monotonic() + 60
+        max_calls=4, max_api_spend_usd=50.0, time_budget=InferenceTimeBudget(duration_seconds=60)
     )
     SessionBudgetLLM(
         _priced(model, "lighting", [_response(usage)]), budget=budget
@@ -189,7 +188,10 @@ def test_a_gateway_outside_the_catalog_is_refused_before_any_call():
         model = "gpt-unlisted"
 
     with pytest.raises(ValueError, match="unsupported model 'gpt-unlisted'"):
-        SessionBudgetLLM(UnknownHosted([]), max_calls=4, deadline=time.monotonic() + 60)
+        SessionBudgetLLM(
+            UnknownHosted([]),
+            budget=SessionCallBudget(max_calls=4, time_budget=InferenceTimeBudget(duration_seconds=60)),
+        )
     assert token_prices(ScriptedLLM.provider, ScriptedLLM.model) == FREE
 
 
@@ -203,7 +205,7 @@ def _priced(model: str, provider: str, responses):
 
 def test_the_local_model_meters_zero():
     budget = SessionCallBudget(
-        max_calls=4, max_api_spend_usd=0.01, deadline=time.monotonic() + 60
+        max_calls=4, max_api_spend_usd=0.01, time_budget=InferenceTimeBudget(duration_seconds=60)
     )
     usage = {"prompt_tokens": 500_000, "completion_tokens": 100_000}
     llm = SessionBudgetLLM(
@@ -218,7 +220,7 @@ def test_the_local_model_meters_zero():
 
 def test_the_cap_refuses_every_role_once_the_charged_spend_reaches_it():
     budget = SessionCallBudget(
-        max_calls=40, max_api_spend_usd=0.002, deadline=time.monotonic() + 60
+        max_calls=40, max_api_spend_usd=0.002, time_budget=InferenceTimeBudget(duration_seconds=60)
     )
     usage = {"prompt_tokens": 10_000, "completion_tokens": 1_000}
     gateway = _priced(MIMO_FLASH_MODEL, "mimo", [_response(usage)] * 3)
@@ -244,7 +246,7 @@ def test_a_resumed_attempt_continues_the_recorded_spend():
     assert BudgetUsed.from_record({"llm_calls": 3}).api_spend_usd == 0.0
 
     budget = SessionCallBudget(
-        max_calls=40, max_api_spend_usd=12.0, deadline=time.monotonic() + 60
+        max_calls=40, max_api_spend_usd=12.0, time_budget=InferenceTimeBudget(duration_seconds=60)
     )
     budget.seed(BudgetUsed.from_record(recorded))
 
@@ -256,4 +258,4 @@ def test_a_resumed_attempt_continues_the_recorded_spend():
 @pytest.mark.parametrize("cap", [0, -1.0, float("inf"), True, "50"])
 def test_a_cap_must_be_a_positive_finite_number(cap):
     with pytest.raises(ValueError, match="max_api_spend_usd"):
-        SessionCallBudget(max_calls=4, max_api_spend_usd=cap, deadline=time.monotonic() + 60)
+        SessionCallBudget(max_calls=4, max_api_spend_usd=cap, time_budget=InferenceTimeBudget(duration_seconds=60))

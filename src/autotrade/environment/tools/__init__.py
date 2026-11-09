@@ -1,7 +1,6 @@
 """Agent-facing tool contracts dispatched by the session runner.
 
-The skills tools are imported lazily so internal helpers can reuse
-``tools.base`` without pulling the pipeline package into a circular import.
+The skills tools live in ``autotrade.pipelines.skills``.
 """
 
 from __future__ import annotations
@@ -45,7 +44,6 @@ __all__ = [
     "CommandResult",
     "CommandRunner",
     "CompactTool",
-    "DeleteSkillTool",
     "EditFileTool",
     "GlobTool",
     "GrepTool",
@@ -66,19 +64,6 @@ __all__ = [
     "ToolSchemaError",
     "ToolSpec",
     "WriteFileTool",
-    "WriteSkillTool",
     "is_sequential_tool",
     "trace_read_stub",
 ]
-
-
-def __dir__() -> list[str]:
-    return sorted({*globals(), "WriteSkillTool", "DeleteSkillTool"})
-
-
-def __getattr__(name: str):
-    if name in {"WriteSkillTool", "DeleteSkillTool"}:
-        from autotrade.pipelines.skills import DeleteSkillTool, WriteSkillTool
-
-        return {"WriteSkillTool": WriteSkillTool, "DeleteSkillTool": DeleteSkillTool}[name]
-    raise AttributeError(name)

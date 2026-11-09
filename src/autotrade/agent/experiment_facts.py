@@ -59,6 +59,7 @@ SEARCH_ROOT_SHELL_NOTE = (
     "transcript 只能用 `read_file`/`grep` 读。"
 )
 
+
 def build_experiment_facts(
     *,
     manifest: Mapping[str, object],
@@ -240,8 +241,6 @@ def _execution_policy(data_summary: Mapping[str, object]) -> dict[str, object]:
         "events_available": "events.parquet" in populated_files,
         "text_available": "text_index.parquet" in populated_files,
         "strategy_clock": "configured_schedule_only",
-        "execution_time": "order_session_open_close_or_intraday_else_execute_at_exact",
-        "missing_exact_price": "reject",
         "historical_minutes_drive_strategy": False,
     }
 

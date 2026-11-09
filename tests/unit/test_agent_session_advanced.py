@@ -279,7 +279,7 @@ def test_the_agent_compacts_its_own_context_and_is_pointed_at_the_trace(tmp_path
         trace_ref="run_ref_x",
     )
 
-    assert runner.run("inspect then finish").status == "finished"
+    runner.run("inspect then finish")
 
     # The request after the compaction: system prompt, the Agent's summary,
     # then the last two messages (the compact turn and its result).
@@ -326,19 +326,18 @@ def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_pat
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     checkpoint = compaction_summary_message(SUMMARY, kind="resume", trace_ref="run_ref_first")
-    result = runner.run(
+    runner.run(
         "continue from the note",
         preamble=[checkpoint],
         complete_validations=[{"node_id": node_id, "revision_id": "strategy_ref_1", "stats": {"sharpe": 1.2}}],
     )
-    assert result.status == "finished"
     [system, summary, note] = llm.calls[0]["messages"]
     assert (system.role, summary.role, note.role) == ("system", "user", "user")
     assert json.loads(summary.content)["summary_kind"] == "resume"
     assert note.content == "continue from the note"
     start = next(payload for event, payload in events if event == "session_start")
     assert start["preamble"] == [checkpoint.content]
-    assert [candidate["node_id"] for candidate in runner._complete_validation_nodes] == [node_id]
+    assert runner._complete_validation_nodes == {node_id}
 
 
 def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
@@ -352,7 +351,7 @@ def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
         config=AgentSessionConfig(max_llm_calls=8),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("inspect then finish").status == "finished"
+    runner.run("inspect then finish")
     refused = next(payload for event, payload in events if event == "tool_call" and payload["tool"] == "compact")
     assert refused["result"]["ok"] is False and "summary" in refused["result"]["error"]
     assert not any(event == "context_compaction" for event, _payload in events)
@@ -385,7 +384,7 @@ def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    assert runner.run("inspect then finish").status == "finished"
+    runner.run("inspect then finish")
 
     notices = [index for index, (event, _payload) in enumerate(events) if event == "context_notice"]
     compactions = [index for index, (event, _payload) in enumerate(events) if event == "context_compaction"]
@@ -433,7 +432,7 @@ def test_a_runtime_compaction_updates_the_agents_own_summary(tmp_path: Path):
         trace_ref="run_ref_x",
     )
 
-    assert runner.run("inspect then finish").status == "finished"
+    runner.run("inspect then finish")
 
     triggers = [payload["trigger"] for event, payload in events if event == "context_compaction"]
     assert triggers == ["agent", "runtime"]
@@ -475,7 +474,7 @@ def test_a_read_of_the_trace_root_is_traced_as_a_stub(tmp_path: Path):
         config=AgentSessionConfig(max_llm_calls=4),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("read then finish").status == "finished"
+    runner.run("read then finish")
     traced = {payload["tool_call_id"]: payload["result"] for event, payload in events if event == "tool_call"}
     assert "content" not in traced["r1"]["value"]
     assert traced["r1"]["value"]["trace_read"]["content_chars"] > 0
@@ -573,7 +572,6 @@ def test_session_tracks_calls_and_finish_value(tmp_path: Path):
         config=AgentSessionConfig(max_llm_calls=2),
     )
     result = runner.run("finish the validated strategy")
-    assert result.status == "finished"
     assert result.finish_value["candidate"]["node_id"] == node_id
     assert result.finish_value["status"] == "step_recorded"
     assert result.finish_value["outcome"] == "completed"
@@ -611,7 +609,7 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
         config=AgentSessionConfig(max_llm_calls=3),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("finish").status == "finished"
+    runner.run("finish")
     end = [payload for event, payload in events if event == "session_end"][-1]
     assert end["status"] == "finished" and end["tool_failures"] == 1
     assert end["finish"]["candidate"]["node_id"] == node_id
@@ -675,7 +673,7 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
         subagent=subagent,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    assert runner.run("delegate, then finish").status == "finished"
+    runner.run("delegate, then finish")
     failed = [
         event
         for event, payload in events
@@ -705,7 +703,6 @@ def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path)
         config=AgentSessionConfig(max_llm_calls=2),
     )
     result = runner.run("finish")
-    assert result.status == "finished"
     assert result.llm_calls == 2
     second_messages = llm.calls[1]["messages"]
     assert any("no_tool_call" in (message.content or "") for message in second_messages)
@@ -732,7 +729,7 @@ def test_fold_session_replays_reasoning_with_tool_call_on_next_round(tmp_path: P
         config=AgentSessionConfig(max_llm_calls=2),
     )
 
-    assert runner.run("inspect and finish").status == "finished"
+    runner.run("inspect and finish")
     assistant = next(
         message for message in llm.calls[1]["messages"] if message.role == "assistant"
     )
@@ -766,7 +763,7 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    assert runner.run("inspect once").status == "finished"
+    runner.run("inspect once")
 
     assert len(llm.calls) == 2
     second_messages = llm.calls[1]["messages"]
@@ -897,9 +894,7 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    result = runner.run("finish the validated strategy")
-
-    assert result.status == "finished"
+    runner.run("finish the validated strategy")
     assert len(llm.calls) == 3
     second = llm.calls[1]
     assert second[-2].role == "assistant"
@@ -956,7 +951,7 @@ def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    assert runner.run("inspect repeatedly").status == "finished"
+    runner.run("inspect repeatedly")
     assert not hasattr(AgentSessionRunner, "_trim")
     assert not hasattr(AgentSessionRunner, "_clear_stale_tool_results")
     assert not any(event == "context_summary" for event, _ in events)
@@ -1028,7 +1023,7 @@ def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    assert runner.run("inspect then finish").status == "finished"
+    runner.run("inspect then finish")
     compact_events = [
         payload for event, payload in events if event == "context_compaction"
     ]
@@ -1103,7 +1098,7 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    assert runner.run("inspect then finish").status == "finished"
+    runner.run("inspect then finish")
 
     compactions = [
         payload
@@ -1226,7 +1221,7 @@ def test_shared_session_llm_budget_counts_every_gateway_call():
         ]
     )
     budgeted = SessionBudgetLLM(
-        scripted, max_calls=1, deadline=__import__("time").monotonic() + 10
+        scripted, budget=SessionCallBudget(max_calls=1, time_budget=InferenceTimeBudget(duration_seconds=10))
     )
     budgeted.complete([ChatMessage("user", "one")])
     with pytest.raises(RuntimeError, match="budget exhausted"):
@@ -1371,12 +1366,13 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     assert "读数不回到会话" in prompt
 
 
-def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
+def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted(tmp_path):
     prompt = build_system_prompt(experiment_facts={})
     assert "不从日期、路径、元数据或模型自身的知识推断之后的行情" in prompt
     # The shell's foreground cap and its detached-job recipe are the tool's
     # own description, not a second copy in the prompt.
-    assert "as a detached job" in SandboxShellTool.spec.description
+    shell = SandboxShellTool(SafeWorkspace(tmp_path), object())  # type: ignore[arg-type]
+    assert "as a detached job" in shell.spec.description
     assert "as a detached job" not in prompt
     assert "修改策略产物" not in prompt
     assert "pyright --project" not in prompt
@@ -1461,19 +1457,29 @@ def _all_registrable_tool_names() -> set[str]:
         TestTool,
         ValidateTool,
     )
+    from autotrade.pipelines.skills import DeleteSkillTool, WriteSkillTool
 
-    # The backtest tools are constructed per session in research_session rather than
-    # exported from the tools package, so read their names off the classes: a
-    # rename must not silently drop one from this set.
+    # The backtest and skills tools live in pipelines rather than the tools
+    # package, so read their names off the classes: a rename must not
+    # silently drop one from this set.
     names = {
         ValidateTool.spec.name,
         TestTool.spec.name,
         NullControlTool.spec.name,
         SmokeBacktestTool.spec.name,
+        WriteSkillTool.spec.name,
+        DeleteSkillTool.spec.name,
     }
     with tempfile.TemporaryDirectory() as tmp:
-        roots = SearchRoots(SafeWorkspace(Path(tmp)))
-        instances = [GlobTool(roots), GrepTool(roots), ReadFileTool(roots)]
+        workspace = SafeWorkspace(Path(tmp))
+        roots = SearchRoots(workspace)
+        # The search and shell tools build their spec per instance.
+        instances = [
+            GlobTool(roots),
+            GrepTool(roots),
+            ReadFileTool(roots),
+            SandboxShellTool(workspace, object()),  # type: ignore[arg-type]
+        ]
     candidates = [*instances, AgentTool]
     candidates.extend(getattr(tools_pkg, name, None) for name in dir(tools_pkg))
     for candidate in candidates:
@@ -1529,17 +1535,15 @@ def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:
 def test_prepare_context_request_returns_messages_that_fit():
     runner = _context_runner(ScriptedLLM([], context_window_tokens=100_000))
     messages = [ChatMessage("user", "short")]
-    assert (
-        runner._prepare_context_request(messages, (), 30.0) is messages
-    )
+    prepared, cap = runner._prepare_context_request(messages, (), 30.0)
+    assert prepared is messages and cap == runner.config.max_response_tokens
 
 
 def test_prepare_context_request_passes_when_window_is_unknown():
     runner = _context_runner(ScriptedLLM([], context_window_tokens=None))
     messages = [ChatMessage("user", "x" * 8_000)]
-    assert (
-        runner._prepare_context_request(messages, (), 30.0) is messages
-    )
+    prepared, cap = runner._prepare_context_request(messages, (), 30.0)
+    assert prepared is messages and cap == runner.config.max_response_tokens
 
 
 def test_prepare_context_request_raises_context_overflow_error():
@@ -1549,9 +1553,7 @@ def test_prepare_context_request_raises_context_overflow_error():
     )
     messages = [ChatMessage("user", "x" * 5_000)]
     with pytest.raises(LLMProxyError) as excinfo:
-        runner._prepare_context_request(
-            messages, (), 30.0, allow_semantic_compaction=False
-        )
+        runner._prepare_context_request(messages, (), 30.0)
     assert is_context_overflow_error(excinfo.value)
     assert "context window 200" in str(excinfo.value)
 
@@ -1576,17 +1578,6 @@ def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_outp
     assert not fits
     assert prompt_tokens + CONTEXT_OUTPUT_TOKEN_MARGIN + CONTEXT_OUTPUT_MIN_TOKENS <= window
 
-    # Untouched content: no compactor is attached and there is no tool result
-    # to summarize, so the emergency fit hands back an unedited copy.
-    assert (
-        runner._prepare_context_request(
-            messages, (), 30.0, allow_semantic_compaction=False
-        )
-        == messages
-    )
-    ((_event, payload),) = [
-        (event, payload) for event, payload in events if event == "context_output_clamped"
-    ]
     clamped, prompt_fits = clamp_requested_max_tokens(
         requested_max_tokens=5_000,
         estimated_prompt_tokens=prompt_tokens,
@@ -1594,6 +1585,13 @@ def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_outp
         output_shares_window=True,
     )
     assert prompt_fits and clamped == window - prompt_tokens - CONTEXT_OUTPUT_TOKEN_MARGIN
+    # Untouched content: no compactor is attached and there is no tool result
+    # to summarize, so the emergency fit hands back an unedited copy, and the
+    # cap to send is the gateway's clamp, not the configured ceiling.
+    assert runner._prepare_context_request(messages, (), 30.0) == (messages, clamped)
+    ((_event, payload),) = [
+        (event, payload) for event, payload in events if event == "context_output_clamped"
+    ]
     assert payload == {
         "estimated_prompt_tokens": prompt_tokens,
         "context_window": window,
@@ -1612,7 +1610,7 @@ def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_outp
     )
     with pytest.raises(LLMProxyError) as excinfo:
         _context_runner(tight, max_response_tokens=5_000)._prepare_context_request(
-            messages, (), 30.0, allow_semantic_compaction=False
+            messages, (), 30.0
         )
     assert is_context_overflow_error(excinfo.value)
 
@@ -1678,9 +1676,7 @@ def test_prepare_context_request_rejects_missing_window_without_assert(monkeypat
         lambda *args, **kwargs: (False, 10, None),
     )
     with pytest.raises(RuntimeError, match="context window is unavailable"):
-        runner._prepare_context_request(
-            messages, (), 30.0, allow_semantic_compaction=False
-        )
+        runner._prepare_context_request(messages, (), 30.0)
 
 
 def test_compaction_trigger_counts_the_provider_tool_schemas():

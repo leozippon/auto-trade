@@ -151,26 +151,16 @@ class ReportIssueTool:
         self._filed = 0
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
+        # The schema already enforced the category enum and the length caps;
+        # stripping can only shorten, so only a blank value is left to refuse.
         try:
-            category = str(arguments["category"]).strip()
-            if category not in ISSUE_CATEGORIES:
-                raise ValueError(
-                    "category must be one of " + ", ".join(ISSUE_CATEGORIES)
-                )
+            category = str(arguments["category"])
             summary = str(arguments["summary"]).strip()
             if not summary:
                 raise ValueError("summary must state the issue")
-            if len(summary) > MAX_ISSUE_SUMMARY_CHARS:
-                raise ValueError(
-                    f"summary exceeds {MAX_ISSUE_SUMMARY_CHARS} characters"
-                )
             evidence = str(arguments["evidence"]).strip()
             if not evidence:
                 raise ValueError("evidence must give the concrete reproduction")
-            if len(evidence) > MAX_ISSUE_EVIDENCE_CHARS:
-                raise ValueError(
-                    f"evidence exceeds {MAX_ISSUE_EVIDENCE_CHARS} characters"
-                )
             with self._lock:
                 if self._filed >= MAX_ISSUE_REPORTS_PER_SESSION:
                     raise ValueError(

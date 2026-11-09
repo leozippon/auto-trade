@@ -166,6 +166,35 @@ class ShellToolTest(unittest.TestCase):
                 page["content"].split("\n")[0], f"{head_lines + 1}\tline-{head_lines:04d}"
             )
 
+    def test_shell_counts_progress_bar_lines_as_read_file_pages_them(self) -> None:
+        """A progress bar redraws with ``\\r``; only ``\\n`` ends a line, so
+        the omitted count and the resume offset match the spilled file."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _, roots, workspace = build_sandbox(Path(tmp))
+            stderr = "".join(
+                f"{index:03d} " + "\r".join(f"{pct}%" for pct in range(10)) + "\n"
+                for index in range(300)
+            )
+            runner = FakeRunner(CommandResult(1, stderr=stderr))
+            tool = SandboxShellTool(
+                workspace, runner, max_output_chars=1_000, capture_output_chars=20_000,
+                result_store=roots,
+            )
+            record = tool.invoke({"argv": ["python", "train.py"]}).value
+            self.assertEqual(record["stderr_lines"], 300)
+            head_lines = record["stderr"].count("\n")
+            tail_lines = record["stderr_tail"].count("\n")
+            hint = record["stderr_spill"]["result_hint"]
+            self.assertIn(f"{300 - head_lines - tail_lines} lines omitted", hint)
+            self.assertIn(f"offset={head_lines}", hint)
+            page = ReadFileTool(roots).invoke(
+                {"root": "artifacts", "path": record["stderr_spill"]["result_ref"],
+                 "offset": head_lines, "limit": 1}
+            ).value
+            self.assertEqual(page["total"], 300)
+            self.assertTrue(page["content"].startswith(f"{head_lines + 1}\t{head_lines:03d} 0%\r"))
+
     def test_shell_keeps_stderr_and_exit_code_when_stderr_overflows(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             _, roots, workspace = build_sandbox(Path(tmp))
@@ -798,6 +827,21 @@ class StructuredSearchToolTest(unittest.TestCase):
             self.assertFalse(escaped.ok)
             self.assertEqual(escaped.value["error_type"], "path_error")
 
+    def test_read_numbers_lines_as_grep_does(self) -> None:
+        """Only ``\\n`` ends a line, as for ripgrep and every offset hint: a
+        form feed is not a line break and a CRLF ending is not content."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _roots, registry = self._tools(Path(tmp))
+            (paths.workspace / "f.txt").write_text("alpha\x0cbeta\ngamma TARGET\r\n", encoding="utf-8")
+            hit = registry.invoke(
+                "grep", {"pattern": "TARGET", "root": "workspace", "output_mode": "content"}
+            ).value
+            self.assertIn("workspace/f.txt:2:", hit["content"])
+            read = registry.invoke("read_file", {"root": "workspace", "path": "workspace/f.txt"}).value
+            self.assertEqual(read["total"], 2)
+            self.assertEqual(read["content"], "1\talpha\x0cbeta\n2\tgamma TARGET")
+
     def test_read_follows_no_symlink_out_of_its_root(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             paths, _, registry = self._tools(Path(tmp))
@@ -1341,8 +1385,9 @@ class ArtifactIOToolTest(unittest.TestCase):
 
 
 class TerminalToolWriteLockTest(unittest.TestCase):
-    """Finishing locks the workspace: after a terminal tool succeeds, the
-    registry refuses every mutating tool while read-only ones keep working."""
+    """Finishing ends the session: a call after the terminal tool in the same
+    assistant turn is refused unrun, and the runner returns at once, so
+    nothing mutates the workspace after finish."""
 
     def _finish_tool(self, root: Path):
         from autotrade.environment.artifacts import new_revision_id
@@ -1366,42 +1411,49 @@ class TerminalToolWriteLockTest(unittest.TestCase):
         finish = TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate)
         return workspace, roots, finish, node_id
 
-    def test_finish_locks_mutating_tools_and_leaves_reads_open(self) -> None:
+    def test_calls_after_the_terminal_tool_are_refused_and_the_session_returns(self) -> None:
+        from autotrade.agent import AgentSessionConfig, AgentSessionRunner
+        from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
+
         with tempfile.TemporaryDirectory() as tmp:
             workspace, roots, finish, node_id = self._finish_tool(Path(tmp))
-            registry = ToolRegistry(
-                [WriteFileTool(workspace), EditFileTool(workspace), ReadFileTool(roots), finish]
+            shell_runner = FakeRunner()
+            llm = ScriptedLLM(
+                [
+                    ProviderResponse(
+                        tool_calls=(
+                            ToolCall("c1", "test", {"node_id": node_id}),
+                            ToolCall("c2", "write_file", {"path": "output/main.py", "content": "changed"}),
+                            ToolCall("c3", "shell", {"argv": ["echo", "after"]}),
+                        )
+                    )
+                ]
             )
-            # Before finishing, writes go through.
-            assert registry.invoke("write_file", {"path": "draft.txt", "content": "x"}).ok
-            finished = registry.invoke("test", {"node_id": node_id})
-            assert finished.ok, finished.error
-            assert finished.finish
-
-            for tool, arguments in (
-                ("write_file", {"path": "output/main.py", "content": "changed"}),
-                ("edit_file", {"path": "draft.txt", "old_text": "x", "new_text": "y"}),
-            ):
-                denied = registry.invoke(tool, arguments)
-                assert not denied.ok, tool
-                assert "locked" in denied.error, tool
-            # The formal artifact is untouched, and reads still work.
-            assert "generate_orders" in (
-                Path(tmp) / "agent/output/main.py"
-            ).read_text(encoding="utf-8")
-            assert registry.invoke("read_file", {"root": "output", "path": "main.py"}).ok
-
-    def test_shell_is_locked_after_finish_too(self) -> None:
-        with tempfile.TemporaryDirectory() as tmp:
-            workspace, _roots, finish, node_id = self._finish_tool(Path(tmp))
-            runner = FakeRunner()
-            registry = ToolRegistry([SandboxShellTool(workspace, runner), finish])
-            assert registry.invoke("shell", {"argv": ["echo", "before"]}).ok
-            assert registry.invoke("test", {"node_id": node_id}).ok
-            denied = registry.invoke("shell", {"argv": ["echo", "after"]})
-            assert not denied.ok
-            assert "locked" in denied.error
-            assert len(runner.calls) == 1  # the locked call never reached the sandbox
+            events: list[tuple[str, dict[str, object]]] = []
+            AgentSessionRunner(
+                llm=llm,
+                tools=ToolRegistry(
+                    [WriteFileTool(workspace), SandboxShellTool(workspace, shell_runner), ReadFileTool(roots), finish]
+                ),
+                system_prompt="research",
+                config=AgentSessionConfig(),
+                event_sink=lambda event, payload: events.append((event, payload)),
+            ).run("finish")
+            self.assertEqual(len(llm.calls), 1)
+            self.assertEqual(shell_runner.calls, [])
+            # The formal artifact is untouched.
+            self.assertIn(
+                "generate_orders", (Path(tmp) / "agent/output/main.py").read_text(encoding="utf-8")
+            )
+            refused = [
+                payload["result"]
+                for event, payload in events
+                if event == "tool_call" and payload["tool"] in ("write_file", "shell")
+            ]
+            self.assertEqual(
+                refused,
+                [{"ok": False, "error": "terminal tool already called in this assistant turn"}] * 2,
+            )
 
 
 class StepRollbackTest(unittest.TestCase):
@@ -2075,11 +2127,6 @@ class SpillAndRootContractTest(unittest.TestCase):
                 mounted.value["retry_hint"],
                 'drop the /mnt/agent/workspace prefix: {"root": "workspace", "path": "inputs/x.json"}',
             )
-            unavailable = registry.invoke(
-                "glob", {"pattern": "*"}, allowed_names={"read_file", "test"}
-            )
-            self.assertFalse(unavailable.ok)
-            self.assertIn("available now: read_file, test", unavailable.error)
             unknown = registry.invoke("shell", {"argv": ["ls"]})
             self.assertIn("tools in this session: glob, read_file", unknown.error)
 

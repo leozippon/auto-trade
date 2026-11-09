@@ -9,7 +9,6 @@ event sequence ``output_item.added`` / ``function_call_arguments.delta`` /
 from __future__ import annotations
 
 import json
-import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -41,8 +40,9 @@ from autotrade.environment.llm.lighting import (
 )
 from autotrade.environment.llm.openai_compatible import load_env_value
 from autotrade.environment.llm.pricing import TokenPrices
+from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import validate_arguments
-from autotrade.pipelines.research_session import SessionBudgetLLM
+from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 
 MODEL = "gpt-6-astra"
 GEMINI_MODEL = "gemini-4-argon"
@@ -377,7 +377,9 @@ def test_gemini_sends_its_whole_output_budget_beside_a_prompt_near_its_window(
     near = [ChatMessage("user", "研" * (window - 20_000))]
     prompt = estimate_chat_request_tokens(near)
     assert window - 32_768 < prompt < window - CONTEXT_OUTPUT_TOKEN_MARGIN
-    budgeted = SessionBudgetLLM(proxy, max_calls=1, deadline=time.monotonic() + 600)
+    budgeted = SessionBudgetLLM(
+        proxy, budget=SessionCallBudget(max_calls=1, time_budget=InferenceTimeBudget(duration_seconds=600))
+    )
     assert context_request_fits(budgeted, near, max_tokens=32_768)[0]
     proxy.complete(near)
     assert transport.bodies[0]["max_tokens"] == 32_768

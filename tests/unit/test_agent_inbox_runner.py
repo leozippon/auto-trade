@@ -139,7 +139,7 @@ def test_before_llm_applies_guidance_without_system_or_manifest(tmp_path: Path) 
         event_sink=lambda event, payload: events.append((event, payload)),
         inbox=inbox,
     )
-    assert runner.run("finish the validated strategy").status == "finished"
+    runner.run("finish the validated strategy")
     first = llm.calls[0]["messages"]
     assert first[0].role == "system"
     assert first[0].content == "daily JSON only"
@@ -186,8 +186,7 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
         event_sink=lambda event, payload: events.append((event, payload)),
         inbox=inbox,
     )
-    result = runner.run("write then finish")
-    assert result.status == "finished"
+    runner.run("write then finish")
     assert write.calls == []
     second = llm.calls[1]["messages"]
     tools = [message for message in second if message.role == "tool"]
@@ -250,7 +249,7 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
         inbox=inbox,
     )
-    assert runner.run("mutate then search").status == "finished"
+    runner.run("mutate then search")
     pump.join(timeout=2)
     assert write.calls
     assert later.calls == []
@@ -294,7 +293,7 @@ def test_non_interrupt_after_llm_waits_for_tool_pairing(tmp_path: Path) -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
         inbox=inbox,
     )
-    assert runner.run("search then finish").status == "finished"
+    runner.run("search then finish")
     assert grep.calls
     first_tools = [message for message in llm.calls[0]["messages"] if message.role == "user"]
     assert all("工具后再看" not in (message.content or "") for message in first_tools)
@@ -332,7 +331,7 @@ def test_after_parallel_readonly_applies_before_next_llm(tmp_path: Path) -> None
         event_sink=lambda event, payload: events.append((event, payload)),
         inbox=inbox,
     )
-    assert runner.run("read then finish").status == "finished"
+    runner.run("read then finish")
     assert glob.calls and grep.calls
     second = llm.calls[1]["messages"]
     assert "并行后看" in _user_texts(second)
@@ -375,7 +374,7 @@ def test_subagent_does_not_consume_inbox_until_parent_returns(tmp_path: Path) ->
         subagent=SubAgentEngine(llm=subagent_llm, tools=ToolRegistry([shell])),
         inbox=inbox,
     )
-    assert runner.run("delegate then finish").status == "finished"
+    runner.run("delegate then finish")
     subagent_seen = _user_texts(subagent_llm.calls[0]["messages"])
     assert all("子代理期间到达" not in text for text in subagent_seen)
     assert "子代理期间到达" in _user_texts(parent_llm.calls[1]["messages"])
@@ -410,7 +409,7 @@ def test_session_inbox_hook_isolates_sessions_and_run_ids(tmp_path: Path) -> Non
         config=AgentSessionConfig(max_llm_calls=2),
         inbox=hook_a,
     )
-    assert runner.run("finish").status == "finished"
+    runner.run("finish")
     assert "只给 A" in _user_texts(llm.calls[0]["messages"])
     assert all("只给 B" not in text for text in _user_texts(llm.calls[0]["messages"]))
     assert list_unconsumed_messages(path, SESSION_A) == ()

@@ -22,7 +22,7 @@ import pytest
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest, append_versioned_jsonl
-from autotrade.environment.tools.base import ToolError
+from autotrade.environment.tools.base import ToolError, ToolRegistry
 from autotrade.environment.tools.skill_feedback import (
     MAX_SKILL_EVIDENCE_CHARS,
     MIN_SKILL_EVIDENCE_CHARS,
@@ -171,9 +171,12 @@ def test_there_is_no_positive_verdict_and_no_other_claim(tmp_path: Path) -> None
         "wrong",
     ]
     tool, _, experiment_dir = _session(tmp_path)
+    registry = ToolRegistry([tool])
     for claim in ("confirmed", "useful", ""):
-        with pytest.raises(ToolError, match="claim must be one of"):
-            _file(tool, claim=claim)
+        result = registry.invoke(
+            "skill_feedback", {"skill": CURATED, "claim": claim, "evidence": EVIDENCE}
+        )
+        assert not result.ok and "claim must be one of" in result.error
     assert not skill_feedback_path(experiment_dir).exists()
 
 
@@ -184,8 +187,11 @@ def test_evidence_must_be_concrete_and_bounded(tmp_path: Path) -> None:
     with pytest.raises(ToolError, match=f"at least {MIN_SKILL_EVIDENCE_CHARS}"):
         # Padding does not clear the floor: the value is stripped first.
         _file(tool, evidence="条目不对。" + " " * MIN_SKILL_EVIDENCE_CHARS)
-    with pytest.raises(ToolError, match="exceeds"):
-        _file(tool, evidence="长" * (MAX_SKILL_EVIDENCE_CHARS + 1))
+    too_long = ToolRegistry([tool]).invoke(
+        "skill_feedback",
+        {"skill": CURATED, "claim": "outdated", "evidence": "长" * (MAX_SKILL_EVIDENCE_CHARS + 1)},
+    )
+    assert not too_long.ok and "too long" in too_long.error
     assert not skill_feedback_path(experiment_dir).exists()
     schema = SkillFeedbackTool.spec.input_schema["properties"]["evidence"]
     assert schema["minLength"] == MIN_SKILL_EVIDENCE_CHARS

@@ -22,9 +22,9 @@ from typing import TYPE_CHECKING, Any, cast
 from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
-    _parse_complete_tool_call,
-    _provider_response_validation_error,
     load_env_value,
+    parse_complete_tool_call,
+    provider_response_validation_error,
 )
 from .pricing import LongContextTier, TokenPrices
 from .proxy import (
@@ -590,7 +590,7 @@ def _responses_failure(decoded: Mapping[str, object]) -> LLMProxyError | None:
 def _tool_call_from_item(
     item: Mapping[str, object], *, output_limited: bool, content: str
 ) -> ToolCall:
-    return _parse_complete_tool_call(
+    return parse_complete_tool_call(
         {
             "id": item.get("call_id"),
             "function": {
@@ -667,7 +667,7 @@ def _responses_provider_response(
             usage=_responses_usage(decoded.get("usage")),
         )
     except ValueError as exc:
-        raise _provider_response_validation_error(exc) from exc
+        raise provider_response_validation_error(exc) from exc
 
 
 def _parse_responses_stream(payload: bytes, *, expected_model: str) -> ProviderResponse:
@@ -775,7 +775,7 @@ def _parse_responses_stream(payload: bytes, *, expected_model: str) -> ProviderR
             usage=usage,
         )
     except ValueError as exc:
-        raise _provider_response_validation_error(exc) from exc
+        raise provider_response_validation_error(exc) from exc
 
 
 def _event_call_key(event: Mapping[str, object], item: object) -> str:

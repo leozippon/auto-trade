@@ -16,18 +16,17 @@ from __future__ import annotations
 
 import json
 import threading
-import time
 import uuid
 from collections import deque
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import cast
 
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
     ApiSpendExhausted,
+    CallBudgetExhausted,
     ChatMessage,
     LLMProxy,
     MalformedToolCallError,
@@ -42,6 +41,7 @@ from autotrade.environment.llm import (
     output_shares_context_window,
 )
 from autotrade.environment.runtime import sanitize_for_log
+from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
@@ -57,7 +57,7 @@ from autotrade.environment.tools.base import (
     ToolSpec,
     is_sequential_tool,
 )
-from autotrade.environment.tools.search import trace_read_stub
+from autotrade.environment.tools.search import file_lines, trace_read_stub
 from autotrade.environment.trace import TraceEvent
 
 from .compact import (
@@ -116,7 +116,6 @@ SUBAGENT_REPORT_MAX_CHARS = 6_000
 # with a stub that loses ``task_id`` — the console would then lose the call.
 TRACE_ARGUMENT_MAX_CHARS = 2_000
 SUBAGENT_TASK_ID_PREFIX = "agent_"
-_CALL_BUDGET_EXHAUSTED = "call budget exhausted"
 # Appended to a child's summary when its reply hit the output ceiling, so the
 # parent never receives a silently cut half-sentence.
 OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
@@ -143,12 +142,12 @@ SUBAGENT_DEGRADED_SUMMARY_ERROR = (
     "Sub-agent turns exhausted; summary recovered without a final report"
 )
 
-_READ_TOOLS = frozenset({"glob", "grep", "read_file"})
+_EXPLORE_TOOLS = frozenset({"glob", "grep", "read_file"})
 # The parent's session surface minus what it keeps by design: the formal
 # backtest (Validation quota and Step tree), finish, rollback and nesting. The unofficial ``smoke_backtest`` is included so a child verifies
 # its implementation on the real replay path instead of hand-rolling a shell
 # smoke test.
-_WRITE_TOOLS = frozenset(
+_GENERAL_PURPOSE_TOOLS = frozenset(
     {
         "edit_file",
         "glob",
@@ -206,13 +205,13 @@ SUBAGENT_ROLE_TABLE: tuple[SubAgentRole, ...] = (
     SubAgentRole(
         "general-purpose",
         "读写执行：跑 Python、实现、计算与写策略、模型和 skills",
-        _WRITE_TOOLS,
+        _GENERAL_PURPOSE_TOOLS,
         mission="完成一个有界的实现、计算或检查任务",
     ),
     SubAgentRole(
         "Explore",
         "只读调查：定位与核对文件、数据、单位、代码和证据",
-        _READ_TOOLS,
+        _EXPLORE_TOOLS,
         mission="调查委托问题并核对它的证据边界",
     ),
 )
@@ -261,7 +260,7 @@ _ROLE_PROMPT = """\
 # 边界
 - 先读 `inputs/skills_index.json`，证据从已挂载的数据、单位引用、制品与参考材料里找；skill 脚本不自动执行。
 {paths}
-- 根 `trace` 是本会话的 transcript（只读）；`/mnt/tools/screen.py` 不在任何读文件根内，只能经 `shell` 运行。
+- 根 `trace` 是本会话的 transcript（只读）{screen}。
 - 不委托子代理，不读研究年末之后的数据，不安装依赖，不伪造结果；以 `[父代理指令]` 开头的消息是父 Agent 的补充要求，优先于原 task。{writes}
 
 # 返回
@@ -458,6 +457,7 @@ def subagent_system_prompt(role: str) -> str:
         lines = {
             "capability": "你可以修改共享的策略、模型与 skills；正式回测（`validate`）、`test` 与候选选择归父 Agent。",
             "paths": PATH_RULES_BULLET,
+            "screen": f"；`{SCREENING_TOOL_MOUNT}` 不在任何读文件根内，只能经 `shell` 运行",
             "writes": _WRITE_LINES,
             "report": "结论、实际修改、关键证据（数据事实逐字）和剩余风险",
             "overflow": "表格、清单、代码与日志写进工作区 `notes/<topic>/` 下的文件，汇报给路径。",
@@ -466,6 +466,7 @@ def subagent_system_prompt(role: str) -> str:
         lines = {
             "capability": "只调查并返回证据：不能写文件、执行 shell、回测或 `test`。",
             "paths": f"- {FILE_PATH_RULE}。",
+            "screen": "",
             "writes": "",
             "report": "结论、关键证据、限制和建议",
             "overflow": "不抄录原文，给出处（根名、路径与行号）。",
@@ -545,7 +546,7 @@ def deliver_subagent_report(
         "summary": delivered,
         "summary_chars": total,
         "summary_delivered_chars": SUBAGENT_REPORT_MAX_CHARS,
-        "summary_lines": len(summary.splitlines()),
+        "summary_lines": len(file_lines(summary)),
         # The line the clip fell inside is re-delivered whole rather than lost.
         "resume_line": delivered.count("\n"),
         "summary_truncated": True,
@@ -600,10 +601,6 @@ class SubAgentConfig:
     # parent session deadline bounds it. Context is not a bound: a child
     # compacts at the parent's threshold (``SubAgentEngine.compactor``).
     max_turns: int | None = DEFAULT_SUBAGENT_MAX_TURNS
-    # None = no extra child wall clock; the parent time budget is the cap. One
-    # LLM call is bounded by the gateway timeout the run configures, never by a
-    # second per-call clock here.
-    deadline_seconds: float | None = None
     # Children running at once; further launches queue in the same pool.
     max_concurrent: int = DEFAULT_SUBAGENT_MAX_CONCURRENT
 
@@ -612,8 +609,6 @@ class SubAgentConfig:
             raise ValueError("Sub-agent max_tokens must be positive")
         if self.max_turns is not None and self.max_turns <= 0:
             raise ValueError("Sub-agent max_turns must be positive")
-        if self.deadline_seconds is not None and self.deadline_seconds <= 0:
-            raise ValueError("Sub-agent deadline_seconds must be positive")
         if self.max_concurrent <= 0:
             raise ValueError("Sub-agent max_concurrent must be positive")
 
@@ -627,7 +622,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
         llm: LLMProxy,
         tools: ToolRegistry,
         config: SubAgentConfig | None = None,
-        deadline_at: datetime | None = None,
         time_budget: InferenceTimeBudget | None = None,
         event_sink: Callable[[TraceEvent, dict[str, object]], None] | None = None,
         cancel_event: threading.Event | None = None,
@@ -636,7 +630,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
         self.llm = llm
         self.tools = tools
         self.config = config or SubAgentConfig()
-        self.deadline_at = deadline_at
         self.event_sink = event_sink
         # The parent session's compactor (gateway and thresholds); each child
         # runs a fresh instance of it over its own conversation. The runner
@@ -713,12 +706,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
         turns_limit = resolve_subagent_max_turns(max_turns, role, self.config.max_turns)
         thinking = normalize_subagent_thinking(thinking, role)
         task_id = task_id or f"{SUBAGENT_TASK_ID_PREFIX}{uuid.uuid4().hex[:12]}"
-        child_cap = (
-            time.monotonic() + self.config.deadline_seconds
-            if self.config.deadline_seconds is not None
-            else float("inf")
-        )
-        deadline = min(child_cap, self._deadline_monotonic())
         llm = llm_with_thinking(self.llm, thinking)
         thinking_applied = llm is not self.llm
         compactor = self.compactor.fresh() if self.compactor is not None else None
@@ -750,9 +737,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         if transcript:
             # Resume: the child's own conversation continues; a transcript cut
             # off mid-batch still ends at its last answered turn.
-            messages = drop_trailing_unanswered_tool_calls(
-                [_copy_chat_message(message) for message in transcript]
-            )
+            messages = drop_trailing_unanswered_tool_calls(transcript)
         else:
             messages = [ChatMessage("system", subagent_system_prompt(role))]
             # The parent snapshot is taken mid-batch: its last assistant turn
@@ -760,11 +745,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             # yet, so the fork ends at the last answered turn.
             forked = (
                 drop_trailing_unanswered_tool_calls(
-                    [
-                        _copy_chat_message(message)
-                        for message in parent_messages
-                        if message.role != "system"
-                    ]
+                    [message for message in parent_messages if message.role != "system"]
                 )
                 if inherit_context and parent_messages
                 else []
@@ -792,7 +773,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     status = "cancelled"
                     error = "Sub-agent cancelled"
                     break
-                if self._deadline_reached(deadline):
+                if self._deadline_reached():
                     status = "timeout"
                     error = "Sub-agent deadline reached"
                     break
@@ -845,7 +826,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     llm,
                     messages,
                     provider_tools,
-                    deadline,
                     task_id=task_id,
                     role=role,
                     turn_index=turns,
@@ -893,7 +873,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             llm,
                             messages,
                             provider_tools,
-                            deadline,
                             identity={
                                 "task_id": task_id,
                                 "role": role,
@@ -904,13 +883,11 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         if progressed:
                             overflow_recovery_used = True
                             continue
-                    if _is_nonretryable_subagent_error(exc) or self._deadline_reached(
-                        deadline
-                    ):
+                    if _is_nonretryable_subagent_error(exc) or self._deadline_reached():
                         status = (
                             "timeout"
                             if isinstance(exc, TimeoutError)
-                            or self._deadline_reached(deadline)
+                            or self._deadline_reached()
                             else "error"
                         )
                         break
@@ -943,7 +920,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 error = ""
                 malformed_reissue_used = False
                 _add_usage(usage, response.usage)
-                cut_off = _output_truncated(response.usage, output_tokens)
+                cut_off = output_truncated(response.usage, output_tokens)
                 truncated_turns += int(cut_off)
                 messages.append(
                     ChatMessage(
@@ -1035,9 +1012,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         )
                     )
                     continue
-                results = self._dispatch_calls(
-                    response.tool_calls, deadline, allowed=allowed
-                )
+                results = self._dispatch_calls(response.tool_calls, allowed=allowed)
                 for call, record, attempted in results:
                     tool_calls_made += int(attempted)
                     messages.append(
@@ -1071,7 +1046,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             if (
                 status == "completed"
                 and not summary
-                and not self._deadline_reached(deadline)
+                and not self._deadline_reached()
                 and not self._cancelled()
             ):
                 messages.append(
@@ -1086,7 +1061,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     llm,
                     messages,
                     provider_tools,
-                    deadline,
                     task_id=task_id,
                     role=role,
                     turn_index=turns,
@@ -1122,7 +1096,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     summary = _recovered_summary(response, messages)
                     if summary:
                         status, error = "exhausted", SUBAGENT_DEGRADED_SUMMARY_ERROR
-                if _output_truncated(response.usage, output_tokens):
+                if output_truncated(response.usage, output_tokens):
                     truncated_turns += 1
                     summary = (
                         summary + "\n" if summary else ""
@@ -1140,7 +1114,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 error = safe_error_summary(exc)
         if status == "completed" and not summary:
             # ``completed`` means a report reached the parent; nothing else.
-            if self._deadline_reached(deadline):
+            if self._deadline_reached():
                 status, error = "timeout", "Sub-agent deadline reached before a report"
             elif self._cancelled():
                 status, error = "cancelled", "Sub-agent cancelled"
@@ -1189,7 +1163,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
         llm: LLMProxy,
         messages: list[ChatMessage],
         provider_tools: tuple[dict[str, object], ...],
-        deadline: float,
         *,
         task_id: str,
         role: str,
@@ -1219,7 +1192,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             result = compactor.compact(
                 messages,
                 tools=provider_tools,
-                remaining_seconds=self._remaining_seconds(deadline),
+                remaining_seconds=self._remaining_seconds(),
                 force=not fits,
             )
             if result is not None:
@@ -1249,7 +1222,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
         llm: LLMProxy,
         messages: list[ChatMessage],
         provider_tools: tuple[dict[str, object], ...],
-        deadline: float,
         *,
         identity: dict[str, object],
     ) -> tuple[list[ChatMessage], bool]:
@@ -1267,7 +1239,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             result = compactor.compact(
                 recovered,
                 tools=provider_tools,
-                remaining_seconds=self._remaining_seconds(deadline),
+                remaining_seconds=self._remaining_seconds(),
                 force=True,
             )
             if result is not None:
@@ -1300,13 +1272,10 @@ class SubAgentEngine(SessionTimeBudgetAware):
             )
         return recovered, compacted or bool(edit)
 
-    def _remaining_seconds(self, local_deadline: float) -> float:
-        remaining = local_deadline - time.monotonic()
-        if self.time_budget is not None:
-            remaining = min(
-                remaining, self.time_budget.remaining() - self.parent_reserve_seconds
-            )
-        return max(remaining, 0.0)
+    def _remaining_seconds(self) -> float:
+        if self.time_budget is None:
+            return float("inf")
+        return max(self.time_budget.remaining() - self.parent_reserve_seconds, 0.0)
 
     def _output_tokens(
         self,
@@ -1336,7 +1305,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
     def _dispatch_calls(
         self,
         calls: tuple[ToolCall, ...],
-        deadline: float,
         *,
         allowed: frozenset[str],
     ) -> list[tuple[ToolCall, dict[str, object], bool]]:
@@ -1352,7 +1320,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 return call, {"ok": False, "error": rejections[index]}, False
             if self._cancelled():
                 return call, {"ok": False, "error": "Sub-agent cancelled"}, False
-            if self._deadline_reached(deadline):
+            if self._deadline_reached():
                 return call, {"ok": False, "error": "Sub-agent deadline reached"}, False
             return call, self.tools.invoke(call.name, call.arguments).to_record(), True
 
@@ -1391,13 +1359,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             raise interrupt
         return [item for item in results if item is not None]
 
-    def _deadline_monotonic(self) -> float:
-        if self.deadline_at is None:
-            return float("inf")
-        remaining = (self.deadline_at - datetime.now(UTC)).total_seconds()
-        return time.monotonic() + max(remaining, 0.0)
-
-    def _deadline_reached(self, local_deadline: float) -> bool:
+    def _deadline_reached(self) -> bool:
         """Whether this child must stop.
 
         The session budget is shared, so the child's share ends
@@ -1406,7 +1368,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
         budget once took the parent's whole wrap-up window with it.
         """
 
-        return time.monotonic() >= local_deadline or (
+        return (
             self.time_budget is not None
             and self.time_budget.remaining() <= self.parent_reserve_seconds
         )
@@ -1424,7 +1386,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
             self.event_sink(event, dict(payload))
 
 
-def _output_truncated(usage: object, max_tokens: int) -> bool:
+def output_truncated(usage: object, max_tokens: int) -> bool:
     """True when a reply used its whole completion budget (finish_reason=length
     is not surfaced by the transport, so the usage count is the signal).
 
@@ -1487,24 +1449,11 @@ def _is_worker_shutdown_error(exc: BaseException) -> bool:
 
 
 def _is_nonretryable_subagent_error(exc: Exception) -> bool:
-    if isinstance(exc, (SessionInterrupt, TimeoutError, ApiSpendExhausted)):
+    if isinstance(exc, (SessionInterrupt, TimeoutError, ApiSpendExhausted, CallBudgetExhausted)):
         return True
-    if is_context_overflow_error(exc):
-        # Compaction and tool-result editing already ran; the next turn
-        # would only overflow again.
-        return True
-    text = f"{exc} {safe_error_summary(exc)}"
-    return _CALL_BUDGET_EXHAUSTED in text
-
-
-def _copy_chat_message(message: ChatMessage) -> ChatMessage:
-    return ChatMessage(
-        message.role,
-        message.content,
-        message.tool_calls,
-        tool_call_id=message.tool_call_id,
-        reasoning_content=message.reasoning_content,
-    )
+    # Compaction and tool-result editing already ran; the next turn would
+    # only overflow again.
+    return is_context_overflow_error(exc)
 
 
 def _traced_arguments(arguments: object) -> object:

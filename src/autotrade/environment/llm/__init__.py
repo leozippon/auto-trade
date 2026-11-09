@@ -1,4 +1,3 @@
-from .deepseek import DeepSeekConfig, DeepSeekProxy
 from .model_profiles import (
     AGENT_MAX_OUTPUT_TOKENS,
     DEFAULT_LLM_MAX_RETRIES,
@@ -21,6 +20,7 @@ from .openai_compatible import (
 )
 from .pricing import (
     ApiSpendExhausted,
+    CallBudgetExhausted,
     LongContextTier,
     TokenPrices,
     billed_tokens,
@@ -61,9 +61,8 @@ __all__ = [
     "MIN_CONTEXT_WINDOW_TOKENS",
     "MODEL_CHOICES",
     "ApiSpendExhausted",
+    "CallBudgetExhausted",
     "ChatMessage",
-    "DeepSeekConfig",
-    "DeepSeekProxy",
     "LLMProxy",
     "LLMProxyError",
     "LongContextTier",

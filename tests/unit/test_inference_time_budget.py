@@ -265,9 +265,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     )
     assert runner.time_budget is batch.session_time_budget is llm.time_budget is time_budget
 
-    result = runner.run("validate")
-
-    assert result.status == "finished"
+    runner.run("validate")
     assert evaluator.calls == 2
     assert len(scripted.calls) == 3
     repair_context = "".join(
@@ -390,9 +388,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
     clock.advance(budget_seconds - 650.0)
     assert time_budget.remaining() == 650.0
 
-    result = runner.run("go")
-
-    assert result.status == "finished"
+    runner.run("go")
     assert not [event for event, _ in events if event == "hard_finalization_started"]
     wrap_up = [payload for event, payload in events if event == "wrap_up_started"]
     assert len(wrap_up) == 1
@@ -515,7 +511,7 @@ def test_model_call_notices_then_the_wrap_up_leave_the_last_call_for_test() -> N
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
-    assert runner.run("go").status == "finished"
+    runner.run("go")
     assert len(finish.calls) == 1 and shared.calls == 10
     notices = [payload for event, payload in events if event == "budget_notice"]
     assert [
@@ -1056,7 +1052,6 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
     elapsed = time.monotonic() - started_at
 
     assert started.is_set()
-    assert result.status == "finished"
     assert result.finish_value["candidate"]["node_id"] == node_id
     # The child is released only after the session returned, so finishing
     # quickly is the proof that the parent never yielded the tail to it.

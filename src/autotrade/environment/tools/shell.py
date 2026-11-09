@@ -18,6 +18,7 @@ from .base import (
     ToolSchemaError,
     ToolSpec,
 )
+from .search import file_lines
 from .workspace import FREE_SPACE_RECOVERY_COMMANDS, SafeWorkspace
 
 # Advisory (not enforced): nudge the Agent away from hiding stderr, which breaks audit.
@@ -126,16 +127,6 @@ def _shell_example(timeout_seconds: float) -> dict[str, object]:
 
 
 class SandboxShellTool:
-    spec = ToolSpec(
-        "shell",
-        _shell_description(
-            DEFAULT_SHELL_TIMEOUT_SECONDS, MAX_SHELL_TIMEOUT_SECONDS, DEFAULT_SHELL_OUTPUT_CHARS
-        ),
-        _shell_input_schema(MAX_SHELL_TIMEOUT_SECONDS),
-        mutating=True,
-        example=_shell_example(DEFAULT_SHELL_TIMEOUT_SECONDS),
-    )
-
     def __init__(
         self,
         workspace: SafeWorkspace,
@@ -253,13 +244,13 @@ class SandboxShellTool:
         head = text[: self.max_output_chars - tail_chars]
         if "\n" in head:
             head = head[: head.rfind("\n") + 1]
-        total_lines = len(text.splitlines())
+        total_lines = len(file_lines(text))
         head_lines = head.count("\n")
         tail = text[-tail_chars:] if tail_chars and not capture_cut else ""
         if "\n" in tail and text[-tail_chars - 1] != "\n":
             # Drop the partial first line unless the window starts on a line.
             tail = tail[tail.find("\n") + 1 :]
-        tail_lines = len(tail.splitlines())
+        tail_lines = len(file_lines(tail))
         omitted = total_lines - head_lines - tail_lines
         record[name] = head
         record[f"{name}_truncated"] = True
