@@ -14,6 +14,7 @@ from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.pit import (
     FIRST_SEEN_COLUMN,
     concat_rows,
+    first_seen_at,
     first_seen_later,
     parquet_meta,
     stamp_text,
@@ -53,12 +54,26 @@ BUSINESS_KEYS = {
     "dividend": ("ts_code", "end_date", "ann_date", "div_proc", "record_date", "ex_date", "pay_date"),
     "fina_audit": ("ts_code", "ann_date", "end_date"),
     "fina_mainbz_vip": ("ts_code", "end_date", "bz_item", "bz_code", "curr_type"),
-    "disclosure_date": ("ts_code", "end_date", "ann_date", "pre_date", "actual_date"),
+    # actual_date is not identity here: a schedule and its realised disclosure
+    # are two versions of one record (_disclosure_versions).
+    "disclosure_date": ("ts_code", "end_date", "ann_date", "pre_date"),
 }
 
 # Fundamental events are stamped at the CN evening clock: the vendor gives a
 # date, not a time, and 18:00 is after the disclosure cut-off for that date.
 _EVENT_CLOCK = time(18, 0)
+
+# Dates a row records as having happened: a row stamped before any of them is
+# determinate lookahead, which the audit fails. A forecast/express version's
+# ann_date is its own disclosure (the first_ann_date bug class); a
+# disclosure_date row's ann_date is its schedule notice and its actual_date the
+# realised disclosure (pre_date is a plan and may lie ahead). Statement
+# datasets are exempt: f_ann_date legitimately precedes ann_date.
+_EVENT_DATE_COLUMNS = {
+    "forecast_vip": ("ann_date",),
+    "express_vip": ("ann_date",),
+    "disclosure_date": ("ann_date", "actual_date"),
+}
 
 RAW_PATTERNS = {
     "income_vip": "period=*.parquet",
@@ -228,10 +243,12 @@ class FundamentalEventsBuilder:
             df["source_path"] = str(path)
             df["source_write_id"] = str(parquet_meta(path).get("write_id", ""))
             df["source_row_id"] = range(len(df))
+            if dataset == "disclosure_date":
+                df = _disclosure_versions(df)
             df["available_at"], df["available_at_rule"] = _available_at_for_frame(
                 dataset, df, statement_availability
             )
-            first_seen = first_seen_later(path, df, df["available_at"])
+            first_seen = _first_seen_later(dataset, path, df)
             if first_seen is not None:
                 df[FIRST_SEEN_COLUMN] = stamp_text(first_seen)
             df["business_key"] = _business_key_frame(dataset, df)
@@ -364,14 +381,11 @@ def audit_fundamental_events(events_root: str | Path, config: FundamentalEventsC
                 (expected_write_id.ne("") & actual_write_id.ne("") & expected_write_id.ne(actual_write_id)).sum()
             )
             duplicate_keys += int(df.duplicated(["dataset", "business_key", "available_at"], keep=False).sum())
-            if expected_dataset in {"forecast_vip", "express_vip"} and "ann_date" in df.columns:
-                ann = pd.to_datetime(df["ann_date"].astype(str).str.strip(), format="%Y%m%d", errors="coerce")
-                ann = ann.dt.tz_localize(CN_TZ)
-                # For forecast/express each version's ann_date IS its disclosure
-                # date; available_at before it is determinate lookahead (the
-                # first_ann_date bug class). Statement datasets are exempt:
-                # f_ann_date legitimately precedes ann_date.
-                backdated_available_at += int((parsed < ann).fillna(False).sum())
+            backdated = pd.Series(False, index=df.index)
+            for column in _EVENT_DATE_COLUMNS.get(expected_dataset, ()):
+                happened = pd.to_datetime(_clean_date_frame(df, column), format="%Y%m%d", errors="coerce")
+                backdated |= parsed < happened.dt.tz_localize(CN_TZ)
+            backdated_available_at += int(backdated.sum())
         total_rows += rows
         severity = (
             "error"
@@ -561,7 +575,19 @@ def _available_at_for_frame(
             rules = rules.mask(missing & available.ne(""), "fallback_joined_statement_available_at")
         return available, rules
     if dataset == "disclosure_date":
-        return _first_available_frame(frame, ("ann_date", "actual_date", "pre_date"), "source:ann_or_conservative_disclosure_date")
+        # The vendor's schedule row: ann_date is its latest schedule notice (a
+        # rescheduling moves it together with pre_date), actual_date the
+        # realised disclosure, filled in after the fact. A row is visible from
+        # the later of the two it carries, so actual_date is never seen before
+        # it happened (the ann_date stamp showed it a median 34 days early);
+        # _disclosure_versions gives a schedule disclosed after its notice an
+        # earlier version without it. A row with neither waits for its pre_date.
+        available, rules = _first_available_frame(frame, ("ann_date", "pre_date"), "source:ann_date_or_pre_date")
+        actual = _clean_date_frame(frame, "actual_date")
+        disclosed = actual.gt(_clean_date_frame(frame, "ann_date"))
+        available = available.mask(disclosed, _stamp_event_clock(actual.where(disclosed, "")))
+        rules = rules.mask(disclosed, "source:actual_date")
+        return available, rules
     return (
         pd.Series("", index=frame.index, dtype=object),
         pd.Series("unsupported_dataset", index=frame.index, dtype=object),
@@ -577,6 +603,39 @@ def _joined_statement_available_at(
     keys = zip(_column_text(frame, "ts_code")[rows], _clean_date_frame(frame, "end_date")[rows])
     joined[rows] = [latest.get(key, "") for key in keys]
     return joined
+
+
+def _disclosure_versions(frame: pd.DataFrame) -> pd.DataFrame:
+    """A raw disclosure_date frame plus, for each schedule announced before its
+    realised disclosure, the schedule as announced: the same row with
+    actual_date withheld, which the rule stamps at ann_date while the row itself
+    is stamped at actual_date. Both keep the raw row's ``source_row_id``."""
+    announced = _clean_date_frame(frame, "ann_date")
+    split = announced.ne("") & _clean_date_frame(frame, "actual_date").gt(announced)
+    if not split.any():
+        return frame
+    schedule = frame[split].copy()
+    schedule["actual_date"] = None
+    return concat_rows([schedule, frame])
+
+
+def _first_seen_later(dataset: str, path: Path, frame: pd.DataFrame) -> pd.Series | None:
+    """``first_seen_later`` for one raw partition's event rows.
+
+    A disclosure_date schedule version withholds actual_date, so its key may be
+    one the lake never held (the row arrived already disclosed): a row without
+    actual_date counts from the earliest observation of its raw row, while a
+    row carrying it keeps the observation of the key that carries it.
+    """
+    if dataset != "disclosure_date":
+        return first_seen_later(path, frame, frame["available_at"])
+    seen = first_seen_at(path, frame)
+    if seen is None:
+        return None
+    earliest = seen.groupby(frame["source_row_id"]).transform("min")
+    seen = seen.mask(_clean_date_frame(frame, "actual_date").eq(""), earliest)
+    later = seen > to_cn_timestamps(frame["available_at"])
+    return seen.where(later) if later.any() else None
 
 
 def _first_available_frame(frame: pd.DataFrame, columns: tuple[str, ...], rule: str) -> tuple[pd.Series, pd.Series]:
@@ -644,9 +703,9 @@ def _is_allowed_available_at_rule(rule: str) -> bool:
         "source:imp_ann_date_or_ann_date",
         "source:imp_ann_date_or_ann_date:ann_date",
         "fallback_joined_statement_available_at",
-        "source:ann_or_conservative_disclosure_date",
-        "source:ann_or_conservative_disclosure_date:actual_date",
-        "source:ann_or_conservative_disclosure_date:pre_date",
+        "source:ann_date_or_pre_date",
+        "source:ann_date_or_pre_date:pre_date",
+        "source:actual_date",
     }
     return text in allowed_rules
 

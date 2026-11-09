@@ -1688,7 +1688,7 @@ def audit_fundamental_unit_and_pit_semantics(raw_dir: Path, add) -> None:
             "forecast_vip": "PIT visibility = each version's own ann_date (first_ann_date is a series attribute, never an availability floor); keep update_flag/type; it is an event table, not a final statement table",
             "express_vip": "use ann_date; it is a preliminary result table and may differ from later statements",
             "dividend": "use imp_ann_date, ex_date, record_date, and pay_date according to field meaning; ann_date can be blank",
-            "disclosure_date": "calendar/planned disclosure table; do not treat it as a fundamental value",
+            "disclosure_date": "calendar/planned disclosure table; do not treat it as a fundamental value. The schedule is visible from ann_date without actual_date; the realised actual_date is a second version visible from that date",
         },
         "doc_refs": {
             dataset: INTEGRATED_DOC_REFS[dataset]

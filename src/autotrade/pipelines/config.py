@@ -64,7 +64,10 @@ ExecutionMode = Literal["sandbox", "trusted"]
 # The stamp lives in the PIT event index a release clones, so only a view built
 # from a release whose index this code wrote carries it.
 # v16: one anns_d text-index row per filing (ts_code + cninfo id); a midnight rec_time now stamps date-only (via the restamped lake).
-SNAPSHOT_CACHE_FORMAT_VERSION = 16
+# v17: a disclosure_date row's realised actual_date is a second version of the
+# schedule, visible from that date; a v16 view shows it from the schedule notice,
+# a median 34 days before the disclosure happened.
+SNAPSHOT_CACHE_FORMAT_VERSION = 17
 
 # Trailing wrap-up grace added to the research session budget. Not a console or
 # worker knob; ResearchSessionRequest carries the seconds to the Agent runner.

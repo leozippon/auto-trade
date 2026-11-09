@@ -21,8 +21,10 @@ from autotrade.environment.data.auction import (
 )
 from autotrade.environment.data.fundamental_events import read_fundamental_events
 from autotrade.environment.data.pit import (
+    FIRST_SEEN_COLUMN,
     CorruptSidecarError,
     concat_rows,
+    observation_path,
     to_cn_timestamps,
     visible_from,
 )
@@ -297,9 +299,9 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
                 ("dividend", "2020-01-06T18:00:00+08:00", "source:imp_ann_date_or_ann_date:ann_date",
                  key("dividend", {"ts_code": "000002.SZ", "end_date": "20191231", "ann_date": "20200106",
                                   "div_proc": "预案", "record_date": "", "ex_date": "", "pay_date": ""})),
-                ("disclosure_date", "2020-01-07T18:00:00+08:00", "source:ann_or_conservative_disclosure_date:pre_date",
+                ("disclosure_date", "2020-01-07T18:00:00+08:00", "source:ann_date_or_pre_date:pre_date",
                  key("disclosure_date", {"ts_code": "000001.SZ", "end_date": "20191231", "ann_date": "",
-                                         "pre_date": "20200107", "actual_date": ""})),
+                                         "pre_date": "20200107"})),
             ]
             self.assertEqual(
                 list(zip(events["dataset"], events["available_at"], events["available_at_rule"], events["business_key"])),
@@ -407,6 +409,102 @@ class FundamentalEventsBuilderTest(unittest.TestCase):
             report = audit_fundamental_events(output, config)
             self.assertEqual(report["status"], "error")
             self.assertEqual(report["findings"][-1]["details"]["backdated_available_at_rows"], 1)
+
+    def test_disclosure_schedule_shows_its_actual_date_only_once_it_happened(self):
+        """disclosure_date's actual_date is the realised disclosure the vendor
+        fills in after the fact. A schedule announced before it is one version
+        at its ann_date without it and a second version of the same record at
+        actual_date; the audit fails a row stamped before a date it carries as
+        having happened, the stamp-at-ann_date leak this replaced."""
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            (raw / "disclosure_date").mkdir(parents=True)
+            pd.DataFrame([
+                # Scheduled on 12-28 for 01-10, disclosed on 01-15.
+                {"ts_code": "000001.SZ", "end_date": "20191231", "ann_date": "20191228",
+                 "pre_date": "20200110", "actual_date": "20200115"},
+                # Scheduled, not disclosed yet.
+                {"ts_code": "000002.SZ", "end_date": "20191231", "ann_date": "20191229",
+                 "pre_date": "20200120", "actual_date": None},
+                # Only the realised date.
+                {"ts_code": "000003.SZ", "end_date": "20191231", "ann_date": None,
+                 "pre_date": None, "actual_date": "20200105"},
+                # A notice dated after the disclosure: one version, at the notice.
+                {"ts_code": "000004.SZ", "end_date": "20191231", "ann_date": "20200112",
+                 "pre_date": "20200110", "actual_date": "20200110"},
+            ]).to_parquet(raw / "disclosure_date" / "period=20191231.parquet", index=False)
+
+            builder = FundamentalEventsBuilder(raw)
+            config = FundamentalEventsConfig(start_date="20191201", end_date="20200131", datasets=("disclosure_date",))
+            events = builder.build(config)
+
+            self.assertEqual(
+                list(zip(events["ts_code"], events["available_at"], events["available_at_rule"], events["actual_date"])),
+                [
+                    ("000001.SZ", "2019-12-28T18:00:00+08:00", "source:ann_date_or_pre_date", None),
+                    ("000002.SZ", "2019-12-29T18:00:00+08:00", "source:ann_date_or_pre_date", None),
+                    ("000003.SZ", "2020-01-05T18:00:00+08:00", "source:actual_date", "20200105"),
+                    ("000004.SZ", "2020-01-12T18:00:00+08:00", "source:ann_date_or_pre_date", "20200110"),
+                    ("000001.SZ", "2020-01-15T18:00:00+08:00", "source:actual_date", "20200115"),
+                ],
+            )
+            versions = events[events["ts_code"] == "000001.SZ"]
+            self.assertEqual(versions["business_key"].nunique(), 1)
+            self.assertEqual(versions["source_row_id"].tolist(), [0, 0])
+            self.assertEqual(versions["pre_date"].tolist(), ["20200110", "20200110"])
+
+            output = Path(tmp) / "pit"
+            builder.write_partitioned(events, output)
+            report = audit_fundamental_events(output, config)
+            # blank source_write_id (the fixture has no sidecars) keeps this at warning
+            self.assertEqual(report["status"], "warning")
+            self.assertEqual(report["findings"][-1]["details"]["backdated_available_at_rows"], 0)
+
+            path = output / "disclosure_date" / "available_month=201912.parquet"
+            leaked = pd.read_parquet(path)
+            leaked.loc[leaked["ts_code"] == "000001.SZ", "actual_date"] = "20200115"
+            leaked.to_parquet(path, index=False)
+            report = audit_fundamental_events(output, config)
+            self.assertEqual(report["status"], "error")
+            self.assertEqual(report["findings"][-1]["details"]["backdated_available_at_rows"], 1)
+
+    def test_disclosure_schedule_version_counts_from_when_the_lake_held_its_row(self):
+        """The schedule version's key, actual_date withheld, is one the lake
+        may never have held: it counts from the earliest observation of its raw
+        row, the disclosed version from that of the key carrying actual_date."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "raw" / "disclosure_date" / "period=20191231.parquet"
+            path.parent.mkdir(parents=True)
+            row = {"end_date": "20191231", "ann_date": "20191228", "pre_date": "20200110", "actual_date": "20200115"}
+            pd.DataFrame([{"ts_code": "000001.SZ", **row}, {"ts_code": "000005.SZ", **row}]).to_parquet(path, index=False)
+            schedule_seen, disclosed_seen = "2019-12-30T04:00:00+00:00", "2020-01-20T04:00:00+00:00"
+            keys = ["ts_code", "end_date", "ann_date", "pre_date", "actual_date"]
+            # 000001.SZ was held as a schedule first; 000005.SZ arrived disclosed.
+            observed = pd.DataFrame([
+                {"ts_code": "000001.SZ", **row, "actual_date": "", FIRST_SEEN_COLUMN: schedule_seen},
+                {"ts_code": "000001.SZ", **row, FIRST_SEEN_COLUMN: disclosed_seen},
+                {"ts_code": "000005.SZ", **row, FIRST_SEEN_COLUMN: disclosed_seen},
+            ])[[*keys, FIRST_SEEN_COLUMN]]
+            observed.to_parquet(observation_path(path), index=False)
+            path.with_suffix(".parquet.meta.json").write_text(
+                json.dumps({"visible_since": disclosed_seen}), encoding="utf-8"
+            )
+
+            events = FundamentalEventsBuilder(path.parents[1]).build(FundamentalEventsConfig(
+                start_date="20191201", end_date="20200131", datasets=("disclosure_date",),
+            ))
+
+            self.assertEqual(
+                sorted(zip(events["ts_code"], events["actual_date"].fillna(""), events[FIRST_SEEN_COLUMN])),
+                [
+                    ("000001.SZ", "", "2019-12-30 12:00:00+08:00"),
+                    ("000001.SZ", "20200115", "2020-01-20 12:00:00+08:00"),
+                    ("000005.SZ", "", "2020-01-20 12:00:00+08:00"),
+                    ("000005.SZ", "20200115", "2020-01-20 12:00:00+08:00"),
+                ],
+            )
+            schedule = events[events["actual_date"].isna()].set_index("ts_code")["available_month"]
+            self.assertEqual(schedule.to_dict(), {"000001.SZ": "201912", "000005.SZ": "202001"})
 
     def test_fina_indicator_row_waits_for_the_latest_statement_of_its_period(self):
         """fina_indicator_vip has no f_ann_date, and the vendor files restated
