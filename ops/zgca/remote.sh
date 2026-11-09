@@ -320,8 +320,10 @@ round() {
     local log qlog command
     log="logs/zgca/$prefix$(basename "$round_file" .py)_$(date -u +%Y%m%dT%H%M%SZ).log"
     # The log and the command are quoted for the shell tmux runs them in.
+    # Unbuffered, so a pass that smokes the starter for an hour shows its
+    # progress in the log instead of nothing until it exits.
     printf -v qlog %q "$log"
-    printf -v command 'AUTOTRADE_GPU_NAME=%q %q %q %q' "$GPU_NAME" "$VENV/bin/python" "$round_file" "$PORT"
+    printf -v command 'AUTOTRADE_GPU_NAME=%q %q -u %q %q' "$GPU_NAME" "$VENV/bin/python" "$round_file" "$PORT"
     for arg in "$@"; do printf -v arg ' %q' "$arg"; command+=$arg; done
     if [ "$session" = "$FILL_SESSION" ]; then
         # Every pass appends to one log. The loop ends at the first pass that
