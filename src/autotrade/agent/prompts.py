@@ -17,7 +17,8 @@ harness, each rule stated once. It carries what the harness enforces, what
 the Agent cannot find out itself, and the owner's research orientation (the
 ambition and depth expected, research through the validation period as well
 as the research years, the strategy compute budget the experiment grants and,
-on a Sandbox with cards, full use of them; not a method); what a tool's
+on a Sandbox with cards, full use of them; not a method) and, in the working
+method, that strategy code is written for speed; what a tool's
 parameter, limit or returned field means is the tool's description and
 schema, the strategy contract is ``output/README.md``, the run's values are
 the facts JSON, and how to research within that orientation is the Agent's
@@ -57,10 +58,10 @@ SESSION_ORIENTATION_SECTION = """\
 """
 
 # The orientation's GPU bullet when the run facts' ``runtime_tools.sandbox_gpus``
-# names cards; it names no card and no method (the facts state the hardware), and
-# a Sandbox without cards reads the orientation without it
-# (``build_system_prompt``).
-SESSION_GPU_ORIENTATION_BULLET = "- 充分利用 Sandbox 可用的 GPU 算力。"
+# names cards; it names no card (the facts state the hardware) and says what
+# using them means, training and batched inference on the device; a Sandbox
+# without cards reads the orientation without it (``build_system_prompt``).
+SESSION_GPU_ORIENTATION_BULLET = "- 充分利用 Sandbox 可用的 GPU 算力：模型的训练与批量推理放在 GPU 上。"
 
 # The orientation's compute-budget bullet, after the GPU bullet when that one is
 # present: the run facts' ``budgets.strategy_inference_timeout_seconds`` and
@@ -101,6 +102,7 @@ PATH_RULES_BULLET = f"- {FILE_PATH_RULE}；{SHELL_PATH_RULE}。"
 SESSION_WORKFLOW_SECTION = f"""\
 # 工作方式
 - 策略合同（入口、`context`、订单、允许的库与模型库）在只读的 `output/README.md`。只有 `output/`（以 `main.py` 为入口的包）和 `models/` 随策略回测与定版；策略任一次超时或报错都让整场回测失败。
+- 策略代码要高效：截面计算向量化，费时的特征、模型与中间结果算一次后缓存复用，不逐日重算；回放的快慢决定每次 `validate` 与 `test` 要等多久。
 {PATH_RULES_BULLET}
 - 同一回合的多个工具调用并发执行；一批里有写入、shell 或回测时，整批按顺序执行。子代理在后台运行，结果以消息送回；没有别的事可做时以文本回复结束本回合。
 - 计划与进度记在工作区根的 `TODO.md`，验证与测试节点在根 `steps` 的 Step 树（`tree.txt`）；中断后的续跑从这两处恢复。

@@ -374,8 +374,8 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     """A session on an A100 could learn the card model only through nvidia-smi,
     and the card sat idle while LightGBM trained on CPU. The Sandbox's cards are
     one fact, count and model read off its own spec; with cards the orientation
-    closes with one sentence that names neither the card nor a method, without
-    any it reads unchanged."""
+    closes with one sentence that says what using them means and names no card,
+    without any it reads unchanged."""
 
     a100 = _facts(
         sandbox_spec=SandboxSpec(gpu=(0,), gpu_count=1, gpu_name_filter="A100").to_record()
@@ -383,8 +383,8 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     assert a100["runtime_tools"]["sandbox_gpus"] == "1 × A100"
     prompt = build_system_prompt(experiment_facts=a100)
     orientation = prompt[prompt.index("# 研究取向") : prompt.index("# 读数")]
-    assert SESSION_GPU_ORIENTATION_BULLET == "- 充分利用 Sandbox 可用的 GPU 算力。"
-    assert orientation.rstrip().endswith("\n- 充分利用 Sandbox 可用的 GPU 算力。")
+    assert SESSION_GPU_ORIENTATION_BULLET == "- 充分利用 Sandbox 可用的 GPU 算力：模型的训练与批量推理放在 GPU 上。"
+    assert orientation.rstrip().endswith("\n" + SESSION_GPU_ORIENTATION_BULLET)
     assert orientation.count("\n- ") == 3
     assert "A100" not in orientation
 

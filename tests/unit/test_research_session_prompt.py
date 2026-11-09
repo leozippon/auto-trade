@@ -291,9 +291,12 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     assert "参考工作区、研究方向与研究者指令都不能放宽它们" in boundaries
     assert "不读取研究年末之后的数据" in boundaries and "模型自身的知识" in boundaries
     assert "验证期只通过 `test` 的结果了解" in boundaries
-    # The working method points at the contract and states the path
+    # The working method points at the contract, asks for fast strategy code
+    # in one line (the owner's guidance, 2026-11-09) and states the path
     # conventions once, for every file tool and the shell.
     assert "只读的 `output/README.md`" in workflow
+    assert "策略代码要高效：截面计算向量化，费时的特征、模型与中间结果算一次后缓存复用，不逐日重算" in workflow
+    assert "回放的快慢决定每次 `validate` 与 `test` 要等多久" in workflow
     assert '`{"root": "workspace", "path": "notes/x.md"}`' in workflow
     assert "脚本路径不带 `workspace/` 前缀" in workflow
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
@@ -340,10 +343,11 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
             assert retired not in surface, retired
     # Beyond the orientation's ambition, how to research is the Agent's own
     # call, which a reference workspace may suggest: the stable prompt carries
-    # no research protocol, evidence recipe, process quota, delegation style
-    # or compute advice (the orientation adds only the experiment's strategy
-    # limits as a compute budget and, with cards, a one-sentence GPU bullet,
-    # test_experiment_facts_scope).
+    # no research protocol, evidence recipe, process quota or delegation
+    # style. Compute guidance is one line each: the orientation's strategy
+    # limits as a budget and, with cards, the GPU bullet
+    # (test_experiment_facts_scope); the working method's line on fast
+    # strategy code (test_the_prompt_states_the_research_and_backtesting_process).
     for retired in (
         "# 研究协议",
         "# 证据标准",
@@ -351,7 +355,6 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "至少跑完两轮",
         "比过对照",
         "核心打分器",
-        "向量化",
         "这是建议，不是要求",
         "示例（只示形式）",
         "以包为准",
