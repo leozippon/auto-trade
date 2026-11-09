@@ -2075,15 +2075,13 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
             self.assertTrue(result.ok, result.error)
             rendered = json.dumps(result.value, ensure_ascii=False, default=str)
             self.assertLessEqual(len(rendered), search_module.MAX_RESULT_CHARS, len(rendered))
-            # The blocks that scale with the replay are the ones left out; every
-            # metric the accept/reject decision needs still rides inline.
+            # The blocks that scale with the replay are the ones left out; the
+            # readings a screening decision is made on ride inline.
             row = result.value["candidates"][0]
-            stats = row["stats"]
-            self.assertNotIn("per_stock", stats)
-            self.assertNotIn("weekly_returns", stats)
-            for key in ("total_return", "sharpe", "max_drawdown", "trade_count"):
-                self.assertIn(key, stats)
-            self.assertEqual(result.value["result_root"], "steps")
+            self.assertNotIn("per_stock", rendered)
+            self.assertNotIn("weekly_returns", rendered)
+            for key in ("return", "sharpe", "max_drawdown", "trades"):
+                self.assertIn(key, row["book"])
             # The reference resolves through the Agent's own read path and the
             # file behind it holds the full record.
             roots = SearchRoots(SafeWorkspace(paths.workspace), paths=paths)
@@ -2091,7 +2089,7 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
             registry = ToolRegistry([ReadFileTool(roots)])
             read = registry.invoke(
                 "read_file",
-                {"root": result.value["result_root"], "path": row["result_ref"]},
+                {"root": "steps", "path": row["result_ref"]},
             )
             self.assertTrue(read.ok, read.error)
             target, _ = roots.resolve("steps", row["result_ref"])

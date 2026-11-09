@@ -127,8 +127,6 @@ from .session_tools import (
     SmokeBacktestTool,
     TestTool,
     ValidateTool,
-    batch_candidate_resources,
-    batch_candidate_stats,
 )
 from .skills import (
     SKILL_LIBRARY_DIRNAME,
@@ -1235,14 +1233,12 @@ class LLMResearchDeveloper:
         )
         from autotrade.agent.runner import AgentSessionBudgetExhausted
 
-        # The Validations earlier attempts recorded are this session's:
-        # nominable at the finish and listed in a hard finalization.
+        # The Validations earlier attempts recorded are this session's: the
+        # runner counts them with the ones this attempt completes.
         recorded_validations = [
             {
                 "node_id": step.step_id,
                 "revision_id": self.ref_store.get_or_create("strategy", step.revision_id),
-                "stats": batch_candidate_stats(step.validation.summary),
-                **batch_candidate_resources(step.validation.summary.get("resources")),
             }
             for step in request.steps_before
         ]

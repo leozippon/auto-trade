@@ -385,7 +385,7 @@ FIGURE = re.compile(r"\d+\.\d+|\d\s*%")
 # The row blocks the host builds; a path the contract names under them must
 # exist on a real row, so a renamed field cannot leave the contract pointing
 # at nothing (``raw_readings.last_two_years.return`` did).
-ROW_BLOCKS = ("residual_reading", "raw_readings")
+ROW_BLOCKS = ("active", "book", "concentration")
 
 
 def _contract_texts() -> dict[str, str]:

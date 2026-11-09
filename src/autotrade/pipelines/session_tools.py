@@ -42,7 +42,12 @@ from autotrade.environment.replay.null_control import (
     BASELINE_DRAWS,
     NullControlSetupError,
 )
-from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
+from autotrade.environment.replay.stats import plain_statistics
+from autotrade.environment.replay.style import (
+    STYLE_ARTIFACT_NAME,
+    _series_pairs,
+    active_analysis,
+)
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     RunManifest,
@@ -233,39 +238,20 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
 
     spec = ToolSpec(
         "smoke_backtest",
-        "UNOFFICIAL smoke run of the CURRENT output/ -- or of the candidate "
-        "directory path names, given exactly as a validate candidate's path "
-        "(path=\"candidates/value\"; same rules, and the read-only README.md is "
-        "supplied the same way) -- over a few trading days of "
-        "the research period, on the real replay path: real rolling "
-        "as-of view (each context.asof_dir/<domain>/ is a DIRECTORY of parquet "
-        "parts, read it with pd.read_parquet(directory)), real AccountSnapshot "
-        "object, same sandbox executor and per-decision timeout as "
-        "a Validation replay. It starts at the research period's first trading "
-        "day unless start names a later one, which is how you measure a fit "
-        "where a real batch will run it: a fit whose training window grows with "
-        "the span is far slower late in the research period than on day one, so "
-        "probe a data-dense late window BEFORE spending a validate call (each "
-        "interval between tests allows acceptance_rules.validation."
-        "validates_per_step of them) on a full-span batch. Returns seconds_per_day.strategy (the only figure "
-        "that scales with the days replayed), window_build_seconds (the host "
-        "side as-of view: on a late start it is almost all the one-off opening "
-        "of that window, minutes of host wall clock paid once and reused by a "
-        "later probe at the same start, so never multiply it by days; a "
-        "full-span batch opens at the period start and does not pay it), "
-        "phase_seconds (raw instrumentation whose phases overlap -- data_view "
-        "wraps the as-of sub-phases, so they do not add up), order "
-        "counts, the as-of domain directory names with each domain's rows and "
-        "first/last trade_date and available_at on the last day replayed (how far "
-        "back the view this window opened on reaches), the container resources block "
-        "(peak memory against the container limit, the state directory's peak "
-        "bytes against its quota, per-fit seconds against the "
-        "fit timeout in force, the wall seconds of each generate_orders call as "
-        "timed by the host executor, and GPU memory for a GPU strategy), and the exact "
-        "exception text on failure. It commits no revision, creates no Step, "
-        "cannot be tested, and does not count against validates_per_step. Use it before "
-        "validate instead of hand-writing a shell smoke test against "
-        "/mnt/snapshot.",
+        "Unofficial rehearsal: replay output/ (or path, a directory laid out and "
+        "checked like a validate candidate's) for a few research-year trading days "
+        "on the real replay path: the rolling as-of view (each "
+        "context.asof_dir/<domain>/ is a directory of parquet parts), a real "
+        "AccountSnapshot, the same executor and per-decision timeout. The window "
+        "opens at the research period's first trading day, or the first one on or "
+        "after start: a fit whose training window grows is slowest late in the "
+        "research years, so measure it there before a full-span validate. Commits "
+        "nothing, creates no node, does not count against "
+        "acceptance_rules.validation.validates_per_step. seconds_per_day.strategy "
+        "is the only cost that scales with days; window_build_seconds is the "
+        "one-off opening of a late window, reused by a later probe at the same "
+        "start. asof_date_ranges: each domain's rows and first/last dates on the "
+        "last day.",
         {
             "type": "object",
             "properties": {
@@ -395,20 +381,13 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
             return ToolResult(
                 True,
                 value={
-                    "status": "failed",
                     "path": path,
-                    "days_requested": days,
-                    "official": False,
+                    "status": "failed",
+                    "start": start or self.request.full_span.start,
                     "error": _public_error_text(exc),
-                    "hint": _SMOKE_LAYOUT_HINT,
-                    **({"start": start} if start is not None else {}),
                     # A rehearsal that died on a clock or on a shared card says
                     # what it was using when it did.
-                    **(
-                        {"resources": resources}
-                        if (resources := strategy_resources_of(exc))
-                        else {}
-                    ),
+                    **resource_reading(strategy_resources_of(exc)),
                 },
             )
         finally:
@@ -417,7 +396,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         try:
             return ToolResult(
                 True,
-                value={"path": path, **self._report(evaluation, result_dir, days, start)},
+                value={"path": path, **self._report(evaluation, result_dir, start)},
             )
         finally:
             # A smoke run leaves no result behind for the ledger or the Agent to
@@ -488,7 +467,6 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         self,
         evaluation: EvaluationResult,
         result_dir: Path,
-        days: int,
         start: str | None,
     ) -> dict[str, object]:
         summary = dict(evaluation.summary)
@@ -501,21 +479,24 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         # is almost entirely the one-off window opening on the window's first
         # day (minutes, then ~0.1 s a day): dividing it by the probe's days
         # reported a per-day rate an audited session extrapolated to a full
-        # span. It is reported below as the whole-run figure it is.
+        # span. It is reported below as the whole-run figure it is; the other
+        # phases are host instrumentation the session cannot act on.
         per_day = (
             {"strategy": round(phases["strategy"] / replayed, 3)}
             if replayed and "strategy" in phases
             else {}
         )
-        pit = _smoke_pit(result_dir)
+        lifecycle = summary.get("order_lifecycle")
+        lifecycle = lifecycle if isinstance(lifecycle, Mapping) else {}
         report: dict[str, object] = {
             "status": "ok",
-            "official": False,
-            "days_requested": days,
+            "start": start or self.request.full_span.start,
             "replayed_trade_days": replayed,
-            "decision_calls": summary.get("decision_calls"),
-            "order_count": summary.get("order_count"),
-            "order_lifecycle": summary.get("order_lifecycle"),
+            "orders": {
+                side: {key: counts.get(key) for key in ("filled", "rejected")}
+                for side, counts in lifecycle.items()
+                if isinstance(counts, Mapping)
+            },
             "reject_counts": summary.get("reject_counts"),
             "seconds_per_day": per_day,
             **(
@@ -523,30 +504,13 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                 if "data_view" in phases
                 else {}
             ),
-            "phase_seconds": phases,
-            "asof_domains": [str(item) for item in pit.get("asof_domains") or ()],
-            "asof_date_ranges": pit.get("asof_date_ranges") or {},
-            "hint": _SMOKE_LAYOUT_HINT,
+            "asof_date_ranges": _smoke_pit(result_dir).get("asof_date_ranges") or {},
+            # What the rehearsal cost its container, so the Agent sizes a
+            # batch on a measurement of the real replay container instead of
+            # on the session container it can see from the inside.
+            **resource_reading(summary.get("resources")),
         }
-        if start is not None:
-            report["start"] = start
-        # What the rehearsal cost its container against the limits in force, so
-        # the Agent sizes a batch on a measurement of the real replay container
-        # instead of on the session container it can see from the inside.
-        resources = summary.get("resources")
-        if resources:
-            report["resources"] = resources
         return report
-
-
-_SMOKE_LAYOUT_HINT = (
-    "context.asof_dir/<domain>/ is a directory of parquet parts: read it with "
-    "pd.read_parquet(context.asof_dir + '/daily'), never "
-    "context.asof_dir + '/daily.parquet'. context.account is an AccountSnapshot "
-    "object (context.account.cash, context.account.positions), not a dict. Never "
-    "fall back to context.snapshot_dir when an as-of read fails: the frozen "
-    "snapshot stops at the decision time and using it is a PIT violation."
-)
 
 
 def _smoke_pit(result_dir: Path) -> dict[str, object]:
@@ -575,11 +539,10 @@ VALIDATION_RESULT_ATTACHMENT = "validation/result.json"
 VALIDATION_DAILY_ATTACHMENT = "validation/active_daily.csv"
 STEP_TREE_SEARCH_ROOT = "steps"
 # Summary blocks whose size scales with the replay: one row per closed position
-# and one per week of the window. An inline copy is therefore not a fixed-cost
-# observation — an audited session shipped 427 KB of ``per_stock`` into the
-# conversation and forced a 174 s compaction plus twelve recovery calls. They
-# stay in the referenced result.json; every other metric is O(1) and rides
-# inline.
+# and one per week of the window. A copy of them is therefore not a fixed cost
+# -- an audited session shipped 427 KB of ``per_stock`` into the conversation
+# and forced a 174 s compaction plus twelve recovery calls. They stay in the
+# referenced result.json; a step-tree node keeps every other metric.
 REPLAY_SCALED_SUMMARY_BLOCKS = ("per_stock", "weekly_returns")
 
 
@@ -603,7 +566,8 @@ def write_active_daily(result_ref: str) -> Path:
 
 
 def inline_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
-    """The backtest metrics an Agent observation may carry inline."""
+    """The backtest metrics a step-tree node carries: every block but the
+    ones that scale with the replay."""
     return {
         key: value
         for key, value in summary.items()
@@ -625,22 +589,6 @@ def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
         if not isinstance(value, (dict, list))
         or key in AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS
     }
-
-
-# What a row's residual reading is, and is not.
-RESIDUAL_READING_NOTE = (
-    "the residual statistic over this row's own span: threshold is "
-    "z(1 - alpha) / sqrt(years) for this span's length, the same formula the "
-    "validation record is read with; a reading, not a verdict"
-)
-# A row whose bytes and span repeat an earlier node of the experiment.
-SAME_BYTES_NOTE = (
-    "these bytes were already validated on this span as the nodes named: the "
-    "random baseline is seeded by the span, so a deterministic strategy repeats "
-    "their readings exactly and a difference measures only the strategy's own "
-    "non-determinism (GPU training, for one); it is the same trial, not new "
-    "evidence"
-)
 
 
 class SessionValidations:
@@ -723,26 +671,25 @@ class SessionValidations:
         }
 
     def record_row(self, record: Mapping[str, object]) -> dict[str, object]:
-        """One validation-record step as a test result lists it: the step, its
-        window and test horizon, the candidate by handle and its entry without
-        the daily rows, and, where the step replayed seed replicates, each
-        one's active return (or its strategy error) by handle."""
+        """One validation-record step as a test result lists it, as it was
+        recorded: its window, the candidate by handle, the entry's figures
+        without the daily rows, and, where the step replayed seed replicates,
+        each one's active return and return (or its strategy error)."""
 
-        candidate = dict(record["candidate"])  # type: ignore[arg-type]
-        entry = {key: _rounded(value) if isinstance(value, float) else value for key, value in dict(record["entry"]).items() if key != "daily"}  # type: ignore[arg-type]
-        row = {
-            "step": record["step"],
-            "window": dict(record["window"]),  # type: ignore[arg-type]
-            "test_horizon": record["test_horizon"],
-            "candidate": {"node_id": candidate["step_id"], **self.handle(str(candidate["step_id"]))},
-            "source": record["source"],
-            **entry,
-        }
+        entry = dict(record["entry"])  # type: ignore[arg-type]
+        row = _rounded_row(
+            {
+                "step": record["step"],
+                **{key: entry.get(key) for key in ("start", "end", "days")},
+                "candidate": self.named([str(record["candidate"]["step_id"])])[0],  # type: ignore[index]
+                **{key: entry.get(key) for key in RECORD_ENTRY_KEYS},
+            }
+        )
         replicates = [dict(item) for item in record.get("replicates") or ()]  # type: ignore[attr-defined]
         if replicates:
             names = self.named([str(item["step_id"]) for item in replicates])
             row["seed_replicates"] = [
-                _replicate_cell(name, item.get("entry") or str(item["strategy_error"]), ("active_return",))  # type: ignore[arg-type]
+                _replicate_cell(name, item.get("entry") or str(item["strategy_error"]))  # type: ignore[arg-type]
                 for name, item in zip(names, replicates, strict=True)
             ]
         return row
@@ -824,85 +771,6 @@ class SessionValidations:
 
         return AcceptanceRules.from_record(self.request.acceptance_rules)
 
-    def residual_reading(self, step: StepResult) -> dict[str, object]:
-        """:meth:`residual_reading_of` one recorded Validation's replay."""
-
-        return self.residual_reading_of(_step_analysis(step), step.validation.summary)
-
-    def residual_reading_of(
-        self, analysis: Mapping[str, object], summary: Mapping[str, object]
-    ) -> dict[str, object]:
-        """The residual statistic over one replay's own span.
-
-        ``verdict.residual_reading`` of the replay's graded series at the
-        experiment's ``alpha``: the residual IR, the three betas and the threshold for the
-        span's length, beside the active excess after the cost stress on the
-        span's turnover (``verdict.summary_excess_at_cost_stress``, the
-        reading the forward stage takes too). No pass or fail: the session
-        reads the same statistic the validation record is read with.
-        ``unmeasured`` names why a span the statistic cannot read has none.
-        """
-
-        rules = self.rules
-        try:
-            reading: dict[str, object] = {
-                key: _rounded(value) if isinstance(value, float) else value
-                for key, value in residual_reading(analysis, alpha=rules.alpha).items()
-            }
-        except ValueError as exc:
-            reading = {"unmeasured": str(exc)}
-        try:
-            stressed = summary_excess_at_cost_stress(
-                graded_statistics(analysis), summary, cost_stress_multiplier=rules.cost_stress_multiplier
-            )
-        except ValueError:
-            stressed = None
-        return {
-            **reading,
-            "active_excess_at_cost_stress": _rounded(stressed),
-            "cost_stress_multiplier": rules.cost_stress_multiplier,
-            "note": RESIDUAL_READING_NOTE,
-        }
-
-    def raw_readings(self, step: StepResult) -> dict[str, object]:
-        """What the holder's account did over the node's span, unregressed.
-
-        The holder's readings of the span (``verdict.holder_readings``: the
-        book, the benchmark and the random baseline as stored, the raw excess
-        and the plain selection), in the structure a forward slice carries
-        them, so a row reads over research what the forward reading reads forward.
-        Beside them the book's market loading relative to its random baseline (the
-        benchmark coefficient of the active series' factor regression,
-        ``verdict.graded_statistics``; a diagnostic no gate reads) and, on a
-        row whose span covers them, the same holder's readings of the last two
-        research years on their own (``last_two_years``). Rows report six
-        decimals.
-        """
-
-        analysis = _step_analysis(step)
-        try:
-            loading = graded_statistics(analysis).get("market_beta")
-        except ValueError:
-            loading = None
-
-        def held(start: str = "", end: str = "") -> dict[str, float | None]:
-            readings = holder_readings(analysis, start=start, end=end)
-            return {name: _rounded(value) for name, value in readings.items()}
-
-        readings: dict[str, object] = {
-            **held(),
-            "active_market_beta": _rounded(loading),  # type: ignore[arg-type]
-        }
-        years = self.request.years[: self.rules.research_years]
-        first = max(len(years) - 2, 0)
-        span = research_span(self.request.years, step.span, research_years=len(years))
-        if span.start <= years[first].start and span.end >= years[-1].end:
-            readings["last_two_years"] = {
-                "span": f"Y{first + 1}..Y{len(years)}" if first + 1 < len(years) else "Y1",
-                **held(years[first].start, years[-1].end),
-            }
-        return readings
-
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
         """Every backtest attempt, successful or not, lands in the run manifest.
 
@@ -982,8 +850,8 @@ class SessionValidations:
                 "strategy", revision.revision_id
             ),
             # tree.json is Agent-readable and accumulates one node per
-            # Validation for the whole experiment, so it carries the
-            # same fixed-size projection the observation does.
+            # Validation for the whole experiment, so it keeps no block that
+            # scales with the replay.
             metrics=inline_backtest_stats(evaluation.summary),
             models_root=revision.models_path,
             attachments={
@@ -1208,121 +1076,196 @@ _BATCH_MANIFEST_KEYS = (
     "control",
     "span",
 )
-# The per-candidate projection an observation carries: a batch multiplies the
-# fixed-size summary by N, so a row keeps what a screening decision is actually
-# made on and points at the node's full record for everything else.
-BATCH_CANDIDATE_SUMMARY_KEYS = (
-    "total_return",
-    "annualized_return",
-    "long_return",
-    "sharpe",
-    "max_drawdown",
-    "win_rate",
-    "turnover",
-    "trade_count",
-    "order_count",
-    "decision_calls",
-    "replayed_trade_days",
-    "exposure",
-    "benchmark",
-    # Whether the excess survives worse execution, and how few trades and names
-    # produced the gains: a screening decision made without them buys a result
-    # that only exists at the modelled slippage or rests on one lucky name.
-    "cost_sensitivity",
-    "pnl_concentration",
-    "sub_windows",
-)
-# A multi-year span has one sub-window row per research year, and a batch
-# multiplies that by the number of candidates. A row keeps the columns a
-# screening comparison is made on; the node's result.json keeps the full table.
-# The active excess rides with the raw one because the verdict reads it -- it
-# is the series it grades: a comparison made on the raw column alone reads a
-# different number than it will. The year's benchmark and random baseline returns ride
-# beside the book's own, so each year reads as the holder's account, the index
-# and zero skill on the same skeleton.
-BATCH_SUB_WINDOW_KEYS = (
-    "label",
-    "return",
-    "benchmark_return",
-    "baseline_return",
-    "excess_return",
-    "active_excess_return",
-    "sharpe",
-)
+# What the Agent reads of one replay. A tool result is a projection: the
+# stored records (the node's result.json, its active_daily.csv, the ledger)
+# keep everything, and a row carries each figure once under a name that says
+# what it is, so no glossary is needed beside it. A batch multiplies a row by
+# its width and every later model call re-sends it, so constants of the batch
+# ride once beside the rows.
 
 
-def batch_candidate_stats(summary: Mapping[str, object]) -> dict[str, object]:
-    """The metrics one batch row carries inline."""
-    stats = {
-        key: value
-        for key, value in summary.items()
-        if key in BATCH_CANDIDATE_SUMMARY_KEYS
-    }
-    rows = stats.get("sub_windows")
-    if isinstance(rows, list):
-        stats["sub_windows"] = [
-            {key: row.get(key) for key in BATCH_SUB_WINDOW_KEYS}
-            for row in rows
-            if isinstance(row, Mapping)
-        ]
-    return stats
-
-
-def batch_candidate_resources(
-    resources: Mapping[str, object] | None,
+def active_reading(
+    analysis: Mapping[str, object],
+    summary: Mapping[str, object],
+    *,
+    rules: AcceptanceRules,
 ) -> dict[str, object]:
-    """A row's container telemetry, which rides beside its metrics, not in them.
+    """The graded series over one replay: the book's daily return minus its
+    random baseline (``verdict.graded_statistics``: the annualised excess,
+    tracking error and information ratio, and the series' loadings on the
+    market, size and value legs), the residual statistic of the same
+    regression at the experiment's ``alpha`` (``verdict.residual_reading``)
+    with the ``threshold`` for the replay's length for the caller to place,
+    the drawdown of its compounded path as the replay states it, and the
+    excess after the cost stress on the replay's turnover
+    (``verdict.summary_excess_at_cost_stress``). ``unmeasured`` says why a
+    replay the residual statistic cannot read has none."""
 
-    What the replay cost its container against the limits it ran under: the
-    peak memory and the fit seconds beside the ceilings this batch's own
-    concurrency put them under. Two experiments sized a batch from the session
-    container's limits instead and lost 20 replay-years to timeouts. A failed
-    candidate has no metrics but carries the same block from its exception, so
-    every row keeps it in the one place — its own top level. Absent when the
-    replay measured nothing.
+    try:
+        graded = graded_statistics(analysis)
+    except ValueError as exc:
+        return {"unmeasured": str(exc)}
+    try:
+        reading = residual_reading(analysis, alpha=rules.alpha)
+    except ValueError as exc:
+        reading = {"unmeasured": str(exc)}
+    benchmark = summary.get("benchmark")
+    benchmark = benchmark if isinstance(benchmark, Mapping) else {}
+    block = {
+        "excess": graded["plain_excess"],
+        "information_ratio": graded["information_ratio"],
+        "residual_information_ratio": reading.get("residual_information_ratio"),
+        "residual_excess": reading.get("residual_excess"),
+        "tracking_error": graded["tracking_error"],
+        "max_drawdown": benchmark.get("active_max_drawdown"),
+        "market_beta": graded["market_beta"],
+        "size_beta": graded["size_beta"],
+        "value_beta": graded["value_beta"],
+        "excess_at_cost_stress": summary_excess_at_cost_stress(
+            graded, summary, cost_stress_multiplier=rules.cost_stress_multiplier
+        ),
+        "threshold": reading.get("threshold"),
+        **({"unmeasured": reading["unmeasured"]} if "unmeasured" in reading else {}),
+    }
+    return _rounded_row(block)
 
-    The fit and ``generate_orders`` seconds ride as their summaries, not as
-    the per-call lists: a strategy that refits daily reads 1,941 fits over an
-    eight-year span, and because a batch result is re-sent with every later
-    model call, two experiments' fit lists came to about a fifth of their main
-    input. A completed row's ``result_ref`` keeps the lists under
-    ``stats.resources``; ``smoke_backtest`` replays a few days and returns them
-    whole.
+
+def book_reading(
+    analysis: Mapping[str, object], summary: Mapping[str, object]
+) -> dict[str, object]:
+    """The holder's money over one replay, after every cost: the replay's own
+    figures, the benchmark and random-baseline comparisons as the holder
+    reads them (``verdict.holder_readings``: compounded returns and their
+    differences), and how it was traded."""
+
+    def block(name: str) -> Mapping[str, object]:
+        value = summary.get(name)
+        return value if isinstance(value, Mapping) else {}
+
+    holder = holder_readings(analysis)
+    benchmark, exposure = block("benchmark"), block("exposure")
+    return _rounded_row(
+        {
+            "return": summary.get("total_return"),
+            "annualized_return": summary.get("annualized_return"),
+            "excess_vs_benchmark": holder["raw_excess"],
+            "baseline_return": holder["baseline_return"],
+            "excess_vs_baseline": holder["plain_selection"],
+            "max_drawdown": summary.get("max_drawdown"),
+            "sharpe": summary.get("sharpe"),
+            "turnover": summary.get("turnover"),
+            "avg_gross": exposure.get("avg_gross"),
+            "zero_position_days": exposure.get("zero_position_days"),
+            "size_tilt": benchmark.get("size_tilt"),
+            "top_industry_weight": benchmark.get("top_industry_weight"),
+            "orders": summary.get("order_count"),
+            "trades": summary.get("trade_count"),
+            "win_rate": summary.get("win_rate"),
+            "top5_share_of_gains": block("pnl_concentration").get("top5_share_of_gross_gains"),
+            "breakeven_extra_slippage_bps": block("cost_sensitivity").get(
+                "breakeven_extra_slippage_bps"
+            ),
+        }
+    )
+
+
+def year_readings(
+    analysis: Mapping[str, object],
+    summary: Mapping[str, object],
+    years: Sequence[ReplaySpan],
+) -> dict[str, object]:
+    """``by_year``: one row per research year of a replay's span, read off its
+    ``sub_windows`` and labelled as spans name the year (``Yk``, its place in
+    ``years``); and, over two years or more, ``concentration``: the year with
+    the largest active excess, its share of the positive years' sum, and the
+    active excess of the span's days outside it (the annualised mean of the
+    active series, as every active excess is read). A sub-window outside
+    every year is a host defect and raises."""
+
+    rows: list[dict[str, object]] = []
+    bounds: list[tuple[str, str]] = []
+    windows = summary.get("sub_windows")
+    for window in windows if isinstance(windows, list) else ():
+        first, last = str(window["start"]), str(window["end"])
+        index = next(
+            (place for place, year in enumerate(years, start=1) if year.start <= first <= year.end),
+            None,
+        )
+        if index is None:
+            raise ValueError(f"sub-window {first}..{last} lies in no research year")
+        rows.append(
+            _rounded_row(
+                {
+                    "label": f"Y{index}",
+                    "active_excess": window.get("active_excess_return"),
+                    "excess_vs_benchmark": window.get("excess_return"),
+                    "return": window.get("return"),
+                    "benchmark_return": window.get("benchmark_return"),
+                    "sharpe": window.get("sharpe"),
+                }
+            )
+        )
+        bounds.append((first, last))
+    readings: dict[str, object] = {"by_year": rows}
+    excesses = [row["active_excess"] for row in rows]
+    active = active_analysis(analysis)
+    if len(rows) < 2 or active is None or not all(isinstance(value, float) for value in excesses):
+        return readings
+    best = max(range(len(rows)), key=lambda place: excesses[place])  # type: ignore[arg-type, return-value]
+    positive = sum(value for value in excesses if value > 0)  # type: ignore[operator, misc]
+    first, last = bounds[best]
+    outside = plain_statistics(
+        value for day, value in _series_pairs(active["strategy_daily"]) if not first <= day <= last
+    )["plain_excess"]
+    readings["concentration"] = _rounded_row(
+        {
+            "best_year": rows[best]["label"],
+            "best_year_share": excesses[best] / positive if positive > 0 else None,  # type: ignore[operator]
+            "active_excess_ex_best_year": outside,
+        }
+    )
+    return readings
+
+
+def resource_reading(resources: Mapping[str, object] | None) -> dict[str, object]:
+    """``{"resources": ...}``: what a replay cost its strategy container, or
+    nothing when it measured nothing.
+
+    The measured peaks (memory, the state directory, GPU memory) and the fit
+    and ``generate_orders`` seconds as count, p50, p95 and max. The limits
+    they ran under are the experiment's ``budgets`` facts, both strategy
+    clocks multiplied by the replays running side by side, so they are not
+    repeated per row. The per-call lists stay in the node's result.json under
+    ``stats.resources``: a strategy that refits daily reads 1,941 fits over
+    an eight-year span, and a batch result is re-sent with every later model
+    call. A failed replay carries the same block off its exception.
     """
 
     if not resources:
         return {}
-    block = dict(resources)
-    fits = block.pop("fit_seconds", None)
-    if fits:
-        block["fit_seconds_summary"] = _seconds_summary(fits, first=True)
-    decisions = block.pop("decision_seconds", None)
-    if decisions:
-        block["decision_seconds_summary"] = _seconds_summary(decisions)
-    return {"resources": block}
+    block: dict[str, object] = {
+        key: resources[key]
+        for key in ("peak_memory_bytes", "peak_state_bytes", "peak_gpu_memory_bytes")
+        if key in resources
+    }
+    for key in ("fit_seconds", "decision_seconds"):
+        seconds = resources.get(key)
+        if seconds:
+            block[key] = _seconds_summary(seconds)  # type: ignore[arg-type]
+    return {"resources": block} if block else {}
 
 
-def _seconds_summary(seconds: Sequence[float], *, first: bool = False) -> dict[str, float]:
-    """How many calls ran and their p50, p95 and max seconds.
-
-    ``first`` adds the first call's seconds, which for ``fit`` is the cold
-    one; the fit max is the reading the fit timeout bounds. Percentiles are
+def _seconds_summary(seconds: Sequence[float]) -> dict[str, float]:
+    """How many calls ran and their p50, p95 and max seconds. Percentiles are
     taken at nearest rank, so each is a measured call rather than an
-    interpolation.
-    """
+    interpolation; the fit max is the reading the fit timeout bounds."""
 
     ordered = sorted(seconds)
 
     def rank(percent: int) -> float:
         return ordered[(percent * len(ordered) + 99) // 100 - 1]
 
-    return {
-        "count": len(ordered),
-        **({"first": seconds[0]} if first else {}),
-        "p50": rank(50),
-        "p95": rank(95),
-        "max": ordered[-1],
-    }
+    return {"count": len(ordered), "p50": rank(50), "p95": rank(95), "max": ordered[-1]}
 
 
 @contextmanager
@@ -1450,6 +1393,32 @@ def replay_legs(
     ]
 
 
+# A validate row's keys in the order the Agent reads them; a failed row has
+# name, control, status, cause, error, wall_seconds and resources.
+VALIDATE_ROW_KEYS = (
+    "name",
+    "control",
+    "status",
+    "cause",
+    "error",
+    "handle",
+    "node_id",
+    "revision_id",
+    "wall_seconds",
+    "active",
+    "book",
+    "by_year",
+    "concentration",
+    "resources",
+    "same_bytes_as",
+    "result_ref",
+)
+
+
+def _validate_row(row: Mapping[str, object]) -> dict[str, object]:
+    return {key: row[key] for key in VALIDATE_ROW_KEYS if key in row}
+
+
 @dataclass(frozen=True)
 class _BatchCandidate:
     name: str
@@ -1475,102 +1444,39 @@ class ValidateTool(SessionTimeBudgetAware):
 
     spec = ToolSpec(
         "validate",
-        "Replay "
-        f"{BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "candidates over one span of the research years, in one "
-        "call; this is the only way to create a node that test can take. span is "
-        "full (the research years, the default), one research year such as Y2, or "
-        "contiguous research years such as Y2..Y4, as the research_geometry fact "
-        "lists them; a span reaching into the validation years is refused, since "
-        "only test replays them; each span is replayed as one continuous book from "
-        "the decision view at its first year. Calls are counted per interval: at "
-        "most acceptance_rules.validation.validates_per_step before the first test "
-        "and between two tests, after which the next call is refused until the "
-        "next test. Each candidate is {name, "
-        "hypothesis, path} with an optional control, as their "
-        "parameters define them: path is a "
-        "workspace directory laid out like output/ (main.py plus its sibling "
-        "modules; the read-only template files such as README.md are supplied for "
-        "you; models/ is shared with the working copy), or output itself to "
-        "validate the working copy as it stands; build such a directory by copying "
-        "output/, the code you have been editing, not refs/, which only holds the "
-        "reference workspace this experiment started from. A candidate whose replay completes becomes its own immutable "
-        "revision and Step node under the CURRENT node as shared parent, recorded "
-        "with its span. A candidate whose replay fails has no result_ref and, while "
-        "record_failed_attempts is on, is recorded as a dead-end node, so later "
-        "sessions see what was already tried; its row says which kind of failure it "
-        "was: cause strategy means your own code raised or the strategy container "
-        "was killed at its memory cap (budgets.strategy_memory_bytes; exit 137, no "
-        "peak reading) or its state directory outgrew budgets.strategy_state_disk_bytes, "
-        "so the replay measured the strategy, while cause environment "
-        "means the host failed it (a strategy clock that ran out, a shared GPU taken "
-        "by another process, a sandbox that never started or broke protocol), which "
-        "measured nothing, so resubmitting that candidate unchanged is a reasonable "
-        "move. The returned validates_in_step/validates_per_step are the interval's "
-        "counters. The whole batch is refused before anything runs if the span "
-        "reaches past the research years, if the interval's calls are used up, "
-        "if two candidates are byte-identical, or if one fails modification_check; "
-        "a refused batch is not counted. The same refusal repeated is answered the "
-        "same way: the third identical one states the recovery for it, so fix what "
-        "the error names instead of calling again unchanged. The call waits briefly "
-        "for background sub-agents that can "
-        "write and is refused while one is still running; read-only audits keep "
-        "running while the candidates replay concurrently. Returns one row per "
-        "candidate: node id with its short handle (valid_002, which every tool "
-        "taking a node_id accepts), headline metrics, the per-year return, "
-        "benchmark_return, baseline_return (the random baseline's own), excess, "
-        "active excess and Sharpe of sub_windows, residual_reading (the residual "
-        "statistic over the row's own span, as acceptance_rules.residual_statistic "
-        "defines it: residual_information_ratio, residual_excess, "
-        "residual_tracking_error, market_beta, size_beta and value_beta of the "
-        "active series regressed on the market, size and value legs, days and "
-        "years, and threshold, z(1 - alpha) / sqrt(years) for this span's length; beside "
-        "them active_excess_at_cost_stress, the annualised active excess after "
-        "cost_stress_multiplier x the slippage on the span's turnover; a reading, "
-        "never a pass or a fail), raw_readings (the holder's money, which active "
-        "readings are not, under the names a forward slice carries: "
-        "strategy_return, benchmark_return and baseline_return, what the book after "
-        "every cost, benchmark_index and the random baseline after its costs each "
-        "compounded to over the span, with raw_excess, book minus benchmark, and "
-        "plain_selection, book minus random baseline, both compounded; "
-        "active_market_beta, the book's market loading relative to its random baseline: the "
-        "market coefficient of the active series' factor regression over the "
-        "span; "
-        "and on a row covering them last_two_years, the same five readings from "
-        "strategy_return to plain_selection over the last two research years "
-        "alone; the rest of that picture is in "
-        "stats: total_return and annualized_return after every cost, "
-        "benchmark.benchmark_return and benchmark.excess_return over the same "
-        "days, and cost_sensitivity.excess_at_2x_slippage, the raw cumulative "
-        "excess at twice the slippage, which gates nothing), same_bytes_as when "
-        "the row repeats the bytes and span of earlier nodes (named: a "
-        "deterministic strategy reads exactly as they did, so it is no new "
-        "evidence), and wall seconds; a failed candidate's row "
-        "carries its cause and its exact failure text instead — one failure never "
-        "hides the others. Every row, failed ones included, also carries resources: "
-        "what the replay cost the strategy container it ran in (peak memory against "
-        "that container's own limit; peak_state_bytes, the state directory's largest "
-        "size after a call, against state_quota_bytes; fit_seconds_summary, the number of fits and the "
-        "first, p50, p95 and max seconds of one fit, the max being the one to read "
-        "against the fit timeout this batch's concurrency put in force; "
-        "decision_seconds_summary, the number of generate_orders calls and the p50, "
-        "p95 and max wall seconds of one call as timed by the host executor; and for "
-        "a GPU strategy its peak video memory); a completed row's result_ref keeps the "
-        "per-call lists under stats.resources.fit_seconds and "
-        "stats.resources.decision_seconds. "
-        "Each completed row's result_ref reads back that candidate's full "
-        "replay record, and its daily_series (validation/active_daily.csv in the "
-        "node's directory; pd.read_csv(path, dtype={'trade_date': str})) is the "
-        "graded series, one row per trading day of the span: strategy_return, "
-        "baseline_return (the zero-skill composite), active_return (their "
-        "difference), active_cumulative and active_drawdown (its compounded path "
-        "and the loss below its running peak, whose maximum is "
-        "active_max_drawdown), benchmark_return, size_factor_return and "
-        "value_factor_return (the three legs residual_reading regresses it on); "
-        "the annualised mean of active_return over its annualised volatility is "
-        "the active IR. "
-        "Selection stays yours: test takes a row as it is, and "
-        "step_rollback(node_id) restores one as the working copy to build on.",
+        f"Replay {BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
+        "candidates over one span of the research years in one call; the only way "
+        "to make a node that test can take. span is full (default), one research "
+        "year Yk or contiguous years Yi..Yj, replayed as one continuous book from "
+        "its first year; a span reaching into the validation years is refused. "
+        "Calls count per interval: at most "
+        "acceptance_rules.validation.validates_per_step before the first test and "
+        "between two tests.\n\nA candidate's path is a workspace directory laid out "
+        "like output/ (main.py and siblings; read-only template files are supplied; "
+        "models/ is shared), or output itself; copy it from output/, not refs/. A "
+        "completed candidate becomes an immutable revision and Step node under the "
+        "current node; a failed one is a dead end with cause strategy (its own code "
+        "raised, or it exceeded budgets.strategy_memory_bytes or "
+        "budgets.strategy_state_disk_bytes) or environment (the host failed it: "
+        "resending it unchanged is reasonable). The whole batch is refused, "
+        "uncounted, if the span leaves the research years, the calls are used up, "
+        "two candidates are byte-identical or one fails modification_check. It "
+        "waits briefly for sub-agents that can write and is refused while one "
+        "runs.\n\nthreshold is z(1-alpha)/sqrt(years) for this span, as "
+        "acceptance_rules.significance reads it. In each row, active is the graded "
+        "series, book minus its random baseline: annualised excess, tracking_error "
+        "and information_ratio, residual_* and betas from its OLS on the market, "
+        "size and value legs, and excess_at_cost_stress (after "
+        "cost_stress_multiplier x the slippage on the span's turnover); readings, "
+        "not verdicts. book is the holder's money after every cost: max_drawdown is "
+        "the equity drawdown registration limits, turnover is traded notional over "
+        "opening capital, summed. concentration.best_year_share is the best year's "
+        "active excess over the positive years' sum. Resource limits are budgets.* "
+        "facts (strategy clocks scaled by the legs replaying at once). "
+        "same_bytes_as names earlier nodes with these bytes on this span: the same "
+        "trial, no new evidence. result_ref (under root steps) is the full record; "
+        "validation/active_daily.csv beside it is the graded series day by day with "
+        "the three legs.",
         {
             "type": "object",
             "properties": {
@@ -1752,10 +1658,7 @@ class ValidateTool(SessionTimeBudgetAware):
                 self.backtest.tree.set_position(parent_node_id)
                 row: dict[str, object] = {
                     "name": candidate.name,
-                    "hypothesis": candidate.hypothesis,
-                    "path": candidate.path,
                     "control": candidate.control,
-                    "result_name": result_name,
                     "wall_seconds": round(replayed.seconds, 1),
                 }
                 metadata = {
@@ -1769,7 +1672,7 @@ class ValidateTool(SessionTimeBudgetAware):
                 if evaluation is None:
                     shared = (
                         [
-                            result_names[other]
+                            candidates[other].name
                             for other, sibling in enumerate(outcomes)
                             if other != index and sibling.shares_card_with(replayed)
                         ]
@@ -1798,9 +1701,6 @@ class ValidateTool(SessionTimeBudgetAware):
             # the Agent moves it deliberately with step_rollback once it picks
             # a winner.
             self.backtest.tree.set_position(parent_node_id)
-        for row, step in recorded:
-            row["raw_readings"] = self.backtest.raw_readings(step)
-            row["residual_reading"] = self.backtest.residual_reading(step)
         if not recorded:
             charged = len(rows) - refunded
             if refunded == len(rows):
@@ -1810,28 +1710,54 @@ class ValidateTool(SessionTimeBudgetAware):
                 f"Validation; {charged} of them raised in their own code, "
                 f"{refunded} failed on the environment. No Validation was recorded",
                 error_type="validation_failed",
-                details={"batch_id": batch_id, "candidates": rows},
+                details={"batch_id": batch_id, "candidates": [_validate_row(row) for row in rows]},
             )
+        rules = self.backtest.rules
+        thresholds: list[object] = []
+        for row, step in recorded:
+            analysis = _step_analysis(step)
+            summary = step.validation.summary
+            row["active"] = active_reading(analysis, summary, rules=rules)
+            thresholds.append(row["active"].pop("threshold", None))  # type: ignore[attr-defined]
+            row["book"] = book_reading(analysis, summary)
+            row.update(year_readings(analysis, summary, self.backtest.request.years))
+        # One span, one length, one threshold: a row whose regression read a
+        # different number of days keeps its own.
+        threshold = next((value for value in thresholds if value is not None), None)
+        for (row, _step), own in zip(recorded, thresholds, strict=True):
+            if own is not None and own != threshold:
+                row["active"]["threshold"] = own  # type: ignore[index]
+        first = recorded[0][1].validation.summary
+        benchmark = first.get("benchmark")
         return ToolResult(
             True,
             value={
                 "batch_id": batch_id,
-                "run_id": self.backtest.ref_store.get_or_create(
-                    "run", self.backtest.request.run_id
-                ),
-                "parent_node_id": parent_node_id,
+                **({"parent_node_id": parent_node_id} if parent_node_id else {}),
+                "validates_in_step": self.backtest.validates_in_interval,
+                "validates_per_step": self.backtest.validates_per_step,
+                "complete_validations": len(recorded),
                 "span": {
                     "label": span.label,
                     "start": span.start,
                     "end": span.end,
                     "years": span.slots,
+                    "days": first.get("replayed_trade_days"),
                 },
-                "candidates": rows,
-                "complete_validations": len(recorded),
+                "threshold": threshold,
+                **(
+                    {
+                        "benchmark": {
+                            "ts_code": benchmark.get("ts_code"),
+                            "label": benchmark.get("label"),
+                            "return": benchmark.get("benchmark_return"),
+                        }
+                    }
+                    if isinstance(benchmark, Mapping)
+                    else {}
+                ),
+                "candidates": [_validate_row(row) for row in rows],
                 "failed": len(rows) - len(recorded),
-                "result_root": STEP_TREE_SEARCH_ROOT,
-                "validates_in_step": self.backtest.validates_in_interval,
-                "validates_per_step": self.backtest.validates_per_step,
             },
         )
 
@@ -2097,28 +2023,20 @@ class ValidateTool(SessionTimeBudgetAware):
             )
         return {
             "status": "ok",
-            "node_id": node_id,
             # The batch's later siblings take later result names, so a handle
             # unambiguous now stays so for the rest of the batch.
             **self.backtest.handle(node_id),
+            "node_id": node_id,
             "revision_id": self.backtest.ref_store.get_or_create(
                 "strategy", revision.revision_id
             ),
-            "stats": batch_candidate_stats(evaluation.summary),
-            **batch_candidate_resources(evaluation.summary.get("resources")),
+            **resource_reading(evaluation.summary.get("resources")),
+            # The random baseline is seeded by the span, so a deterministic
+            # strategy repeats these nodes' readings exactly: the same trial.
+            **({"same_bytes_as": self.backtest.named(repeated)} if repeated else {}),
+            # The node's directory under the ``steps`` root; its
+            # active_daily.csv sits beside the record.
             "result_ref": public_result_ref,
-            # Relative to the node's directory, which the prompt says how to reach.
-            "daily_series": VALIDATION_DAILY_ATTACHMENT,
-            **(
-                {
-                    "same_bytes_as": {
-                        "nodes": self.backtest.named(repeated),
-                        "note": SAME_BYTES_NOTE,
-                    }
-                }
-                if repeated
-                else {}
-            ),
         }
 
     def _record_failure(
@@ -2176,49 +2094,32 @@ class ValidateTool(SessionTimeBudgetAware):
         # result to carry it — and lands where a successful row keeps its own:
         # a fit that ran out of clock or a card that was taken says so here,
         # measured in the container it actually ran in.
-        row.update(batch_candidate_resources(strategy_resources_of(error)))
+        row.update(resource_reading(strategy_resources_of(error)))
         return row
 
 
 TEST_DESCRIPTION = (
-    "Advance the validation period by one step with candidate: a complete full-span "
-    "validate node of this session (full id or short handle). The candidate must "
-    "register: not a control, finite metrics, equity drawdown within acceptance_rules' "
-    "limit; any seed replicate it names must be valid. Seed replicates are optional for "
-    "any candidate: seed_replicates may name other full-span nodes of this session "
+    "Advance the validation period one step with candidate, a complete full-span "
+    "validate node of this session. It must register as "
+    "acceptance_rules.registration defines; otherwise it is refused with the "
+    "reasons and the test horizon stays. seed_replicates may name full-span nodes "
     "whose bytes differ from the candidate's in exactly one integer seed assignment "
-    "(e.g. SEED_BASE = 1000 -> 2000); they are registered and replayed forward beside "
-    "it, and every test that names them replays each alongside the candidate over the "
-    "same span. Each replay, candidate or replicate, takes one replay slot "
-    "(budgets.batch_validate_max_concurrency, strategy clocks widened as in validate), so "
-    "with fewer slots than 1 + replicates the step takes about ceil((1 + replicates) / "
-    "slots) replays of wall clock; none of it runs on the session clock. Registration "
-    "reads no performance; a "
-    "candidate that does not register is refused with named reasons and the test horizon "
-    "does not move. A registered candidate is replayed with its random baseline as one "
-    "fresh continuous book from the validation start to the end of the next step; "
-    "nothing carries over from earlier tests, so switching candidates costs only this "
-    "replay. Its result over the newest step becomes that step's entry in the experiment's "
-    "validation record and is never rewritten. The step always runs to completion; a "
-    "candidate whose own code raises during the replay is refused with the error and "
-    "the test horizon does not move. Then the test horizon advances and the validate allowance "
-    "starts again; the session's data view stays at the end of the research years, so "
-    "these results are how the validation years reach you. Returns: the new test horizon "
-    "and the steps left; "
-    "the candidate's whole-replay statistics (stats, raw_readings and residual_reading "
-    "as a validate row carries them); step_table, one row per step from the validation "
-    "start to the test horizon, each over that step's window, so the rows are quarters for "
-    "quarterly steps and months for monthly ones (return, max_drawdown, turnover, fees, "
-    "active_return against the random baseline, index_return), and with seed replicates "
-    "named, seed_replicates: each one's handle with its active_return, return, max_drawdown "
-    "and turnover over that step, or its strategy_error where its own code raised (the "
-    "step is still recorded); record, the record to date, one row per step with the "
-    "candidate that produced it (and its replicates' active_return); and significance, "
-    "the record's residual information ratio of the stitched daily active series on the "
-    "market, size and value legs, the betas, the one-sided p_value and the threshold for the record's current length. These "
-    "are readings, never a pass or a fail. When this call tests the last step, the "
-    "session ends and this candidate is the registered strategy. The call starts only "
-    "after every background sub-agent has finished."
+    "(e.g. SEED_BASE = 1000 -> 2000); each test naming them replays each beside the "
+    "candidate in its own replay slot (budgets.batch_validate_max_concurrency): "
+    "with fewer slots than 1 + replicates a step takes about ceil((1 + replicates) "
+    "/ slots) replays of wall clock, none of it session time.\n\nThe candidate "
+    "replays as one fresh book from the validation start to the end of the next "
+    "step, so switching candidates costs only this replay. Its newest step becomes "
+    "that step's entry in the validation record, never rewritten; the horizon "
+    "advances and the validate allowance restarts. If the candidate raises or the "
+    "host fails a leg, nothing is recorded; a replicate whose own code raises is "
+    "recorded with its strategy_error. It waits for every background sub-agent to "
+    "finish; the last step ends the session with this candidate "
+    "registered.\n\nwhole_replay reads this replay as a validate row does. "
+    "candidate_by_step is this replay's view of every step so far, beside each "
+    "replicate's: a counterfactual for steps recorded with another candidate. "
+    "record is authoritative, as recorded. significance reads the record as "
+    "acceptance_rules.significance defines."
 )
 
 
@@ -2368,7 +2269,7 @@ class TestTool(SessionTimeBudgetAware):
                     details={
                         "cause": cause,
                         **({"seed_replicate": names[index - 1]} if index else {}),
-                        **batch_candidate_resources(strategy_resources_of(exc)),
+                        **resource_reading(strategy_resources_of(exc)),
                     },
                 ) from exc
             self._environment_failed = 0
@@ -2419,18 +2320,35 @@ class TestTool(SessionTimeBudgetAware):
             backtest.tests.append(record)
             backtest.validates_in_interval = 0
             finished = step == steps.count
-        table = [_rounded_row(row) for row in step_table(replay, analysis, steps, through=step)]
-        if replicates:
-            for index, row in enumerate(table):
-                row["seed_replicates"] = [
-                    _replicate_cell(name, rows if isinstance(rows, str) else rows[index], REPLICATE_STEP_KEYS)
-                    for name, rows in zip(names, replicate_rows, strict=True)
-                ]
+        # This replay's own view of every step from the validation start, the
+        # replicates' beside the candidate's: a counterfactual for the steps
+        # the record holds with another candidate.
+        by_step = [
+            {
+                "step": row["step"],
+                **_rounded_row({key: row[key] for key in REPLICATE_STEP_KEYS}),
+                **(
+                    {
+                        "seed_replicates": [
+                            _replicate_cell(name, rows if isinstance(rows, str) else rows[index])
+                            for name, rows in zip(names, replicate_rows, strict=True)
+                        ]
+                    }
+                    if replicates
+                    else {}
+                ),
+            }
+            for index, row in enumerate(step_table(replay, analysis, steps, through=step))
+        ]
         if self._trace_emit is not None:
             self._trace_emit(
                 TraceEvent.TOOL_CALL_STARTED,
                 {"tool": "test", "status": "step_recorded", "step": step, "test_horizon": test_horizon},
             )
+        active = active_reading(analysis, evaluation.summary, rules=backtest.rules)
+        # The record's own threshold is the one significance reads.
+        active.pop("threshold", None)
+        significance = record_significance([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)
         value: dict[str, object] = {
             "status": "step_recorded",
             "step": step,
@@ -2438,20 +2356,22 @@ class TestTool(SessionTimeBudgetAware):
             "steps_left": steps.count - step,
             "test_horizon": test_horizon,
             "candidate": {
-                "node_id": node_id,
                 **backtest.handle(node_id),
+                # The host registers the last test's candidate and replicates
+                # by these full ids.
+                "node_id": node_id,
                 **({"seed_replicates": list(replicates)} if replicates else {}),
             },
             "replay": {"start": steps.start, "end": test_horizon, "wall_seconds": round(time.perf_counter() - started, 1)},
-            "stats": batch_candidate_stats(evaluation.summary),
-            **batch_candidate_resources(evaluation.summary.get("resources")),
-            "raw_readings": {name: _rounded(v) for name, v in holder_readings(analysis).items()},
-            "residual_reading": backtest.residual_reading_of(analysis, evaluation.summary),
-            "step_table": table,
+            "whole_replay": {"active": active, "book": book_reading(analysis, evaluation.summary)},
+            "candidate_by_step": by_step,
             "record": [backtest.record_row(row) for row in backtest.tests],
-            "significance": _rounded_row(record_significance([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
-            "test_replays": backtest.test_replays,
-            "validates_per_step": backtest.rules.validates_per_step,
+            "significance": _rounded_row(
+                {
+                    **{key: significance[key] for key in SIGNIFICANCE_KEYS if key in significance},
+                    **({"unmeasured": significance["unmeasured"]} if significance.get("unmeasured") else {}),
+                }
+            ),
         }
         if finished:
             value.update(
@@ -2490,29 +2410,34 @@ def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-# What a test's step_table row carries of each seed replicate replayed beside
-# its candidate; a record row carries the first alone.
-REPLICATE_STEP_KEYS = ("active_return", "return", "max_drawdown", "turnover")
+# What a test reads of each step: a candidate_by_step row and each seed
+# replicate's cell beside it carry the step's active return and return; a
+# record row carries the recorded entry's figures.
+REPLICATE_STEP_KEYS = ("active_return", "return")
+RECORD_ENTRY_KEYS = ("return", "active_return", "index_return", "max_drawdown", "turnover", "fees")
+# The record's significance test as a test result carries it.
+SIGNIFICANCE_KEYS = (
+    "residual_information_ratio",
+    "threshold",
+    "p_value",
+    "residual_excess",
+    "residual_tracking_error",
+    "market_beta",
+    "size_beta",
+    "value_beta",
+    "days",
+    "years",
+)
 
 
-def _replicate_cell(
-    handle: str, row: Mapping[str, object] | str, keys: Sequence[str]
-) -> dict[str, object]:
-    """One seed replicate in a step's row: its handle and ``keys`` of its own
-    row over the step at six decimals, or, where ``row`` is the error text
-    its own code raised, that text as ``strategy_error``."""
+def _replicate_cell(handle: str, row: Mapping[str, object] | str) -> dict[str, object]:
+    """One seed replicate in a step's row: its handle with its own active
+    return and return over the step, or, where ``row`` is the error text its
+    own code raised, that text as ``strategy_error``."""
 
     if isinstance(row, str):
         return {"handle": handle, "strategy_error": row}
-    return {"handle": handle, **{key: _rounded(row[key]) for key in keys}}  # type: ignore[arg-type]
-
-
-NULL_CONTROL_NOTE = (
-    "descriptive only: excess_percentile near 0.5 means the names carried no "
-    "information the timing and sizing did not. The percentile gates nothing; "
-    "what the gate grades is the node's active series against the random baseline its own "
-    "validation drew (benchmark.active_*)"
-)
+    return {"handle": handle, **_rounded_row({key: row[key] for key in REPLICATE_STEP_KEYS})}
 
 
 class NullControlTool(SessionTimeBudgetAware):
@@ -2562,31 +2487,17 @@ class NullControlTool(SessionTimeBudgetAware):
         self.blocks: dict[str, dict[str, object]] = {}
         self.spec = ToolSpec(
             self.spec.name,
-            f"Rank one complete Validation node of this session against K={BASELINE_DRAWS} "
-            "host replays of its own trade skeleton over the node's own span, every "
-            "name replaced by a random one that one board lot of the same money could "
-            "buy on the same side of the experiment's benchmark_index membership (the "
-            "float-cap decile when "
-            "index_weight is not mounted): the same null control the Pipeline runs "
-            "for the registered node at registration. Returns the null_control block the ledger "
-            "will carry (observed_excess, excess_percentile — near 0.5 means the names "
-            "added nothing the timing and sizing did not — the null's mean and p05/p95, "
-            "rejects_mean, dropped_trips_mean). Every formal validation already "
-            "reports the node against a random baseline of the same construction "
-            "(benchmark.active_*), which is the series the verdict grades; this "
-            "percentile is a second, descriptive reading of it. Costs well under a "
-            "minute of host replay per research year (the session clock pauses like a "
-            f"formal backtest) and is capped at {max_calls} per "
-            "session (max_null_controls in the budgets fact; every result reports "
-            "null_controls_remaining); a node's block is cached, and the registered node's "
-            "block is reused at registration instead of being drawn again. Use it on "
-            "full-span finalists before a test, not on every candidate. "
-            "Refused for a node that is not a complete Validation of this session, "
-            "once the cap is spent, and while a background sub-agent that can write "
-            "is still running; it is also unavailable once the session enters hard "
-            "finalization, so rank the finalists before that. A call the host "
-            "cannot even set up — it replays nothing and reports no block — costs "
-            "no budget, so the counters it returns are the ones still available.",
+            "Rank a complete Validation node of this session against "
+            f"{BASELINE_DRAWS} host replays of its own trade skeleton over its span, "
+            "each name replaced by a random one on the same side of the "
+            "benchmark_index membership (the float-cap decile without index_weight) "
+            "that one board lot of the same money could buy: the null control the "
+            "Pipeline runs at registration, which reuses this cached block. "
+            "excess_percentile near 0.5 means the names added nothing the timing "
+            f"and sizing did not. At most {max_calls} calls per session "
+            "(budgets.max_null_controls; a call the host cannot set up costs none); "
+            "refused for any other node, once spent, while a sub-agent that can "
+            "write runs, and in hard finalization. Use it on full-span finalists.",
             self.spec.input_schema,
             mutating=True,
             example=self.spec.example,
@@ -2665,13 +2576,11 @@ class NullControlTool(SessionTimeBudgetAware):
         self, node_id: str, block: Mapping[str, object], *, cached: bool
     ) -> dict[str, object]:
         return {
-            "node_id": node_id,
-            **self.backtest.handle(node_id),
+            "handle": self.backtest.named([node_id])[0],
             "null_control": allowed_keys(block, NULL_CONTROL_KEYS),
             "cached": cached,
             "null_controls_used": self.used,
             "null_controls_remaining": self.max_calls - self.used,
-            "note": NULL_CONTROL_NOTE,
         }
 
 
@@ -2685,11 +2594,10 @@ def _rejection_recovery(error_type: str) -> str:
 
     if error_type == "readonly_baseline":
         return (
-            "Recovery: call modification_check on that candidate directory and "
-            "read delta.readonly_violations — the named file no longer holds "
-            "the bytes this session was seeded with. Delete your copy of it "
-            "from the candidate directory; validate supplies the "
-            "read-only template itself."
+            "Recovery: the refusal's details.readonly_violations name the "
+            "read-only file that no longer holds the bytes this session was "
+            "seeded with. Delete your copy of it from the candidate directory; "
+            "validate supplies the read-only template itself."
         )
     if error_type == "permission_denied":
         return (

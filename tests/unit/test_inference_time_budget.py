@@ -299,7 +299,6 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     )
     # The reference names the step-tree attachment that actually holds the full
     # replay record, under the ``steps`` search root the Agent can read.
-    assert successful["result"]["value"]["result_root"] == "steps"
     row = successful["result"]["value"]["candidates"][0]
     assert row["result_ref"] == (
         f"research__{fold_ref}__{run_ref}__valid_002/validation/result.json"

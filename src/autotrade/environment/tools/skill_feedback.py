@@ -131,8 +131,8 @@ class SkillFeedbackTool:
             "claim": "outdated",
             "evidence": (
                 "条目让读 `raw_readings.last_two_years.return`；本会话 validate 的整期行"
-                "（node_7f3a）里这个字段不存在，该块的字段是 strategy_return、"
-                "benchmark_return、baseline_return、raw_excess 与 plain_selection。"
+                "（valid_004）里没有 raw_readings 这个块，账户读数在 book，"
+                "最后两个研究年的读数在 by_year 的对应两行。"
             ),
         },
     )

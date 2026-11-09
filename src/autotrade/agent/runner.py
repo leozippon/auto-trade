@@ -212,7 +212,7 @@ def _candidate_entry(
     value: Mapping[str, object], *, index: int
 ) -> dict[str, object] | None:
     """One complete Validation node as the runner counts it (the time-budget
-    notice and ``steps_used``). ``stats`` keeps only bounded scalars."""
+    notice and ``steps_used``)."""
 
     node_id = value.get("node_id")
     revision_id = value.get("revision_id")
@@ -220,24 +220,7 @@ def _candidate_entry(
         return None
     if not isinstance(revision_id, str) or not revision_id:
         return None
-    raw_stats = value.get("stats")
-    stats: dict[str, object] = {}
-    if isinstance(raw_stats, Mapping):
-        for key, metric in raw_stats.items():
-            if len(stats) >= 32:
-                break
-            if metric is None or isinstance(metric, (str, int, float, bool)):
-                stats[str(key)] = sanitize_for_log(metric)
-    entry: dict[str, object] = {
-        "node_id": node_id,
-        "revision_id": revision_id,
-        "validation_index": index,
-        "stats": stats,
-    }
-    result_name = value.get("result_name")
-    if isinstance(result_name, str) and result_name:
-        entry["result_name"] = result_name
-    return entry
+    return {"node_id": node_id, "revision_id": revision_id, "validation_index": index}
 
 
 def _inbox_trace_text(text: str) -> str:

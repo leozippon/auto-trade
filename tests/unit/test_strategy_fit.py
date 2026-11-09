@@ -722,7 +722,7 @@ def test_readme_package_example_passes_modification_check_and_a_short_pit_smoke_
     models.mkdir()
     check = ModificationCheckTool(output, models_dir=models).invoke({})
     assert check.value["fit"] == {"refit_period": "quarter"}
-    assert check.value["file_count"] == 2
+    assert check.value["files"] == 2
 
     days = ["20240328", "20240329", "20240401", "20240402"]
     snapshot, replay = _pit_bundle(tmp_path, days)

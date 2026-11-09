@@ -61,7 +61,7 @@ class ModificationConstraintsReachTheToolTest(unittest.TestCase):
             ).invoke("modification_check", {})
             self.assertTrue(generous.ok, generous.error)
             # The rewrite is reported, never refused: the delta is information.
-            self.assertEqual(generous.value["delta"]["diff_lines"], 50)
+            self.assertEqual(generous.value["diff_lines"], 50)
 
             strict = ToolRegistry(
                 [

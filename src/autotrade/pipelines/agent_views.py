@@ -10,8 +10,9 @@ from collections.abc import Mapping, Sequence
 # The null-control fields a tool result carries. ``rejects_mean`` rides along because a null whose orders are mostly rejected
 # is a weaker comparison, ``status``/``reason`` because a failed or unavailable
 # null (a result with no filled trade) must not read as a missing one, and the
-# null's own centre and spread over its ``k`` draws because a percentile alone
-# does not say how far the observed excess sits from them. Informational: the
+# null's own centre and spread over its draws (their number is in the tool's
+# description) because a percentile alone does not say how far the observed
+# excess sits from them. Informational: the
 # pipeline gates on the active series against the random baseline each validation draws,
 # never on this percentile.
 NULL_CONTROL_KEYS = (
@@ -22,7 +23,6 @@ NULL_CONTROL_KEYS = (
     "null_excess_mean",
     "null_excess_p05",
     "null_excess_p95",
-    "k",
     "rejects_mean",
     "dropped_trips_mean",
     "step",

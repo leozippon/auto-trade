@@ -257,8 +257,7 @@ class SeedOutputFromStarterTest(unittest.TestCase):
             result = check.invoke({})
             self.assertTrue(result.ok, result.error)
             self.assertEqual(result.value["fingerprint"], artifact_fingerprint(output))
-            self.assertEqual(result.value["delta"]["readonly_violations"], [])
-            self.assertIn("lib/pick.py", result.value["delta"]["changed_files"])
+            self.assertIn("lib/pick.py", result.value["changed_files"])
 
     def test_the_host_restores_the_contract_file_a_session_lost(self) -> None:
         """One flattened ``rm -rf`` took ``output/`` down with the seeded
@@ -288,7 +287,6 @@ class SeedOutputFromStarterTest(unittest.TestCase):
             # One tree: the restored file is inside the counts and the address
             # the formal replay is pinned to.
             self.assertEqual(result.value["fingerprint"], artifact_fingerprint(output))
-            self.assertEqual(result.value["delta"]["readonly_violations"], [])
             self.assertEqual(stat.S_IMODE((output / "README.md").stat().st_mode), 0o666)
 
             (output / "README.md").write_text("rewritten contract\n", encoding="utf-8")

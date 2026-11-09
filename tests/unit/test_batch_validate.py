@@ -86,10 +86,10 @@ from autotrade.pipelines.session_tools import (
     SessionValidations,
     ValidateTool,
     leg_cards,
+    year_readings,
 )
 from autotrade.pipelines.verdict import (
     ACTIVE_DAILY_COLUMNS,
-    HOLDER_READINGS,
     _max_slice_drawdown,
     graded_statistics,
     residual_reading,
@@ -120,7 +120,12 @@ def _strategy(marker: str) -> str:
 COSTED = {"cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}}
 
 
-def _summary(total_return: float) -> dict[str, object]:
+def _summary(
+    total_return: float, year_windows: tuple[tuple[str, str], ...] = (("20210701", "20220630"),)
+) -> dict[str, object]:
+    """A replay summary with one sub-window per research year the request
+    names, as the real backend reports them, and the benchmark block."""
+
     return {
         "total_return": total_return,
         "sharpe": 1.0,
@@ -130,22 +135,34 @@ def _summary(total_return: float) -> dict[str, object]:
         "replayed_trade_days": 60,
         "per_stock": [{"symbol": "000001.SZ"} for _ in range(200)],
         "weekly_returns": [{"week_end": "20220107", "return": 0.01}],
+        "benchmark": {
+            "ts_code": DEFAULT_BENCHMARK_INDEX,
+            "label": "index",
+            "benchmark_return": 0.01,
+            "excess_return": total_return - 0.01,
+            "active_max_drawdown": 0.02,
+            "size_tilt": 0.1,
+            "top_industry_weight": 0.2,
+        },
         "sub_windows": [
             {
-                "kind": "year",
-                "label": "202107-202206",
-                "start": "20210701",
-                "end": "20220630",
-                "trade_days": 60,
+                "kind": "research_year",
+                "label": f"{start[:6]}-{end[:6]}",
+                "start": start,
+                "end": end,
+                "trade_days": 60 // len(year_windows),
                 "partial": False,
                 "return": total_return,
                 "benchmark_return": 0.01,
                 "excess_return": total_return - 0.01,
+                "active_excess_return": 0.1 * (index + 1),
+                "baseline_return": 0.0,
                 "sharpe": 1.0,
                 "max_drawdown": 0.05,
                 "turnover": 1.2,
                 "trade_count": 3,
             }
+            for index, (start, end) in enumerate(year_windows)
         ],
     }
 
@@ -272,7 +289,10 @@ class _Evaluator:
                         "what kills a worker this way"
                     )
                     raise _replay_failure(f"fit failed ({marker}): {killed}", killed)
-            summary = {**_summary(0.01 * len(source)), **self.summary_extra}
+            summary = {
+                **_summary(0.01 * len(source), request.year_windows or ((request.start, request.end),)),
+                **self.summary_extra,
+            }
             if self.resources is not None:
                 summary["resources"] = dict(self.resources)
             target = self.results_root / f"valid_{call_index:03d}" / "result.json"
@@ -641,8 +661,11 @@ class BatchValidateSpanTest(unittest.TestCase):
             value = result.value
             self.assertEqual(
                 value["span"],
-                {"label": "Y2..Y3", "start": "20220701", "end": "20240630", "years": 2},
+                {"label": "Y2..Y3", "start": "20220701", "end": "20240630", "years": 2, "days": 60},
             )
+            # One row per research year of the span, named as spans name it.
+            for row in value["candidates"]:
+                self.assertEqual([year["label"] for year in row["by_year"]], ["Y2", "Y3"])
             for request in session.evaluator.requests:
                 self.assertEqual((request.start, request.end), ("20220701", "20240630"))
                 self.assertEqual(request.snapshot.decision_ref, "decision_Y2")
@@ -760,7 +783,10 @@ class ControlsTest(unittest.TestCase):
             self.assertFalse(registration["passed"])
             self.assertIn("registration_nominee_is_control", registration["reasons"])
             # Rows name a node by the short handle the tools accept.
-            self.assertEqual(cand["handle"], cand["result_name"])
+            self.assertEqual(
+                [cand["handle"], control["handle"]], session.backtest.named([cand["node_id"], control["node_id"]])
+            )
+            self.assertTrue(cand["handle"].startswith("valid_"))
 
     def test_control_is_optional_and_a_non_boolean_one_is_refused_before_anything_runs(
         self,
@@ -811,7 +837,9 @@ class BatchValidateRunTest(unittest.TestCase):
                 self.assertTrue(node["complete_validation"])
                 self.assertEqual(node["metadata"]["batch_id"], value["batch_id"])
                 self.assertEqual(node["metadata"]["candidate"], row["name"])
-                self.assertEqual(node["metadata"]["hypothesis"], row["hypothesis"])
+                # The hypothesis is recorded with the node, not echoed back.
+                self.assertTrue(node["metadata"]["hypothesis"])
+                self.assertNotIn("hypothesis", row)
             # The batch never touched the working copy, so the tree position
             # comes back to where it branched from.
             self.assertEqual(session.tree.current_node_id, branch_point)
@@ -860,7 +888,7 @@ class BatchValidateRunTest(unittest.TestCase):
             [row["name"] for row in result.value["candidates"]], names
         )
         self.assertEqual(
-            [row["result_name"] for row in result.value["candidates"]],
+            [row["handle"] for row in result.value["candidates"]],
             [f"valid_{index + 1:03d}" for index in range(len(names))],
         )
 
@@ -943,9 +971,8 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(len(failed), 1)
             # The dead end hangs off the batch's own parent, not off whichever
             # sibling happened to be recorded before it.
-            self.assertEqual(
-                failed[0]["parent_node_id"], result.value["parent_node_id"]
-            )
+            self.assertIsNone(failed[0]["parent_node_id"])
+            self.assertNotIn("parent_node_id", result.value)
             # The dead end carries the same batch id and hypothesis as its
             # recorded siblings: the round is readable from the tree alone.
             self.assertEqual(failed[0]["metadata"]["candidate"], "bad")
@@ -955,8 +982,9 @@ class BatchValidateRunTest(unittest.TestCase):
 
     def test_every_row_says_what_the_replay_cost_its_container(self) -> None:
         """Completed and failed rows alike carry the container telemetry, in
-        the same place: the row's own top level, beside ``stats`` rather than
-        inside it, because a failed row has no ``stats`` at all.
+        the same place: the row's own top level, because a failed row has no
+        readings at all. The limits it ran under are the budgets facts and
+        are not repeated per row.
 
         Two experiments sized a batch from a 3-day smoke and lost 20 replay-years to
         fits that ran past the concurrency-scaled cap, reasoning about a
@@ -979,17 +1007,8 @@ class BatchValidateRunTest(unittest.TestCase):
         }
         summarised = {
             "peak_memory_bytes": 7_883_149_312,
-            "memory_limit_bytes": 17_179_869_184,
-            "fit_seconds_summary": {
-                "count": 5,
-                "first": 335.7,
-                "p50": 4.4,
-                "p95": 1204.2,
-                "max": 1204.2,
-            },
-            "decision_seconds_summary": {"count": 6, "p50": 0.4, "p95": 23.1, "max": 23.1},
-            "fit_timeout_seconds": 10_800.0,
-            "decision_timeout_seconds": 1_080.0,
+            "fit_seconds": {"count": 5, "p50": 4.4, "p95": 1204.2, "max": 1204.2},
+            "decision_seconds": {"count": 6, "p50": 0.4, "p95": 23.1, "max": 23.1},
         }
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp), fail_markers=("999",), resources=usage)
@@ -998,7 +1017,6 @@ class BatchValidateRunTest(unittest.TestCase):
             result = session.call("good", "slow", span="Y1")
             rows = {row["name"]: row for row in result.value["candidates"]}
             self.assertEqual(rows["good"]["resources"], summarised)
-            self.assertNotIn("resources", rows["good"]["stats"])
             record = json.loads(
                 (session.tree.root / rows["good"]["result_ref"]).read_text(
                     encoding="utf-8"
@@ -1007,7 +1025,9 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(record["stats"]["resources"]["fit_seconds"], fits)
             self.assertEqual(record["stats"]["resources"]["decision_seconds"], decisions)
             self.assertEqual(rows["slow"]["status"], "failed")
-            self.assertNotIn("stats", rows["slow"])
+            self.assertEqual(
+                list(rows["slow"]), ["name", "control", "status", "cause", "error", "wall_seconds", "resources"]
+            )
             self.assertEqual(rows["slow"]["resources"], summarised)
 
     def test_a_row_without_telemetry_carries_no_empty_resources_block(self) -> None:
@@ -1066,7 +1086,7 @@ class BatchValidateRunTest(unittest.TestCase):
             result = session.call("gpu", "own", "ok", span="Y2")
             gpu, own, ok = result.value["candidates"]
             self.assertEqual((gpu["cause"], own["cause"]), ("environment", "strategy"))
-            self.assertIn(f"valid_002, valid_003 {note}", gpu["error"])
+            self.assertIn(f"own, ok {note}", gpu["error"])
             self.assertNotIn(note, own["error"])
             self.assertEqual(ok["status"], "ok")
             # The contended leg is refunded; the strategy's own failure is not.
@@ -1130,7 +1150,7 @@ class BatchValidateRunTest(unittest.TestCase):
             placed = card_of(session)
             self.assertEqual(sorted(placed.values()), [(1,), (1,), (4,)])
             beside = [
-                row["result_name"]
+                row["name"]
                 for row, marker in zip(rows[1:], ("21", "22"), strict=True)
                 if placed[_strategy(marker)] == placed[_strategy("999")]
             ]
@@ -1216,61 +1236,89 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(rows["big"]["cause"], "strategy")
             self.assertIn("32g memory cap", rows["big"]["error"])
 
-    def test_each_row_carries_the_sub_window_table_and_a_readable_result_ref(
+    def test_a_completed_row_has_the_documented_keys_and_a_readable_result_ref(
         self,
     ) -> None:
+        """A row is a projection: the documented blocks in order, nothing that
+        echoes the call (the hypothesis, the path) and nothing the batch states
+        once. The node's result.json keeps the whole record."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             value = session.call("a", "b").value
             for row in value["candidates"]:
-                stats = row["stats"]
-                self.assertEqual(stats["sub_windows"][0]["label"], "202107-202206")
-                self.assertIn("total_return", stats)
-                # The blocks that scale with the replay stay behind the
-                # reference, like every Validation keeps them.
-                self.assertNotIn("per_stock", stats)
-                self.assertNotIn("weekly_returns", stats)
-                attachment = session.tree.root / row["result_ref"]
-                self.assertTrue(attachment.is_file())
-                record = json.loads(attachment.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    list(row),
+                    [
+                        "name", "control", "status", "handle", "node_id", "revision_id",
+                        "wall_seconds", "active", "book", "by_year", "concentration", "result_ref",
+                    ],
+                )
+                self.assertEqual(
+                    list(row["active"]),
+                    [
+                        "excess", "information_ratio", "residual_information_ratio", "residual_excess",
+                        "tracking_error", "max_drawdown", "market_beta", "size_beta", "value_beta",
+                        "excess_at_cost_stress",
+                    ],
+                )
+                self.assertEqual(
+                    list(row["book"]),
+                    [
+                        "return", "annualized_return", "excess_vs_benchmark", "baseline_return",
+                        "excess_vs_baseline", "max_drawdown", "sharpe", "turnover", "avg_gross",
+                        "zero_position_days", "size_tilt", "top_industry_weight", "orders", "trades",
+                        "win_rate", "top5_share_of_gains", "breakeven_extra_slippage_bps",
+                    ],
+                )
+                self.assertEqual([year["label"] for year in row["by_year"]], ["Y1", "Y2", "Y3", "Y4"])
+                self.assertEqual(
+                    list(row["by_year"][0]),
+                    ["label", "active_excess", "excess_vs_benchmark", "return", "benchmark_return", "sharpe"],
+                )
+                flat = json.dumps(row)
+                for echoed in ("hypothesis", "earns a positive", "candidates/", "threshold", "ts_code", "note"):
+                    self.assertNotIn(echoed, flat)
+                record = json.loads((session.tree.root / row["result_ref"]).read_text(encoding="utf-8"))
                 self.assertIn("sub_windows", record["stats"])
+                self.assertIn("per_stock", record["stats"])
+            # The batch's constants ride once beside the rows.
+            self.assertEqual(
+                value["benchmark"], {"ts_code": DEFAULT_BENCHMARK_INDEX, "label": "index", "return": 0.01}
+            )
+            self.assertEqual(value["span"]["days"], 60)
 
-    def test_each_row_carries_the_sealed_statistic_on_its_span_and_no_verdict(
+    def test_the_threshold_is_the_batchs_and_each_row_reads_the_statistic_on_its_span(
         self,
     ) -> None:
-        """A row reads the sealed gate's statistic over its own visible span --
-        the residual IR, the three betas and the threshold for that span's length --
-        and nothing that passes or fails: no gate field, no trial count, no
-        threshold from other rows."""
+        """A row reads the sealed gate's statistic over its own span -- the
+        residual IR and the three betas of the active series -- and the batch
+        states the threshold for that span's length once; nothing passes or
+        fails."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
-            full = session.validate_one("full", _strategy("333"))
-            year = session.validate_one("year", _strategy("4"), span="Y2")
-            for row in (full, year):
-                reading = row["residual_reading"]
+            for name, marker, span in (("full", "333", "full"), ("year", "4", "Y2")):
+                session.candidate(name, _strategy(marker))
+                value = session.call(name, span=span).value
+                [row] = value["candidates"]
                 sidecar = json.loads(
-                    (
-                        Path(session.backtest.steps[-1 if row is year else 0].validation.result_ref).parent
-                        / "style_analysis.json"
-                    ).read_text(encoding="utf-8")
+                    (Path(session.backtest.steps[-1].validation.result_ref).parent / "style_analysis.json")
+                    .read_text(encoding="utf-8")
                 )
                 expected = residual_reading(sidecar, alpha=REQUIRED_RULES["alpha"])
-                for key in (
-                    "residual_information_ratio",
-                    "market_beta",
-                    "size_beta",
-                    "value_beta",
-                    "threshold",
-                    "years",
-                ):
-                    self.assertAlmostEqual(reading[key], expected[key], places=6, msg=key)
-                self.assertIn("not a verdict", reading["note"])
-                flat = json.dumps(row)
-                for word in ("passed", "registration", "trials", "selection_statistics", "deflated"):
+                active = row["active"]
+                for key in ("residual_information_ratio", "residual_excess", "market_beta", "size_beta", "value_beta"):
+                    self.assertAlmostEqual(active[key], expected[key], places=6, msg=key)
+                self.assertAlmostEqual(value["threshold"], expected["threshold"], places=6)
+                graded = graded_statistics(sidecar)
+                self.assertAlmostEqual(active["excess"], graded["plain_excess"], places=6)
+                self.assertAlmostEqual(active["information_ratio"], graded["information_ratio"], places=6)
+                flat = json.dumps(value)
+                for word in ("passed", "registration", "trials", "selection_statistics", "deflated", "verdict"):
                     self.assertNotIn(word, flat)
-                self.assertNotIn("vs_parent", row)
+                # A one-year span has no other year to concentrate against.
+                self.assertEqual("concentration" in row, span == "full")
 
     def test_every_row_reads_the_holders_money_and_the_forward_readings_cost_stress(
         self,
@@ -1278,9 +1326,8 @@ class BatchValidateRunTest(unittest.TestCase):
         """Two sessions quoted 0.148 and 1.608 as one node's "cost stress": the
         active reading and the raw cumulative excess. Every row carries the one
         the forward reading reports, computed by the host: the active excess at
-        the experiment's multiplier. The holder's readings beside it are the
-        structure a forward slice carries, plain selection included, so the row
-        reads over research what the forward reading reads forward."""
+        the experiment's multiplier. The book beside it reads the holder's
+        money as a forward slice does."""
         with TemporaryDirectory() as tmp:
             session = _Session(
                 Path(tmp), acceptance_rules={"max_drawdown": 0.25, "cost_stress_multiplier": 3.0}
@@ -1288,7 +1335,6 @@ class BatchValidateRunTest(unittest.TestCase):
             # The fixture's replay turns its opening capital over 1.2 times.
             session.evaluator.summary_extra = COSTED
             row = session.validate_one("a", _strategy("1"))
-            raw = row["raw_readings"]
             sidecar = json.loads(
                 (
                     Path(session.backtest.steps[0].validation.result_ref).parent
@@ -1296,67 +1342,27 @@ class BatchValidateRunTest(unittest.TestCase):
                 ).read_text(encoding="utf-8")
             )
 
-            def compound(key: str, start: str = "", end: str = "99999999") -> float:
-                return math.prod(
-                    1.0 + value for day, value in sidecar[key] if start <= day <= end
-                ) - 1.0
+            def compound(key: str) -> float:
+                return math.prod(1.0 + value for _day, value in sidecar[key]) - 1.0
 
-            # The holder's readings of the row's own span: each stored series
-            # compounded, and the two differences.
-            self.assertEqual(
-                list(raw), [*HOLDER_READINGS, "active_market_beta", "last_two_years"]
-            )
             book, benchmark, baselines = (
                 compound(key) for key in ("strategy_daily", "benchmark_daily", "baseline_daily")
             )
             for name, expected in (
-                ("strategy_return", book),
-                ("benchmark_return", benchmark),
+                ("excess_vs_benchmark", book - benchmark),
                 ("baseline_return", baselines),
-                ("raw_excess", book - benchmark),
-                ("plain_selection", book - baselines),
+                ("excess_vs_baseline", book - baselines),
             ):
-                self.assertAlmostEqual(raw[name], expected, places=6, msg=name)
+                self.assertAlmostEqual(row["book"][name], expected, places=6, msg=name)
+            self.assertEqual(row["book"]["return"], round(0.01 * len(_strategy("1")), 6))
             statistics = graded_statistics(sidecar)
             years = statistics["days"] / TRADING_DAYS_PER_YEAR
-            reading = row["residual_reading"]
             self.assertAlmostEqual(
-                reading["active_excess_at_cost_stress"],
+                row["active"]["excess_at_cost_stress"],
                 statistics["plain_excess"] - 2.0 * 5.0 * 1.2 * 1e-4 / years,
                 places=6,
             )
-            self.assertEqual(reading["cost_stress_multiplier"], 3.0)
-            # The book's market loading against its own random baseline is the active
-            # series' regression coefficient, a diagnostic beside it.
-            self.assertAlmostEqual(
-                raw["active_market_beta"], statistics["market_beta"], places=6
-            )
-            # The last two research years read on their own: the same five
-            # readings, the stored series compounded over Y3..Y4.
-            late = raw["last_two_years"]
-            self.assertEqual(list(late), ["span", *HOLDER_READINGS])
-            self.assertEqual(late["span"], "Y3..Y4")
-            book, benchmark, baselines = (
-                compound(key, "20230701", "20250630")
-                for key in ("strategy_daily", "benchmark_daily", "baseline_daily")
-            )
-            self.assertAlmostEqual(late["strategy_return"], book, places=6)
-            self.assertAlmostEqual(late["benchmark_return"], benchmark, places=6)
-            self.assertAlmostEqual(late["baseline_return"], baselines, places=6)
-            self.assertAlmostEqual(late["plain_selection"], book - baselines, places=6)
-            self.assertNotEqual(late["strategy_return"], raw["strategy_return"])
-            # A probe row reads the same over its own span; it does not reach
-            # the last two years, so it has no line for them.
-            probe = session.validate_one("b", _strategy("2"), span="Y1")
-            self.assertEqual(
-                list(probe["raw_readings"]), [*HOLDER_READINGS, "active_market_beta"]
-            )
-            self.assertIn("active_excess_at_cost_stress", probe["residual_reading"])
-            # A row's year carries the benchmark and the random baseline beside its return.
-            self.assertTrue(
-                {"return", "benchmark_return", "baseline_return"}
-                <= set(row["stats"]["sub_windows"][0])
-            )
+            self.assertNotIn("cost_stress_multiplier", json.dumps(row))
 
     def test_the_cost_stress_is_read_on_every_row_and_never_refuses_a_registration(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1367,11 +1373,47 @@ class BatchValidateRunTest(unittest.TestCase):
             below = session.validate_one("below", _strategy("1"))
             session.evaluator.summary_extra = COSTED
             above = session.validate_one("above", _strategy("2"))
-            self.assertLess(below["residual_reading"]["active_excess_at_cost_stress"], 0)
-            self.assertGreater(above["residual_reading"]["active_excess_at_cost_stress"], 0)
+            self.assertLess(below["active"]["excess_at_cost_stress"], 0)
+            self.assertGreater(above["active"]["excess_at_cost_stress"], 0)
             # A reading, not a condition: the node registers and is registered.
             finished = session.finish.invoke({"node_id": below["node_id"]})
             self.assertTrue(finished.finish)
+
+    def test_concentration_reads_the_best_year_against_the_rest_of_the_span(self) -> None:
+        """On a known active series -- a constant daily active return per
+        year, 0.1 %, 0.4 % and -0.05 % -- each year's active excess, the best
+        year's share of the positive ones and the active excess of the days
+        outside it are exact; a one-year span has nothing to concentrate on."""
+
+        years = [
+            ReplaySpan(f"Y{index}", "valid", f"20{20 + index}0701", f"20{21 + index}0630", SnapshotBundle("s", "d", "r"))
+            for index in (1, 2, 3)
+        ]
+        per_day = (0.001, 0.004, -0.0005)
+        days = [[f"20{20 + index}09{day:02d}" for day in range(1, 11)] for index in (1, 2, 3)]
+        analysis = {
+            "strategy_daily": [[day, 0.0002 + active] for block, active in zip(days, per_day) for day in block],
+            "baseline_daily": [[day, 0.0002] for block in days for day in block],
+        }
+        summary = {
+            "sub_windows": [
+                {"start": block[0], "end": block[-1], "active_excess_return": active * TRADING_DAYS_PER_YEAR}
+                for block, active in zip(days, per_day)
+            ]
+        }
+        readings = year_readings(analysis, summary, years)
+        self.assertEqual([row["label"] for row in readings["by_year"]], ["Y1", "Y2", "Y3"])
+        concentration = readings["concentration"]
+        self.assertEqual(concentration["best_year"], "Y2")
+        self.assertAlmostEqual(concentration["best_year_share"], 0.004 / (0.001 + 0.004), places=6)
+        self.assertAlmostEqual(
+            concentration["active_excess_ex_best_year"], (0.001 - 0.0005) / 2 * TRADING_DAYS_PER_YEAR, places=6
+        )
+        alone = year_readings(analysis, {"sub_windows": summary["sub_windows"][:1]}, years)
+        self.assertEqual([row["label"] for row in alone["by_year"]], ["Y1"])
+        self.assertNotIn("concentration", alone)
+        with self.assertRaisesRegex(ValueError, "lies in no research year"):
+            year_readings(analysis, {"sub_windows": [{"start": "20300901", "end": "20300910"}]}, years)
 
     def test_a_row_that_repeats_earlier_bytes_on_the_same_span_names_them(self) -> None:
         """A session spent 8 replay-years re-running the bytes of a node it
@@ -1386,8 +1428,7 @@ class BatchValidateRunTest(unittest.TestCase):
             probe = session.validate_one("a_probe", _strategy("1"), span="Y1")
             self.assertNotIn("same_bytes_as", probe)
             again = session.validate_one("a_again", _strategy("1"))
-            self.assertEqual(again["same_bytes_as"]["nodes"], [first["handle"]])
-            self.assertIn("same trial", again["same_bytes_as"]["note"])
+            self.assertEqual(again["same_bytes_as"], [first["handle"]])
             self.assertEqual(again["status"], "ok")
 
     def test_nothing_selects_a_winner_on_the_agent_s_behalf(self) -> None:
@@ -1399,18 +1440,18 @@ class BatchValidateRunTest(unittest.TestCase):
             # The rows are the whole answer: no row is ranked, named or
             # picked, and nothing beside them restates the protocol.
             self.assertEqual(
-                set(value) - {"candidates"},
-                {
+                list(value),
+                [
                     "batch_id",
-                    "run_id",
-                    "parent_node_id",
-                    "span",
-                    "complete_validations",
-                    "failed",
-                    "result_root",
                     "validates_in_step",
                     "validates_per_step",
-                },
+                    "complete_validations",
+                    "span",
+                    "threshold",
+                    "benchmark",
+                    "candidates",
+                    "failed",
+                ],
             )
             # The working copy is untouched by the batch.
             self.assertEqual(
@@ -1502,8 +1543,9 @@ class DailySeriesTest(unittest.TestCase):
             rows = [*full["candidates"], *sub["candidates"]]
             self.assertEqual(len(rows), 3)
             for row in rows:
-                self.assertEqual(row["daily_series"], "validation/active_daily.csv")
-                path = session.tree.root / row["node_id"] / row["daily_series"]
+                # Beside the record result_ref names, as the description says.
+                self.assertEqual(row["result_ref"], f"{row['node_id']}/validation/result.json")
+                path = session.tree.root / Path(row["result_ref"]).parent / "active_daily.csv"
                 frame = pd.read_csv(path, dtype={"trade_date": str})
                 self.assertEqual(tuple(frame.columns), ACTIVE_DAILY_COLUMNS)
                 result_ref = steps[row["node_id"]].validation.result_ref
@@ -1534,7 +1576,7 @@ class DailySeriesTest(unittest.TestCase):
             # drawdown the verdict holds to its limit, and the residual
             # reading off the series and the three legs beside it.
             [edge] = [row for row in full["candidates"] if row["name"] == "edge"]
-            frame = pd.read_csv(session.tree.root / edge["node_id"] / edge["daily_series"])
+            frame = pd.read_csv(session.tree.root / Path(edge["result_ref"]).parent / "active_daily.csv")
             sidecar = json.loads(
                 (Path(steps[edge["node_id"]].validation.result_ref).parent / "style_analysis.json")
                 .read_text(encoding="utf-8")
@@ -1550,7 +1592,7 @@ class DailySeriesTest(unittest.TestCase):
             )
             self.assertAlmostEqual(
                 reading["residual_information_ratio"],
-                edge["residual_reading"]["residual_information_ratio"],
+                edge["active"]["residual_information_ratio"],
                 places=5,
             )
             equity = 1.0 + frame["active_cumulative"]
@@ -1572,12 +1614,12 @@ class DailySeriesTest(unittest.TestCase):
                 row["name"]: row
                 for row in session.call("good", "bad", span="Y1").value["candidates"]
             }
-            self.assertNotIn("daily_series", rows["bad"])
+            self.assertNotIn("result_ref", rows["bad"])
             # The good row's copy in its node, the experiment's published
             # copy of that node and the host's beside its result; nothing for
             # the failed one, anywhere.
             [step] = session.backtest.steps
-            node = Path(rows["good"]["node_id"]) / rows["good"]["daily_series"]
+            node = Path(rows["good"]["result_ref"]).parent / "active_daily.csv"
             self.assertEqual(
                 sorted(Path(tmp).rglob("*active_daily*")),
                 sorted(
@@ -1632,12 +1674,33 @@ class BatchValidateContractTest(unittest.TestCase):
 
     def test_the_description_states_the_selection_path(self) -> None:
         description = ValidateTool.spec.description
-        self.assertIn("step_rollback", description)
-        self.assertIn("test", description)
-        self.assertIn("hypothesis", description)
-        self.assertIn("span", ValidateTool.spec.input_schema["properties"])
-        for retired in ("Fold", "parent strategy", "backtest budget", "Step budget"):
+        self.assertIn("the only way to make a node that test can take", description)
+        self.assertIn("acceptance_rules.significance", description)
+        properties = ValidateTool.spec.input_schema["properties"]
+        self.assertIn("span", properties)
+        self.assertIn("hypothesis", properties["candidates"]["items"]["properties"])
+        for retired in ("Fold", "parent strategy", "backtest budget", "Step budget", "residual_statistic"):
             self.assertNotIn(retired, description)
+
+    def test_the_replay_tool_descriptions_stay_within_their_size_targets(self) -> None:
+        """Every description rides in every model call: each says its tool's
+        rules and the fields a name cannot carry, within a fixed budget, so
+        the prose does not creep back into what each call re-sends."""
+
+        from autotrade.environment.tools.modification_check import ModificationCheckTool
+        from autotrade.environment.tools.step_rollback import StepRollbackTool
+        from autotrade.pipelines.session_tools import SmokeBacktestTool, TestTool
+
+        limits = (
+            (ValidateTool.spec, 2_200),
+            (TestTool.spec, 1_500),
+            (SmokeBacktestTool.spec, 900),
+            (NullControlTool(SimpleNamespace(), max_calls=12).spec, 700),  # type: ignore[arg-type]
+            (ModificationCheckTool.spec, 212),
+            (StepRollbackTool.spec, 77),
+        )
+        for spec, limit in limits:
+            self.assertLessEqual(len(spec.description), limit, spec.name)
 
     def test_a_schema_error_returns_the_example_call(self) -> None:
         with TemporaryDirectory() as tmp:
@@ -1776,7 +1839,7 @@ class RepeatedRejectionTest(unittest.TestCase):
             )
             self.assertIn("calling it again unchanged", escalated)
             self.assertIn("modification_check", escalated)
-            self.assertIn("delta.readonly_violations", escalated)
+            self.assertIn("details.readonly_violations", escalated)
             # An escalation is not a charge: the budget is still untouched.
             self.assertEqual([event for event, _ in trace], ["batch_rejection_escalated"])
             payload = trace[0][1]
@@ -1839,6 +1902,9 @@ class NullControlToolTest(unittest.TestCase):
             node = session.validate_one("n", _strategy("7"))["node_id"]
             tool = NullControlTool(session.backtest, max_calls=2)
             first = tool.invoke({"node_id": node}).value
+            self.assertEqual(
+                list(first), ["handle", "null_control", "cached", "null_controls_used", "null_controls_remaining"]
+            )
             self.assertFalse(first["cached"])
             self.assertEqual(first["null_control"]["excess_percentile"], 0.62)
             # The Agent-visible block is the same whitelist the run facts use.
@@ -1868,7 +1934,7 @@ class NullControlToolTest(unittest.TestCase):
             self.assertEqual(refused.exception.details["nodes"], ["valid_001", "valid_002"])
             # The short handle names the node the full id does.
             ranked = tool.invoke({"node_id": "valid_001"}).value
-            self.assertEqual((ranked["node_id"], ranked["handle"]), (first, "valid_001"))
+            self.assertEqual(ranked["handle"], "valid_001")
             with self.assertRaises(ToolError) as exhausted:
                 tool.invoke({"node_id": second})
             self.assertEqual(exhausted.exception.error_type, "null_control_budget_exhausted")

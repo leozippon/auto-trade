@@ -162,12 +162,22 @@ class ModificationCheckTool:
             # whose fingerprint is not this one, so an approval cannot be
             # transferred to bytes written after it.
             "fingerprint": artifact_fingerprint(self.output_dir, self.models_dir),
-            "file_count": len(files),
-            "total_bytes": total_bytes,
-            "changed_lines": delta.diff_lines,
-            "constraints": constraints.to_record(),
-            "delta": delta.to_record(),
-            "model_delta": model_delta.to_record() if model_delta is not None else None,
+            # The tree as it stands and what changed against its parent. The
+            # limits are the budgets facts, and a read-only violation refuses
+            # the check above, so neither rides here.
+            "files": len(files),
+            "bytes": total_bytes,
+            "changed_files": list(delta.changed_files),
+            "diff_lines": delta.diff_lines,
+            "model_delta": (
+                {
+                    "files": model_delta.total_files,
+                    "bytes": model_delta.total_bytes,
+                    "changed_files": list(model_delta.changed_files),
+                }
+                if model_delta is not None
+                else None
+            ),
         }
         if restored:
             # Explicit, never silent: the Agent is told its tree changed under

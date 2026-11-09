@@ -22,7 +22,7 @@ from autotrade.environment.replay.style import (
     slot_benchmark,
     write_style_rollup,
 )
-from autotrade.pipelines.session_tools import batch_candidate_stats
+from autotrade.pipelines.session_tools import book_reading
 
 # Forty names make a cross-section, ordered by float cap (slot 0 smallest).
 # Twelve are cheap and twelve dear on book-to-price, each set split evenly
@@ -176,9 +176,10 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
     assert payload["style"]["industries"][0] == {"name": "电子", "weight": 0.75}
     block = benchmark_summary_block(payload)
     assert block["top_industry_weight"] == 0.75
-    visible = batch_candidate_stats({"total_return": 0.1, "benchmark": block})
-    assert visible["benchmark"]["top_industry_weight"] == 0.75
-    assert "size_tilt" in visible["benchmark"]
+    # What a validate row's book carries of it.
+    visible = book_reading({}, {"total_return": 0.1, "benchmark": block})
+    assert visible["top_industry_weight"] == 0.75
+    assert "size_tilt" in visible
 
 
 def test_a_span_classifies_each_day_under_its_own_slots_universe_vintage(tmp_path: Path):
@@ -466,13 +467,14 @@ def test_the_factor_regression_reads_the_market_and_size_loadings(tmp_path: Path
     ) == (block["market_beta"], block["size_beta"], block["value_beta"], block["tracking_error"])
 
 
-def test_the_agent_reads_the_size_loading_beside_the_tilt(tmp_path: Path):
+def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
     """``size_tilt`` says which rung of the cap ladder the book stands on;
     ``size_beta`` is its loading on the size spread — the one that produced
     the 2024-01 drawdown.
     The two move in opposite directions across measured books, so a budget
-    written on the visible tilt cannot reach the loading. It therefore rides in
-    the compact block and through the Agent-visible whitelist."""
+    written on the tilt cannot reach the loading. It therefore rides in the
+    compact block of every result; a validate row reads the active series'
+    loadings beside the book's tilt."""
 
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=20)]
     replay_dir, daily = _regression_inputs(tmp_path, days)
@@ -492,12 +494,10 @@ def test_the_agent_reads_the_size_loading_beside_the_tilt(tmp_path: Path):
     # not the tilt under another name.
     assert block["size_beta"] == size_beta
     assert block["size_beta"] != block["size_tilt"]
-    visible = batch_candidate_stats({"total_return": 0.1, "benchmark": block})
-    assert visible["benchmark"]["size_beta"] == size_beta
 
     # Same slot, a cross-section carrying no returns: the size factor cannot be
-    # built, so the loading reads as unmeasured (null) in what the Agent reads
-    # rather than standing there as a zero it could gate on.
+    # built, so the loading reads as unmeasured (null) in the stored block
+    # rather than standing there as a zero something could gate on.
     unmeasured = replay_style_analysis(
         _replay(days),
         _daily(days),
@@ -509,9 +509,6 @@ def test_the_agent_reads_the_size_loading_beside_the_tilt(tmp_path: Path):
     assert unmeasured["factor_regression"]["size_beta"] is None
     unmeasured_block = benchmark_summary_block(unmeasured)
     assert unmeasured_block["size_beta"] is None
-    assert batch_candidate_stats(
-        {"total_return": 0.1, "benchmark": unmeasured_block}
-    )["benchmark"]["size_beta"] is None
 
 
 def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
@@ -831,9 +828,6 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
         "baseline_draws",
     }
     assert {key: compact[key] for key in without_baselines} == without_baselines
-    visible = batch_candidate_stats({"total_return": 0.1, "benchmark": compact})
-    assert visible["benchmark"]["active_information_ratio"] == compact["active_information_ratio"]
-    assert visible["benchmark"]["tracking_error"] == compact["tracking_error"]
 
     def year_rows(analysis):
         summary = {"sub_windows": [{"start": days[0], "end": days[-1], "return": 0.05}]}

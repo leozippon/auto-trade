@@ -171,23 +171,44 @@ def test_a_test_advances_the_test_horizon_one_step_and_records_it_once() -> None
         assert record["candidate"]["step_id"] == node and record["entry"]["start"] == "20250701"
         # No seed replicate named: the record and every row keep the candidate's shape alone.
         assert "replicates" not in record
-        assert all("seed_replicates" not in row for row in (*value["step_table"], *value["record"]))
+        assert all("seed_replicates" not in row for row in (*value["candidate_by_step"], *value["record"]))
+        # The result is a projection: each block once, nothing the call or the
+        # facts already state.
+        assert list(value) == [
+            "status", "step", "steps", "steps_left", "test_horizon", "candidate", "replay",
+            "whole_replay", "candidate_by_step", "record", "significance",
+        ]
+        assert value["candidate"] == {"handle": "valid_001", "node_id": node}
+        assert list(value["whole_replay"]) == ["active", "book"]
+        assert "threshold" not in value["whole_replay"]["active"]
+        assert value["candidate_by_step"] == [
+            {"step": 1, "active_return": pytest.approx(value["record"][0]["active_return"], abs=1e-6),
+             "return": pytest.approx(value["record"][0]["return"], abs=1e-6)}
+        ]
+        assert list(value["record"][0]) == [
+            "step", "start", "end", "days", "candidate", "return", "active_return", "index_return",
+            "max_drawdown", "turnover", "fees",
+        ]
+        assert list(value["significance"]) == [
+            "residual_information_ratio", "threshold", "p_value", "residual_excess", "residual_tracking_error",
+            "market_beta", "size_beta", "value_beta", "days", "years",
+        ]
         # The replay ran from the validation start to the new test horizon.
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20250930")
-        assert value["test_replays"] == 1
+        assert harness.backtest.test_replays == 1
         second = harness.test.invoke({"candidate": node})
         assert second.value["test_horizon"] == "20251231" and [row["step"] for row in harness.records()] == [1, 2]
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20251231")
         # The record to date lists both steps with their candidate; the
         # significance test reads them stitched.
         record_rows = second.value["record"]
-        assert [(row["step"], row["candidate"]["node_id"]) for row in record_rows] == [(1, node), (2, node)]
-        assert second.value["significance"]["steps"] == 2 and "residual_information_ratio" in second.value["significance"]
-        # Its table has one row per quarterly step tested, read off this replay.
-        assert [(row["step"], row["start"], row["end"]) for row in second.value["step_table"]] == [
-            (1, "20250701", "20250930"),
-            (2, "20251001", "20251231"),
+        assert [(row["step"], row["candidate"], row["start"], row["end"]) for row in record_rows] == [
+            (1, "valid_001", "20250701", "20250930"),
+            (2, "valid_001", "20251001", "20251231"),
         ]
+        assert second.value["significance"]["days"] == sum(row["days"] for row in record_rows)
+        # This replay's view has one row per quarterly step tested.
+        assert [row["step"] for row in second.value["candidate_by_step"]] == [1, 2]
         assert "months" not in second.value
         horizons = [row["test_horizon"] for row in harness.records()]
         assert horizons == sorted(horizons) and len(set(horizons)) == len(horizons)
@@ -265,9 +286,10 @@ def test_nothing_returned_to_the_agent_dates_past_the_test_horizon() -> None:
         assert dates and max(dates) <= test_horizon, sorted(dates)[-3:]
         # The replay stopped at the test horizon, and its table has one monthly row.
         assert harness.evaluator.requests[-1][2] == test_horizon
-        assert [(row["step"], row["start"], row["end"]) for row in result.value["step_table"]] == [
+        assert [(row["step"], row["start"], row["end"]) for row in result.value["record"]] == [
             (1, "20250701", "20250731")
         ]
+        assert [row["step"] for row in result.value["candidate_by_step"]] == [1]
 
 
 def test_a_test_whose_replay_fails_leaves_the_test_horizon_where_it_was() -> None:
@@ -307,10 +329,10 @@ def test_a_test_whose_replay_fails_leaves_the_test_horizon_where_it_was() -> Non
 
 def test_seed_replicates_are_replayed_beside_the_candidate_and_read_step_by_step() -> None:
     """Every test that names seed replicates replays each beside the candidate
-    from the validation start: each step_table row reads every replicate over
-    its step, the record keeps their entries beside the candidate's, and what
-    the candidate reads -- its rows, its statistics, the record's
-    significance -- is what it reads alone."""
+    from the validation start: each candidate_by_step row reads every
+    replicate over its step, the record keeps their recorded entries beside
+    the candidate's, and what the candidate reads -- its rows, its whole
+    replay, the record's significance -- is what it reads alone."""
 
     with TemporaryDirectory() as tmp, TemporaryDirectory() as alone_tmp:
         harness = _Harness(Path(tmp))
@@ -333,30 +355,39 @@ def test_seed_replicates_are_replayed_beside_the_candidate_and_read_step_by_step
             harness.backtest.validation_request(revision, harness.backtest.request.validation), end_day="20250930"
         )
         expected = step_entry(*replay_and_analysis(own.result_ref), start="20250701", end="20250930")
-        [row] = first["step_table"]
+        # The host registers the last test's replicates by their full ids.
+        assert first["candidate"]["seed_replicates"] == [second, third]
+        [row] = first["candidate_by_step"]
         assert [cell["handle"] for cell in row["seed_replicates"]] == handles
         cell = row["seed_replicates"][0]
-        assert set(cell) == {"handle", "active_return", "return", "max_drawdown", "turnover"}
-        for key in ("active_return", "return", "max_drawdown", "turnover"):
+        assert list(cell) == ["handle", "active_return", "return"]
+        for key in ("active_return", "return"):
             assert cell[key] == pytest.approx(expected[key], abs=1e-6), key
         assert cell["active_return"] != pytest.approx(row["active_return"], abs=1e-6)
+        # The record carries the replicates' recorded entries, by handle.
         assert first["record"][0]["seed_replicates"] == [
-            {"handle": handle, "active_return": pytest.approx(item["entry"]["active_return"], abs=1e-6)}
+            {
+                "handle": handle,
+                "active_return": pytest.approx(item["entry"]["active_return"], abs=1e-6),
+                "return": pytest.approx(item["entry"]["return"], abs=1e-6),
+            }
             for handle, item in zip(handles, record["replicates"], strict=True)
         ]
         # The next test, naming them by full id, reads them over every step so far.
         later = harness.test.invoke({"candidate": nominee, "seed_replicates": [second, third]}).value
-        assert [row["step"] for row in later["step_table"]] == [1, 2]
-        assert later["step_table"][0]["seed_replicates"] == row["seed_replicates"]
-        assert [cell["handle"] for cell in later["step_table"][1]["seed_replicates"]] == handles
+        assert [row["step"] for row in later["candidate_by_step"]] == [1, 2]
+        assert later["candidate_by_step"][0]["seed_replicates"] == row["seed_replicates"]
+        assert [cell["handle"] for cell in later["candidate_by_step"][1]["seed_replicates"]] == handles
         assert [len(row["seed_replicates"]) for row in later["record"]] == [2, 2]
 
         # The same candidate tested alone reads the same as it did beside them.
         solo = _Harness(Path(alone_tmp))
         solo.seeded("a", 1000)
         alone = [solo.test.invoke({"candidate": solo.backtest.steps[0].step_id}).value for _ in range(2)][-1]
-        assert [{k: v for k, v in row.items() if k != "seed_replicates"} for row in later["step_table"]] == alone["step_table"]
-        assert later["significance"] == alone["significance"] and later["stats"] == alone["stats"]
+        assert [
+            {k: v for k, v in row.items() if k != "seed_replicates"} for row in later["candidate_by_step"]
+        ] == alone["candidate_by_step"]
+        assert later["significance"] == alone["significance"] and later["whole_replay"] == alone["whole_replay"]
 
 
 def test_a_replicate_that_raises_is_a_reading_and_one_the_host_fails_fails_the_step() -> None:
@@ -391,10 +422,10 @@ def test_a_replicate_that_raises_is_a_reading_and_one_the_host_fails_fails_the_s
         assert "KeyError: 'close'" in error_row["strategy_error"]
         assert completed["step_id"] == hosted and completed["entry"]["end"] == "20250930"
         name = harness.backtest.named([raised])[0]
-        [row] = result.value["step_table"]
+        [row] = result.value["candidate_by_step"]
         assert row["seed_replicates"][0] == {"handle": name, "strategy_error": error_row["strategy_error"]}
         assert result.value["record"][0]["seed_replicates"][0] == row["seed_replicates"][0]
-        assert result.value["test_replays"] == 3
+        assert harness.backtest.test_replays == 3
 
 
 def test_a_test_replays_its_legs_under_the_card_and_clock_rules_of_validate() -> None:

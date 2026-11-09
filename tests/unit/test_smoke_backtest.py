@@ -187,23 +187,27 @@ def test_smoke_runs_the_real_replay_over_a_short_window(tmp_path: Path) -> None:
     assert result.ok
     value = result.value
     assert value["status"] == "ok"
+    # The report is a projection: no echo of the request, no constant prose,
+    # no raw host instrumentation.
+    assert list(value) == [
+        "path", "status", "start", "replayed_trade_days", "orders", "reject_counts",
+        "seconds_per_day", "window_build_seconds", "asof_date_ranges",
+    ]
     # The replay really was truncated, not the whole 12-day window.
     assert value["replayed_trade_days"] == 3
-    assert value["decision_calls"] == 3
-    assert value["days_requested"] == 3
-    assert value["order_count"] >= 1
+    assert all(set(counts) == {"filled", "rejected"} for counts in value["orders"].values())
+    assert sum(sum(counts.values()) for counts in value["orders"].values()) >= 1
     # Per-day timing is the number the 30 s per-decision cap is judged against,
     # and only the strategy's own cost scales with the days a span replays.
     assert set(value["seconds_per_day"]) == {"strategy"}
     assert all(seconds >= 0.0 for seconds in value["seconds_per_day"].values())
-    assert "asof_dir" in value["hint"] and "snapshot_dir" in value["hint"]
 
 
 def test_smoke_is_outside_every_official_accounting_surface(tmp_path: Path) -> None:
     tool = _tool(tmp_path, WORKING_STRATEGY)
     value = tool.invoke({}).value
 
-    assert value["official"] is False
+    assert value["status"] == "ok"
     # No revision was committed and no result survived for a ledger or a freeze
     # to pick up: the tool owns no artifact store and no step tree at all.
     assert not hasattr(tool, "tree")
@@ -334,9 +338,9 @@ def test_smoke_backtest_is_registered_for_fold_sessions() -> None:
     # read-only parallel batch alongside an edit.
     assert SmokeBacktestTool.spec.mutating is True
     description = SmokeBacktestTool.spec.description
-    assert "UNOFFICIAL" in description
-    assert "DIRECTORY of parquet parts" in description
-    assert "before validate" in description
+    assert "Unofficial" in description
+    assert "context.asof_dir/<domain>/ is a directory of parquet parts" in description
+    assert "before a full-span validate" in description
 
 
 def test_result_json_is_not_left_behind_for_a_ledger_to_find(tmp_path: Path) -> None:
@@ -363,9 +367,8 @@ def test_start_probes_a_later_window_inside_the_research_period(tmp_path: Path) 
     assert value["status"] == "ok", value
     assert value["start"] == DAYS[10]
     assert value["replayed_trade_days"] == 2
-    # The default window still opens at the start of the research period and
-    # says nothing about a probe date it was not given.
-    assert "start" not in tool.invoke({"days": 2}).value
+    # The default window opens at the start of the research period.
+    assert tool.invoke({"days": 2}).value["start"] == tool.request.full_span.start
 
 
 def test_start_outside_the_research_period_is_refused(tmp_path: Path) -> None:
@@ -412,11 +415,10 @@ def test_the_one_off_window_build_is_never_reported_per_day(tmp_path: Path) -> N
     ).value
     assert value["seconds_per_day"] == {"strategy": 1.5}
     assert value["window_build_seconds"] == 335.7
-    # The raw instrumentation is still there, and the sub-phase it wraps is
-    # never added to it.
-    assert value["phase_seconds"]["timeview_refresh"] == 279.3
+    # The raw instrumentation, whose phases overlap, stays with the host.
+    assert "phase_seconds" not in value
     description = SmokeBacktestTool.spec.description
-    assert "window_build_seconds" in description and "never multiply it by days" in description
+    assert "window_build_seconds is the one-off opening of a late window" in description
 
 
 def test_a_rehearsal_reports_what_it_cost_its_container(tmp_path: Path) -> None:
@@ -452,7 +454,12 @@ def test_a_rehearsal_reports_what_it_cost_its_container(tmp_path: Path) -> None:
             )
 
     tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=MeasuredEvaluator())
-    assert tool.invoke({"days": 2}).value["resources"] == usage
+    # Measured readings as validate rows carry them; the limits are facts.
+    assert tool.invoke({"days": 2}).value["resources"] == {
+        "peak_memory_bytes": 7_883_149_312,
+        "fit_seconds": {"count": 1, "p50": 335.7, "p95": 335.7, "max": 335.7},
+        "decision_seconds": {"count": 2, "p50": 0.4, "p95": 22.4, "max": 22.4},
+    }
 
 
 def test_a_failed_rehearsal_still_reports_what_it_was_using(tmp_path: Path) -> None:
@@ -476,7 +483,8 @@ def test_a_failed_rehearsal_still_reports_what_it_was_using(tmp_path: Path) -> N
     tool = _tool(tmp_path, WORKING_STRATEGY, evaluator=FitCapEvaluator())
     value = tool.invoke({"days": 1}).value
     assert value["status"] == "failed"
-    assert value["resources"] == usage
+    assert list(value) == ["path", "status", "start", "error", "resources"]
+    assert value["resources"] == {"peak_memory_bytes": 30_064_771_072}
     # A replay that reported nothing carries no empty block.
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -506,7 +514,7 @@ def test_a_candidate_directory_is_smoked_by_its_path(tmp_path: Path) -> None:
     assert "not subscriptable" in str(default["error"])
     # The working copy named outright is the same thing as the default.
     assert tool.invoke({"days": 1, "path": "output"}).value["status"] == "failed"
-    assert "path=\"candidates/value\"" in SmokeBacktestTool.spec.description
+    assert "laid out and checked like a validate candidate's" in SmokeBacktestTool.spec.description
 
 
 def test_a_smoked_path_is_held_to_the_batch_candidate_rules(tmp_path: Path) -> None:
@@ -590,5 +598,4 @@ def test_a_rehearsal_states_how_far_back_each_domain_reaches(tmp_path: Path) -> 
     tool = _tool(root, WORKING_STRATEGY)
     tool.evaluator = _WithPit(tool.evaluator)
     value = tool.invoke({"days": 2}).value
-    assert value["asof_domains"] == ["daily", "fundamentals", "universe"]
     assert value["asof_date_ranges"] == ranges

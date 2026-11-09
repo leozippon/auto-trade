@@ -18,8 +18,8 @@ rows stitched in step order with the residual statistic every other reading
 uses (``pipelines/verdict.py``): the residual information ratio of the active
 series on the market, size and value legs, its betas, the threshold for the record's
 length and the one-sided null p-value, beside the stitched return, drawdown
-and turnover. The per-step table a test returns (:func:`step_table`) reads
-its own replay step by step.
+and turnover. A test reads its own replay step by step (:func:`step_table`),
+the rows it returns as ``candidate_by_step``.
 """
 
 from __future__ import annotations

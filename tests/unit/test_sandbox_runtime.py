@@ -86,7 +86,7 @@ from autotrade.pipelines.hitl_state import (
     select_gpus,
     write_gpu_claim,
 )
-from autotrade.pipelines.session_tools import batch_candidate_resources
+from autotrade.pipelines.session_tools import resource_reading
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
 
 from .fixtures_sandbox import docker_available
@@ -2718,13 +2718,12 @@ def test_each_due_decision_is_timed_and_a_row_carries_their_summary(tmp_path: Pa
 
     assert stats["decision_calls"] == 3
     assert len(stats["resources"]["decision_seconds"]) == 3
-    block = batch_candidate_resources(stats["resources"])["resources"]
-    summary = block["decision_seconds_summary"]
+    block = resource_reading(stats["resources"])["resources"]
+    summary = block["decision_seconds"]
     assert set(summary) == {"count", "p50", "p95", "max"}
     assert summary["count"] == stats["decision_calls"]
     assert 0 <= summary["p50"] <= summary["p95"] <= summary["max"]
-    assert "decision_seconds" not in block
-    assert "fit_seconds_summary" not in block
+    assert "fit_seconds" not in block
 
 
 def test_container_gpu_peak_counts_only_this_containers_own_processes(tmp_path: Path):
