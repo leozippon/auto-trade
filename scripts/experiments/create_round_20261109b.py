@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The 2026-11-09b round: round 20261107d's experiment again on the ZGCA A100, after the walk-forward review.
 
-`open_200k_10y_astra_zgca_20261109b` replaces `open_200k_10y_astra_zgca_20261107d`,
+`open_200k_10y_flash_zgca_20261109b` replaces `open_200k_10y_astra_zgca_20261107d`,
 which the owner wrapped up on 2026-11-09 at 14:52Z at its twelfth validated node,
 before its first `test`. The mid-run review of that round and of its local twin
 (`.runtime/analysis/round_{d,e}_midpoint_review_20261109.md`) found both on
@@ -25,8 +25,11 @@ and the validation period 2022-08..2025-07 is tested in twelve quarterly steps;
 the ten-year profile and seed (`_profiles.FUND_TITLE_TEN_YEAR_CSI1000` on
 `FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED`, CSI 1000, the 0.55 / 0.30 drawdown
 limits, alpha 0.05); a CNY 200k account on the main board and ChiNext;
-gpt-6-astra at reasoning effort xhigh with sub-agents and compaction on
-DeepSeek-V4.1-Flash, no compaction threshold pinned.
+DeepSeek-V4.1-Flash as the main model as well as for sub-agents and
+compaction (the owner's choice for these rounds until the workflow is stable;
+gpt-6-astra, the earlier rounds' main model, bills a whole request at twice
+the prompt price past 272k tokens and would have spent its $150 cap around the
+third test step), no compaction threshold pinned.
 
 It runs on the instance, whose fill loop creates it once the card is free:
 
@@ -57,7 +60,6 @@ from scripts.experiments._profiles import (
 from scripts.experiments._round import Round
 
 PACK = "configs/workspace_refs/open_200k_20261107"
-ASTRA = "gpt-6-astra"
 FLASH = "DeepSeek-V4.1-Flash"
 
 # Round 20261107's directive, unchanged so the harness is the only difference.
@@ -84,7 +86,7 @@ def _experiment(model: str, *, gpus: int, replays: int) -> dict[str, object]:
 
 EXPERIMENTS: dict[str, dict[str, object]] = {
     # The instance's one A100, claimed by the console when it starts the worker.
-    "open_200k_10y_astra_zgca_20261109b": _experiment(ASTRA, gpus=1, replays=3),
+    "open_200k_10y_flash_zgca_20261109b": _experiment(FLASH, gpus=1, replays=3),
 }
 
 ROUND = Round(
@@ -96,8 +98,7 @@ ROUND = Round(
         "initial_cash": 200_000,
         "permitted_boards": ["main", "gem"],
         # Round 20261107d's budgets: a week of research time, 19,200 model
-        # calls, 36 null controls. The spend cap is the owner's figure for this
-        # round (see the logbook of 2026-11-09).
+        # calls, 36 null controls and USD 150, which Flash's prices leave ample.
         "max_api_spend_usd": 150.0,
         "max_llm_calls": 19_200,
         "max_research_minutes": 10_080,
