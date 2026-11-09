@@ -1478,7 +1478,11 @@ class EnvironmentBlockedTest(unittest.TestCase):
     def test_the_second_batch_failed_whole_on_one_span_ends_the_session(self) -> None:
         trace: list[tuple[str, dict[str, object]]] = []
         with TemporaryDirectory() as tmp:
-            session = _Session(Path(tmp), fail_markers=("999",), trace=trace)
+            # Four batches in one interval: more than the default allowance of 3,
+            # which is not what this test is about.
+            session = _Session(
+                Path(tmp), fail_markers=("999",), trace=trace, acceptance_rules={"validates_per_step": 6}
+            )
             session.candidate("blocked", _strategy("999"))
             session.candidate("good", _strategy("1"))
             # The first is refunded and reported like any failed batch.

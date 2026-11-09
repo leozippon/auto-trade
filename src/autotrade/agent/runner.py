@@ -8,10 +8,13 @@ brings the test horizon to the end of the validation years returns; no other
 action ends it. The budget the pipeline hands over includes a trailing
 wrap-up grace window (``deadline_grace_seconds``): reaching the main deadline
 never interrupts the model — a single wrap-up prompt is injected and the
-session keeps its full tool surface through the grace window; when the grace
-window, the model-call budget or the API spend cap is exhausted the session
-closes gracefully (``session_end`` with status ``deadline_exceeded``,
-``call_budget_exhausted`` or ``api_spend_exhausted``) and the Pipeline
+session keeps its full tool surface through the grace window. The same single
+prompt goes out instead when the API spend or the model calls reach
+``BUDGET_WRAP_UP_FRACTION`` of their caps first, since running out of either
+ends the session at once. When the grace window, the model-call budget or the
+API spend cap is exhausted the session closes gracefully (``session_end`` with
+status ``deadline_exceeded``, ``call_budget_exhausted`` or
+``api_spend_exhausted``) and the Pipeline
 records a ``deadline`` outcome and completes the validation record from the
 test horizon instead of failing the run; the readout follows from the host's
 forward replay. Main conversation calls and compactions
@@ -184,10 +187,28 @@ INBOX_SAFE_AFTER_PARALLEL_READONLY = "after_parallel_readonly"
 INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM = "after_tools_before_llm"
 _INBOX_TRACE_CHARS = 400
 _INTERRUPTED_BY_USER = "interrupted_by_user"
-# Elapsed fractions of the session's inference time budget at which one
-# ``time_budget_notice`` observation states the remaining minutes and how many
-# backtests have run so far.
-TIME_BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
+# Used fractions of each session budget -- the inference time, the API spend
+# and the model calls -- at which one ``budget_notice`` observation states what
+# is left of that budget and how many backtests have run so far.
+BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
+# The used fraction of the API spend or of the model calls at which the wrap-up
+# prompt goes out, as it does for the time budget at its grace window: running
+# out of either stops the session at once, so the session gets its chance to
+# ``test`` its best candidate first. It takes the place of that budget's last
+# notice.
+BUDGET_WRAP_UP_FRACTION = 0.9
+# What is left of each budget, in its own unit, as the notice payload names it.
+_BUDGET_REMAINING_KEYS = {
+    "inference_time": "remaining_minutes",
+    "api_spend": "remaining_usd",
+    "llm_calls": "remaining_calls",
+}
+# What each budget's notice asks the session to keep back.
+_BUDGET_NOTICE_ADVICE = {
+    "inference_time": "一次回测的耗时随其区间覆盖的年数增长，为仍要跑的 validate 与 test 预留时间",
+    "api_spend": "子代理与压缩的调用也计入花费，为仍要跑的 validate 与 test 留出花费",
+    "llm_calls": "子代理与压缩的调用也计入，为仍要跑的 validate 与 test 留出调用次数",
+}
 _BACKTEST_TOOLS = ("smoke_backtest", "validate", "test")
 # The trace events that carry one tool outcome. The session_end tool_failures
 # scalar and the Agent Trace summary must count the same events, or an audit
@@ -208,11 +229,44 @@ class AgentInboxHook(Protocol):
     def consume(self, message_id: str) -> str: ...
 
 
+class SessionBudgetMeter(Protocol):
+    """The session's shared model-call and API-spend counters, every role and
+    earlier attempt included: the pipeline's ``SessionCallBudget``, which
+    charges each response as it lands. The runner only reads them, for the
+    budget notices and the wrap-up."""
+
+    calls: int
+    max_calls: int
+    api_spend_usd: float
+    max_api_spend_usd: float
+
+
+@dataclass(frozen=True)
+class _BudgetLevel:
+    """How far one session budget is spent: the used fraction of its cap and
+    what is left in its own unit (minutes, USD or calls)."""
+
+    budget: str
+    used: float
+    left: float
+
+
+def _budget_spent_phrase(level: _BudgetLevel, fraction: float) -> str:
+    """How much of a budget is spent and what is left: the opening of its
+    notice, and of the wrap-up a spend or call budget triggers."""
+
+    if level.budget == "inference_time":
+        return f"推理时间预算已用去 {fraction:.0%}，剩余约 {level.left:g} 分钟"
+    if level.budget == "api_spend":
+        return f"API 花费已用去上限的 {fraction:.0%}，剩余约 ${level.left:.2f}"
+    return f"模型调用已用去上限的 {fraction:.0%}，剩余 {level.left:.0f} 次"
+
+
 def _candidate_entry(
     value: Mapping[str, object], *, index: int
 ) -> dict[str, object] | None:
-    """One complete Validation node as the runner counts it (the time-budget
-    notice and ``steps_used``)."""
+    """One complete Validation node as the runner counts it (the budget
+    notices and ``steps_used``)."""
 
     node_id = value.get("node_id")
     revision_id = value.get("revision_id")
@@ -303,6 +357,7 @@ class AgentSessionRunner:
         compactor: ContextCompactor | None = None,
         subagent: SubAgentEngine | None = None,
         time_budget: InferenceTimeBudget | None = None,
+        session_budget: SessionBudgetMeter | None = None,
         conversation_id: str | None = None,
         event_sink: Callable[[TraceEvent, dict[str, object]], None] | None = None,
         inbox: AgentInboxHook | None = None,
@@ -312,6 +367,9 @@ class AgentSessionRunner:
         self.tools = tools
         self.system_prompt = system_prompt
         self.config = config or AgentSessionConfig()
+        # The shared call and spend meter; without one only the time budget
+        # has notices and a wrap-up.
+        self.session_budget = session_budget
         self.compactor = compactor
         self.subagent = subagent
         # The run's opaque ref: the transcript file the compaction summary
@@ -439,7 +497,7 @@ class AgentSessionRunner:
             if budget_total_seconds is not None
             else max(time_budget.remaining(), 0.0)
         )
-        notice_index = 0
+        notice_indices = dict.fromkeys(_BUDGET_REMAINING_KEYS, 0)
         backtests = dict.fromkeys(_BACKTEST_TOOLS, 0)
         messages = [
             ChatMessage("system", self.system_prompt),
@@ -492,23 +550,11 @@ class AgentSessionRunner:
                     llm_calls=llm_calls,
                 )
             provider_tools = self.tools.provider_tools()
-            if (
-                not self._wrap_up_sent
-                and remaining <= self.config.deadline_grace_seconds
-            ):
-                messages.append(ChatMessage("user", WRAP_UP_PROMPT))
-                self._wrap_up_sent = True
-                self._emit(
-                    TraceEvent.WRAP_UP_STARTED,
-                    {
-                        "remaining_seconds": round(remaining, 6),
-                        "grace_seconds": self.config.deadline_grace_seconds,
-                    },
-                )
             if not self._wrap_up_sent:
-                notice_index = self._time_budget_notice(
-                    messages, remaining, budget_total, notice_index, backtests
-                )
+                levels = self._budget_levels(remaining, budget_total)
+                self._wrap_up_if_due(messages, remaining, levels)
+                if not self._wrap_up_sent:
+                    self._budget_notices(messages, levels, notice_indices, backtests)
             messages, _ = self._compact_if_needed(
                 messages, remaining, provider_tools
             )
@@ -801,57 +847,133 @@ class AgentSessionRunner:
             llm_calls=self.config.max_llm_calls,
         )
 
-    def _time_budget_notice(
+    def _budget_levels(self, remaining: float, total: float) -> list[_BudgetLevel]:
+        """Where each session budget stands: the inference time against the
+        whole session budget, and the shared API spend and model calls when the
+        pipeline handed over their meter."""
+
+        levels: list[_BudgetLevel] = []
+        if total > 0:
+            levels.append(
+                _BudgetLevel(
+                    "inference_time",
+                    1.0 - remaining / total,
+                    round(max(remaining, 0.0) / 60.0, 1),
+                )
+            )
+        meter = self.session_budget
+        if meter is not None:
+            spend, spend_cap = meter.api_spend_usd, meter.max_api_spend_usd
+            levels.append(
+                _BudgetLevel(
+                    "api_spend", spend / spend_cap, round(max(spend_cap - spend, 0.0), 2)
+                )
+            )
+            levels.append(
+                _BudgetLevel(
+                    "llm_calls",
+                    meter.calls / meter.max_calls,
+                    max(meter.max_calls - meter.calls, 0),
+                )
+            )
+        return levels
+
+    def _wrap_up_if_due(
         self,
         messages: list[ChatMessage],
         remaining: float,
-        total: float,
-        notice_index: int,
-        backtests: Mapping[str, int],
-    ) -> int:
-        """Inject one budget notice per crossed fraction; return the next index."""
+        levels: Sequence[_BudgetLevel],
+    ) -> None:
+        """Send the wrap-up prompt when the first budget reaches its wrap-up
+        point: the time budget its grace window, the API spend or the model
+        calls ``BUDGET_WRAP_UP_FRACTION`` of their caps. One sentence naming
+        that budget leads the prompt."""
 
-        fractions = TIME_BUDGET_NOTICE_FRACTIONS
-        if total <= 0 or notice_index >= len(fractions):
-            return notice_index
-        elapsed = 1.0 - remaining / total
-        crossed: float | None = None
-        while notice_index < len(fractions) and elapsed >= fractions[notice_index]:
-            crossed = fractions[notice_index]
-            notice_index += 1
-        if crossed is None:
-            return notice_index
-        remaining_minutes = round(max(remaining, 0.0) / 60.0, 1)
-        payload: dict[str, object] = {
-            "observation": "time_budget_notice",
-            "elapsed_fraction": crossed,
-            "remaining_minutes": remaining_minutes,
-        }
-        complete = len(self._complete_validation_nodes)
-        payload.update(
-            smoke_backtests=backtests["smoke_backtest"],
-            validates=backtests["validate"],
-            tests=backtests["test"],
-            complete_validations=complete,
-        )
-        payload["message"] = (
-            f"推理时间预算已用去 {crossed:.0%}，剩余约 {remaining_minutes:g} 分钟；"
-            f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
-            f"validate {backtests['validate']} 次、test {backtests['test']} 次、"
-            f"完整 Validation {complete} 个。"
-            "一次回测的耗时随其区间覆盖的年数增长，为仍要跑的 validate 与 test 预留时间；"
-            "预算耗尽时宿主以最近一次 test 的候选补完记录。"
-        )
-        messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))
+        extra: dict[str, object] = {}
+        if remaining <= self.config.deadline_grace_seconds:
+            budget = "inference_time"
+            minutes = round(max(remaining, 0.0) / 60.0, 1)
+            lead = f"推理时间已到主截止，剩下的约 {minutes:g} 分钟是收尾宽限。"
+        else:
+            level = next(
+                (
+                    level
+                    for level in levels
+                    if level.budget != "inference_time"
+                    and level.used >= BUDGET_WRAP_UP_FRACTION
+                ),
+                None,
+            )
+            if level is None:
+                return
+            budget = level.budget
+            lead = f"{_budget_spent_phrase(level, level.used)}。"
+            extra = {
+                "used_fraction": round(level.used, 4),
+                _BUDGET_REMAINING_KEYS[budget]: level.left,
+            }
+        messages.append(ChatMessage("user", lead + WRAP_UP_PROMPT))
+        self._wrap_up_sent = True
         self._emit(
-            TraceEvent.TIME_BUDGET_NOTICE,
+            TraceEvent.WRAP_UP_STARTED,
             {
-                key: value
-                for key, value in payload.items()
-                if key not in {"observation", "message"}
+                "budget": budget,
+                **extra,
+                "remaining_seconds": round(remaining, 6),
+                "grace_seconds": self.config.deadline_grace_seconds,
             },
         )
-        return notice_index
+
+    def _budget_notices(
+        self,
+        messages: list[ChatMessage],
+        levels: Sequence[_BudgetLevel],
+        notice_indices: dict[str, int],
+        backtests: Mapping[str, int],
+    ) -> None:
+        """Inject one ``budget_notice`` per budget that crossed a notice
+        fraction since its last one; crossing several at once yields one."""
+
+        fractions = BUDGET_NOTICE_FRACTIONS
+        for level in levels:
+            index = notice_indices[level.budget]
+            crossed: float | None = None
+            while index < len(fractions) and level.used >= fractions[index]:
+                crossed = fractions[index]
+                index += 1
+            notice_indices[level.budget] = index
+            if crossed is None:
+                continue
+            complete = len(self._complete_validation_nodes)
+            payload: dict[str, object] = {
+                "observation": "budget_notice",
+                "budget": level.budget,
+                "used_fraction": crossed,
+                _BUDGET_REMAINING_KEYS[level.budget]: level.left,
+                "smoke_backtests": backtests["smoke_backtest"],
+                "validates": backtests["validate"],
+                "tests": backtests["test"],
+                "complete_validations": complete,
+            }
+            payload["message"] = (
+                f"{_budget_spent_phrase(level, crossed)}；"
+                f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
+                f"validate {backtests['validate']} 次、test {backtests['test']} 次、"
+                f"完整 Validation {complete} 个。"
+                f"{_BUDGET_NOTICE_ADVICE[level.budget]}；"
+                "预算耗尽时宿主以最近一次 test 的候选补完记录。"
+            )
+            messages.append(
+                ChatMessage("user", json.dumps(payload, ensure_ascii=False))
+            )
+            self._emit(
+                TraceEvent.BUDGET_NOTICE,
+                {
+                    key: value
+                    for key, value in payload.items()
+                    if key not in {"observation", "message"}
+                },
+            )
 
     def _record_complete_validations(self, record: dict[str, object]) -> None:
         """Register every complete Validation node one tool result carries.

@@ -35,7 +35,7 @@ class TraceEvent(StrEnum):
     TOOL_CALL = "tool_call"
     TOOL_SKIPPED = "tool_skipped"
     USER_MESSAGE = "user_message"
-    TIME_BUDGET_NOTICE = "time_budget_notice"
+    BUDGET_NOTICE = "budget_notice"
     WRAP_UP_STARTED = "wrap_up_started"
     CONTEXT_COMPACTION = "context_compaction"
     CONTEXT_EDIT = "context_edit"

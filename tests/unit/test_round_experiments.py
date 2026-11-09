@@ -1119,4 +1119,4 @@ def test_a_round_that_states_no_research_years_is_refused(
     stated = _sealed_round(pit_views_seed="data/seed_probe")
     params, reason = stated.validated(PROBE_ID)
     assert reason == "" and params is not None
-    assert (params["research_years"], params["test_step_months"], params["validates_per_step"]) == (1, 3, 6)
+    assert (params["research_years"], params["test_step_months"], params["validates_per_step"]) == (1, 3, 3)

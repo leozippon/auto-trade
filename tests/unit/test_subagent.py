@@ -1869,7 +1869,8 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
     from autotrade.agent.prompts import WRAP_UP_PROMPT
 
     assert any(
-        message.content == WRAP_UP_PROMPT for message in inner.calls[1]["messages"]
+        str(message.content).endswith(WRAP_UP_PROMPT)
+        for message in inner.calls[1]["messages"]
     )
     release.set()
     time.sleep(0.2)
@@ -4078,9 +4079,9 @@ class _ClockedLLM(ScriptedLLM):
 
 
 def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
-    from autotrade.agent.runner import TIME_BUDGET_NOTICE_FRACTIONS
+    from autotrade.agent.runner import BUDGET_NOTICE_FRACTIONS
 
-    assert TIME_BUDGET_NOTICE_FRACTIONS == (0.5, 0.75, 0.9)
+    assert BUDGET_NOTICE_FRACTIONS == (0.5, 0.75, 0.9)
     clock = _Clock()
     budget = InferenceTimeBudget(duration_seconds=100_000.0, clock=clock)
     llm = _ClockedLLM(
@@ -4103,17 +4104,19 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert runner.run("go").status == "finished"
-    notices = [payload for event, payload in events if event == "time_budget_notice"]
-    assert [n["elapsed_fraction"] for n in notices] == [0.5, 0.75, 0.9]
+    notices = [payload for event, payload in events if event == "budget_notice"]
+    assert {n["budget"] for n in notices} == {"inference_time"}
+    assert [n["used_fraction"] for n in notices] == [0.5, 0.75, 0.9]
     assert [n["remaining_minutes"] for n in notices] == [750.0, 333.3, 83.3]
     assert [n["smoke_backtests"] for n in notices] == [0, 1, 1]
     assert all(n["validates"] == 0 and n["tests"] == 0 and n["complete_validations"] == 0 for n in notices)
     delivered = [
         json.loads(str(message.content))
         for message in llm.calls[-1]["messages"]
-        if '"time_budget_notice"' in str(message.content or "")
+        if '"budget_notice"' in str(message.content or "")
     ]
     assert len(delivered) == 3
+    assert delivered[0]["message"].startswith("推理时间预算已用去 50%，剩余约 750 分钟")
     assert "smoke_backtest 1 次" in delivered[1]["message"]
     # The notice reports the budget; it is not a wrap-up cue. A session that read
     # a finishing cue at 50% finished with 280 minutes and 7 backtests unused.
@@ -4141,9 +4144,9 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert runner.run("go").status == "finished"
-    notices = [payload for event, payload in events if event == "time_budget_notice"]
+    notices = [payload for event, payload in events if event == "budget_notice"]
     assert [
-        (notice["elapsed_fraction"], notice["remaining_minutes"]) for notice in notices
+        (notice["used_fraction"], notice["remaining_minutes"]) for notice in notices
     ] == [(0.75, 333.3)]
 
 

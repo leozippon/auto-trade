@@ -839,10 +839,18 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     assert record["budget_used"]["llm_calls"] == 3 + len(second_llm.calls) == 4
     assert result["verdict"]["status"] == "registered_with_record"
     opening = second_llm.calls[0]["messages"]
-    assert [message.role for message in opening] == ["system", "user"]
+    assert [message.role for message in opening] == ["system", "user", "user"]
     note = opening[1].content
     assert "第 2 次尝试" in note and "language model unavailable" in note
     assert "中断前没有压缩摘要" in note and "模型调用 3/4" in note
+    # The shared call count opens past 75% of its cap, so the notice for it
+    # follows the note.
+    notice = json.loads(opening[2].content)
+    assert (notice["budget"], notice["used_fraction"], notice["remaining_calls"]) == (
+        "llm_calls",
+        0.75,
+        1,
+    )
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 3
     assert facts["experiment"]["validations_to_date"] == 0
@@ -929,9 +937,15 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     ]
     [end] = [event for event in events if event.get("event_type") == "session_end"]
     assert end["status"] == "api_spend_exhausted"
-    # The resumed attempt was told the cap and what the first one spent of it.
+    # Past 90% of the cap the session was told to wrap up before the cap ended it.
+    [wrap_up] = [event for event in events if event.get("event_type") == "wrap_up_started"]
+    assert wrap_up["budget"] == "api_spend"
+    # The resumed attempt was told the cap and what the first one spent of it,
+    # and the runner, reading the shared meter, that this is past half of it.
     opening = second_llm.calls[0]["messages"]
     assert "API 花费 $0.04/$0.08" in opening[1].content
+    notice = json.loads(opening[-1].content)
+    assert (notice["budget"], notice["used_fraction"]) == ("api_spend", 0.5)
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["budgets"]["max_api_spend_usd"] == 0.08
     assert facts["budgets"]["used_before_this_attempt"]["api_spend_usd"] == 0.041
@@ -1248,7 +1262,9 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
             )
         )
 
-    repo, experiment = make_experiment(tmp_path, developer_mode="llm")
+    # Six validates over three attempts, all before a first test: more than the
+    # default allowance of 3, which is not what this test is about.
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm", validates_per_step=6)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     never = ProviderResponse(tool_calls=(ToolCall("test", "test", {"candidate": "working_copy"}),))

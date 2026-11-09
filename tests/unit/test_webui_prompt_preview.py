@@ -166,7 +166,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
             experiment_default("max_research_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
         ),
         "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
-        "validates_per_step": 6,
+        "validates_per_step": 3,
         "max_null_controls": experiment_default("max_null_controls"),
         "max_llm_calls": experiment_default("max_llm_calls"),
         "max_api_spend_usd": experiment_default("max_api_spend_usd"),

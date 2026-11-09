@@ -1203,6 +1203,7 @@ class LLMResearchDeveloper:
             ),
             subagent=subagent,
             time_budget=time_budget,
+            session_budget=shared_budget,
             event_sink=emit_event,
             inbox=bind_session_inbox(
                 self.experiment_dir,

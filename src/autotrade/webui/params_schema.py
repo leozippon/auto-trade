@@ -490,7 +490,7 @@ _FIELDS: list[dict[str, object]] = [
         "label": "每步验证调用上限",
         "type": "int",
         "min": 1,
-        "help": "首次 test 之前以及相邻两次 test 之间允许的 validate 调用次数；超出即拒绝，直到下一次 test。默认 6。",
+        "help": "首次 test 之前以及相邻两次 test 之间允许的 validate 调用次数；超出即拒绝，直到下一次 test。默认 3。",
     },
     {
         "key": "alpha",

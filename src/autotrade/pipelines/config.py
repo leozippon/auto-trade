@@ -261,7 +261,7 @@ class AcceptanceRules:
     # validate calls an interval between tests may make.
     test_step_months: int = _rule(3, "Months the test horizon advances per test (1 or 3).")
     validates_per_step: int = _rule(
-        6, "validate calls allowed before the first test and between consecutive tests."
+        3, "validate calls allowed before the first test and between consecutive tests."
     )
 
     def __post_init__(self) -> None:

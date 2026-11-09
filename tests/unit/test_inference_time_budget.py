@@ -11,6 +11,7 @@ import pytest
 from autotrade.agent.compact import ContextCompactionConfig, ContextCompactor
 from autotrade.agent.prompts import WRAP_UP_PROMPT
 from autotrade.agent.runner import (
+    API_SPEND_EXHAUSTED,
     AgentSessionBudgetExhausted,
     AgentSessionConfig,
     AgentSessionRunner,
@@ -21,10 +22,12 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
+    MIMO_FLASH_MODEL,
     ChatMessage,
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
+    token_prices,
 )
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
@@ -392,13 +395,137 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
     assert result.status == "finished"
     assert not [event for event, _ in events if event == "hard_finalization_started"]
     wrap_up = [payload for event, payload in events if event == "wrap_up_started"]
-    assert wrap_up and wrap_up[0]["remaining_seconds"] == 500.0
+    assert len(wrap_up) == 1
+    assert (wrap_up[0]["budget"], wrap_up[0]["remaining_seconds"]) == (
+        "inference_time",
+        500.0,
+    )
     # The conversation survives: the wrap-up prompt is appended to it, it is not
     # a fresh two-message finalization context.
     second = scripted.calls[1]["messages"]
     assert [message.role for message in second[:2]] == ["system", "user"]
     assert {message.role for message in second} == {"system", "user", "assistant", "tool"}
-    assert second[-1].content == WRAP_UP_PROMPT
+    # One sentence naming the budget that triggered it leads the prompt.
+    assert second[-1].content == (
+        "推理时间已到主截止，剩下的约 8.3 分钟是收尾宽限。" + WRAP_UP_PROMPT
+    )
+
+
+class _PricedLLM(ScriptedLLM):
+    # A catalog model, so the session meter charges its replies at list price.
+    provider = "mimo"
+    model = MIMO_FLASH_MODEL
+
+
+def _shell_reply(call_id: str, prompt_tokens: int = 0) -> ProviderResponse:
+    return ProviderResponse(
+        tool_calls=(ToolCall(call_id, "shell", {}),),
+        usage={"prompt_tokens": prompt_tokens, "completion_tokens": 0},
+    )
+
+
+def test_api_spend_notices_then_one_wrap_up_before_the_cap_ends_the_session() -> None:
+    """Spend is announced at 50% and 75% of its cap, as time is; at 90% the
+    wrap-up goes out once, naming the spend, and reaching the cap still ends
+    the session at once."""
+
+    time_budget = InferenceTimeBudget(duration_seconds=100_000.0)
+    # The cap is what 100M uncached prompt tokens cost, so a reply's prompt
+    # tokens in millions are its share of the cap in percent.
+    cap = 100_000_000 * token_prices("mimo", MIMO_FLASH_MODEL).uncached_prompt / 1e6
+    shared = SessionCallBudget(
+        max_calls=40, max_api_spend_usd=cap, time_budget=time_budget
+    )
+    gateway = _PricedLLM(
+        [
+            _shell_reply("c1", 55_000_000),  # 55%
+            _shell_reply("c2", 22_000_000),  # 77%
+            _shell_reply("c3", 14_000_000),  # 91%
+            _shell_reply("c4", 5_000_000),  # 96%
+            _shell_reply("c5", 5_000_000),  # 101%
+            _shell_reply("c6", 1_000_000),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(gateway, budget=shared, role="main"),
+        tools=ToolRegistry([RecordingShell()]),
+        system_prompt="research",
+        config=AgentSessionConfig(max_llm_calls=40, deadline_seconds=100_000.0),
+        time_budget=time_budget,
+        session_budget=shared,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    with pytest.raises(AgentSessionBudgetExhausted) as raised:
+        runner.run("go")
+
+    assert raised.value.finish_reason == API_SPEND_EXHAUSTED
+    [end] = [payload for event, payload in events if event == "session_end"]
+    assert end["status"] == API_SPEND_EXHAUSTED
+    # The cap refused the sixth call before the provider was asked.
+    assert len(gateway.calls) == 5
+    notices = [payload for event, payload in events if event == "budget_notice"]
+    assert [(n["budget"], n["used_fraction"]) for n in notices] == [
+        ("api_spend", 0.5),
+        ("api_spend", 0.75),
+    ]
+    assert notices[0]["remaining_usd"] == pytest.approx(0.45 * cap, abs=0.006)
+    assert notices[1]["remaining_usd"] == pytest.approx(0.23 * cap, abs=0.006)
+    delivered = [
+        json.loads(str(message.content))
+        for message in gateway.calls[2]["messages"]
+        if '"budget_notice"' in str(message.content or "")
+    ]
+    assert [item["used_fraction"] for item in delivered] == [0.5, 0.75]
+    assert delivered[0]["message"].startswith("API 花费已用去上限的 50%，剩余约 $")
+    # Exactly one wrap-up, sent after the third reply, though spend kept rising.
+    [wrap_up] = [payload for event, payload in events if event == "wrap_up_started"]
+    assert (wrap_up["budget"], wrap_up["used_fraction"]) == ("api_spend", 0.91)
+    prompt = gateway.calls[3]["messages"][-1].content
+    assert prompt.startswith("API 花费已用去上限的 91%，剩余约 $")
+    assert prompt.endswith(WRAP_UP_PROMPT)
+    assert sum(
+        str(message.content).endswith(WRAP_UP_PROMPT)
+        for message in gateway.calls[4]["messages"]
+    ) == 1
+
+
+def test_model_call_notices_then_the_wrap_up_leave_the_last_call_for_test() -> None:
+    """The shared model calls are announced at 50% and 75% of the cap; at 90%
+    the wrap-up goes out and the session still has the call to ``test``."""
+
+    time_budget = InferenceTimeBudget(duration_seconds=100_000.0)
+    shared = SessionCallBudget(max_calls=10, time_budget=time_budget)
+    scripted = ScriptedLLM(
+        [
+            *(_shell_reply(f"r{index}") for index in range(1, 10)),
+            ProviderResponse(tool_calls=(ToolCall("t1", "test", {}),)),
+        ]
+    )
+    finish = TerminalTool()
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=SessionBudgetLLM(scripted, budget=shared, role="main"),
+        tools=ToolRegistry([RecordingShell(), finish]),
+        system_prompt="research",
+        config=AgentSessionConfig(max_llm_calls=10, deadline_seconds=100_000.0),
+        time_budget=time_budget,
+        session_budget=shared,
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+
+    assert runner.run("go").status == "finished"
+    assert len(finish.calls) == 1 and shared.calls == 10
+    notices = [payload for event, payload in events if event == "budget_notice"]
+    assert [
+        (n["budget"], n["used_fraction"], n["remaining_calls"]) for n in notices
+    ] == [("llm_calls", 0.5, 5), ("llm_calls", 0.75, 2)]
+    [wrap_up] = [payload for event, payload in events if event == "wrap_up_started"]
+    assert (wrap_up["budget"], wrap_up["remaining_calls"]) == ("llm_calls", 1)
+    assert scripted.calls[-1]["messages"][-1].content == (
+        "模型调用已用去上限的 90%，剩余 1 次。" + WRAP_UP_PROMPT
+    )
 
 
 def test_reserve_without_complete_node_keeps_research_and_compaction_available() -> (
