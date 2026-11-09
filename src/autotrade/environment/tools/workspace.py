@@ -7,22 +7,11 @@ from pathlib import Path, PurePosixPath
 
 from .base import ToolError
 
-# Where the workspace is mounted inside the sandbox. The rule text below and the
-# refusal hint for an absolute path quote the same constant.
+# Where the workspace is mounted inside the sandbox. The system prompt states
+# the root-plus-path rule once; a path that spells this mount out is the one
+# shape of that mistake with a mechanical repair, so the refusals of the read
+# and the write tools name it.
 WORKSPACE_MOUNT = "/mnt/agent/workspace"
-# Stated in every file tool's description because the two path conventions are
-# easy to mix up: `shell` runs on the real sandbox filesystem, while these tools
-# address files as a root name plus a path relative to it. Trace audits show
-# fresh sub-agents carrying the absolute path out of a shell call straight into
-# their first read_file/edit_file call.
-ROOT_RELATIVE_PATH_RULE = (
-    "`root` plus `path` is a virtual address, not a sandbox filesystem path: the "
-    f"`workspace` root is the directory shell runs in as `.` ({WORKSPACE_MOUNT}), "
-    f"so pass path='inputs/x.json', never path='{WORKSPACE_MOUNT}/inputs/x.json'. "
-    "A leading 'workspace/' is read as that root name and dropped when it does not "
-    "resolve as a real directory, while shell always takes it literally, so leave it "
-    "out: path='notes/probe.py' is what shell runs as ['python', 'notes/probe.py']."
-)
 
 # The workspace bind mount has no quota and shares one host filesystem with the
 # data lake, the experiment directories and the logs: one experiment wrote 6.4 GB of
@@ -38,16 +27,25 @@ LOW_DISK_SPACE = "low_disk_space"
 FREE_SPACE_RECOVERY_COMMANDS = frozenset({"du", "ls", "rm"})
 
 
+def mount_relative(pure: PurePosixPath) -> str | None:
+    """The workspace-relative form of a path that spells the mount out, else None."""
+
+    if pure.is_relative_to(WORKSPACE_MOUNT) and ".." not in pure.parts:
+        return pure.relative_to(WORKSPACE_MOUNT).as_posix()
+    return None
+
+
 def _relative_form_hint(pure: PurePosixPath) -> str:
     """Separate "you spelled the mount out" from "you tried to leave the tree".
 
     Both refusals share one message, but only the first has a mechanical
     repair, so the hint names it instead of restating the rule."""
 
-    if pure.is_relative_to(WORKSPACE_MOUNT) and ".." not in pure.parts:
+    relative = mount_relative(pure)
+    if relative is not None:
         return (
             f"the workspace is addressed relatively: drop the {WORKSPACE_MOUNT} prefix "
-            f"and pass '{pure.relative_to(WORKSPACE_MOUNT).as_posix()}'"
+            f"and pass '{relative}'"
         )
     return (
         "paths are relative to the workspace root: pass '.' for the root itself or a "
@@ -164,8 +162,8 @@ class SafeWorkspace:
 __all__ = [
     "FREE_SPACE_RECOVERY_COMMANDS",
     "LOW_DISK_SPACE",
-    "ROOT_RELATIVE_PATH_RULE",
     "WORKSPACE_MIN_FREE_BYTES",
     "WORKSPACE_MOUNT",
     "SafeWorkspace",
+    "mount_relative",
 ]

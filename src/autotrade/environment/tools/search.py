@@ -36,7 +36,7 @@ from pathlib import Path, PurePosixPath
 from autotrade.environment.executor import close_process_pipes
 
 from .base import ToolError, ToolResult, ToolSpec
-from .workspace import ROOT_RELATIVE_PATH_RULE, SafeWorkspace
+from .workspace import WORKSPACE_MOUNT, SafeWorkspace, mount_relative
 
 DEFAULT_GREP_LIMIT = 250
 DEFAULT_GLOB_LIMIT = 100
@@ -271,15 +271,6 @@ def _has_entries(directory: Path) -> bool:
         return False
 
 
-_ROOT_HINT = (
-    " Default `workspace`, whose `inputs/` holds the session facts "
-    "(e.g. root='workspace', path='inputs/skills_index.json'); formal strategy "
-    "files are root='output', path='main.py'; `trace` is this session's own "
-    "transcript (`<run_ref>.txt`, `<run_ref>.partN.txt` when long), every attempt "
-    "included."
-)
-
-
 _TRACE_READ_CONTENT_KEYS = ("content", "filenames", "lines")
 
 
@@ -311,11 +302,7 @@ def trace_read_stub(
 
 
 def _root_field(roots: SearchRoots, description: str) -> dict[str, object]:
-    return {
-        "type": "string",
-        "enum": list(roots.names),
-        "description": description + _ROOT_HINT,
-    }
+    return {"type": "string", "enum": list(roots.names), "description": description}
 
 
 class _SearchToolBase:
@@ -343,22 +330,28 @@ class _SearchToolBase:
             ) from exc
         return _collect_rg_lines(proc, timeout_seconds=self.timeout_seconds, max_lines=max_lines)
 
-    def _apply_result_budget(self, content: str, *, tool_kind: str) -> tuple[str, dict[str, object]]:
-        if len(content) <= MAX_RESULT_CHARS:
-            return content, {"truncated_by_chars": False}
-        stored = self.roots.store_tool_result(tool=self.spec.name, kind=tool_kind, content=content)
-        return content[:MAX_RESULT_CHARS], {"truncated_by_chars": True, **stored}
+    def _budget_lines(self, lines: list[str], *, tool_kind: str) -> tuple[list[str], dict[str, object]]:
+        """The leading whole lines of a page that fit the inline char budget.
 
-    def _budget_page_lines(self, lines: list[str], *, tool_kind: str) -> tuple[list[str], dict[str, object]]:
-        """Apply the inline char budget to a filename page as a whole.
+        Over budget, the whole page is spilled and only the lines that fit
+        whole stay inline, so the page's ``returned`` and ``next_offset`` count
+        exactly what the Agent saw. A cut inside a line used to leave the rest
+        of the page neither inline nor counted as missing: a 40 KB README read
+        in two pages never showed its lines ~387-419, and a char-cut file name
+        is a path that does not exist."""
 
-        The full page is persisted on overflow (same as text content); the
-        returned list drops the char-cut partial last name instead of leaking
-        a fabricated path into the observation."""
-        truncated, budget = self._apply_result_budget("\n".join(lines), tool_kind=tool_kind)
-        if not budget.get("truncated_by_chars"):
-            return lines, budget
-        return truncated.split("\n")[:-1], budget
+        text = "\n".join(lines)
+        if len(text) <= MAX_RESULT_CHARS:
+            return lines, {}
+        stored = self.roots.store_tool_result(tool=self.spec.name, kind=tool_kind, content=text)
+        kept: list[str] = []
+        used = 0
+        for line in lines:
+            used += len(line) + (1 if kept else 0)
+            if used > MAX_RESULT_CHARS:
+                break
+            kept.append(line)
+        return kept, stored
 
 
 class GrepTool(_SearchToolBase):
@@ -368,25 +361,21 @@ class GrepTool(_SearchToolBase):
         super().__init__(roots, timeout_seconds=timeout_seconds)
         self.spec = ToolSpec(
             "grep",
-            "Search allowlisted sandbox roots with ripgrep and structured pagination. "
-            "Use for targeted text/code/log search; choose files/count modes before content when possible. "
-            "`pattern` is a Rust-regex pattern (ripgrep's default engine): classes, groups, "
-            "alternation, quantifiers and anchors work, but look-around ((?=..), (?<=..)) and "
-            "backreferences do not and PCRE2 is not enabled, so split such a search into two calls. "
-            "Command-line flags belong in the typed arguments, not in `pattern`: use case_insensitive, "
-            "multiline, glob, context, head_limit and offset instead of -i, -U, -g, -C or -n. "
-            "Results come back as `filenames` (mode 'files'), 'path:count' lines (mode 'count') or "
-            "always path-prefixed, line-numbered 'path:line:text' lines in `content` (mode 'content'), "
-            "whose `filenames` lists the distinct files of that page. "
-            "A path the host cannot read is skipped instead of failing the call: the answer then "
-            "carries `skipped`/`skipped_count`, and its counts cover only what could be read. "
-            + ROOT_RELATIVE_PATH_RULE,
+            "Search a root with ripgrep; try mode 'files' or 'count' before 'content'. "
+            "`pattern` is a Rust-regex: no look-around or backreferences, so split such a "
+            "search into two calls. Flags are typed arguments: case_insensitive, multiline, "
+            "glob, context, head_limit and offset instead of -i, -U, -g, -C or -n. Mode "
+            "'files' (default) returns `filenames`, 'count' returns 'path:count' lines and "
+            "'content' returns 'path:line:text' lines plus the page's `filenames`. "
+            f"A page holds at most head_limit lines and {MAX_RESULT_CHARS} chars; when "
+            "`truncated`, continue from `next_offset`. An unreadable path is skipped and "
+            "listed in `skipped`, and the counts cover only what was read.",
             {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "minLength": 1, "maxLength": 1000,
                                 "description": "Ripgrep pattern to search for."},
-                    "root": _root_field(roots, "Allowlisted sandbox root to search."),
+                    "root": _root_field(roots, "Root to search; default workspace."),
                     "path": {"type": "string", "maxLength": 500,
                              "description": "Optional relative subpath under root; empty searches the whole root."},
                     "glob": {"type": "string", "maxLength": 500,
@@ -477,58 +466,40 @@ class GrepTool(_SearchToolBase):
                     details={"exit_code": completed["exit_code"]},
                 )
 
-        common = {
+        value: dict[str, object] = {
             "mode": output_mode, "root": root, "path": path,
             "pattern": pattern, "glob": glob, "stderr": stderr, "timeout": completed["timeout"],
             **_partial_fields(skipped),
         }
+        page = raw_lines[offset : offset + head_limit]
         if output_mode == "count":
-            visible_lines, paging = _apply_paging(
-                raw_lines, offset=offset, head_limit=head_limit, source_truncated=completed["line_limited"]
+            shown, budget = self._budget_lines(page, tool_kind="grep_count")
+            value.update(
+                page_matches=_sum_count_lines(shown),
+                num_matches_lower_bound=_sum_count_lines(raw_lines),
+                num_matches_known=not completed["line_limited"],
+                content="\n".join(shown),
             )
-            content, budget = self._apply_result_budget("\n".join(visible_lines), tool_kind="grep_count")
-            value = {
-                **common,
-                "num_lines": len(raw_lines),
-                "page_matches": _sum_count_lines(visible_lines),
-                "num_matches_lower_bound": _sum_count_lines(raw_lines),
-                "num_matches_known": not completed["line_limited"],
-                "content": content,
-                **paging, **budget,
-            }
         elif output_mode == "files":
-            visible_lines, paging = _apply_paging(
-                raw_lines, offset=offset, head_limit=head_limit, source_truncated=completed["line_limited"]
-            )
             # The page rides the observation once, as `filenames`: duplicating
             # it into a joined `content` copy doubled the bytes and the copy
             # escaped the char budget entirely.
-            filenames, budget = self._budget_page_lines(visible_lines, tool_kind="grep_files")
-            if len(filenames) != len(visible_lines):
-                paging["returned"] = len(filenames)
-                paging["truncated"] = True
-            value = {**common, "num_files": paging["total"], "filenames": filenames, **paging, **budget}
+            shown, budget = self._budget_lines(page, tool_kind="grep_files")
+            value["filenames"] = shown
         else:
-            visible_lines, paging = _apply_paging(
-                raw_lines, offset=offset, head_limit=head_limit, source_truncated=completed["line_limited"]
-            )
             # Rendering the NUL back to ripgrep's own separator is
             # length-preserving, so the char budget applies to exactly what the
             # Agent will read, and the spilled full page carries no NUL either.
-            rendered = [_render_content_line(line) for line in visible_lines]
-            content, budget = self._apply_result_budget("\n".join(rendered), tool_kind="grep_content")
-            # Derive the page's file list from the lines that survived the
-            # budget (a char-cut partial last line is not one of them), not
-            # from the raw lines: every observation field respects the budget.
-            kept = len(content.split("\n")) - (1 if budget.get("truncated_by_chars") else 0)
-            value = {
-                **common,
-                "num_lines": len(raw_lines),
-                "filenames": sorted(_filenames_from_content(visible_lines[:kept])),
-                "content": content,
-                **paging, **budget,
-            }
-        return ToolResult(True, value=value)
+            shown, budget = self._budget_lines(
+                [_render_content_line(line) for line in page], tool_kind="grep_content"
+            )
+            # The page's file list comes from the lines that stayed inline.
+            value["filenames"] = sorted(_filenames_from_content(page[: len(shown)]))
+            value["content"] = "\n".join(shown)
+        more = completed["line_limited"] or offset + len(shown) < len(raw_lines)
+        total = None if completed["line_limited"] else len(raw_lines)
+        value.update(_page_fields(offset=offset, returned=len(shown), total=total, more=more))
+        return ToolResult(True, value={**value, **budget})
 
 
 class GlobTool(_SearchToolBase):
@@ -538,17 +509,17 @@ class GlobTool(_SearchToolBase):
         super().__init__(roots, timeout_seconds=timeout_seconds)
         self.spec = ToolSpec(
             "glob",
-            "List files under an allowlisted sandbox root with structured pagination. "
-            "Use to discover files by name/pattern before reading or grepping them. "
-            "A directory the host cannot list is skipped instead of failing the call: the answer "
-            "then carries `skipped`/`skipped_count`, and its counts cover only what could be read. "
-            + ROOT_RELATIVE_PATH_RULE,
+            "List the files under `root`/`path` whose relative path matches a glob ('*.py' "
+            "in one directory, '**/*.py' recursively), to find files before reading or "
+            f"grepping them. A page holds at most head_limit names and {MAX_RESULT_CHARS} "
+            "chars; when `truncated`, continue from `next_offset`. An unlistable directory "
+            "is skipped and listed in `skipped`.",
             {
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "minLength": 1, "maxLength": 500,
                                 "description": "File glob such as '*.py' for one directory or '**/*.py' recursively."},
-                    "root": _root_field(roots, "Allowlisted sandbox root to list."),
+                    "root": _root_field(roots, "Root to list; default workspace."),
                     "path": {"type": "string", "maxLength": 500,
                              "description": "Optional relative subpath under root; empty lists from the root."},
                     "head_limit": {"type": "integer", "minimum": 1, "maximum": MAX_HEAD_LIMIT,
@@ -583,19 +554,16 @@ class GlobTool(_SearchToolBase):
                 source_truncated = True
                 break
             files.append(str(candidate.relative_to(target)))
-        visible, paging = _apply_paging(
-            files, offset=0, head_limit=head_limit, source_truncated=source_truncated,
-            total_prefix=max(seen_matches - len(files), 0),
-        )
-        paging["offset"] = offset
         # Same single-field page contract as files-mode grep.
-        filenames, budget = self._budget_page_lines(visible, tool_kind="glob")
-        if len(filenames) != len(visible):
-            paging["returned"] = len(filenames)
-            paging["truncated"] = True
+        shown, budget = self._budget_lines(files, tool_kind="glob")
+        paging = _page_fields(
+            offset=offset,
+            returned=len(shown),
+            total=None if source_truncated else seen_matches,
+            more=source_truncated or len(shown) < len(files),
+        )
         return ToolResult(True, value={
-            "root": root, "path": path, "pattern": pattern,
-            "num_files": paging["total"], "filenames": filenames,
+            "root": root, "path": path, "pattern": pattern, "filenames": shown,
             **paging, **budget, **_partial_fields(skipped),
         })
 
@@ -607,19 +575,18 @@ class ReadFileTool(_SearchToolBase):
         super().__init__(roots, timeout_seconds=timeout_seconds)
         self.spec = ToolSpec(
             "read_file",
-            "Read a file under an allowlisted sandbox root with line numbers and pagination. "
-            "Prefer this over `shell cat`/`head` for code you will edit (line-numbered, bounded output); "
-            "`cat`/`head` stay available for pipelines. Rejects files over the size cap "
-            "(use shell or DuckDB/pyarrow for large data files). "
-            "`content` is line-numbered and line-normalized, so it carries neither the original line "
-            "endings nor a trailing newline (`final_newline` reports whether the file ends with one): "
-            "never reconstruct a file by pasting it back through `write_file`; copy bytes with shell "
-            "`cp` and check with `sha256sum`. "
-            + ROOT_RELATIVE_PATH_RULE,
+            "Read a text file under a root, line-numbered like `cat -n`; prefer it over shell "
+            "`cat`/`head` for code you will edit. A page is up to `limit` lines from `offset` "
+            f"(0-based) and at most {MAX_RESULT_CHARS} chars, cut at a whole line (a single "
+            "longer line is cut at that cap); when `truncated`, continue from `next_offset`. "
+            "`content` carries no line endings and `final_newline` says whether the file ends "
+            "with one, so copy a file with shell `cp`, never by pasting it into write_file. "
+            f"Files over {MAX_READ_BYTES // 1024**2} MiB are refused: read data files with "
+            "shell, DuckDB or pyarrow.",
             {
                 "type": "object",
                 "properties": {
-                    "root": _root_field(roots, "Allowlisted sandbox root the file lives under."),
+                    "root": _root_field(roots, "Root the file is under; default workspace."),
                     "path": {"type": "string", "minLength": 1, "maxLength": 500,
                              "description": "Relative file path under root."},
                     "offset": {"type": "integer", "minimum": 0,
@@ -662,17 +629,32 @@ class ReadFileTool(_SearchToolBase):
             text = target.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             raise ToolError(f"read failed under root {root!r} for {path!r}: {exc.strerror or type(exc).__name__}", error_type="tool_error") from exc
+        lines = text.splitlines()
         # cat -n style line numbering, paginated by line so large files stay bounded.
-        numbered = [f"{index}\t{line}" for index, line in enumerate(text.splitlines(), start=1)]
-        visible, paging = _apply_paging(numbered, offset=offset, head_limit=limit, source_truncated=False)
-        content, budget = self._apply_result_budget("\n".join(visible), tool_kind="read")
+        page = [
+            f"{number}\t{line}"
+            for number, line in enumerate(lines[offset : offset + limit], start=offset + 1)
+        ]
+        shown, budget = self._budget_lines(page, tool_kind="read")
+        if page and not shown:
+            # One line longer than the whole budget (compact JSON, say): its
+            # head is shown and counted, the description says such a line is
+            # cut, and the page still advances past it.
+            shown = [page[0][:MAX_RESULT_CHARS]]
+        line_cut = bool(shown) and shown[-1] != page[len(shown) - 1]
+        paging = _page_fields(
+            offset=offset,
+            returned=len(shown),
+            total=len(lines),
+            more=line_cut or offset + len(shown) < len(lines),
+        )
         return ToolResult(True, value={
-            "root": root, "path": path,
-            # Whole-file facts, like ``line_count``: the numbered rendering cannot
-            # express a trailing newline, so an Agent copying content through
+            "root": root, "path": path, "content": "\n".join(shown), **paging,
+            # A whole-file fact: the numbered rendering cannot express a
+            # trailing newline, so an Agent copying content through
             # ``write_file`` would silently drop it without being told.
-            "line_count": len(numbered), "final_newline": text.endswith("\n"),
-            "content": content, **paging, **budget,
+            "final_newline": text.endswith("\n"),
+            **budget,
         })
 
 
@@ -682,9 +664,15 @@ def _safe_subpath(base: Path, path: str) -> Path:
         return base_resolved
     candidate = Path(path)
     if candidate.is_absolute():
+        relative = mount_relative(PurePosixPath(path))
         raise ToolError(
             "search path must be relative to the selected root",
             error_type="path_error", blocked_target=path,
+            retry_hint=(
+                f'drop the {WORKSPACE_MOUNT} prefix: {{"root": "workspace", "path": "{relative}"}}'
+                if relative is not None
+                else None
+            ),
         )
     parts = PurePosixPath(path).parts
     if ".." in parts:
@@ -780,31 +768,18 @@ def _validate_relative_pattern(pattern: str, *, label: str) -> None:
         )
 
 
-def _apply_paging(
-    lines: list[str],
-    *,
-    offset: int,
-    head_limit: int,
-    source_truncated: bool = False,
-    total_prefix: int = 0,
-) -> tuple[list[str], dict[str, object]]:
-    available_len = len(lines)
-    total_lower_bound = total_prefix + len(lines)
-    if offset > available_len:
-        visible: list[str] = []
-    else:
-        visible = lines[offset : offset + head_limit]
-    truncated = source_truncated or offset + len(visible) < available_len
-    total = None if source_truncated else total_lower_bound
-    return visible, {
-        "offset": offset,
-        "head_limit": head_limit,
-        "returned": len(visible),
-        "truncated": truncated,
-        "total": total,
-        "total_lower_bound": total_lower_bound,
-        "total_known": not source_truncated,
+def _page_fields(*, offset: int, returned: int, total: int | None, more: bool) -> dict[str, object]:
+    """Where a page sits: ``returned`` counts the items actually inline and
+    ``truncated`` says something requested or after it was left out, by the
+    item limit or by the char budget; ``next_offset`` is then where the next
+    call continues. ``total`` is None when the walk stopped before the end."""
+
+    fields: dict[str, object] = {
+        "offset": offset, "returned": returned, "total": total, "truncated": more,
     }
+    if more:
+        fields["next_offset"] = offset + returned
+    return fields
 
 
 def _clean_rg_lines(lines: list[str]) -> list[str]:

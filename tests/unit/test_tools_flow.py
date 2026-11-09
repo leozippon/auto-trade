@@ -161,7 +161,7 @@ class ShellToolTest(unittest.TestCase):
                 {"root": spill["result_root"], "path": spill["result_ref"],
                  "offset": head_lines, "limit": 2}
             ).value
-            self.assertEqual(page["line_count"], 1000)
+            self.assertEqual(page["total"], 1000)
             self.assertEqual(
                 page["content"].split("\n")[0], f"{head_lines + 1}\tline-{head_lines:04d}"
             )
@@ -304,10 +304,13 @@ class ShellToolTest(unittest.TestCase):
             self.assertTrue(multiline.ok, multiline.error)
             self.assertEqual(runner.calls[1][0], ("python", "-c", script))
             self.assertEqual(multiline.value["argv_normalized"], ARGV_STRING_NOTE)
-            # The repair note belongs to that call only.
+            # The repair note belongs to that call only: a plain argv array
+            # comes back with the command's own four fields and nothing else.
             plain = registry.invoke("shell", {"argv": ["echo", "ok"]})
             self.assertTrue(plain.ok, plain.error)
-            self.assertNotIn("argv_normalized", plain.value)
+            self.assertEqual(set(plain.value), {"exit_code", "stdout", "stderr", "timed_out"})
+            for note in (ARGV_STRING_NOTE, ARGV_SHELL_NOTE, ARGV_ONE_ELEMENT_NOTE):
+                self.assertLessEqual(len(note), 120, note)
 
     def test_shell_runs_a_command_string_through_the_shell_and_names_the_repair(self) -> None:
         """A command line is the same call as the argv array in a different
@@ -325,8 +328,12 @@ class ShellToolTest(unittest.TestCase):
                 runner.calls[0][0], ("bash", "-lc", "grep -n 'a b' notes.txt")
             )
             self.assertEqual(result.value["argv_normalized"], ARGV_SHELL_NOTE)
-            # The label still names what ran, not the shell that ran it.
-            self.assertEqual(result.value["command_kind"], "search")
+            # The note is one short sentence (a command string is most calls),
+            # and the result is the command's own fields plus that note.
+            self.assertLessEqual(len(result.value["argv_normalized"]), 120)
+            self.assertEqual(
+                set(result.value), {"exit_code", "stdout", "stderr", "timed_out", "argv_normalized"}
+            )
             for arguments in ({"cmd": "ls -la output"}, {"command": ["ls", "output"]}):
                 misnamed = registry.invoke("shell", arguments)
                 self.assertFalse(misnamed.ok, arguments)
@@ -348,8 +355,7 @@ class ShellToolTest(unittest.TestCase):
             self.assertEqual(
                 runner.calls[0][0], ("bash", "-lc", "python -c 'print(1)'")
             )
-            self.assertIn(ARGV_ONE_ELEMENT_NOTE, result.value["argv_normalized"])
-            self.assertIn(ARGV_SHELL_NOTE, result.value["argv_normalized"])
+            self.assertEqual(result.value["argv_normalized"], ARGV_ONE_ELEMENT_NOTE)
             # A lone program name is a real one-element argv, not a command line.
             bare = registry.invoke("shell", {"argv": ["pwd"]})
             self.assertTrue(bare.ok, bare.error)
@@ -450,7 +456,8 @@ class ShellToolTest(unittest.TestCase):
                 hint = result.value["retry_hint"]
                 self.assertIn("write_file", hint)
                 self.assertIn('["python", "notes/probe.py"]', hint)
-                self.assertIn("correct call example", hint)
+                self.assertNotIn("correct call example", hint)
+                self.assertIn("correct call example", result.error)
             self.assertEqual(runner.calls, [])
             # The cap has to clear the `bash -lc` heredocs and `python -c`
             # probes the Agent legitimately writes, which run to a few kB.
@@ -566,7 +573,9 @@ class StructuredSearchToolTest(unittest.TestCase):
                 "grep", {"pattern": "alpha", "root": "workspace", "output_mode": "files"}
             ).value
             self.assertEqual(files["mode"], "files")
-            self.assertEqual(files["num_files"], 3)
+            self.assertEqual(files["total"], 3)
+            self.assertFalse(files["truncated"])
+            self.assertNotIn("next_offset", files)
             self.assertIn("workspace/alpha.txt", files["filenames"])
             self.assertNotIn("workspace/.hidden.txt", files["filenames"])
 
@@ -602,6 +611,17 @@ class StructuredSearchToolTest(unittest.TestCase):
             ).value
             self.assertEqual(page_1["filenames"], ["workspace/a.py", "workspace/b.py"])
             self.assertEqual(page_2["filenames"], ["workspace/nested/c.py"])
+            # The walk stopped at the limit, so the total is unknown and the
+            # page says where the next one starts; the last page is complete.
+            self.assertEqual(
+                (page_1["returned"], page_1["truncated"], page_1["next_offset"], page_1["total"]),
+                (2, True, 2, None),
+            )
+            self.assertEqual(
+                (page_2["offset"], page_2["returned"], page_2["truncated"], page_2["total"]),
+                (2, 1, False, 3),
+            )
+            self.assertNotIn("next_offset", page_2)
 
             # A symlink loop inside a read root must not be followed.
             (paths.workspace / "loop").mkdir()
@@ -632,6 +652,17 @@ class StructuredSearchToolTest(unittest.TestCase):
             ).value
             self.assertEqual(limited["returned"], 1)
             self.assertTrue(limited["truncated"])
+            self.assertEqual(limited["next_offset"], 1)
+            rest = registry.invoke(
+                "grep",
+                {"pattern": "alpha", "root": "workspace", "output_mode": "files", "offset": 1},
+            ).value
+            self.assertEqual(
+                sorted(limited["filenames"] + rest["filenames"]), sorted(files["filenames"])
+            )
+            for record in (files, limited, rest, page_1, page_2):
+                for retired in ("head_limit", "total_lower_bound", "total_known", "num_files"):
+                    self.assertNotIn(retired, record)
 
     def test_search_roots_are_an_enum_and_traversal_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -726,7 +757,11 @@ class StructuredSearchToolTest(unittest.TestCase):
             paths, roots, registry = self._tools(Path(tmp))
             (paths.workspace / "f.txt").write_text("l1\nl2\nl3\nl4\n", encoding="utf-8")
             full = registry.invoke("read_file", {"root": "workspace", "path": "workspace/f.txt"}).value
-            self.assertEqual(full["line_count"], 4)
+            self.assertEqual(
+                set(full),
+                {"root", "path", "content", "offset", "returned", "total", "truncated", "final_newline"},
+            )
+            self.assertEqual((full["returned"], full["total"], full["truncated"]), (4, 4, False))
             self.assertIn("1\tl1", full["content"])  # cat -n style
             self.assertIn("4\tl4", full["content"])
             page = registry.invoke(
@@ -735,6 +770,9 @@ class StructuredSearchToolTest(unittest.TestCase):
             self.assertIn("2\tl2", page["content"])
             self.assertNotIn("1\tl1", page["content"])
             self.assertNotIn("4\tl4", page["content"])
+            self.assertEqual(
+                (page["returned"], page["truncated"], page["next_offset"]), (2, True, 3)
+            )
             # The line-numbered rendering cannot express a trailing newline, so
             # the result states it as a whole-file fact on every page: an Agent
             # copying content through write_file would otherwise silently drop
@@ -781,7 +819,59 @@ class StructuredSearchToolTest(unittest.TestCase):
             self.assertFalse(too_large.ok)
             self.assertEqual(too_large.value["error_type"], "too_large")
             self.assertIn("read cap", too_large.error)
-            self.assertEqual(small.value["line_count"], 1)
+            self.assertEqual(small.value["total"], 1)
+
+    def test_a_read_over_the_char_budget_continues_exactly_where_it_stopped(self) -> None:
+        """The inline cut used to fall inside a line while `returned` counted
+        the requested lines: a 40 KB README read in two pages never showed
+        lines ~387-419. A page now holds whole lines only, counts them, and
+        names the line to continue from, so paging reproduces the file."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            paths, _, registry = self._tools(Path(tmp))
+            lines = [f"line {index:04d} " + "y" * (index % 157) for index in range(900)]
+            text = "\n".join(lines) + "\n"
+            self.assertGreater(len(text), 2 * search_module.MAX_RESULT_CHARS)
+            (paths.workspace / "long.md").write_text(text, encoding="utf-8")
+            offset, seen, pages = 0, [], 0
+            while True:
+                page = registry.invoke(
+                    "read_file", {"path": "workspace/long.md", "offset": offset, "limit": 5000}
+                ).value
+                pages += 1
+                content = page["content"]
+                self.assertLessEqual(len(content), search_module.MAX_RESULT_CHARS)
+                numbered = content.split("\n")
+                self.assertEqual(page["returned"], len(numbered))
+                self.assertEqual(numbered[0].split("\t", 1)[0], str(offset + 1))
+                seen.extend(line.split("\t", 1)[1] for line in numbered)
+                self.assertEqual(page["total"], len(lines))
+                if not page["truncated"]:
+                    self.assertNotIn("next_offset", page)
+                    break
+                self.assertEqual(page["next_offset"], offset + page["returned"])
+                # The page was over the budget, so it was also spilled.
+                self.assertIn("result_ref", page)
+                offset = page["next_offset"]
+            self.assertGreater(pages, 2)
+            self.assertEqual(seen, lines)
+
+            # One line longer than the whole budget is cut at it, counted, and
+            # the next page starts after it.
+            (paths.workspace / "compact.json").write_text(
+                "{" + "x" * (search_module.MAX_RESULT_CHARS + 50) + "}\nnext\n", encoding="utf-8"
+            )
+            cut = registry.invoke("read_file", {"path": "workspace/compact.json"}).value
+            self.assertEqual(len(cut["content"]), search_module.MAX_RESULT_CHARS)
+            self.assertEqual(
+                (cut["returned"], cut["truncated"], cut["next_offset"]), (1, True, 1)
+            )
+            after = registry.invoke(
+                "read_file", {"path": "workspace/compact.json", "offset": cut["next_offset"]}
+            ).value
+            self.assertEqual(
+                (after["content"], after["returned"], after["truncated"]), ("2\tnext", 1, False)
+            )
 
     def test_files_and_glob_pages_are_budgeted_as_a_whole(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -801,7 +891,8 @@ class StructuredSearchToolTest(unittest.TestCase):
                 # The page rides the observation exactly once, inside the char
                 # budget: no duplicated joined-text copy escaping the cap.
                 self.assertNotIn("content", record)
-                self.assertTrue(record["truncated_by_chars"])
+                self.assertTrue(record["truncated"])
+                self.assertEqual(record["next_offset"], record["returned"])
                 self.assertTrue(record["filenames"])
                 self.assertLessEqual(len("\n".join(record["filenames"])), 200)
                 for name in record["filenames"]:
@@ -814,7 +905,15 @@ class StructuredSearchToolTest(unittest.TestCase):
                     "read_file", {"root": record["result_root"], "path": record["result_ref"]}
                 )
                 self.assertTrue(spilled.ok, spilled.error)
-                self.assertEqual(spilled.value["line_count"], len(names))
+                self.assertEqual(spilled.value["total"], len(names))
+            # The next page starts at the first name the budget left out.
+            with patch.object(search_module, "MAX_RESULT_CHARS", 200):
+                rest = registry.invoke(
+                    "glob",
+                    {"pattern": "workspace/*.txt", "root": "workspace", "head_limit": 1000,
+                     "offset": listing["next_offset"]},
+                ).value
+            self.assertEqual(rest["filenames"][0], sorted(names)[listing["returned"]])
 
     def test_content_filenames_come_from_the_budgeted_page(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -827,7 +926,12 @@ class StructuredSearchToolTest(unittest.TestCase):
                     "grep",
                     {"pattern": "needle", "root": "workspace", "output_mode": "content", "head_limit": 1000},
                 ).value
-            self.assertTrue(record["truncated_by_chars"])
+            self.assertTrue(record["truncated"])
+            # Whole lines only, all counted: the next page starts after them.
+            self.assertEqual(record["returned"], len(record["content"].split("\n")))
+            self.assertEqual(record["next_offset"], record["returned"])
+            for line in record["content"].split("\n"):
+                self.assertTrue(line.endswith(":1:needle"), line)
             for name in record["filenames"]:
                 # Derived from the truncated visible page only: every listed
                 # file appears in the visible content and really exists.
@@ -1503,7 +1607,7 @@ class ToolContractHintTest(unittest.TestCase):
             )
             self.assertFalse(stale.ok)
             root_help = ReadFileTool(roots).spec.input_schema["properties"]["root"]["description"]
-            self.assertIn("path='inputs/skills_index.json'", root_help)
+            self.assertIn("default workspace", root_help)
 
     def test_shell_description_states_argv_shape_timeout_and_workspace_bound(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1514,12 +1618,18 @@ class ToolContractHintTest(unittest.TestCase):
             self.assertIn("inside the workspace", default)
             self.assertIn("at most 600", default)
             self.assertIn("at most 5;", custom)
-            # The two path conventions are contrasted where they are confused:
-            # shell's real sandbox path against the file tools' root+path.
-            self.assertIn("/mnt/agent/workspace", default)
-            self.assertIn("read_file/write_file/edit_file/grep/glob", default)
 
-    def test_file_and_search_tools_contrast_their_paths_with_the_shell_path(self) -> None:
+    def test_file_and_shell_descriptions_leave_the_path_rule_to_the_prompt(self) -> None:
+        """The root-plus-path rule is the system prompt's, stated once; the
+        descriptions stay within their size caps instead of restating it."""
+
+        from autotrade.agent.prompts import FILE_PATH_RULE, build_system_prompt
+
+        self.assertIn(FILE_PATH_RULE, build_system_prompt(experiment_facts={}))
+        caps = {
+            "read_file": 700, "grep": 800, "glob": 450,
+            "write_file": 300, "edit_file": 450, "shell": 1300,
+        }
         with tempfile.TemporaryDirectory() as tmp:
             _, roots, workspace = build_sandbox(Path(tmp))
             for spec in (
@@ -1528,12 +1638,13 @@ class ToolContractHintTest(unittest.TestCase):
                 ReadFileTool(roots).spec,
                 GrepTool(roots).spec,
                 GlobTool(roots).spec,
+                SandboxShellTool(workspace, FakeRunner()).spec,
             ):
-                self.assertIn(
-                    "never path='/mnt/agent/workspace/inputs/x.json'",
-                    spec.description,
-                    spec.name,
-                )
+                self.assertLessEqual(len(spec.description), caps[spec.name], spec.name)
+                self.assertNotIn("/mnt/agent/workspace", spec.description, spec.name)
+                root = spec.input_schema["properties"].get("root")
+                if root is not None:
+                    self.assertLessEqual(len(root["description"]), 60, spec.name)
             # Batched edits are applied in order, so the second must match the
             # file the first one left behind.
             self.assertIn(
@@ -1769,7 +1880,14 @@ class ToolResultContractTest(unittest.TestCase):
                 result = registry.invoke(name, arguments)
                 self.assertFalse(result.ok, name)
                 self.assertIn(needle, result.error, name)
-                self.assertIn("correct call example", result.value["retry_hint"], name)
+                # The example rides once, in the error; a specific fix the
+                # tool named stays in retry_hint without a second copy.
+                blob = result.error + json.dumps(result.value, ensure_ascii=False)
+                self.assertEqual(blob.count("correct call example"), 1, name)
+            too_long = registry.invoke(
+                "shell", {"argv": ["python", "-c", "x" * (SHELL_ARGV_MAX_CHARS + 1)]}
+            )
+            self.assertEqual(too_long.value["retry_hint"], ARGV_TOO_LONG_HINT)
             shell_description = SandboxShellTool(workspace, FakeRunner()).spec.description
             self.assertIn(f"at most {SHELL_ARGV_MAX_CHARS} chars", shell_description)
             self.assertIn('["python", "notes/probe.py"]', shell_description)
@@ -1836,7 +1954,8 @@ class SpillAndRootContractTest(unittest.TestCase):
             with patch.object(search_module, "MAX_RESULT_CHARS", 500):
                 first = registry.invoke("read_file", {"path": "inputs/big.txt"})
             self.assertTrue(first.ok, first.error)
-            self.assertTrue(first.value["truncated_by_chars"])
+            self.assertTrue(first.value["truncated"])
+            self.assertEqual(first.value["next_offset"], first.value["returned"])
             self.assertNotIn("result_path", first.value)
             self.assertEqual(first.value["result_root"], "artifacts")
             ref = first.value["result_ref"]
@@ -1849,7 +1968,7 @@ class SpillAndRootContractTest(unittest.TestCase):
             self.assertIn("artifacts", roots.names)
             spilled = registry.invoke("read_file", {"root": "artifacts", "path": ref})
             self.assertTrue(spilled.ok, spilled.error)
-            self.assertEqual(spilled.value["line_count"], 200)
+            self.assertEqual(spilled.value["total"], 200)
             self.assertEqual(
                 first.value["result_hint"],
                 f"full result spilled; read it back with: read_file root='artifacts' path='{ref}'",
@@ -1934,6 +2053,17 @@ class SpillAndRootContractTest(unittest.TestCase):
             absolute = registry.invoke("read_file", {"root": "artifacts", "path": "/etc/passwd"})
             self.assertFalse(absolute.ok)
             self.assertNotIn(tmp, absolute.error + json.dumps(absolute.value))
+            self.assertNotIn("retry_hint", absolute.value)
+            # Spelling the sandbox mount out is the one absolute form with a
+            # mechanical repair, and the refusal names it.
+            mounted = registry.invoke(
+                "read_file", {"root": "artifacts", "path": "/mnt/agent/workspace/inputs/x.json"}
+            )
+            self.assertFalse(mounted.ok)
+            self.assertEqual(
+                mounted.value["retry_hint"],
+                'drop the /mnt/agent/workspace prefix: {"root": "workspace", "path": "inputs/x.json"}',
+            )
             unavailable = registry.invoke(
                 "glob", {"pattern": "*"}, allowed_names={"read_file", "test"}
             )

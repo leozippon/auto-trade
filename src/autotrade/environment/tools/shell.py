@@ -48,24 +48,16 @@ SHELL_CAPTURE_MAX_CHARS = 1_000_000
 # (bare, or as the single element of a one-element array), a JSON-encoded
 # array, and a long ``python -c`` script inlined as one element. All but the
 # last are the same command in a different wrapper, so they are repaired here
-# and the repair is named in the result; only the over-long element is refused,
-# with the recipe that replaces it. A command sent under another key is not a
-# wrapper of the command but a wrong field name: the schema names ``argv`` and
-# answers with a correct call example, which costs one round and teaches the
-# field, so this tool guesses no key.
-ARGV_STRING_NOTE = (
-    "argv arrived as a JSON-encoded string and was parsed into an array; "
-    "send argv as a real JSON array of strings, not a string containing one"
-)
-ARGV_SHELL_NOTE = (
-    "argv arrived as one command string, so it was run as "
-    '["bash", "-lc", "<that command line>"] -- pipes, redirections, globs, '
-    "`&&` and $VAR are the shell's, and an argv array is what runs without one"
-)
-ARGV_ONE_ELEMENT_NOTE = (
-    "argv held a single element that was itself a whole command line, so the "
-    "one-element array was unwrapped"
-)
+# and the repair is named in the result in one short sentence (a command
+# string is more than half of all calls, so the note rides on most results);
+# only the over-long element is refused, with the recipe that replaces it. A
+# command sent under another key is not a wrapper of the command but a wrong
+# field name: the schema names ``argv`` and answers with a correct call
+# example, which costs one round and teaches the field, so this tool guesses
+# no key.
+ARGV_STRING_NOTE = "argv was a JSON-encoded string; it ran as the array it holds"
+ARGV_SHELL_NOTE = "argv was a command string; it ran under bash -lc"
+ARGV_ONE_ELEMENT_NOTE = "argv's one element was a whole command line; it ran under bash -lc"
 ARGV_TOO_LONG_HINT = (
     f"each argv element is at most {SHELL_ARGV_MAX_CHARS} chars: write the "
     "script to a file with write_file (e.g. notes/probe.py) and run "
@@ -81,45 +73,6 @@ _SHELLS = frozenset({"sh", "bash", "dash"})
 _DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?")
 _ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
 _SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&"})
-READ_ONLY_COMMANDS = {
-    "awk",
-    "cat",
-    "cut",
-    "du",
-    "file",
-    "find",
-    "grep",
-    "head",
-    "jq",
-    "less",
-    "ls",
-    "nl",
-    "pwd",
-    "rg",
-    "sort",
-    "stat",
-    "tail",
-    "wc",
-}
-SEARCH_COMMANDS = {"ag", "ack", "find", "grep", "locate", "rg", "which", "whereis"}
-LIST_COMMANDS = {"du", "ls", "tree"}
-SHELL_NEUTRAL_COMMANDS = {"echo", "printf", "true", "false", ":"}
-WRITE_COMMANDS = {
-    "apply_patch",
-    "chmod",
-    "chown",
-    "cp",
-    "dd",
-    "install",
-    "ln",
-    "mkdir",
-    "mv",
-    "rm",
-    "rmdir",
-    "tee",
-    "touch",
-    "truncate",
-}
 
 
 def _shell_input_schema(timeout_seconds: float) -> dict[str, object]:
@@ -147,42 +100,24 @@ def _shell_description(
     timeout_seconds: float, max_timeout_seconds: float, max_output_chars: int
 ) -> str:
     return (
-        "Run one bounded foreground command in the injected network-disabled "
-        "Agent sandbox. Send `argv` either as a JSON array of strings, which runs "
-        'directly with no shell (["python", "-c", "print(1)"]), or as one command '
-        'string, which runs as ["bash", "-lc", "<that command line>"] so pipes, '
-        "redirections, globs, `&&` and $VAR work as written "
-        '("ls output | wc -l"). A one-element array holding a whole command line, '
-        "and the array sent as one JSON-encoded string, are read the same way; the "
-        "result names whichever repair was applied. "
-        "Each argv element is at most "
-        f"{SHELL_ARGV_MAX_CHARS} chars: put longer code in a file with write_file "
-        '(e.g. notes/probe.py) and run ["python", "notes/probe.py"]. '
-        "`cwd` and every path must stay inside the workspace (relative, no `..`); "
-        "`skills/` is read-only for shell too (write_skill/delete_skill are its only writers). "
-        "The one path outside the workspace this tool may run is the read-only signal screen "
-        f"`{SCREENING_TOOL_MOUNT}` (e.g. [\"python\", \"{SCREENING_TOOL_MOUNT}\", \"--help\"]); "
-        "it is a bind mount outside every file-tool root, so read_file/grep/glob cannot open it. "
-        "These are real sandbox filesystem paths under the workspace root, which the "
-        "sandbox mounts at /mnt/agent/workspace and this tool enters as `.`; the file "
-        "tools (read_file/write_file/edit_file/grep/glob) address the same files as a "
-        "`root` name plus a path relative to it, reject that absolute form, and read a "
-        "leading `workspace/` as that root name (dropping it unless a real `workspace/` "
-        "directory exists) while shell always takes it literally — so keep script paths "
-        "free of that prefix. "
-        f"`timeout_seconds` defaults to {timeout_seconds:g} and is at most {max_timeout_seconds:g}; "
-        "the command runs in the foreground and is killed at the timeout, so validate a "
-        "script on a sample of dates/stocks first. Work longer than one call either runs "
-        "as foreground chunks that each finish within the cap, or as a detached job: start "
-        "it with setsid (nohup optional) so it leaves the call's process group, with "
-        "stdin, stdout and stderr redirected to files under the workspace, have it checkpoint its intermediate results there (they persist), "
-        "and check on it in later calls by reading its log. A detached job keeps running "
-        "after the command returns, outside the timeout, until the session container "
-        "ends; a model server such as `vllm serve` bound to 127.0.0.1 is started the same "
-        "way. stdout and stderr over "
-        f"{max_output_chars} chars come back as an inline head plus `<stream>_tail`, with the "
-        "full stream spilled to a file: `<stream>_spill.result_hint` gives the read_file call "
-        "for the omitted lines. Write large outputs to a workspace file and read them selectively."
+        "Run one bounded foreground command in the network-disabled sandbox, from the "
+        "workspace directory. `argv` is a JSON array of strings, run directly with no "
+        'shell (["python", "-c", "print(1)"]), or one command string, run under '
+        "`bash -lc` so pipes, redirections, globs, `&&` and $VAR work. Each element is "
+        f"at most {SHELL_ARGV_MAX_CHARS} chars: write longer code to a file and run "
+        '["python", "notes/probe.py"]. `cwd` and every path stay inside the workspace '
+        "(relative, no `..`); `skills/` is read-only here too. The one outside path it "
+        f"may run is the read-only signal screen `{SCREENING_TOOL_MOUNT}`, which no file "
+        "tool can open. "
+        f"`timeout_seconds` defaults to {timeout_seconds:g} and is at most "
+        f"{max_timeout_seconds:g}; the command is killed at the timeout, so try a script "
+        "on a sample of dates/stocks first. Longer work runs as chunks that each finish in time, or as a "
+        "detached job: start it with setsid, stdin, stdout and stderr redirected to "
+        "workspace files, checkpoint there and read its log in later calls; it runs past "
+        "the timeout until the session container ends (a `vllm serve` on 127.0.0.1 "
+        f"starts the same way). stdout and stderr over {max_output_chars} chars come back "
+        "as an inline head plus `<stream>_tail`; the whole stream is spilled and "
+        "`<stream>_spill.result_hint` gives the read_file call for the omitted lines."
     )
 
 
@@ -253,19 +188,19 @@ class SandboxShellTool:
         """
 
         self._repair.note = None
-        notes: list[str] = []
         argv = arguments.get("argv")
+        note = None
         if isinstance(argv, str):
             argv, note = _argv_from_string(argv)
-            notes.append(note)
             arguments = {**arguments, "argv": argv}
         elif (lone := _lone_command_line(argv)) is not None:
             argv, note = _argv_from_string(lone)
-            notes.extend((ARGV_ONE_ELEMENT_NOTE, note))
+            if note == ARGV_SHELL_NOTE:
+                note = ARGV_ONE_ELEMENT_NOTE
             arguments = {**arguments, "argv": argv}
         if isinstance(argv, list):
             _reject_long_argv_elements(argv)
-        self._repair.note = "; ".join(notes) or None
+        self._repair.note = note
         return arguments
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -290,9 +225,6 @@ class SandboxShellTool:
         record = result.to_record()
         self._bound_stream(record, "stdout", result.stdout, capture_cut=result.stdout_truncated)
         self._bound_stream(record, "stderr", result.stderr, capture_cut=result.stderr_truncated)
-        # Audit statistics only; permissions stay with the sandbox, the
-        # filesystem and the tool registry's post-finish write lock.
-        record["command_kind"] = _classify_command(argv)
         reminder = _stderr_suppression_reminder(argv)
         if reminder:
             record["stderr_suppression_reminder"] = reminder
@@ -585,36 +517,6 @@ def _skip_duration(args: list[str]) -> list[str]:
     if args and _DURATION_RE.fullmatch(args[0]):
         return args[1:]
     return args
-
-
-def _classify_command(tokens: Sequence[str]) -> str:
-    """Best-effort audit label only; permissions are enforced by Docker/filesystem.
-
-    A command line runs as ``bash -lc <script>``, whether the Agent wrote that
-    array or this tool built it from a command string, so the label comes from
-    the script's first command; labelling every such call by its shell would
-    say nothing about what ran.
-    """
-    if tokens and _basename(str(tokens[0])).lower() in _SHELLS:
-        script = _shell_c_script(tokens)
-        if script is not None:
-            tokens = _first_command_tokens(script)
-    words = [_basename(token) for token in tokens if token and not token.startswith("-")]
-    if not words:
-        return "unknown"
-    meaningful = [word for word in words if word not in SHELL_NEUTRAL_COMMANDS]
-    if not meaningful:
-        return "neutral"
-    first = meaningful[0]
-    if first in WRITE_COMMANDS:
-        return "write"
-    if first in SEARCH_COMMANDS:
-        return "search"
-    if first in LIST_COMMANDS:
-        return "list"
-    if first in READ_ONLY_COMMANDS:
-        return "read"
-    return "unknown"
 
 
 def _stderr_suppression_reminder(tokens: Sequence[str]) -> str | None:

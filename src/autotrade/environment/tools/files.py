@@ -23,7 +23,7 @@ from autotrade.environment.artifacts import (
 )
 
 from .base import ToolError, ToolResult, ToolSpec
-from .workspace import ROOT_RELATIVE_PATH_RULE, SafeWorkspace
+from .workspace import SafeWorkspace
 
 MAX_WRITE_CHARS = 200_000
 _PATH = {"type": "string", "minLength": 1, "maxLength": 500}
@@ -34,10 +34,7 @@ WRITABLE_ROOTS = ("workspace", "output", "models")
 _ROOT = {
     "type": "string",
     "enum": list(WRITABLE_ROOTS),
-    "description": (
-        "Optional, same convention as read_file: `output` = output/, `models` = models/, "
-        "`workspace` (default) = the workspace root; read-only roots are refused."
-    ),
+    "description": "Writable root; default workspace.",
 }
 
 
@@ -122,11 +119,9 @@ class _WorkspaceWriteTool:
 class WriteFileTool(_WorkspaceWriteTool):
     spec = ToolSpec(
         "write_file",
-        "Create or overwrite a UTF-8 text file in the strategy workspace "
-        "(formal code under output/, drafts elsewhere, text metadata under models/). "
-        "`path` is relative to the workspace root, or to the optional writable `root`. "
-        "Binary model weights are still written with shell/python. "
-        + ROOT_RELATIVE_PATH_RULE,
+        "Create or overwrite a UTF-8 text file in the workspace: formal code under "
+        "output/, drafts elsewhere, text metadata under models/. Binary model weights "
+        "are written with shell.",
         {
             "type": "object",
             # No schema-level maxLength: the size refusal is raised in invoke()
@@ -158,14 +153,10 @@ class WriteFileTool(_WorkspaceWriteTool):
 class EditFileTool(_WorkspaceWriteTool):
     spec = ToolSpec(
         "edit_file",
-        "Replace exact UTF-8 text in an existing strategy workspace file; "
-        "old_text must match the current content uniquely unless replace_all is set. "
-        "`path` is relative to the workspace root, or to the optional writable `root`; "
-        "there is no offset/limit (edits match text, not lines). "
-        "Tool calls in one assistant turn are applied in the order you list them, so a "
-        "second edit to the same file must match what the first edit left behind: prefer "
-        "one edit per file per turn, or rewrite the whole file with write_file. "
-        + ROOT_RELATIVE_PATH_RULE,
+        "Replace exact text in an existing UTF-8 workspace file: `old_text` must match "
+        "the current content once, unless `replace_all` is set. Calls in one turn apply "
+        "in order, so a second edit to the same file must match what the first left "
+        "behind: prefer one edit per file per turn, or rewrite the file with write_file.",
         {
             "type": "object",
             "properties": {

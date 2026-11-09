@@ -578,7 +578,6 @@ def _retained_tool_fields(content: str) -> dict[str, object]:
         return {}
     retained: dict[str, object] = {}
     allowed = {
-        "command_kind",
         "error",
         "node_id",
         "offset",

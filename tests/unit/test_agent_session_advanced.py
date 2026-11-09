@@ -120,7 +120,6 @@ class LongResultShell(DeclaredReadOnlyShell):
                 "stdout": "row\n" * 10_000,
                 "stderr": "",
                 "timed_out": False,
-                "command_kind": "read",
             },
         )
 
@@ -480,7 +479,7 @@ def test_a_read_of_the_trace_root_is_traced_as_a_stub(tmp_path: Path):
     traced = {payload["tool_call_id"]: payload["result"] for event, payload in events if event == "tool_call"}
     assert "content" not in traced["r1"]["value"]
     assert traced["r1"]["value"]["trace_read"]["content_chars"] > 0
-    assert traced["r1"]["value"]["line_count"] == 2
+    assert traced["r1"]["value"]["total"] == 2
     assert "secret numbers" not in json.dumps(traced["r1"])
     assert "plain note" in traced["r2"]["value"]["content"]
     # The conversation itself still carries what was read.
@@ -784,10 +783,7 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
     assert summary["source_omitted"] is True
     assert "sha256" not in summary
     assert {"head", "tail", "retained_fields"} <= summary.keys()
-    assert summary["retained_fields"] == {
-        "value.timed_out": False,
-        "value.command_kind": "read",
-    }
+    assert summary["retained_fields"] == {"value.timed_out": False}
     assert set(summary) == {
         "observation",
         "note",

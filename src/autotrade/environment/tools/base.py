@@ -100,7 +100,7 @@ class ToolSpec:
     description: str
     input_schema: Mapping[str, object]
     mutating: bool = False
-    # One correct call, echoed in every schema error for this tool so the
+    # One correct call, appended to every schema error for this tool so the
     # model can fix the shape in its next call instead of guessing.
     example: Mapping[str, object] | None = None
 
@@ -287,17 +287,12 @@ class ToolRegistry:
             result = tool.invoke(validated)
         except ToolSchemaError as exc:
             # A shape error is self-correcting: the message carries one
-            # correct call for this tool.
+            # correct call for this tool, once; a tool that named the specific
+            # fix keeps it in ``retry_hint``.
             message = str(exc)
             if tool.spec.example is not None:
                 example = json.dumps(tool.spec.example, ensure_ascii=False)
                 message = f"{message}; correct call example: {example}"
-                hint = f"correct call example: {example}"
-                # A tool that named the specific fix keeps it; the example is
-                # appended so every shape error still carries one correct call.
-                exc.retry_hint = (
-                    hint if exc.retry_hint is None else f"{exc.retry_hint}; {hint}"
-                )
             return ToolResult(False, value=exc.to_record(), error=message)
         except ToolError as exc:
             # Structured failure detail rides back with the message so the Agent
