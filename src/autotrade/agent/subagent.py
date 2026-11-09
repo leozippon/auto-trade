@@ -66,11 +66,7 @@ from .compact import (
     fit_tool_results_to_context,
     safe_error_summary,
 )
-from .prompts import (
-    TOOL_PATH_CHEAT_SHEET,
-    TOOL_READ_ONLY_SCREEN_NOTE,
-    TOOL_WRITE_CHEAT_SHEET,
-)
+from .prompts import FILE_PATH_RULE, PATH_RULES_BULLET
 
 SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
 # Read-compatible aliases from older traces and prompts, each mapped to the
@@ -251,76 +247,57 @@ def _role_schema_text() -> str:
     return "；".join(lines) + "。"
 
 
-_WRITE_PROMPT = """\
+# One role prompt for both roles (Pi's agent-definition layout): an identity
+# line, the boundaries every child shares, the writing role's additions, and
+# the report cap. The path rules are the session prompt's own (prompts.py), so
+# a child reads the convention its parent does. The writing role's lines are
+# an example-based cheat sheet: both sub-agent models kept passing ``shell``
+# argv as one string and mixing up roots and relative paths despite the
+# curated skills.
+_ROLE_PROMPT = """\
 # 身份
-你是研究会话的一级 `{role}` sub-agent：{mission}。你可用已注入工具修改共享策略、模型或 skills，但父 Agent 独占正式回测（`validate`）、`test` 与候选选择。
+你是研究会话的一级 `{role}` sub-agent：{mission}。{capability}
 
 # 边界
-- 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。有复用价值、而挂载的技能库与数据引用里还没有的知识写入 skill，而不是堆入策略或汇报。
-- 只完成父任务；不得再委托子代理、读取研究年末之后的数据、安装依赖、替父 Agent 提问或伪造结果。分钟和竞价不是策略时钟。
-- 实现或评估候选时严格按 task 的规格实现：不得静默回退或改动 task 的设定，做不到就如实汇报；汇报里的数据事实（行数、字段、统计量、错误原文）逐字给出，不只给概括。
-{tool_calls}
-- 工具 schema 决定实际能力。同一回合的只读调用并发执行；写、检查与 shell 按因果顺序分回合调用。每次 shell 调用都是有界的前台命令，到超时即被终止；更长的工作可以用 `setsid`（可加 `nohup`）脱离启动，stdin、stdout、stderr 都重定向到工作区文件并写检查点，之后读它的日志看进度，汇报里写明它的日志与产出路径（父会话起的本机模型服务可以直接请求）。不用 sleep/等待包装，不隐藏错误；shell 写入工作区的文件会保留。全市场逐股或全历史的计算先在抽样上验证脚本，中间结果落盘。
-- 工作区是父 Agent 与并行子代理共用的同一棵实时目录树：没有各自的副本，也没有结束时的回并，你的写入即时生效且不可撤销。只在 task 给定的路径下创建、修改与删除，并在汇报里写明删了什么。
-- 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
+- 先读 `inputs/skills_index.json`，证据从已挂载的数据、单位引用、制品与参考材料里找；skill 脚本不自动执行。
+{paths}
+- 根 `trace` 是本会话的 transcript（只读）；`/mnt/tools/screen.py` 不在任何读文件根内，只能经 `shell` 运行。
+- 不委托子代理，不读研究年末之后的数据，不安装依赖，不伪造结果；以 `[父代理指令]` 开头的消息是父 Agent 的补充要求，优先于原 task。{writes}
 
 # 返回
-用简洁中文说明结论、实际修改、关键证据和剩余风险，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一个回合去读：表格、逐列清单、代码与日志写进工作区 `notes/<topic>/` 下的文件，汇报只给结论、关键数字和这些文件的路径。\
+用简洁中文给出{report}，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，{overflow}\
 """
 
-_READ_PROMPT = """\
-# 身份
-你是研究会话的一级只读 `{role}` sub-agent：{mission}。只调查父任务并返回证据；不能写策略、models 或 skills，也不能回测或 `test`。
-
-# 边界
-- 先读 `inputs/skills_index.json`，再从已挂载数据、单位引用、制品和参考材料中自主发现任务所需证据；skill 脚本不自动执行。
-{tool_calls}
-- 工具 schema 决定实际能力；同一回合的多个只读调用并发执行。不得再委托子代理、读取研究年末之后的数据、安装依赖或伪造结果；分钟和竞价不是策略时钟。
-- 运行中收到以 `[父代理指令]` 开头的消息时，它是父 Agent 的补充要求，优先于原 task。
-
-# 返回
-用简洁中文说明结论、关键证据、限制和建议，然后停止。汇报只有前 {report_cap} 个字符直接送到父 Agent，超出的部分它要另花一个回合去读：不抄录原文，给结论、关键数字和出处（根名、路径与行号），父 Agent 需要时自己去读。\
-"""
+_WRITE_LINES = """
+- 写：`write_file`/`edit_file` 只写 `workspace`/`output`/`models`，草稿与中间结果放 `notes/<topic>/`；同一文件每回合只 `edit_file` 一次，下一次编辑匹配改后的内容。
+- `shell`：`{"argv": ["python", "notes/probe.py"], "cwd": "."}` 直接执行，整行命令字符串按 `["bash", "-lc", "<该命令行>"]` 执行，多行脚本先写成文件再按路径运行，不隐藏错误。每次调用到超时即被终止，更长的工作用 `setsid` 脱离启动、输出重定向到工作区文件，之后读它的日志。
+- 严格按 task 的规格实现：不得静默回退或改动 task 的设定，做不到就如实汇报。
+- 工作区是父 Agent 与并行子代理共用的同一棵实时目录树，写入即时生效且不可撤销：只在 task 给定的路径下创建、修改与删除，并在汇报里写明删了什么。"""
 
 # The single place the sub-agent mechanism is explained to the model; the
-# system prompt only points here. Modeled on Pi's Agent tool description.
+# system prompt only says children run in the background. Modeled on Pi's
+# Agent tool description: purpose, the three call shapes with the one rule of
+# each, then defaults and caps. What a field means is its schema description
+# (``resume`` takes agent and task, ``text`` is delivered as a ``[父代理指令]``
+# message, ``max_turns`` and ``thinking`` state the grace turns and the
+# fallback to the role default), and the roles are the generated ``agent``
+# field (``_role_schema_text``), so neither is restated here.
 AGENT_TOOL_DESCRIPTION = (
     "启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。"
-    "三种调用形状，参数名以下面为准：\n"
-    "1. launch（省略 action 或 action=launch）：{\"agent\": <角色>, \"task\": <完整任务>}，"
-    "可选 description、max_turns、thinking、inherit_context。"
-    "用于读库、探索、计算、样板实现或审计等能独立完成的任务：把大量阅读与计算留在子代理里以保护主上下文；"
-    "目标已知的单个文件直接用 read_file/grep/glob；不要重复子代理正在做的搜索。"
-    f"同一回合可发起多个（默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队），可写的子代理同样可以并行；"
-    "并行的子代理范围须互斥，每个只写 task 指定的路径；"
-    "返回值列出正在运行和排队的子代理（task_id、角色、description），已在进行的范围不要再启动一次。\n"
-    "2. resume（不是 action，是 launch 的一个参数）：{\"agent\": <与原来相同的角色>, \"task\": <后续任务>, "
-    "\"resume\": <已完成子代理的 task_id>}。让一个已完成的子代理在自己的对话上继续新的 task（保留它读过的上下文）；"
-    "仍在运行或未知的 task_id 会被拒绝，action=resume、只给 task_id、或省略 agent/task 都是错误形状。"
-    "只在后续任务确实需要它已有的上下文时 resume；独立的后续工作另起并行的全新子代理，不要串成 resume 链。\n"
-    "3. message（action=message）：{\"action\": \"message\", \"task_id\": <运行中或排队的 task_id>, \"text\": <指令>}。"
-    "给一个仍在运行的子代理发中途指令：立即返回 status=queued，"
-    "指令在它下一回合模型调用前作为一条 `[父代理指令]` 消息送达（尚未开始的排队子代理在第一回合前收到），"
-    "它的 subagent_completed 里 steers/steers_undelivered 记送达与未送达条数。"
-    "只在需要改变范围、追加刚发现的约束或让它提前收尾汇报时使用；不为催促而发，"
-    "后续任务用 resume 或新子代理，已完成的子代理不能 message。\n"
-    # Roles are not described here: the same tool payload carries the generated
-    # per-role table on the ``agent`` property (``_role_schema_text``); a
-    # hand-written copy could only drift from SUBAGENT_ROLE_TABLE.
-    "回合与思考：子代理拥有自己模型的完整上下文窗口、按该窗口推导的压缩阈值和与你相同的输出上限（达到阈值时自动压缩，不会因上下文写满而失败），"
-    f"可以承担较大的有界块；省略 max_turns 时最多 {DEFAULT_SUBAGENT_MAX_TURNS} 回合：倒数第 {SUBAGENT_GRACE_TURNS} 回合起收到收尾提示，"
-    "到上限后强制一次简洁总结。几个并行的有界子代理仍好过一个很长的串行子代理；确需更多回合时显式给 max_turns。"
-    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，适合需要判断的审计、设计与实现；"
-    "有界的机械工作（按给定路径读取并摘录、跑一段已写好的脚本、逐文件核对）显式降到 low/medium："
-    f"每回合输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，把它全部耗在思考里而发不出工具调用的一个回合只得到最多 "
-    f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后该次委托记为 error。"
-    "thinking 与 max_turns 由你按次决定，生效顺序：本次调用参数 > 角色默认（见 agent 字段） > 全局默认"
-    f"（{DEFAULT_SUBAGENT_THINKING}、{DEFAULT_SUBAGENT_MAX_TURNS} 回合）；生效值记入该子代理的 subagent_task 事件。\n"
-    f"汇报：最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长的汇报只内联开头（summary_truncated=true），"
-    "全文落盘并以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号，不是字符数）；"
-    "子代理的角色提示里写着这个上限：可写的子代理把长材料写进工作区文件、汇报给路径，只读的子代理给出处而不抄原文。"
-    "模型服务方拒绝子代理的某次请求（内容过滤）时，它立即以 status=refused 结束、没有汇报，error 给出服务方原文："
-    "任务没有完成，换一种表述重新委托或自己完成。"
+    "能独立完成的阅读、计算、实现或审计交给子代理以保护主上下文；目标已知的单个文件自己用 read_file/grep/glob 读。\n"
+    "- launch：{\"agent\": <角色>, \"task\": <完整任务>}，可选 description、max_turns、thinking、inherit_context。"
+    "同一回合可发起多个，可写的子代理同样可以并行，但范围须互斥、各只写 task 指定的路径；返回值列出运行与排队中的子代理，不要重复已在进行的范围。\n"
+    "- resume：{\"agent\": <原角色>, \"task\": <后续任务>, \"resume\": <已完成子代理的 task_id>}，是 launch 的参数而不是 action；"
+    "只在后续任务需要它已有的上下文时用，独立的后续工作另起新的子代理，不要串成 resume 链。\n"
+    "- message：{\"action\": \"message\", \"task_id\": <运行或排队中的 task_id>, \"text\": <指令>}，立即返回 status=queued；"
+    "只用于改变范围、追加新发现的约束或让它提前收尾，不为催促而发。\n"
+    f"- 默认与上限：默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队；max_turns 默认 {DEFAULT_SUBAGENT_MAX_TURNS} 回合，"
+    "几个并行的有界子代理好过一个很长的串行子代理。"
+    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，有界的机械工作降到 low/medium：每回合输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，"
+    f"全耗在思考里的回合只有 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
+    f"汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长时只内联开头（summary_truncated=true），"
+    "全文以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号）。"
+    "服务方拒绝请求时子代理以 status=refused 结束、没有汇报，error 是服务方原文：任务没有完成，换种表述重新委托或自己做。"
 )
 
 AGENT_TOOL_SPEC = ToolSpec(
@@ -475,22 +452,29 @@ def allowed_subagent_tools(role: str | None = None) -> frozenset[str]:
 
 def subagent_system_prompt(role: str) -> str:
     spec = subagent_role(role)
-    # The example-based tool-calling cheat sheet has one source (prompts.py); a
-    # read-only role sees the path lines and who runs the screen script, a
-    # writing role the write and shell lines as well.
-    if spec.shell:
-        template = _WRITE_PROMPT
-        tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_WRITE_CHEAT_SHEET}"
-    else:
-        template = _READ_PROMPT
-        tool_calls = f"{TOOL_PATH_CHEAT_SHEET}\n{TOOL_READ_ONLY_SCREEN_NOTE}"
     # The child is told the inline cap its report is delivered under: 44 % of
     # one turn's reports ran past it unaware and cost the parent a spill read.
-    return template.format(
+    if spec.shell:
+        lines = {
+            "capability": "你可以修改共享的策略、模型与 skills；正式回测（`validate`）、`test` 与候选选择归父 Agent。",
+            "paths": PATH_RULES_BULLET,
+            "writes": _WRITE_LINES,
+            "report": "结论、实际修改、关键证据（数据事实逐字）和剩余风险",
+            "overflow": "表格、清单、代码与日志写进工作区 `notes/<topic>/` 下的文件，汇报给路径。",
+        }
+    else:
+        lines = {
+            "capability": "只调查并返回证据：不能写文件、执行 shell、回测或 `test`。",
+            "paths": f"- {FILE_PATH_RULE}。",
+            "writes": "",
+            "report": "结论、关键证据、限制和建议",
+            "overflow": "不抄录原文，给出处（根名、路径与行号）。",
+        }
+    return _ROLE_PROMPT.format(
         role=role,
         mission=spec.mission,
-        tool_calls=tool_calls,
         report_cap=SUBAGENT_REPORT_MAX_CHARS,
+        **lines,
     )
 
 

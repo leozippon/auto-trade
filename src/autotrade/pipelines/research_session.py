@@ -1516,11 +1516,14 @@ def research_geometry_record(
     that end on its anchor day: ``input_window`` is the session's view, and
     each year's ``input_window`` is that of the view its replay starts from,
     anchored the day before the year starts. The validation years' dates are
-    stated so the session knows what its tests reveal; the periods after the
-    last year exist and are hidden, and neither their dates nor their slots
-    are named anywhere a session can read. The prompt's run section reads
-    ``research_period``, ``validation_period``, ``step``, ``steps``,
-    ``steps_tested``, ``test_horizon`` and ``years`` (``agent/prompts.py``).
+    stated (``validation_period``, and every year in ``years``, from which
+    the acceptance facts count the validation years; the run facts list the
+    research years alone) so the session knows what its tests reveal; the
+    periods after the last year exist and are hidden, and neither their dates
+    nor their slots are named anywhere a session can read. The prompt's run
+    section reads ``research_period``, ``validation_period``, ``step``,
+    ``steps``, ``steps_tested``, ``test_horizon`` and ``years``
+    (``agent/prompts.py``).
     """
 
     def input_window(end: str) -> str:
@@ -1546,15 +1549,6 @@ def research_geometry_record(
         "steps": steps.count,
         "steps_tested": steps_tested,
         "test_horizon": steps.horizon_after(steps_tested),
-        "validation_note": (
-            "the session's data view (decision_time, input_window) ends on the last day of "
-            "the research years and stays there for the whole session, and validate replays "
-            "spans inside the research years only. The validation years reach the session "
-            "only through test results: each test replays its candidate from the validation "
-            "start to the end of the next step, the new test horizon, and returns the results "
-            "step by step (acceptance_rules.validation); test_horizon is the day the tests have "
-            "reached, the end of the research years before the first test"
-        ),
         "years": [
             {
                 "label": year.label,

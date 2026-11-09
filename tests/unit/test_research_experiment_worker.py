@@ -477,9 +477,8 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     received = _facts(system_prompts[0])
     previewed = _facts(str(build_prompt_preview(experiment, "research", "", repo_root=repo)["prompt"]))
     assert set(previewed) == set(received)
-    for block in ("budgets", "research_scope", "visibility_policy", "broker_replay", "experiment"):
+    for block in ("budgets", "visible_timeline", "visibility_policy", "broker_replay", "experiment"):
         assert set(previewed[block]) == set(received[block]), block
-    assert previewed["research_scope"] == received["research_scope"]
     assert previewed["research_geometry"] == received["research_geometry"]
     assert "session" not in received["identity"]
     assert previewed["artifact_contract"]["start"] == received["artifact_contract"]["start"] == {
@@ -1169,7 +1168,8 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert first["equity_curve"][-1]["trade_date"] <= "20230630"
 
     # The session's facts: one session, started from the template, the
-    # research year and the validation year's dates, no Validation yet.
+    # research year (the geometry's years list it alone) and the validation
+    # period's dates, no Validation yet.
     system = next(
         message.content
         for call in llm.calls
@@ -1179,7 +1179,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     facts = json.loads(system.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert "session" not in facts["identity"] and "earlier_sessions" not in facts
     assert facts["artifact_contract"]["start"]["kind"] == "template"
-    assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1", "Y2"]
+    assert [year["label"] for year in facts["research_geometry"]["years"]] == ["Y1"]
     assert facts["research_geometry"]["research_period"] == "20220701..20230630"
     assert facts["research_geometry"]["validation_period"] == "20230701..20240630"
     assert facts["research_geometry"]["input_window"] == "20210701..20230630"

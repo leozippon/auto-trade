@@ -289,7 +289,6 @@ class SessionFactsTest(unittest.TestCase):
         self.assertEqual(facts["experiment"]["validations_to_date"], 5)
         self.assertEqual(facts["experiment"]["full_span_validations_to_date"], 2)
         self.assertEqual(facts["budgets"]["max_null_controls"], 3)
-        self.assertIn("cause: environment", facts["budgets"]["validation_failure_note"])
         self.assertEqual(
             facts["artifact_contract"]["start"],
             {
@@ -299,8 +298,6 @@ class SessionFactsTest(unittest.TestCase):
             },
         )
         self.assertIn("significance", facts["artifact_contract"]["acceptance_rules"])
-        self.assertIn("20210701..20240630", facts["research_scope"]["research"])
-        self.assertIn("one research session", facts["research_scope"]["research"])
         # The periods after research end exist and are sealed: no date of them.
         for later in ("2025-07", "202507", "2026", "20260630", "20260930"):
             self.assertNotIn(later, prompt)
@@ -427,15 +424,14 @@ class PromptCompositionTest(unittest.TestCase):
         second_prefix, second_context = second.split(self.MARKER, 1)
         self.assertEqual(first_prefix, second_prefix)
         self.assertNotEqual(first_context, second_context)
-        # Opening paragraph, process, research orientation, readings,
-        # strategy, prohibitions, how to work -- then the environment.
+        # Opening paragraph, how the session advances, research orientation,
+        # readings, boundaries, how to work -- then the environment.
         order = [
             first.index("你是本研究框架的 AI 首席量化研究官"),
-            first.index("# 研究与回测流程"),
+            first.index("# 会话怎样推进"),
             first.index("# 研究取向"),
             first.index("# 读数"),
-            first.index("# 策略"),
-            first.index("# 禁止事项"),
+            first.index("# 不可越过的边界"),
             first.index("# 工作方式"),
             first.index(self.MARKER),
         ]

@@ -318,7 +318,7 @@ class AcceptanceRulesTest(unittest.TestCase):
             sorted(facts), ["forward", "graded_series", "registration", "significance", "validation"]
         )
         self.assertIn(str(verdict.BASELINE_DRAWS), facts["graded_series"])
-        self.assertIn("benchmark.active_information_ratio", facts["graded_series"])
+        self.assertIn("active.information_ratio", facts["graded_series"])
         statistic = facts["significance"]
         self.assertIn("intercept times sqrt(244) over the residual standard deviation", statistic["statistic"])
         self.assertIn("the size leg and the value leg", statistic["statistic"])
@@ -329,12 +329,9 @@ class AcceptanceRulesTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             rules.agent_facts(validation_years=0)
         validation = facts["validation"]
-        self.assertEqual(
-            (validation["research_years"], validation["test_step_months"], validation["validates_per_step"]),
-            (5, 1, 4),
-        )
-        self.assertIn("at most 4 validate calls", validation["validates_per_step_rule"])
-        self.assertIn("no action that ends the session earlier", validation["end"])
+        # The validation block is the three numbers; how test advances the
+        # session is the prompt's and the tool's text.
+        self.assertEqual(validation, {"research_years": 5, "test_step_months": 1, "validates_per_step": 4})
         registration = facts["registration"]
         self.assertEqual(
             sorted(registration),
@@ -344,6 +341,9 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("<= 0.2", registration["max_drawdown"])
         self.assertIn("at every test", registration["checked"])
         self.assertIn("reported, not graded", registration["tracking_mandate"])
+        self.assertIn("stats.benchmark.tracking_error", registration["tracking_mandate"])
+        self.assertIn("exactly one line changed", registration["seed_replicates"])
+        self.assertNotIn("never a gate", statistic["threshold"])
         self.assertIn("multiplied by 3.0", facts["forward"]["reported"])
         self.assertIn("deciding nothing", facts["forward"]["reported"])
         text = json.dumps(facts)
@@ -357,8 +357,12 @@ class AcceptanceRulesTest(unittest.TestCase):
 
         facts = AcceptanceRules(**REQUIRED_RULES).agent_facts(validation_years=1)
         graded = facts["graded_series"]
-        for field in ("benchmark.active_excess", "sub_windows[].active_excess_return", "daily_series"):
+        # The fields a validate row and test's whole_replay carry (WP-B's
+        # projection), not the stored record's names.
+        for field in ("active.excess", "by_year[].active_excess", "validation/active_daily.csv"):
             self.assertIn(field, graded)
+        for stale in ("benchmark.active_", "sub_windows", "daily_series", "residual_reading"):
+            self.assertNotIn(stale, json.dumps(facts))
         text = json.dumps(facts).lower()
         self.assertNotIn("neutral", text)
         self.assertNotIn("graduat", text)

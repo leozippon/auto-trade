@@ -13,10 +13,10 @@ import pytest
 
 from autotrade.agent import subagent as subagent_module
 from autotrade.agent.prompts import (
+    FILE_PATH_RULE,
+    PATH_RULES_BULLET,
     RESUME_INSTRUCTION,
     SESSION_WORKFLOW_SECTION,
-    TOOL_PATH_CHEAT_SHEET,
-    TOOL_WRITE_CHEAT_SHEET,
     build_system_prompt,
 )
 from autotrade.agent.runner import (
@@ -801,9 +801,9 @@ def test_session_and_subagent_prompts_keep_roles() -> None:
     # The pyright how-to assertion lives in test_sandbox_pyright.py. The
     # sub-agent roles reach the parent through the `agent` schema's role
     # table, and how to delegate is the parent's own call, so the system
-    # prompt names only the tool.
+    # prompt says only that children run in the background.
     parent = build_system_prompt(experiment_facts={})
-    assert "`agent`" in parent
+    assert "子代理在后台运行" in parent
     assert "`test`" in parent
     assert "通常优先" not in parent
     for stale in (
@@ -1038,7 +1038,7 @@ def test_single_subagent_role_can_finish() -> None:
 def test_general_prompts_explain_the_role() -> None:
     writer = subagent_system_prompt("general-purpose")
     assert "一级 `general-purpose`" in writer
-    assert "修改共享策略、模型或 skills" in writer
+    assert "修改共享的策略、模型与 skills" in writer
     assert "有界的实现、计算或检查任务" in writer
     # Writers share one live tree with the parent and sibling children: no
     # private copy, no merge-back, so writes stay inside the task's paths.
@@ -1073,35 +1073,53 @@ def test_each_role_writes_its_report_within_the_inline_cap() -> None:
 def test_subagent_prompts_carry_the_path_and_argv_contract() -> None:
     """Both sub-agent models failed the same two tool contracts in ~3% of
     calls (absolute /mnt paths to read_file, argv as one string, stale
-    edit_file old_text), 6-12 times per session despite the curated skills: the
-    role prompt carries an example-based cheat sheet with one source in
-    prompts.py, whatever the task says."""
+    edit_file old_text), 6-12 times per session despite the curated skills:
+    the role prompt carries the session prompt's own path rules (one source,
+    prompts.py) and, for the writing role, an example-based shell and edit
+    cheat sheet, whatever the task says."""
 
     writer = subagent_system_prompt("general-purpose")
     reader = subagent_system_prompt("Explore")
+    assert PATH_RULES_BULLET in SESSION_WORKFLOW_SECTION and PATH_RULES_BULLET in writer
     for prompt in (writer, reader):
-        assert TOOL_PATH_CHEAT_SHEET in prompt
-        assert '{"root": "artifacts", "path": "data_summary.json"}' in prompt
-        assert "不接受 `/mnt/...` 绝对路径" in prompt
-        assert "`workspace/notes/x.md` 即 root=`workspace`、path=`notes/x.md`" in prompt
+        assert FILE_PATH_RULE in prompt
+        assert '{"root": "workspace", "path": "notes/x.md"}' in prompt
+        assert "不接受绝对路径" in prompt
+        assert "根 `trace` 是本会话的 transcript" in prompt
         assert "/mnt/tools/screen.py" in prompt
-    assert TOOL_WRITE_CHEAT_SHEET in writer
+    # The read-only role has no shell: no shell path rule and no argv.
+    assert "脚本路径不带 `workspace/` 前缀" not in reader
+    assert "argv" not in reader
+    assert "不能写文件、执行 shell" in reader
     assert '{"argv": ["python", "notes/probe.py"], "cwd": "."}' in writer
     # Since a bare command string runs through bash -lc, the cheat sheet is
     # directional: it says which shape does what, not which one is refused.
     assert "会被拒绝" not in writer
     assert '整行命令字符串按 `["bash", "-lc", "<该命令行>"]` 执行' in writer
-    assert "管道、重定向、通配、`&&` 与 `$VAR` 照写生效" in writer
-    assert "先 `write_file` 写成文件再按路径运行" in writer
+    assert "多行脚本先写成文件再按路径运行" in writer
+    assert "`setsid` 脱离启动" in writer
     assert "`notes/<topic>/`" in writer
-    assert "第二次编辑必须匹配前一次编辑之后的内容" in writer
+    assert "同一文件每回合只 `edit_file` 一次" in writer
     # A writer implements a candidate as the task specifies it and reports
     # data facts verbatim; a read-only role carries no implementation rule.
     assert "不得静默回退或改动 task 的设定" in writer
     assert "不得静默回退或改动 task 的设定" not in reader
-    # A read-only role has no shell, so it is told who runs the screen instead.
-    assert "argv" not in reader
-    assert "只能由父 Agent 或可执行子代理经 `shell` 运行" in reader
+    # Both roles share one body: the boundaries every child keeps and the
+    # report cap are stated once in each prompt.
+    for prompt in (writer, reader):
+        assert "不委托子代理，不读研究年末之后的数据，不安装依赖，不伪造结果" in prompt
+        assert prompt.count(str(SUBAGENT_REPORT_MAX_CHARS)) == 1
+        assert "`[父代理指令]`" in prompt
+
+
+def test_the_subagent_surfaces_stay_within_their_size_targets() -> None:
+    """The ``agent`` description rides in every parent call and a role prompt
+    in every child call: each states its rules once within a fixed budget, so
+    prose does not creep back into what every call re-sends."""
+
+    assert len(AGENT_TOOL_DESCRIPTION) <= 1_100
+    assert len(subagent_system_prompt("general-purpose")) <= 1_300
+    assert len(subagent_system_prompt("Explore")) <= 650
 
 
 def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
@@ -1142,8 +1160,11 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
         in AGENT_TOOL_SPEC.description
     )
     assert "可写的子代理同样可以并行" in AGENT_TOOL_SPEC.description
-    assert "subagent_completed" in SESSION_WORKFLOW_SECTION
-    assert "不要轮询" in SESSION_WORKFLOW_SECTION
+    # The session prompt says only that children run in the background; how
+    # their results arrive and that they are not polled is the tool's text.
+    assert "子代理在后台运行，结果以消息送回" in SESSION_WORKFLOW_SECTION
+    assert "subagent_completed" in AGENT_TOOL_SPEC.description
+    assert "不要轮询" in AGENT_TOOL_SPEC.description
     assert "Sleep" not in SESSION_WORKFLOW_SECTION
 
 
@@ -2686,7 +2707,7 @@ def test_agent_tool_schema_through_the_registry() -> None:
         "description", "max_turns", "thinking", "inherit_context", "resume",
     }
     assert schema["properties"]["agent"]["enum"] == list(SUBAGENT_ROLES)
-    for phrase in ("subagent_completed", "resume", "不要轮询", "action=message"):
+    for phrase in ("subagent_completed", "resume", "不要轮询", '"action": "message"'):
         assert phrase in spec.description
     # Role capabilities ride on the ``agent`` property, generated from the role
     # table; the description does not carry a second, hand-written copy.
@@ -2873,13 +2894,13 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     continuations = f"最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写"
     for phrase in (
         "thinking 默认 xhigh",
-        "显式降到 low/medium",
+        "降到 low/medium",
         "机械工作",
         f"{AGENT_MAX_OUTPUT_TOKENS} token",
-        continuations,
+        f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写",
         "不要串成 resume 链",
-        "action=message",
         "不为催促而发",
+        "status=refused",
     ):
         assert phrase in AGENT_TOOL_DESCRIPTION
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
@@ -2898,14 +2919,13 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
         assert phrase not in AGENT_TOOL_DESCRIPTION
     for role in SUBAGENT_ROLES:
         assert f"{role}：" in agent_field["description"]
-    # The three call shapes are separate, labelled parts carrying their exact
+    # The three call shapes are separate, labelled bullets carrying their exact
     # argument names; resume is a launch parameter, never an action.
     for shape in (
-        "1. launch（省略 action 或 action=launch）",
-        "2. resume（不是 action",
-        '"resume": <已完成子代理的 task_id>',
-        "action=resume、只给 task_id",
-        "3. message（action=message）",
+        '- launch：{"agent": <角色>, "task": <完整任务>}',
+        '- resume：{"agent": <原角色>, "task": <后续任务>, "resume": <已完成子代理的 task_id>}',
+        "是 launch 的参数而不是 action",
+        '- message：{"action": "message", "task_id": <运行或排队中的 task_id>, "text": <指令>}',
     ):
         assert shape in AGENT_TOOL_DESCRIPTION
     assert "没有 resume 这个 action" in AGENT_TOOL_SPEC.input_schema["properties"]["action"]["description"]
@@ -3210,11 +3230,11 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     assert SubAgentConfig().max_turns == 48
     assert "48 回合" in AGENT_TOOL_DESCRIPTION and "24 回合" not in AGENT_TOOL_DESCRIPTION
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]["description"]
-    assert "48 回合" in max_turns_field and "自动压缩" in max_turns_field
-    # Parents learn that a child has their context window, and that several
-    # bounded parallel children still beat one long serial child.
-    assert "自己模型的完整上下文窗口" in AGENT_TOOL_DESCRIPTION
-    assert "并行的有界子代理仍好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
+    # Parents learn that a child has their context window (the field's text),
+    # and that several bounded parallel children still beat one long serial
+    # child.
+    assert "48 回合" in max_turns_field and "子代理的上下文与你同样大并自动压缩" in max_turns_field
+    assert "并行的有界子代理好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
 
     busy = ScriptedLLM(
         [
@@ -4170,8 +4190,9 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
     for bad in (0, -1, True, "3"):
         with pytest.raises(ValueError, match="max_turns"):
             resolve_subagent_max_turns(bad, "Explore", 48)
-    # The tool text states the precedence and the ranges.
-    assert "本次调用参数 > 角色默认" in AGENT_TOOL_DESCRIPTION
+    # The fields state the fallback to the role default and the ranges.
+    for field in ("max_turns", "thinking"):
+        assert "省略时按角色默认" in AGENT_TOOL_SPEC.input_schema["properties"][field]["description"]
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]
     assert max_turns_field["minimum"] == 1 and "max_llm_calls 的一半" in max_turns_field["description"]
     assert "off/low/medium/xhigh" in AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]

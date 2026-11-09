@@ -1352,13 +1352,13 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         "`context.bars` is an evaluation-interval market surface, not the complete strategy input history",
     ):
         assert rule in reference, rule
-    prohibitions = prompt[prompt.index("# 禁止事项") :]
+    boundaries = prompt[prompt.index("# 不可越过的边界") :]
     for rule in (
-        "读取研究年末之后的数据",
-        "使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录",
-        "伪造工具结果",
+        "不读取研究年末之后的数据",
+        "不使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录",
+        "不伪造工具结果",
     ):
-        assert rule in prohibitions
+        assert rule in boundaries
     facts = build_experiment_facts(
         manifest={
             "kind": "research",
@@ -1370,12 +1370,14 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
     assert facts["visibility_policy"]["visible_research_period"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_the_research_years"]
+    # The hidden periods are the prompt's process section, stated once.
+    assert "after_the_research_years" not in facts["visibility_policy"]
+    assert "读数不回到会话" in prompt
 
 
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted():
     prompt = build_system_prompt(experiment_facts={})
-    assert "从日期、路径、元数据和模型自身的知识推断之后的行情" in prompt
+    assert "不从日期、路径、元数据或模型自身的知识推断之后的行情" in prompt
     # The shell's foreground cap and its detached-job recipe are the tool's
     # own description, not a second copy in the prompt.
     assert "as a detached job" in SandboxShellTool.spec.description

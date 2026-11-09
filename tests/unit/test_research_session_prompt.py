@@ -209,59 +209,93 @@ def test_retired_tools_are_absent_from_every_role() -> None:
         assert not hasattr(tools_package, retired)
 
 
+# The static part's headings, in the order the prompt reads them (Pi and
+# Claude Code's layout: who, how the session advances, the orientation, how
+# the work is read, the hard boundaries, how to work).
+STATIC_HEADINGS = (
+    "# 会话怎样推进",
+    "# 研究取向",
+    "# 读数",
+    "# 不可越过的边界",
+    "# 工作方式",
+)
+
+
+def test_the_static_prompt_reads_in_its_sections_without_the_retired_test_gate() -> None:
+    """The owner wants research to go on through the validation period: the
+    orientation no longer asks for directions compared before the first test,
+    and that wording cannot return."""
+
+    stable = _full_prompt().split("# 环境")[0]
+    assert stable.startswith("你是本研究框架的 AI 首席量化研究官")
+    places = [stable.index(f"\n{heading}\n") for heading in STATIC_HEADINGS]
+    assert places == sorted(places)
+    assert [line for line in stable.splitlines() if line.startswith("# ")] == list(STATIC_HEADINGS)
+    for retired in ("之后再开始测试", "充分比较多个方向", "# 研究与回测流程", "# 禁止事项", "# 策略"):
+        assert retired not in stable, retired
+
+
 def test_the_prompt_states_the_research_and_backtesting_process() -> None:
-    """The static part says who the Agent is, the process it is engaged in and
+    """The static part says who the Agent is, how the session advances and
     the rules that matter, each once; the numbers are the run section's."""
 
     prompt = _full_prompt()
     stable = prompt.split("# 环境")[0]
-    process = stable[stable.index("# 研究与回测流程") : stable.index("# 研究取向")]
+    process = stable[stable.index("# 会话怎样推进") : stable.index("# 研究取向")]
     orientation = stable[stable.index("# 研究取向") : stable.index("# 读数")]
-    readings = stable[stable.index("# 读数") : stable.index("# 策略")]
+    readings = stable[stable.index("# 读数") : stable.index("# 不可越过的边界")]
+    boundaries = stable[stable.index("# 不可越过的边界") : stable.index("# 工作方式")]
+    workflow = stable[stable.index("# 工作方式") :]
     assert "AI 首席量化研究官（AI Chief Quantitative Research Officer）" in stable
     # Research on the visible years, whose data view never moves; each test
-    # extends the backtest one step and reveals it through its results; then
+    # extends the backtest one step, reveals it through its results and
+    # restarts the validate allowance; research goes on between tests; then
     # the host-run Forward and Held-out stages, then Paper.
     for clause in (
-        "研究期分两段：研究年与验证期",
-        "你能读到的数据止于研究年末，整个会话都不变",
-        "验证期的数据不会挂载，只通过 `test` 的结果一步一步揭开",
+        "你能读到的数据止于研究年末，整个会话不变",
+        "验证期的数据不挂载，只随每次 `test` 的结果揭开一步",
         "用 `validate` 在研究年内回测",
-        "`test` 把一个候选从验证期起点回测到下一步的终点并返回结果，这一步的结果记入本实验的验证记录",
-        "测试终点推进一步",
-        "已记入验证记录的条目不会改写",
-        "验证期最后一步测试完，会话结束，最后测试的候选定版",
+        "`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录",
+        "测试终点前进一步，`validate` 的次数重新计",
+        "测试期间研究照常：继续探索新方向、改进候选",
+        "有更好的就在下一步换上",
+        "换候选只花一次回放；已记入记录的条目不改写",
+        "最后一步测完会话结束，最后测试的候选定版",
         "会话不能主动结束",
-        "宿主用最后测试的候选跑完剩下的步",
-        "运行 Forward 与 Held-out 两个阶段，读数不回到会话",
-        "是否进入 Paper（每日出单、人工交易）由运营者决定",
+        "宿主用最后测试的候选跑完剩余的步",
+        "运行 Forward 与 Held-out，读数不回到会话",
+        "是否进入 Paper 由运营者决定",
         "`fit` 与 `REFIT_PERIOD`",
     ):
         assert clause in process, clause
-    # The host reads the record; the statistic and its threshold; no pass or fail.
+    # The host reads the record; the statistic and its threshold; readings,
+    # not verdicts.
     for clause in (
         "宿主读的是验证记录",
         "随机选股对照组合",
         "残差信息比率",
         "z(1−α)/√年数",
-        "会话里没有通过或不通过",
         "是读数，不是判决",
     ):
         assert clause in readings, clause
     # The owner's orientation: innovative, deep strategies over textbook style
     # factors, with rule scoring as the baseline, and the budget spent on
-    # comparing directions in the research years before testing.
+    # research through the research years and the validation period alike.
     for clause in (
         "有创新性、有深度的策略，而不是教科书式的风格因子组合",
         "学习型模型、预训练模型与嵌入",
         "简单的规则打分只作基线对照，不作为目标",
-        "不以提前结束为目标",
-        "在研究年里充分比较多个方向、迭代改进之后再开始测试",
+        "研究年与验证期都是研究的时间，回放的等待不计入推理时间，不以提前结束为目标",
     ):
         assert clause in orientation, clause
-    assert "参考工作区、研究方向与研究者指令都不能放宽它们" in stable
-    assert "读取研究年末之后的数据" in stable and "模型自身的知识" in stable
-    assert "验证期只通过 `test` 的结果了解" in stable
+    assert "参考工作区、研究方向与研究者指令都不能放宽它们" in boundaries
+    assert "不读取研究年末之后的数据" in boundaries and "模型自身的知识" in boundaries
+    assert "验证期只通过 `test` 的结果了解" in boundaries
+    # The working method points at the contract and states the path
+    # conventions once, for every file tool and the shell.
+    assert "只读的 `output/README.md`" in workflow
+    assert '`{"root": "workspace", "path": "notes/x.md"}`' in workflow
+    assert "脚本路径不带 `workspace/` 前缀" in workflow
     assert "## 本实验的研究方向（用户注入）\n方向约束研究什么，不约束怎样做" in prompt
     # The retired action set and its wording are gone from every surface the
     # session reads under this contract: no registration or finishing action, no
@@ -345,12 +379,14 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     # because every finishing text asked for them first; none does now.
     for surface in surfaces.values():
         assert "写好 skills" not in surface and "写进 skills" not in surface
-    # The run facts open their block with an index of their keys, and say
-    # they are a snapshot the session does not see updated.
+    # The run facts open their block with an index of their keys, say they
+    # are a snapshot the session does not see updated, and name the file the
+    # same facts are in; no package list is promised.
     facts = prompt[prompt.index("## 运行事实") : prompt.index("```json")]
-    assert "会话中不更新" in facts
-    for fact in ("`budgets`", "`research_geometry`", "`artifact_contract`"):
+    assert "会话中不更新" in facts and "inputs/session_context.json" in facts
+    for fact in ("budgets（", "research_geometry（", "artifact_contract.acceptance_rules（"):
         assert fact in facts, fact
+    assert "已装依赖" not in facts
 
 
 # What the session surfaces call the experiment, its control portfolio, its
@@ -431,8 +467,8 @@ def test_the_contract_quotes_no_forward_figure_and_names_only_real_row_fields() 
 
 def _run_facts(**geometry: object) -> dict[str, object]:
     """Facts carrying what the run section reads, at a five-year research and
-    five-year validation geometry with quarterly steps; ``years`` lists every
-    year of the geometry, as the record does."""
+    five-year validation geometry with quarterly steps; ``years`` lists the
+    research years, as the facts do."""
 
     from autotrade.pipelines.verdict import residual_threshold
 
@@ -440,7 +476,7 @@ def _run_facts(**geometry: object) -> dict[str, object]:
         "research_geometry": {
             "test_horizon": "20200731",
             "research_period": "20150801..20200731",
-            "years": [{"label": f"Y{index}", "end": f"{2015 + index}0731"} for index in range(1, 11)],
+            "years": [{"label": f"Y{index}", "end": f"{2015 + index}0731"} for index in range(1, 6)],
             "validation_period": "20200801..20250731",
             "step": "quarter",
             "steps": 20,

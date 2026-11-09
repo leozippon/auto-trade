@@ -371,8 +371,6 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
     assert (budgets["strategy_cpus"], budgets["strategy_memory_bytes"]) == (16.0, 64 * 1024**3)
     assert budgets["strategy_state_disk_bytes"] == 8 * 1024**3
     assert budgets["strategy_inference_timeout_seconds"] == 1080.0
-    note = budgets["strategy_container_note"]
-    assert "16 个 CPU" in note and "都设为 16" in note and "内存上限 64 GiB" in note
     with pytest.raises(ValueError, match="strategy_memory must be a positive Docker memory limit"):
         start(strategy_memory="64 GB")
     with pytest.raises(ValueError, match="strategy_state_disk must be a positive Docker memory limit"):

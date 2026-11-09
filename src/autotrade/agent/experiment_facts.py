@@ -3,7 +3,9 @@
 ``build_experiment_facts`` is the visibility contract for what a research
 session may know about its own run (budgets, snapshot windows, broker replay
 policy, artifact contract, runtime tools). Pure data shaping —
-the prompt text that wraps it lives in ``prompts.py``.
+the prompt text that wraps it lives in ``prompts.py``. The facts hold values
+and structured definitions; a rule the system prompt or a tool description
+already states is not repeated here as prose.
 """
 
 from __future__ import annotations
@@ -19,70 +21,9 @@ from autotrade.environment.dividend_tax import (
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import regression_method
-from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT, container_thread_env
+from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
 
 EXPERIMENT_FACTS_SCHEMA_VERSION = 2
-
-# Agent-visible clock contract for ``budgets.deadline_seconds``, read from the
-# injected facts; every replay tool pauses the clock,
-# while shell and sub-agent waits do not and must not be named here.
-DEADLINE_SECONDS_NOTE = (
-    "`deadline_seconds` 统计可暂停的有效推理时间；"
-    "`smoke_backtest`、`validate` 和 `run_null_control` "
-    "调用期间暂停计时，"
-    "因此会话总墙钟可能更长。"
-)
-
-# Agent-visible rule for the two strategy clocks under batch fan-out. The
-# environment, not the strategy, creates the contention a batch adds, so both
-# caps move with it (pipelines.session_tools._batch_replay_timeouts).
-BATCH_VALIDATE_FIT_TIMEOUT_NOTE = (
-    "`validate` 并发回测期间，`strategy_fit_timeout_seconds` 与单次推断上限"
-    "`strategy_inference_timeout_seconds` 都按本批实际并发路数成倍放大（路数取本批候选数与 "
-    "`batch_validate_max_concurrency` 中较小的一个，3 路即 3 倍），"
-    "因为并发是环境引入的、不该记到策略头上；单个候选的调用两者都用基准值。"
-)
-
-# How a failed candidate's replay is read (pipelines.session_tools.ValidateTool).
-VALIDATION_FAILURE_NOTE = (
-    "回测失败的候选按失败归属记录：策略自身抛错，策略容器越过内存上限 `strategy_memory_bytes` "
-    "被 OOM kill（exit 137，那次回测没有峰值读数），以及状态目录越过磁盘上限 `strategy_state_disk_bytes`，"
-    "都是策略自己的失败（行内 `cause: strategy`）；"
-    "环境失败（行内 `cause: environment`，如策略超时、共享 GPU 被别的进程占走、沙箱没起来）"
-    "没有测出候选的任何信息——原样重投是合理的。"
-)
-
-
-def strategy_container_note(cpus: float, memory_bytes: int) -> str:
-    """What one candidate's replay runs on, in one passage beside its numbers.
-
-    A fact, not advice: how to use the cores and cards is the session's call,
-    which a reference workspace may suggest. The CPU quota and memory cap are the
-    experiment's strategy container's own (``SandboxConfig.spec``, as the run manifest
-    carries them) and the thread variables are rendered by
-    ``container_thread_env``, the very code the executor builds each strategy
-    container's flags from, so the passage cannot drift from what a replay
-    gets; the other per-experiment numbers (cards, batch width) are named by their
-    budgets keys. The structure it states is the executor's: a ``fit``-bearing
-    strategy gets a second container with the same boundary, called before that
-    day's decision (``replay.engine``), and a batch's legs run concurrently, one
-    card each in turn (``session_tools.leg_cards``).
-    """
-
-    threads = container_thread_env(cpus)["OMP_NUM_THREADS"]
-    memory_gib = memory_bytes / 1024**3
-    return (
-        "每个候选回测时，`generate_orders` 在一个策略容器里运行；定义了 `fit` 的候选另起一个边界相同的容器专跑 `fit`，"
-        "同一天先 `fit` 后决策，两者不同时计算。"
-        f"每个容器各有 {cpus:g} 个 CPU 的配额（`strategy_cpus`），"
-        f"`OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 与 `NUMEXPR_NUM_THREADS` 都设为 {threads}，"
-        f"内存上限 {memory_gib:g} GiB（`strategy_memory_bytes`），"
-        "并挂本实验的 `strategy_gpu_count` 张卡（为 0 时全在 CPU 上）：卡型与每张的显存在会话里用 `nvidia-smi` 看，"
-        "显存与同卡的其他腿、会话里起的进程共用。"
-        "一次 `validate` 至多同时回测 `batch_validate_max_concurrency` 个候选，各有自己的容器；"
-        "单独的回测挂全部卡，并排回测的候选轮流各挂一张，多于卡数时几条腿同卡。"
-    )
-
 
 # ``runtime_tools.sandbox_gpus`` of a Sandbox without cards; the prompt's
 # orientation reads the same fact (``prompts.build_system_prompt``).
@@ -117,18 +58,6 @@ SEARCH_ROOT_SHELL_NOTE = (
     "（Step 产物树即 `/mnt/artifacts/steps`）。只有根 `trace` 在容器里没有路径，"
     "transcript 只能用 `read_file`/`grep` 读。"
 )
-
-# What a session knows about the data past its research years: the validation
-# period by its dates (``research_geometry.validation_period``), whose data is
-# never mounted and which reaches the session only through test results, one
-# step at a time; the periods after the geometry's last year only as hidden,
-# never their dates, slots or results.
-HIDDEN_PERIODS_NOTE = (
-    "研究年之后是验证期（research_geometry.validation_period）：会话的数据视图止于研究年末且整个会话不变，"
-    "验证期的数据不挂载，只通过每次 `test` 的结果逐步揭开，测试终点之后的结果不进入会话；"
-    "验证期之后是前推期与 Held-out，由宿主在会话结束后回测，其日期与读数不进入任何会话。"
-)
-
 
 def build_experiment_facts(
     *,
@@ -196,15 +125,11 @@ def build_experiment_facts(
         },
         "visibility_policy": {
             "visible_research_period": True,
-            "after_the_research_years": HIDDEN_PERIODS_NOTE,
             "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
         },
-        "research_geometry": _as_mapping(manifest.get("research")) or None,
+        "research_geometry": _research_geometry(manifest),
         "visible_timeline": _visible_timeline(
             data_summary=data_summary, snapshot_config=snapshot_config
-        ),
-        "research_scope": _research_scope(
-            manifest=manifest, snapshot_config=snapshot_config
         ),
         # The experiment's state at session start: nothing registered yet, and the
         # Validations earlier attempts recorded. ``False`` and zero counts are
@@ -237,6 +162,20 @@ def build_experiment_facts(
     return compact_mapping(facts)
 
 
+def _research_geometry(manifest: Mapping[str, object]) -> dict[str, object] | None:
+    """The manifest's research geometry with the research years alone in
+    ``years``: the validation years reach the session as
+    ``validation_period`` and through ``test``, and the manifest keeps every
+    year because the acceptance facts count the validation years off it."""
+
+    geometry = _as_mapping(manifest.get("research"))
+    if not geometry:
+        return None
+    research_end = str(geometry["research_period"]).split("..")[1]
+    years = [year for year in _as_list(geometry.get("years")) if str(_as_mapping(year)["end"]) <= research_end]
+    return {**geometry, "years": years}
+
+
 def _visible_timeline(
     *,
     data_summary: Mapping[str, object],
@@ -251,69 +190,19 @@ def _visible_timeline(
             ),
             "validation_intraday_scope": "historical_pit_features_and_exact_execution_prices",
             "execution_policy": _execution_policy(data_summary),
+            "universe_screen": _universe_screen(snapshot_config),
         }
     )
 
 
-def _research_scope(
-    *,
-    manifest: Mapping[str, object],
-    snapshot_config: Mapping[str, object],
-) -> dict[str, object]:
-    """One sentence each on the research period, the universe and the cadence."""
-    research = _as_mapping(manifest.get("research"))
-    period = research.get("research_period")
-    research_sentence = (
-        f"The experiment's one research session researches the period {period}, one "
-        "complete year per label, on a data view that ends there for the whole "
-        "session, then lives through the validation period "
-        "(research_geometry.validation_period) one test step at a time, seeing it "
-        "only through the test results; it ends when the test horizon reaches its end, "
-        "and the candidate of the last test is the "
-        "registered strategy. No other session follows; the host then replays the registered "
-        "strategy over the periods after the geometry's last year and records the "
-        "readings."
-        if period
-        else None
-    )
+def _universe_screen(snapshot_config: Mapping[str, object]) -> dict[str, object]:
+    """The screen the decision view's universe is built under, its active
+    settings only: absent for the default, unfiltered universe (every listed
+    A share on all boards, ST names and new listings included), which the
+    strategy filters itself."""
+
     screen = _as_mapping(snapshot_config.get("universe_screen"))
-    active = {
-        key: value
-        for key, value in screen.items()
-        if value not in (None, False, 0, [], ())
-    }
-    if active:
-        universe = (
-            "The universe is screened when the decision view is built "
-            f"({', '.join(f'{key}={value}' for key, value in active.items())}); "
-            "the strategy may filter further."
-        )
-    else:
-        universe = (
-            "The universe is unfiltered: every listed A share on all boards, ST "
-            "names included and no new-listing exclusion; the strategy applies its "
-            "own universe filters."
-        )
-    schedule = _as_mapping(manifest.get("schedule"))
-    period_name = str(schedule.get("period") or "day")
-    inference_time = schedule.get("inference_time")
-    when = (
-        "every trading day"
-        if period_name == "day"
-        else f"on the first available trading day of each {period_name}"
-    )
-    cadence = (
-        f"generate_orders is called {when} at {inference_time}; the strategy chooses "
-        "its own rebalance cadence by returning no orders on days it does not want to "
-        "trade."
-    )
-    return compact_mapping(
-        {
-            "research": research_sentence,
-            "universe": universe,
-            "strategy_cadence": cadence,
-        }
-    )
+    return {key: value for key, value in screen.items() if value not in (None, False, 0, [], ())}
 
 
 def _snapshot_windows(snapshot_config: Mapping[str, object]) -> dict[str, object]:
@@ -364,8 +253,6 @@ def _budget_facts(
     context_compaction: Mapping[str, object] | None,
 ) -> dict[str, object]:
     budgets = _as_mapping(manifest.get("budgets"))
-    cpus = budgets.get("strategy_cpus")
-    memory_bytes = budgets.get("strategy_memory_bytes")
     return compact_mapping(
         {
             # Pausable effective reasoning time: the main deadline PLUS the
@@ -374,7 +261,6 @@ def _budget_facts(
             # ``deadline_grace_seconds`` later than the one its directive and
             # wrap-up prompt talk about.
             "deadline_seconds": budgets.get("deadline_seconds"),
-            "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
             "deadline_grace_seconds": budgets.get("deadline_grace_seconds"),
             "max_llm_calls": max_llm_calls or budgets.get("max_llm_calls"),
             "max_api_spend_usd": budgets.get("max_api_spend_usd"),
@@ -382,7 +268,6 @@ def _budget_facts(
             # (``AcceptanceRules.validates_per_step``), which the prompt's run
             # section reads from here.
             "validates_per_step": budgets.get("validates_per_step"),
-            "validation_failure_note": VALIDATION_FAILURE_NOTE,
             # Host null controls the session may request before it selects,
             # minutes of replay each; every run_null_control result says what is left.
             "max_null_controls": budgets.get("max_null_controls"),
@@ -412,24 +297,17 @@ def _budget_facts(
             # thread count has the real number instead of a guess: a session
             # that guessed low spent two backtest slots on fit timeouts it had
             # the cores to avoid.
-            "strategy_cpus": cpus,
+            "strategy_cpus": budgets.get("strategy_cpus"),
             # The memory ceiling of that same container, in the unit a replay
             # reports its measured peak in (``resources.peak_memory_bytes``).
             # The session container carries the same ceiling, so a fit profiled
             # under `shell` is measured against the number the formal replay
             # will enforce rather than extrapolated across two boundaries.
-            "strategy_memory_bytes": memory_bytes,
+            "strategy_memory_bytes": budgets.get("strategy_memory_bytes"),
             # The disk the replay's state directory may hold, measured after
             # every call, in the unit a replay reports its own in
             # (``resources.peak_state_bytes``); past it the backtest fails.
             "strategy_state_disk_bytes": budgets.get("strategy_state_disk_bytes"),
-            # The two containers per candidate, their threads and cards, and
-            # the batch's concurrent legs, in one passage.
-            "strategy_container_note": (
-                strategy_container_note(float(cpus), int(memory_bytes))  # type: ignore[arg-type]
-                if cpus is not None and memory_bytes is not None
-                else None
-            ),
             # Replays one validate call runs at once (the experiment's
             # ``batch_validate_max_concurrency``), each with its own strategy
             # container (two when the candidate declares fit). The host is
@@ -438,8 +316,9 @@ def _budget_facts(
             # measured on the strategy's own call and start only once the
             # worker holds the decision inputs, so neither bills container
             # scheduling or host contention to the strategy.
+            # How the two strategy clocks scale with it is the validate
+            # description's rule.
             "batch_validate_max_concurrency": budgets.get("batch_validate_max_concurrency"),
-            "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
             "context_compaction": context_compaction,
         }
     )
@@ -574,7 +453,6 @@ def _runtime_tool_facts(
     return compact_mapping(
         {
             "python": runtime_env.get("python"),
-            "python_packages": dict(_as_mapping(runtime_env.get("python_packages"))),
             "cli_tools_available": available,
             "cli_tools_missing": missing,
             "network_mode": network,

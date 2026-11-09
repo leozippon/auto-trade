@@ -16,12 +16,6 @@ import pandas as pd
 import pytest
 
 from autotrade.agent import prompts
-from autotrade.agent.experiment_facts import (
-    BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
-    DEADLINE_SECONDS_NOTE,
-    VALIDATION_FAILURE_NOTE,
-    strategy_container_note,
-)
 from autotrade.agent.prompts import (
     SESSION_DEFAULT_INSTRUCTION,
     SESSION_DYNAMIC_CONTEXT_HEADER,
@@ -154,7 +148,6 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
     for tool in (
         "validate",
         "test",
-        "agent",
         "report_issue",
         "skill_feedback",
     ):
@@ -172,10 +165,8 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "deadline_seconds": session_deadline_seconds(
             experiment_default("max_research_minutes"), DEFAULT_DEADLINE_GRACE_MINUTES
         ),
-        "deadline_seconds_note": DEADLINE_SECONDS_NOTE,
         "deadline_grace_seconds": DEFAULT_DEADLINE_GRACE_MINUTES * 60.0,
         "validates_per_step": 6,
-        "validation_failure_note": VALIDATION_FAILURE_NOTE,
         "max_null_controls": experiment_default("max_null_controls"),
         "max_llm_calls": experiment_default("max_llm_calls"),
         "max_api_spend_usd": experiment_default("max_api_spend_usd"),
@@ -197,12 +188,10 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_cpus": sandbox.spec.cpus,
         "strategy_memory_bytes": sandbox.spec.memory_bytes,
         "strategy_state_disk_bytes": sandbox.state_disk_bytes,
-        "strategy_container_note": strategy_container_note(sandbox.spec.cpus, sandbox.spec.memory_bytes),
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
-        "batch_validate_fit_timeout_note": BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     }
-    # The research years, read at their end; the validation years are named
-    # as what the tests reveal.
+    # The research years, read at their end, are the geometry's years; the
+    # validation years are named as the period the tests reveal.
     geometry = facts["research_geometry"]
     research, validation = GEOMETRY.split_research(REQUIRED_RULES["research_years"])
     assert geometry["research_period"] == f"{GEOMETRY.research_start}..{research[-1].end}"
@@ -210,7 +199,7 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert geometry["decision_time"] == validation[0].anchor.isoformat()
     assert geometry["test_horizon"] == research[-1].end
     assert (geometry["step"], geometry["steps"], geometry["steps_tested"]) == ("quarter", 12, 0)
-    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3", "Y4"]
+    assert [year["label"] for year in geometry["years"]] == [year.label for year in research] == ["Y1"]
     assert "session" not in facts["identity"]
     assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 0
     # Runtime-only facts are marked, never invented.

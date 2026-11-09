@@ -1,7 +1,8 @@
-"""The run facts a session is told: the research period and the session's
-place in the experiment, universe policy and strategy call cadence — one sentence
-each, with every date after research end absent — plus the budgets and
-decision-input windows the same object publishes."""
+"""The run facts a session is told: values and structured definitions --
+the research geometry with its research years, the budgets, the
+decision-input windows, the universe screen and the call schedule -- with
+every date after research end absent and none of the rules the system prompt
+or a tool description states repeated as prose."""
 
 from __future__ import annotations
 
@@ -12,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent.experiment_facts import (
-    BATCH_VALIDATE_FIT_TIMEOUT_NOTE,
     SEARCH_ROOT_SHELL_NOTE,
     build_experiment_facts,
 )
@@ -20,6 +20,7 @@ from autotrade.agent.prompts import (
     PROTOCOL_INSTRUCTION,
     SESSION_BUDGET_ORIENTATION_BULLET,
     SESSION_GPU_ORIENTATION_BULLET,
+    build_run_section,
     build_system_prompt,
     chinese_duration,
 )
@@ -76,24 +77,62 @@ def _data_summary(rows: dict[str, int]) -> dict[str, object]:
     }
 
 
-def test_the_session_facts_state_the_research_period_and_the_session_place() -> None:
-    facts = _facts()
-    scope = facts["research_scope"]
-    assert "The experiment's one research session researches the period 20210701..20250630" in scope["research"]
-    assert "No other session follows" in scope["research"]
-    assert "validation period" in scope["research"]
-    assert "on a data view that ends there for the whole session" in scope["research"]
-    assert scope["universe"].startswith("The universe is unfiltered")
-    assert "ST names included" in scope["universe"]
-    assert "every trading day at 08:30" in scope["strategy_cadence"]
-    assert "own rebalance cadence" in scope["strategy_cadence"]
+def test_the_session_facts_hold_values_and_leave_the_prompts_prose_out() -> None:
+    """The process, the hidden periods, the failure causes, the clock pauses
+    and the batch's clock scaling are the system prompt's and the tool
+    descriptions'; the facts carry no second copy of them, and no date after
+    the research years."""
+
+    facts = _facts(
+        budgets={**CONTAINER, "deadline_seconds": 43800.0, "batch_validate_max_concurrency": 3}
+    )
+    assert "research_scope" not in facts
+    assert facts["visibility_policy"] == {
+        "visible_research_period": True,
+        "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
+    }
     assert "session" not in facts["identity"]
-    assert facts["visibility_policy"]["visible_research_period"] is True
-    assert "不进入任何会话" in facts["visibility_policy"]["after_the_research_years"]
+    # The budgets are numbers and the compaction map, never a sentence.
+    budgets = facts["budgets"]
+    assert budgets["batch_validate_max_concurrency"] == 3
+    assert not [key for key, value in budgets.items() if isinstance(value, str)]
     rendered = json.dumps(facts, ensure_ascii=False)
     for later in ("2026", "202507", "2025-07"):
         assert later not in rendered
     assert '"s4"' not in rendered
+
+
+def test_the_geometry_fact_lists_the_research_years_alone() -> None:
+    """The validation years reach the session as ``validation_period`` and
+    through ``test``; the facts' ``years`` are the years ``validate`` can
+    replay, which the run section counts, while the manifest keeps every year."""
+
+    from types import SimpleNamespace
+
+    from autotrade.pipelines.config import AcceptanceRules
+    from autotrade.pipelines.research_session import research_geometry_record
+
+    years = [
+        SimpleNamespace(label=f"Y{index}", start=f"{2014 + index}0701", end=f"{2015 + index}0630")
+        for index in range(1, 6)
+    ]
+    record = research_geometry_record(
+        years, research_years=3, test_step_months=3, steps_tested=0, window_months=24
+    )
+    assert [year["label"] for year in record["years"]] == ["Y1", "Y2", "Y3", "Y4", "Y5"]
+    facts = _facts(
+        research=record,
+        acceptance_rules=AcceptanceRules(alpha=0.05, research_years=3).to_record(),
+        budgets={"validates_per_step": 6},
+    )
+    geometry = facts["research_geometry"]
+    assert [year["label"] for year in geometry["years"]] == ["Y1", "Y2", "Y3"]
+    assert geometry["validation_period"] == "20180701..20200630"
+    assert "validation_note" not in geometry
+    # Two validation years beyond the three research years set the threshold.
+    rules = facts["artifact_contract"]["acceptance_rules"]
+    assert rules["significance"]["threshold_over_validation_period"] == 1.163
+    assert "- 研究年：3 个，20150701..20180630；" in build_run_section(facts)
 
 
 def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
@@ -126,7 +165,12 @@ def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
     assert "signal_screen_ref" not in local_facts["source_refs"]
 
 
-def test_a_screened_universe_and_a_monthly_cadence_are_described() -> None:
+def test_a_screened_universe_and_a_monthly_cadence_are_stated_as_values() -> None:
+    """The screen the decision view is built under is a fact only when the
+    experiment sets one, as its active settings; the call schedule is the
+    broker's ``schedule``."""
+
+    assert "universe_screen" not in _facts()["visible_timeline"]
     screened = SnapshotConfig(
         screen_exclude_st=True, screen_exclude_new_listed_days=180, screen_boards=("main",)
     ).to_record()
@@ -134,11 +178,12 @@ def test_a_screened_universe_and_a_monthly_cadence_are_described() -> None:
         snapshot_config=screened,
         schedule={"period": "month", "inference_time": "09:00"},
     )
-    scope = facts["research_scope"]
-    assert scope["universe"].startswith("The universe is screened")
-    assert "exclude_st=True" in scope["universe"]
-    assert "boards=['main']" in scope["universe"]
-    assert "first available trading day of each month at 09:00" in scope["strategy_cadence"]
+    assert facts["visible_timeline"]["universe_screen"] == {
+        "exclude_st": True,
+        "exclude_new_listed_days": 180,
+        "boards": ["main"],
+    }
+    assert facts["broker_replay"]["schedule"] == {"period": "month", "inference_time": "09:00"}
 
 
 def test_both_strategy_wall_clocks_reach_the_session() -> None:
@@ -168,29 +213,6 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
     )["budgets"]
     assert budgets["deadline_seconds"] == 43800.0
     assert budgets["deadline_grace_seconds"] == 600.0
-
-
-def test_the_session_is_told_deadline_seconds_is_pausable_effective_time() -> None:
-    """The session must see the pause clock next to ``deadline_seconds``.
-
-    Every replay tool -- ``smoke_backtest`` and ``run_null_control`` included
-    -- pauses the budget; shell and sub-agent waits do not, and must not be
-    written as exemptions in the sentence the sessions actually read.
-    """
-
-    expected = (
-        "`deadline_seconds` 统计可暂停的有效推理时间；"
-        "`smoke_backtest`、`validate` 和 `run_null_control` "
-        "调用期间暂停计时，"
-        "因此会话总墙钟可能更长。"
-    )
-    facts = _facts(
-        budgets={"deadline_seconds": 43800.0, "deadline_grace_seconds": 600.0}
-    )
-    assert facts["budgets"]["deadline_seconds_note"] == expected
-    for name in ("shell", "subagent", "sub-agent", "子代理"):
-        assert name not in facts["budgets"]["deadline_seconds_note"]
-    assert expected in build_system_prompt(experiment_facts=facts)
 
 
 def test_the_facts_say_where_the_session_started() -> None:
@@ -285,7 +307,7 @@ def test_a_cpu_only_experiment_still_states_its_strategy_gpu_count() -> None:
         }
     )["budgets"]
     assert budgets["strategy_gpu_count"] == 0
-    assert "strategy_gpu_count" not in _facts(budgets={})["budgets"]
+    assert "strategy_gpu_count" not in _facts(budgets={}).get("budgets", {})
 
 
 # The strategy container's boundary as the run manifest carries it: the
@@ -311,12 +333,8 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     )["budgets"]
     assert budgets["strategy_cpus"] == 16.0
     assert budgets["batch_validate_max_concurrency"] == 5
-    # The width alone would mislead: the fit clock the batch is judged against
-    # scales with it, so the rule travels with the number.
-    assert budgets["batch_validate_fit_timeout_note"] == BATCH_VALIDATE_FIT_TIMEOUT_NOTE
     assert "strategy_cpus" in build_system_prompt(experiment_facts=_facts(budgets=CONTAINER))
-    bare = _facts(budgets={})["budgets"]
-    assert "strategy_cpus" not in bare and "strategy_container_note" not in bare
+    assert "strategy_cpus" not in _facts(budgets={}).get("budgets", {})
 
 
 def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
@@ -334,21 +352,6 @@ def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
     # How to probe a batch before sending it is advice a pack may give, not a
     # run fact.
     assert "smoke_backtest_probe_note" not in budgets
-
-
-def test_the_container_note_renders_from_the_experiments_limits() -> None:
-    """The container passage's numbers are the experiment's own limits as the run
-    manifest carries them, not retyped prose: other limits change the prompt
-    the session reads, thread variables included."""
-
-    prompt = build_system_prompt(experiment_facts=_facts(budgets=CONTAINER))
-    note = _facts(budgets=CONTAINER)["budgets"]["strategy_container_note"]
-    assert "8 个 CPU" in note and "都设为 8" in note and "内存上限 32 GiB" in note
-    assert note in prompt
-    changed = _facts(budgets={"strategy_cpus": 2.5, "strategy_memory_bytes": 16 * 1024**3})
-    note = changed["budgets"]["strategy_container_note"]
-    assert "2.5 个 CPU" in note and "都设为 3" in note and "内存上限 16 GiB" in note
-    assert build_system_prompt(experiment_facts=changed) != prompt
 
 
 def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:

@@ -343,28 +343,33 @@ class AcceptanceRules:
         """The ``acceptance_rules`` run fact, derived from these rules so no
         prompt restates a threshold. ``validation_years`` is how many years
         the experiment's geometry leaves after the research years, for the threshold over
-        the whole validation period. Rules and that count only: the dates of
-        the research and validation years are the research geometry's
+        the whole validation period. Rules, structured definitions and that
+        count only: how ``validate`` and ``test`` advance the session is the
+        prompt's and their descriptions', the dates of the research and
+        validation years are the research geometry's
         (``research_session.research_geometry_record``), and no forward or
         Held-out date appears anywhere a session reads."""
 
         if isinstance(validation_years, bool) or not isinstance(validation_years, int) or validation_years < 1:
             raise ValueError(f"validation_years must be a positive integer, got {validation_years!r}")
 
+        # The mandate limits the strategy's own series, not the active one:
+        # its loadings are in the node's full record, not on a validate row.
         if self.tracking_error_cap is None:
             mandate: object = (
-                "none for this experiment: benchmark.tracking_error and "
-                "benchmark.market_beta are reported, not graded"
+                "none for this experiment: the strategy's own residual tracking error and "
+                "market beta (stats.benchmark.tracking_error and stats.benchmark.market_beta "
+                "in a node's result_ref) are reported, not graded"
             )
         else:
             mandate = {
                 "tracking_error": (
                     f"<= {self.tracking_error_cap}: the node's own residual tracking "
-                    "error against the factor legs (benchmark.tracking_error)"
+                    "error against the factor legs (stats.benchmark.tracking_error in its result_ref)"
                 ),
                 "market_beta": (
                     f"within {self.beta_min}..{self.beta_max} "
-                    "(benchmark.market_beta)"
+                    "(stats.benchmark.market_beta in its result_ref)"
                 ),
                 "role": (
                     "a constraint the book must satisfy over the candidate's span "
@@ -382,13 +387,11 @@ class AcceptanceRules:
                 "one on the same side of the experiment's benchmark_index membership that one "
                 "board lot of that money could buy). Its annualized mean is the active "
                 "excess, its annualized standard deviation the active tracking error "
-                "and their ratio the active information ratio. Every formal validation "
-                "reports them as benchmark.active_excess, "
-                "benchmark.active_tracking_error, benchmark.active_information_ratio "
-                "and benchmark.active_max_drawdown (over the validation's own span), "
-                "per research year as sub_windows[].active_excess_return, and day by "
-                "day as the active_return of its daily_series. The strategy exposes "
-                "nothing for this beyond its orders"
+                "and their ratio the active information ratio: active.excess, "
+                "active.tracking_error and active.information_ratio of a validate row "
+                "and of test's whole_replay, per research year by_year[].active_excess, "
+                "and day by day the node's validation/active_daily.csv. The strategy "
+                "exposes nothing for this beyond its orders"
             ),
             "significance": {
                 "statistic": (
@@ -398,49 +401,17 @@ class AcceptanceRules:
                     f"intercept times sqrt({years}) over the residual standard deviation; "
                     f"years = trading days / {years}"
                 ),
-                "threshold": "z(1 - alpha) / sqrt(years): the level a zero-skill reading reaches with probability alpha; stated beside every reading, never a gate",
+                "threshold": "z(1 - alpha) / sqrt(years): the level a zero-skill reading reaches with probability alpha",
                 "alpha": self.alpha,
                 "threshold_over_one_year": round(verdict.residual_threshold(1.0, self.alpha), 3),
                 "threshold_over_validation_period": round(
                     verdict.residual_threshold(float(validation_years), self.alpha), 3
-                ),
-                "on_spans": (
-                    "every validate row reports it over its own span (residual_reading) "
-                    "with the threshold for that span's length; every test reports it over the "
-                    "validation record so far with the threshold for the record's length"
                 ),
             },
             "validation": {
                 "research_years": self.research_years,
                 "test_step_months": self.test_step_months,
                 "validates_per_step": self.validates_per_step,
-                "test": (
-                    "test(candidate) advances the test horizon one step: the host "
-                    "replays the candidate as a fresh book from the validation start to the "
-                    "new test horizon with its matched random baseline, records the newest step as the "
-                    "validation record's entry for that step and returns the whole replay's "
-                    "statistics, a per-step table, the record to date and its residual "
-                    "statistic. The session's data view stays at the end of the research "
-                    "years, so the validation years reach it only through these results. "
-                    "The candidate must register (registration below) and may change at any step"
-                ),
-                "validates_per_step_rule": (
-                    f"at most {self.validates_per_step} validate calls before the first "
-                    "test and between two tests; a further call is refused until the next test"
-                ),
-                "end": (
-                    "the session ends when the test horizon reaches the end of the validation "
-                    "years; the candidate of the last test is the registered strategy. There is "
-                    "no action that ends the session earlier. If the time, call or spend "
-                    "budget runs out after a test, the host completes the record with the "
-                    "last tested candidate; before any test, with the last registrable "
-                    "full-span candidate"
-                ),
-                "after": (
-                    "the registered strategy and its seed replicates are then replayed by the "
-                    "host over the Forward year and the Held-out months as one book; those "
-                    "readings are recorded, gate nothing and reach no session"
-                ),
             },
             "registration": {
                 "span": f"the candidate replayed the whole research-years span (span={FULL_SPAN})",
@@ -450,16 +421,13 @@ class AcceptanceRules:
                     f"<= {self.max_drawdown}: equity drawdown over the candidate's span"
                 ),
                 "seed_replicates": (
-                    "optional, for any candidate: test's seed_replicates may name other "
-                    "complete full-span Validations of this session, registered as "
-                    "candidates (not controls), each the candidate's bytes with exactly one "
-                    "line changed, an integer assignment to a seed name (SEED, SEED_BASE, "
-                    "or one ending in _SEED or _SEED_BASE; e.g. SEED_BASE = 1000 in the "
-                    "candidate, 2000 in a replicate), and with bytes that differ from every "
-                    "other registered one. A named replicate that is not one refuses the "
-                    "test. The replicates named at the last test are registered beside the "
-                    "strategy and replayed forward with it, and the Forward reading reports "
-                    "them and their mean with the strategy's"
+                    "optional: each replicate test names is a complete full-span candidate "
+                    "(not control) node of this session whose bytes are the candidate's with "
+                    "exactly one line changed, an integer assignment to a seed name (SEED, "
+                    "SEED_BASE, or one ending in _SEED or _SEED_BASE; e.g. SEED_BASE = 1000 in "
+                    "the candidate, 2000 in a replicate), and differ from every other "
+                    "registered one; the replicates named at the last test are registered "
+                    "and replayed forward beside the strategy"
                 ),
                 "tracking_mandate": mandate,
                 "checked": "at every test; a candidate that fails is refused and the test horizon does not move",
