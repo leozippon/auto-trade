@@ -42,6 +42,7 @@ from autotrade.environment.executor import (
     StrategyStateExceeded,
     _run_limited_capture,
     attach_strategy_resources,
+    discard_strategy_state,
     raised_by_strategy,
     strategy_resource_usage,
     strategy_resources_of,
@@ -457,8 +458,11 @@ def test_real_exec_input_reaches_the_payload_in_band_while_stdin_stays_open(tmp_
             ["sh", "-c", "cat; printf end"], cwd=".", timeout_seconds=10, max_output_chars=4_000
         )
         assert (empty.exit_code, empty.stdout, empty.timed_out) == (0, "end", False)
-        failing = sandbox.exec(["sh", "-c", "cat >&2; exit 3"], timeout_seconds=10, input_text="why")
-        assert (failing.returncode, failing.stderr) == (3, "why")
+        failing = runner.run(
+            ["sh", "-c", "cat >&2; exit 3"],
+            cwd=".", timeout_seconds=10, max_output_chars=4_000, input_text="why",
+        )
+        assert (failing.exit_code, failing.stderr) == (3, "why")
     finally:
         sandbox.stop()
 
@@ -535,7 +539,7 @@ def test_real_persistent_timeout_kills_command_only_and_preserves_session(tmp_pa
         assert followup.exit_code == 0
         assert followup.stdout == "retained\nready\n"
         assert (paths.workspace / "timeout-proof.txt").is_file()
-        assert sandbox.exec(["true"], timeout_seconds=5).returncode == 0
+        assert runner.run(["true"], cwd=".", timeout_seconds=5, max_output_chars=4_000).exit_code == 0
     finally:
         sandbox.stop()
 
@@ -877,7 +881,7 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
     )
     sandbox.start()
     try:
-        result = sandbox.exec(
+        result = sandbox.exec_limited(
             [
                 "python",
                 "-c",
@@ -895,8 +899,9 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
                 ),
             ],
             timeout_seconds=15,
+            max_output_chars=4_000,
         )
-        assert result.returncode == 0, result.stderr
+        assert result.exit_code == 0, result.stderr
     finally:
         sandbox.stop()
 
@@ -2095,6 +2100,60 @@ def test_a_state_directory_the_host_cannot_read_fails_rather_than_undercounts(tm
         assert "peak_state_bytes" not in executor.resource_usage()
     finally:
         hidden.chmod(0o700)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root removes any tree from the host")
+def test_a_state_tree_the_host_cannot_empty_is_purged_from_the_replays_own_image(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """What a worker wrote belongs to its subuid, and the host cannot unlock a
+    directory it does not own. The rest is deleted from a container of the
+    replay's boundary -- its Docker, its pinned image, never a pull -- and a
+    purge that outlives its clock is removed by the name it was started under
+    instead of being left running."""
+
+    log = tmp_path / "docker.log"
+    docker = tmp_path / "docker"
+    docker.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*" >> "{log}"\n'
+        'if [ "$1" = run ]; then\n'
+        '  [ -n "$PURGE_HANGS" ] && exec sleep 30\n'
+        '  for arg; do case "$arg" in *:/purge) tree="${arg%:/purge}";; esac; done\n'
+        '  chmod -R u+w "$tree" && rm -rf "$tree"/*\n'
+        "fi\n",
+        encoding="utf-8",
+    )
+    docker.chmod(0o755)
+    spec = SandboxSpec(image="autotrade-sandbox:exp-pinned", docker_executable=str(docker), gpu=None)
+    monkeypatch.setattr(
+        "autotrade.environment.sandbox._unlock_owned_directories", lambda _path: None
+    )
+
+    def written_state(name: str) -> Path:
+        state = tmp_path / name
+        (state / "model").mkdir(parents=True)
+        (state / "model" / "weights.pt").write_bytes(b"w")
+        (state / "model").chmod(0o555)
+        return state
+
+    state = written_state("state")
+    discard_strategy_state(state, spec)
+    assert not state.exists()
+    (run,) = log.read_text(encoding="utf-8").splitlines()
+    assert run.startswith("run --pull never --rm --name admpurge_")
+    assert f"-v {state}:/purge autotrade-sandbox:exp-pinned sh -c " in run
+
+    monkeypatch.setenv("PURGE_HANGS", "1")
+    monkeypatch.setattr("autotrade.environment.sandbox._PURGE_TIMEOUT_SECONDS", 0.5)
+    hung = written_state("hung")
+    try:
+        with pytest.raises(OSError, match="cannot remove strategy state"):
+            discard_strategy_state(hung, spec)
+        run, removed = log.read_text(encoding="utf-8").splitlines()[1:]
+        assert removed == f"rm --force {run.split('--name ')[1].split()[0]}"
+    finally:
+        (hung / "model").chmod(0o755)
 
 
 def test_a_worker_killed_while_starting_stays_a_startup_failure(tmp_path: Path):

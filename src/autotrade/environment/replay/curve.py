@@ -14,6 +14,7 @@ from pathlib import Path
 
 from autotrade.common.records import read_json_object
 
+from .stats import compounded_path
 from .style import STYLE_ARTIFACT_NAME
 
 STRATEGY_LABEL = "策略"
@@ -107,20 +108,14 @@ def benchmark_label(result_file: Path) -> str:
 
 
 def curve_entry(key: str, label: str, rows: list[tuple[str, float]]) -> dict[str, object]:
-    dates: list[str] = []
-    cumulative: list[float] = []
-    drawdown: list[float] = []
-    equity = peak = 1.0
-    for day, value in rows:
-        equity *= 1.0 + value
-        peak = max(peak, equity)
-        dates.append(day)
-        cumulative.append(round(equity - 1.0, 6))
-        drawdown.append(round(equity / peak - 1.0, 6))
+    path = compounded_path(value for _day, value in rows)
+    cumulative = [round(equity - 1.0, 6) for equity, _loss in path]
+    # Drawn as a signed fall below the peak; ``0.0 -`` keeps a peak day at +0.0.
+    drawdown = [round(0.0 - loss, 6) for _equity, loss in path]
     return {
         "key": key,
         "label": label,
-        "dates": dates,
+        "dates": [day for day, _value in rows],
         "cum": cumulative,
         "drawdown": drawdown,
         "final": cumulative[-1] if cumulative else None,

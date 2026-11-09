@@ -133,8 +133,7 @@ class DailyReplayEngine:
         initial_equity = self.broker.profile.initial_cash
         started = perf_counter()
         for trade_date in market.trade_dates:
-            day = date.fromisoformat(f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}")
-            day_end = datetime.combine(day, time.max, tzinfo=CN_TZ)
+            day_end = datetime.combine(date.fromisoformat(trade_date), time.max, tzinfo=CN_TZ)
             inference_at = self.schedule.at(trade_date)
             bars = market.bars_for_day(trade_date)
             due = self.schedule.is_due(trade_date, previous_trade_date)

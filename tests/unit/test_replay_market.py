@@ -315,7 +315,7 @@ def test_market_normalizes_keys_and_rejects_duplicates_and_non_json_values() -> 
         DailyMarketData(infinite)
     with pytest.raises(ValueError, match="missing columns"):
         DailyMarketData(frame.drop(columns=["open"]))
-    with pytest.raises(ValueError, match="invalid trade_date"):
+    with pytest.raises(ValueError, match="invalid date: '2023-13-01'"):
         DailyMarketData(frame.assign(trade_date="2023-13-01"))
     naive = frame.assign(available_at="2023-08-21T17:30:00")
     with pytest.raises(ValueError, match="timezone"):

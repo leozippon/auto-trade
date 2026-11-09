@@ -1,4 +1,13 @@
-"""Configuration for the isolated daily-strategy container."""
+"""The sandbox containers' boundary and the Agent session's container.
+
+``SandboxSpec`` is one container's boundary (image, user, CPU, memory, PIDs,
+scratch, GPUs), shared by the Agent session's persistent container and every
+strategy container; ``SandboxConfig`` adds a strategy container's call limits
+and state quota. ``LocalSandbox`` lays out the host tree the session mounts and
+``DockerSandbox`` runs that session container. Trees containers wrote into are
+removed with ``remove_sandbox_tree``. The strategy container itself is
+``executor.DockerStrategyExecutor``.
+"""
 
 from __future__ import annotations
 
@@ -31,6 +40,7 @@ from .runtime import (
     RUNTIME_CACHE_SUFFIXES,
     SandboxPaths,
     chmod_tree,
+    link_or_copy,
     new_id,
     utc_now_iso,
 )
@@ -81,13 +91,20 @@ def _unlock_owned_directories(path: Path) -> None:
             continue
 
 
-def remove_sandbox_tree(path: Path) -> bool:
-    """Remove one experiment's sandbox directory.
+# Wall clock for the container that deletes what the host cannot; one that
+# outlives it is removed by name.
+_PURGE_TIMEOUT_SECONDS = 300.0
 
-    Host-owned directories are unlocked and removed first. Files the container
+
+def remove_sandbox_tree(path: Path, spec: SandboxSpec | None = None) -> bool:
+    """Remove a directory tree sandbox containers wrote into.
+
+    Host-owned directories are unlocked and removed first. Files a container
     created belong to its subuid, so what remains is deleted from a
-    root-in-userns container that can see those ids. Returns True when the
-    tree is gone.
+    root-in-userns container, which can see those ids, started from ``spec``'s
+    Docker executable and image (an experiment's pinned image) without a pull;
+    without a spec, from ``docker`` and ``DEFAULT_IMAGE``. Returns True when
+    the tree is gone.
     """
 
     target = Path(path)
@@ -101,27 +118,44 @@ def remove_sandbox_tree(path: Path) -> bool:
     drop()
     if not target.exists():
         return True
+    docker = spec.docker_executable if spec is not None else "docker"
+    name = new_id("admpurge")
     try:
         subprocess.run(
             [
-                "docker",
+                docker,
                 "run",
+                "--pull",
+                "never",
                 "--rm",
+                "--name",
+                name,
                 "--user",
                 "0",
                 "--network=none",
                 "-v",
                 f"{target}:/purge",
-                DEFAULT_IMAGE,
+                spec.image if spec is not None else DEFAULT_IMAGE,
                 "sh",
                 "-c",
                 "rm -rf /purge/* /purge/.[!.]* /purge/..?*",
             ],
             capture_output=True,
             text=True,
-            timeout=300,
+            timeout=_PURGE_TIMEOUT_SECONDS,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        # The killed client leaves its container running.
+        try:
+            subprocess.run(
+                [docker, "rm", "--force", name],
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
     except (OSError, subprocess.SubprocessError):
         pass
     drop()
@@ -197,38 +231,20 @@ class SandboxSpec:
     user: str = "61000:61000"
     network: str = "none"
     # The same CPU and memory boundary for the session container and the
-    # strategy container. One size for both means a session that profiles its
-    # ``fit`` under ``shell`` measures against the very ceiling the formal
-    # replay enforces, instead of extrapolating from its own container to a
-    # larger one; the pair is published as the run facts ``budgets.strategy_cpus``
-    # and ``budgets.strategy_memory_bytes``.
-    # Both containers also pass ``memory`` as ``--memory-swap``, which is what
-    # makes the cap a boundary rather than a slope: Docker's default grants a
-    # container as much swap again, and the container then pages instead of
-    # failing. With swap pinned there is no headroom above the cap at all, so
-    # the cap has to be sized for what a ``fit`` actually needs rather than for
-    # what today's experiments happen to use. Measured over the replays on record:
-    # rule-based experiments peak at 3.8 GiB (48% of the former 8 GiB cap), but the
-    # two fit-bearing ML experiments (``alpha158_lgbm``, ``gru_ranker``) peaked
-    # 6.70-7.60 GiB, i.e. 85-95% of it -- a model only slightly larger would be
-    # an OOM kill rather than a slow replay, so the cap went to 16 GiB. An
-    # in-process vLLM engine then took it to 32 GiB: a retrieval experiment's
-    # full-span leg peaked at 14.1 GiB of the 16 (cgroup reading, page cache
-    # included) and its in-context path adds about 2.5 GiB. The cap is a
-    # ceiling, not a reservation: with one session plus three concurrent
-    # validation containers per experiment at the cap, four experiments would
-    # hold 4 x 4 x 32 = 512 GiB, already past the 503 GiB host, which relies
-    # on containers not filling at once. CPU stays at 8: strategy containers
-    # use ~1.1 of the 8 cores and host CPU PSI is 0.
+    # strategy container, so a session that profiles its ``fit`` under ``shell``
+    # measures against the very ceiling the formal replay enforces; the pair is
+    # published as the run facts ``budgets.strategy_cpus`` and
+    # ``budgets.strategy_memory_bytes``. Both containers also pass ``memory`` as
+    # ``--memory-swap``: with no swap above it the cap is a boundary the
+    # container fails at rather than a slope it pages down, so it is sized for
+    # what a ``fit`` needs, an in-process vLLM engine included. It is a
+    # ceiling, not a reservation: the host relies on concurrent containers not
+    # all filling it at once.
     cpus: float = 8.0
     memory: str = "32g"
-    # A fork-bomb guard, not a budget, counting threads as well as processes:
-    # one worker with torch, LightGBM and XGBoost thread pools at the
-    # CPU-derived thread cap plus PyArrow's own pool needs well over the 64
-    # the single-threaded NumPy era allowed, and a vLLM engine run tensor
-    # parallel across two cards peaked at 280 (its engine and two GPU worker
-    # processes), past the 256 this was before. Both containers run the same
-    # engines and have the same guard.
+    # A fork-bomb guard, not a budget. It counts threads as well as processes,
+    # and a vLLM engine run tensor parallel across two cards (its engine and two
+    # GPU worker processes) needs about 280.
     pids: int = 1024
     # ``/tmp``: the session's own default; a strategy container gets
     # ``STRATEGY_TMPFS_SIZE``. Both are charged to the container's own
@@ -376,14 +392,11 @@ class SandboxConfig:
     # call; the pipeline knob ``strategy_fit_timeout_seconds`` sets the latter.
     # Both start only once the worker holds the decision inputs, so neither
     # bills container scheduling or host-side request materialization to the
-    # strategy. The defaults are sized as runaway guards, an hour for either
-    # call (for the inference cap the owner's decision of 2026-11-08): about
-    # 60x the heaviest measured decision on record (a rebalance day of a
-    # cross-sectional LightGBM experiment, median 60.7 s over 49 such days),
-    # so a genuine runaway still dies while neither host contention nor a
-    # heavier method decides a verdict. The system prompt states an
-    # experiment's two values as the floor of the strategy's compute budget
-    # (``prompts.SESSION_BUDGET_ORIENTATION_BULLET``).
+    # strategy. The defaults are runaway guards, an hour for either call: about
+    # 60x the heaviest measured decision, so a genuine runaway still dies while
+    # neither host contention nor a heavier method decides a verdict. The
+    # system prompt states an experiment's two values as the floor of the
+    # strategy's compute budget (``prompts.SESSION_BUDGET_ORIENTATION_BULLET``).
     timeout_seconds: float = 3600.0
     fit_timeout_seconds: float = 3600.0
     # Environment-side bound on bringing one strategy container up to its
@@ -398,10 +411,8 @@ class SandboxConfig:
     # the directory after every ``fit`` and ``generate_orders`` call and fails
     # the replay past it (``executor.StrategyStateExceeded``). 64 GiB is far
     # more than a strategy's working store needs -- a full seven-year panel of
-    # 5,000 stocks with 200 float32 features is about 7 GB -- while three
-    # concurrent replays at the cap stay far below the disks the directories
-    # live on: 1.2 TB free on the local host, 552 TB on the A100 instance's
-    # shared filesystem.
+    # 5,000 stocks with 200 float32 features is about 7 GB -- while concurrent
+    # replays at the cap stay far below the disks the directories live on.
     state_disk: str = "64g"
     # Rendered as ``--label`` on the strategy container; the experiment's
     # labels from ``experiment_container_labels``.
@@ -660,23 +671,6 @@ class DockerSandbox:
         )
         return self.container
 
-    def exec(
-        self,
-        argv: Sequence[str],
-        *,
-        cwd: str = ".",
-        timeout_seconds: float = 30.0,
-        input_text: str | None = None,
-    ) -> subprocess.CompletedProcess[str]:
-        data = (input_text or "").encode("utf-8")
-        command = self._exec_command(argv, cwd=cwd, input_bytes=len(data))
-        with attached_stdin(data) as stdin:
-            return subprocess.run(
-                command,
-                stdin=stdin, capture_output=True, text=True, errors="replace",
-                timeout=timeout_seconds, check=False,
-            )
-
     def exec_limited(
         self,
         argv: Sequence[str],
@@ -744,15 +738,8 @@ def link_copytree(source: str | Path, dest: str | Path) -> Path:
     if dest.exists():
         chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
         shutil.rmtree(dest)
-    shutil.copytree(source, dest, copy_function=_link_or_copy)
+    shutil.copytree(source, dest, copy_function=link_or_copy)
     return dest
-
-
-def _link_or_copy(source: str, dest: str) -> None:
-    try:
-        os.link(source, dest)
-    except OSError:
-        shutil.copy2(source, dest)
 
 
 # Transient caches/tooling dirs are scratch, not experiment artifacts. They are
@@ -809,7 +796,7 @@ def _replace_dir_contents(source: Path, dest: Path) -> None:
         shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
     for child in source.iterdir():
         target = dest / child.name
-        shutil.copytree(child, target, copy_function=_link_or_copy) if child.is_dir() else _link_or_copy(str(child), str(target))
+        shutil.copytree(child, target, copy_function=link_or_copy) if child.is_dir() else link_or_copy(child, target)
     chmod_tree(dest, file_mode=0o444, dir_mode=0o555)
 
 

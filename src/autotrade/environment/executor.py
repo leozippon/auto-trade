@@ -30,6 +30,7 @@ from .pretrained import PretrainedStoreError, require_pretrained_store
 from .sandbox import (
     DockerSandbox,
     SandboxConfig,
+    SandboxSpec,
     container_thread_env,
     remove_sandbox_tree,
 )
@@ -350,15 +351,16 @@ class FittableStrategyExecutor(StrategyExecutor, Protocol):
     def fit(self, context: StrategyContext) -> None: ...
 
 
-def discard_strategy_state(state_dir: Path) -> None:
+def discard_strategy_state(state_dir: Path, spec: SandboxSpec | None = None) -> None:
     """Remove a strategy state directory with everything the strategy wrote.
 
     What a sandbox worker writes belongs to its subuid, and the host cannot
     unlink entries of a directory the worker created, so ``remove_sandbox_tree``
-    deletes what remains from a container. A tree that survives raises.
+    deletes what remains from a container of ``spec``, the boundary the
+    workers ran in. A tree that survives raises.
     """
 
-    if not remove_sandbox_tree(state_dir):
+    if not remove_sandbox_tree(state_dir, spec):
         raise OSError(f"cannot remove strategy state: {state_dir}")
 
 
@@ -689,7 +691,7 @@ class DockerStrategyExecutor:
                         raise GpuMemoryContention(f"{contention}; strategy error: {text}")
                     raise StrategyRaised(text)
                 raise StrategyExecutionError(f"unexpected strategy worker message: {message_type!r}")
-        except (TimeoutError, BrokenPipeError, OSError, ValueError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             self._abort()
             detail = self._stderr_text()
             suffix = f"; worker stderr: {detail}" if detail else ""
@@ -930,14 +932,7 @@ class DockerStrategyExecutor:
         try:
             self._send({"type": "ready", "sequence": _READY_SEQUENCE}, deadline)
             message, _ = self._read_message(deadline)
-        except (
-            TimeoutError,
-            BrokenPipeError,
-            OSError,
-            ValueError,
-            json.JSONDecodeError,
-            StrategyExecutionError,
-        ) as exc:
+        except (OSError, ValueError, StrategyExecutionError) as exc:
             # Abort first: it joins the stderr drain, so a container that died
             # on startup (missing image, daemon error) still has its own words
             # in the message instead of a race with the reader thread.
@@ -1066,7 +1061,7 @@ class DockerStrategyExecutor:
         # peak of a run that just died on a clock or a card still exists.
         self._monitor.stop()
         self._closed = True
-        if self._fit_worker is not None and self._fit_worker is not self:
+        if self._fit_worker is not None:
             self._fit_worker._abort()
         process = self._process
         if process is None:
@@ -1316,7 +1311,7 @@ def _pinned_store(pin: str) -> Path | None:
         raise StrategyExecutionError(str(exc)) from exc
 
 
-def _require_local_image(config: SandboxConfig) -> str:
+def _require_local_image(config: SandboxConfig) -> None:
     """Resolve Docker and reject an absent or stale image without any pull attempt.
 
     The image carries its own copy of the strategy loader, so an image baking
@@ -1356,7 +1351,6 @@ def _require_local_image(config: SandboxConfig) -> str:
         raise StrategyExecutionError(str(exc)) from exc
     except (OSError, subprocess.SubprocessError) as exc:
         raise StrategyExecutionError(f"Docker is unavailable: {exc}") from exc
-    return executable
 
 
 __all__ = [

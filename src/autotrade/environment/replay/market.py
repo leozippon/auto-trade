@@ -9,6 +9,7 @@ current day actually touches.
 
 from __future__ import annotations
 
+import functools
 import json
 import math
 from collections.abc import Callable, Iterator, Mapping
@@ -57,7 +58,7 @@ class DailyMarketData:
         if missing:
             raise ValueError(f"daily market data missing columns: {missing}")
         count = len(daily)
-        date_codes, dates = _normalized_codes(daily["trade_date"], _date_text)
+        date_codes, dates = _normalized_codes(daily["trade_date"], date_text)
         symbol_codes, symbols = _normalized_codes(daily[symbol_source], _symbol_text)
         if "" in symbols:
             raise ValueError("daily market data contains an empty symbol")
@@ -189,7 +190,7 @@ def _distributions_by_ex_date(
     has_bonus = "bonus_per_share" in actions.columns
     out: dict[str, dict[str, Distribution]] = {}
     for row in actions.to_dict("records"):
-        symbol, ex_date = _symbol_text(row[symbol_column]), _date_text(row["ex_date"])
+        symbol, ex_date = _symbol_text(row[symbol_column]), date_text(row["ex_date"])
         amounts = []
         for column in ("cash_per_share", "bonus_per_share"):
             value = row.get(column, 0.0)
@@ -204,7 +205,7 @@ def _distributions_by_ex_date(
         record_date = None
         if cash or bonus:
             try:
-                record_date = distribution_record_date([_date_text(row.get("record_date"))])
+                record_date = distribution_record_date([date_text(row.get("record_date"))])
             except ValueError as exc:
                 raise ValueError(f"{symbol} on {ex_date}: invalid dividend record_date: {exc}") from exc
         day = out.setdefault(ex_date, {})
@@ -267,13 +268,27 @@ def _json_scalar(value: object) -> object:
         raise StrategyContractError("strategy bar must be JSON-compatible") from exc
 
 
-def _date_text(value: object) -> str:
-    text = str(value).strip()
-    normalized = f"{text[:4]}-{text[4:6]}-{text[6:8]}" if len(text) == 8 and text.isdigit() else text
+def date_text(value: object) -> str:
+    """``value`` as the ``YYYYMMDD`` text the replay keys a trading day by.
+
+    Takes ``YYYYMMDD`` or ``YYYY-MM-DD`` text (surrounding blanks ignored) or a
+    ``date``, a ``datetime`` or a ``pd.Timestamp`` (its own calendar day);
+    anything else raises ``ValueError``.
+    """
+
+    if isinstance(value, date):
+        return value.strftime("%Y%m%d")
+    return _date_text(str(value).strip())
+
+
+# Stored series repeat the same trading days, so each distinct text is parsed
+# once: a verdict or a console listing reads millions of points.
+@functools.cache
+def _date_text(text: str) -> str:
     try:
-        return date.fromisoformat(normalized).strftime("%Y%m%d")
+        return date.fromisoformat(text).strftime("%Y%m%d")
     except ValueError as exc:
-        raise ValueError(f"invalid trade_date: {value!r}") from exc
+        raise ValueError(f"invalid date: {text!r}") from exc
 
 
 def _symbol_text(value: object) -> str:
@@ -281,8 +296,7 @@ def _symbol_text(value: object) -> str:
 
 
 def _default_available_at(trade_date: str) -> datetime:
-    day = date.fromisoformat(f"{trade_date[:4]}-{trade_date[4:6]}-{trade_date[6:8]}")
-    return datetime.combine(day, time(17, 30), tzinfo=CN_TZ)
+    return datetime.combine(date.fromisoformat(trade_date), time(17, 30), tzinfo=CN_TZ)
 
 
 def _available_at(value: object) -> datetime:
@@ -313,4 +327,4 @@ def _missing_to_none(value: object) -> object:
         return value
 
 
-__all__ = ["DailyMarketData"]
+__all__ = ["DailyMarketData", "date_text"]

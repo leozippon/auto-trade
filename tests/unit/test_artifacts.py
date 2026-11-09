@@ -10,10 +10,10 @@ from autotrade.environment.artifacts import (
     ModificationConstraints,
     _atomic_replace_copied,
     _unlock_directory,
+    check_model_artifacts,
+    check_strategy_artifact,
     copy_artifact,
     copy_model_artifacts,
-    load_model_artifacts,
-    load_strategy_artifact,
     model_artifact_delta,
     modification_delta,
     new_revision_id,
@@ -44,27 +44,21 @@ class ArtifactContractTest(unittest.TestCase):
         exec(compile(source, str(TEMPLATE_DIR / "main.py"), "exec"), module.__dict__)
         self.assertEqual(module.generate_orders(SimpleNamespace()), [])
 
-    def test_loads_valid_artifact_directory_and_stamps_a_revision_id(self):
+    def test_accepts_a_valid_artifact_directory(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = write_artifact(Path(tmp))
-            artifact = load_strategy_artifact(root)
-            self.assertIn("main.py", artifact.files)
-            self.assertTrue(artifact.revision_id.startswith("artifact_"))
-            self.assertNotEqual(load_strategy_artifact(root).revision_id, artifact.revision_id)
-            pinned = load_strategy_artifact(root, revision_id="revision_fixed")
-            self.assertEqual(pinned.revision_id, "revision_fixed")
-            self.assertTrue(new_revision_id("revision").startswith("revision_"))
+            check_strategy_artifact(write_artifact(Path(tmp)))
+        self.assertTrue(new_revision_id("revision").startswith("revision_"))
 
     def test_rejects_missing_entrypoint_and_forbidden_paths(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp), main="x = 1\n")
             with self.assertRaisesRegex(ArtifactError, "must define"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp), main="def run_strategy(context):\n    return {}\n")
             with self.assertRaisesRegex(ArtifactError, "generate_orders"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(
@@ -72,7 +66,7 @@ class ArtifactContractTest(unittest.TestCase):
                 main='def generate_orders(context):\n    return open("/mnt/artifacts/x").read()\n',
             )
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(
@@ -80,7 +74,7 @@ class ArtifactContractTest(unittest.TestCase):
                 main='def generate_orders(context):\n    return open("/mnt/agent/workspace/secret").read()\n',
             )
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
         # The signal screen is session tooling; the strategy worker never mounts it.
         with tempfile.TemporaryDirectory() as tmp:
@@ -89,7 +83,7 @@ class ArtifactContractTest(unittest.TestCase):
                 main='import subprocess\n\n\ndef generate_orders(context):\n    subprocess.run(["python", "/mnt/tools/screen.py"])\n    return []\n',
             )
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
     def test_forbidden_path_scan_ignores_docstrings(self):
         main = '''
@@ -107,8 +101,7 @@ def generate_orders(context):
 '''
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp), main=main)
-            artifact = load_strategy_artifact(root)
-            self.assertIn("main.py", artifact.files)
+            check_strategy_artifact(root)
 
     def test_copy_artifact_skips_runtime_cache(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -120,7 +113,7 @@ def generate_orders(context):
             copy_artifact(source, dest)
             self.assertTrue((dest / "main.py").exists())
             self.assertFalse((dest / "__pycache__").exists())
-            load_strategy_artifact(dest)
+            check_strategy_artifact(dest)
 
     def test_allows_subdirectories_and_rejects_unsupported_files_cache_and_symlinks(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -128,14 +121,13 @@ def generate_orders(context):
             helper_dir = root / "helpers"
             helper_dir.mkdir()
             (helper_dir / "signals.py").write_text("def score(context):\n    return 0.0\n", encoding="utf-8")
-            artifact = load_strategy_artifact(root)
-            self.assertIn("helpers/signals.py", artifact.files)
+            check_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp))
             (root / "lookup.csv").write_text("ts_code,score\n000001.SZ,1\n", encoding="utf-8")
             with self.assertRaisesRegex(ArtifactError, "unsupported"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp))
@@ -145,7 +137,7 @@ def generate_orders(context):
                 encoding="utf-8",
             )
             with self.assertRaisesRegex(ArtifactError, "stage directories"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = write_artifact(Path(tmp))
@@ -153,14 +145,14 @@ def generate_orders(context):
             cache.mkdir()
             (cache / "x.pyc").write_bytes(b"x")
             with self.assertRaisesRegex(ArtifactError, "runtime cache"):
-                load_strategy_artifact(root)
+                check_strategy_artifact(root)
 
         if hasattr(Path, "symlink_to"):
             with tempfile.TemporaryDirectory() as tmp:
                 root = write_artifact(Path(tmp))
                 (root / "linked.py").symlink_to(root / "main.py")
                 with self.assertRaisesRegex(ArtifactError, "symlinks"):
-                    load_strategy_artifact(root)
+                    check_strategy_artifact(root)
 
     def test_modification_delta_counts_files_and_code_lines_only(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -261,15 +253,11 @@ def generate_orders(context):
             (root / "params.json").write_text('{"alpha": 1}\n', encoding="utf-8")
             (root / "ranker" / "weights.pt").write_bytes(b"weights")
 
-            artifact = load_model_artifacts(root)
-
-            self.assertEqual(set(artifact.files), {"params.json", "ranker/weights.pt"})
-            self.assertTrue(artifact.revision_id.startswith("models_"))
-            self.assertGreater(artifact.total_bytes, 0)
+            check_model_artifacts(root)
 
             dest = Path(tmp) / "copied"
             copy_model_artifacts(root, dest)
-            self.assertEqual(set(load_model_artifacts(dest).files), set(artifact.files))
+            check_model_artifacts(dest)
 
             delta = model_artifact_delta(Path(tmp) / "empty_parent", dest)
             self.assertEqual(delta.total_files, 2)
@@ -295,26 +283,28 @@ def generate_orders(context):
                 self.assertEqual(model_artifact_delta(parent, work).changed_files, ("weights.bin",))
 
     def test_model_artifacts_reject_hidden_cache_and_unsupported_files(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "models"
-            root.mkdir()
-            (root / "data.so").write_bytes(b"not a model")
-            with self.assertRaisesRegex(ArtifactError, "unsupported"):
-                load_model_artifacts(root)
+        # Pickle and joblib files too: a strategy can never read them.
+        for name in ("data.so", "fit.pkl", "fit.pickle", "fit.joblib"):
+            with tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp) / "models"
+                root.mkdir()
+                (root / name).write_bytes(b"not a model")
+                with self.assertRaisesRegex(ArtifactError, "unsupported"):
+                    check_model_artifacts(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"
             root.mkdir()
             (root / "helper.py").write_text("VALUE = 1\n", encoding="utf-8")
             with self.assertRaisesRegex(ArtifactError, "unsupported"):
-                load_model_artifacts(root)
+                check_model_artifacts(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"
             root.mkdir()
             (root / ".secret.json").write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(ArtifactError, "hidden"):
-                load_model_artifacts(root)
+                check_model_artifacts(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"
@@ -322,7 +312,7 @@ def generate_orders(context):
             hidden_dir.mkdir(parents=True)
             (hidden_dir / "params.json").write_text("{}", encoding="utf-8")
             with self.assertRaisesRegex(ArtifactError, "hidden"):
-                load_model_artifacts(root)
+                check_model_artifacts(root)
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "models"
@@ -330,7 +320,7 @@ def generate_orders(context):
             cache.mkdir(parents=True)
             (cache / "x.pyc").write_bytes(b"x")
             with self.assertRaisesRegex(ArtifactError, "runtime cache"):
-                load_model_artifacts(root)
+                check_model_artifacts(root)
 
 
 class RegisteredRestoreReplaceTest(unittest.TestCase):

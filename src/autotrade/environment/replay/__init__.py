@@ -7,6 +7,9 @@ modules.
 - ``stats``: ``ReplayResult`` container and return-statistics reducer.
 - ``timeview``: rolling as-of PIT view over snapshot + replay parts.
 - ``style``: Barra-lite benchmark/style attribution over frozen replay outputs.
+- ``null_control``: the random-portfolio null control of one result and its
+  random-baseline composite.
+- ``curve``: one result as the daily curve the console and Paper draw.
 """
 
 from .engine import (

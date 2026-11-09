@@ -194,7 +194,7 @@ def test_a_readme_edit_is_refused_where_a_session_mounts_it_and_nowhere_else(
     monkeypatch.setattr(contract_fingerprint, "_repository_root", lambda: checkout)
 
     config = _container_start(tmp_path)
-    assert _require_local_image(config) == config.spec.docker_executable
+    _require_local_image(config)
     with pytest.raises(SandboxImageContractMismatch, match=AGENT_CONTRACT_PATHS[0]):
         assert_image_contract_current(
             IMAGE, runtime=IMPORTED_RUNTIME_FINGERPRINT, readme=readme

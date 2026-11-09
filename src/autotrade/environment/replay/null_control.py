@@ -43,13 +43,11 @@ from autotrade.environment.broker_core import (
     LOT_SIZE,
     STAR_MIN_LOT_SIZE,
     board_of,
-    is_bse_market,
-    is_star_market,
 )
 from autotrade.environment.strategy import StrategyContext, StrategySchedule
 
 from .engine import run_daily_replay
-from .market import DailyMarketData
+from .market import DailyMarketData, date_text
 from .stats import ReplayResult, total_return_from_curve
 from .style import daily_returns_from_curve
 
@@ -360,9 +358,9 @@ class _Membership:
     """The benchmark's constituent cross-sections, read by entry day."""
 
     def __init__(self, membership: Mapping[str, Collection[str]]) -> None:
-        self._dates = sorted(_date_text(date) for date in membership)
+        self._dates = sorted(date_text(date) for date in membership)
         self._members = {
-            _date_text(date): frozenset(str(code) for code in codes)
+            date_text(date): frozenset(str(code) for code in codes)
             for date, codes in membership.items()
         }
 
@@ -406,7 +404,7 @@ class _Universe:
         rows = pd.DataFrame(
             {
                 "symbol": frame[symbol_column].astype(str).str.strip(),
-                "trade_date": [_date_text(value) for value in frame["trade_date"]],
+                "trade_date": [date_text(value) for value in frame["trade_date"]],
                 "open": opens,
                 "pre_close": pd.to_numeric(frame["pre_close"], errors="coerce"),
                 "circ_mv": (
@@ -697,13 +695,15 @@ def _queue(
     orders.setdefault(when.strftime("%Y%m%d"), []).append(order)
 
 
-_STAR, _BSE, _MAIN = "star", "bse", "main"
+_STAR, _BSE, _MAIN = "star", "bj", "main"
 
 
 def _board(symbol: str) -> str:
-    if is_star_market(symbol):
-        return _STAR
-    return _BSE if is_bse_market(symbol) else _MAIN
+    """The lot ladder a buy of ``symbol`` declares on: STAR's and the BSE's own,
+    whole lots on every other board (and on a code listed on none)."""
+
+    board = board_of(symbol)
+    return board if board in (_STAR, _BSE) else _MAIN
 
 
 def _lot_quantities(shares: np.ndarray, boards: np.ndarray) -> np.ndarray:
@@ -783,17 +783,10 @@ def _benchmark_return(dates: Sequence[str], benchmark: Mapping[str, float]) -> f
 
 
 def _step_bounds(step: tuple[str, str]) -> tuple[str, str]:
-    start, end = (_date_text(value) for value in step)
+    start, end = (date_text(value) for value in step)
     if start > end:
         raise ValueError(f"step window start {start} is after its end {end}")
     return start, end
-
-
-def _date_text(value: object) -> str:
-    text = str(value).strip()
-    if len(text) == 8 and text.isdigit():
-        return text
-    return pd.Timestamp(text).strftime("%Y%m%d")
 
 
 def _cn_datetime(value: object) -> datetime:

@@ -211,12 +211,13 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     assert one_year["years"] == 1.0 and one_year["threshold"] == pytest.approx(1.6449, abs=1e-4)
 
     # A sidecar's graded series over a slice reads the same statistic.
+    keys = list(pd.bdate_range("2015-01-05", periods=days).strftime("%Y%m%d"))
     analysis = {
-        "strategy_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(active)],
-        "benchmark_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(market)],
-        "size_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(size)],
-        "value_factor_daily": [[f"d{index:05d}", float(item)] for index, item in enumerate(value)],
-        "baseline_daily": [[f"d{index:05d}", 0.0] for index in range(len(active))],
+        "strategy_daily": [[keys[index], float(item)] for index, item in enumerate(active)],
+        "benchmark_daily": [[keys[index], float(item)] for index, item in enumerate(market)],
+        "size_factor_daily": [[keys[index], float(item)] for index, item in enumerate(size)],
+        "value_factor_daily": [[keys[index], float(item)] for index, item in enumerate(value)],
+        "baseline_daily": [[keys[index], 0.0] for index in range(len(active))],
     }
     assert verdict.residual_reading(analysis, alpha=0.05) == {"series": "active", **reading, "dropped_days": 0}
     # A non-finite day is dropped and counted, never read as a figure: a NaN

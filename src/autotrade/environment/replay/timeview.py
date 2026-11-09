@@ -84,6 +84,7 @@ from autotrade.environment.data.contracts import (
     text_dataset_visible_cutoff,
 )
 from autotrade.environment.data.pit import FIRST_SEEN_COLUMN, to_cn_timestamps
+from autotrade.environment.runtime import link_or_copy
 
 _EMPTY_INDICES = np.array([], dtype=np.int64)
 _EMPTY_KEYS = np.array([], dtype="datetime64[ns]")
@@ -402,7 +403,7 @@ class Timeview:
                     f"as-of universe vintage {source} drops published columns {missing}"
                 )
         part.parent.mkdir(parents=True, exist_ok=True)
-        _link_or_copy(source, part)
+        link_or_copy(source, part)
 
     def append_replay_partition(self, domain: str, replay: pd.DataFrame) -> None:
         """Add one bounded source partition to an incremental replay domain."""
@@ -631,7 +632,7 @@ class _DomainView:
                 and all(field.type != pa.null() for field in schema)
             )
             if footer.metadata.num_rows > 0 or typed_empty:
-                _link_or_copy(frozen_file, self.out_dir / "part_0000.parquet")
+                link_or_copy(frozen_file, self.out_dir / "part_0000.parquet")
                 self._part_seq = 1
                 # Types for canonical columns a replay frame does not carry:
                 # every part in the directory has to unify with part 0.
@@ -950,11 +951,11 @@ class _TextView:
 
     def _init_frozen(self, frozen_index_file: Path, frozen_library_dir: Path) -> None:
         if frozen_index_file.exists():
-            _link_or_copy(frozen_index_file, self.out_index_dir / "part_0000.parquet")
+            link_or_copy(frozen_index_file, self.out_index_dir / "part_0000.parquet")
             self._part_seq = 1
         if frozen_library_dir.exists():
             for src in sorted(frozen_library_dir.glob("*.parquet")):
-                _link_or_copy(src, self.out_library_dir / src.name)
+                link_or_copy(src, self.out_library_dir / src.name)
 
     def roll(self, when: pd.Timestamp) -> bool:
         if not self._segments:
@@ -1290,14 +1291,3 @@ def _validated_stash_root(stash_dir: Path | None) -> Path | None:
             f"Timeview stash has no validated semantic contract: {stash_root}"
         )
     return stash_root
-
-
-def _link_or_copy(src: Path, dst: Path) -> None:
-    """Hardlink ``src`` to ``dst`` (zero-copy on the same filesystem); copy on a
-    cross-device or already-linked failure."""
-    if dst.exists():
-        dst.unlink()
-    try:
-        os.link(src, dst)
-    except OSError:
-        shutil.copyfile(src, dst)

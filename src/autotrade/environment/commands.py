@@ -1,8 +1,8 @@
-"""The result of one bounded command, beside the runner that produces it.
+"""The result of one bounded command.
 
-``executor._run_limited_capture`` builds it for every sandbox command; the tool
-layer (``tools.base``, which re-exports it) hands it to the Agent. It imports
-nothing from either, so both can import it.
+The runner that produces it, ``executor._run_limited_capture``, builds it for
+every sandbox command; the tool layer (``tools.base``, which re-exports it)
+hands it to the Agent. It imports nothing from either, so both can import it.
 """
 
 from __future__ import annotations

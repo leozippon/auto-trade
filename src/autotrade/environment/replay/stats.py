@@ -494,7 +494,7 @@ def attach_sub_window_benchmark(
     # Deferred: ``style`` imports this module for the trading-day constant and
     # the equity-curve helpers, so the functions it owns can only be reached
     # from here at call time.
-    from .style import _series_pairs, active_analysis, window_plain_excess
+    from .style import active_analysis, series_pairs, window_plain_excess
 
     rows = summary.get("sub_windows")
     if not isinstance(rows, list):
@@ -537,7 +537,7 @@ def attach_sub_window_benchmark(
             row["baseline_return"] = _round(
                 compounded_return(
                     value
-                    for day, value in _series_pairs(style_analysis.get("baseline_daily"))
+                    for day, value in series_pairs(style_analysis.get("baseline_daily"))
                     if start <= day <= end
                 )
             )
@@ -815,8 +815,7 @@ def _weekly_returns(
     week_end: dict[tuple[int, int], tuple[str, float]] = {}
     for row in curve:
         trade_date = str(row["trade_date"])
-        day = date(int(trade_date[:4]), int(trade_date[4:6]), int(trade_date[6:8]))
-        iso = day.isocalendar()
+        iso = date.fromisoformat(trade_date).isocalendar()
         week_end[(iso.year, iso.week)] = (trade_date, float(row["equity"]))
     ordered = [week_end[key] for key in sorted(week_end)]
     starts = [initial, *(equity for _, equity in ordered[:-1])]

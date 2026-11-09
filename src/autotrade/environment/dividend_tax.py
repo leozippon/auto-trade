@@ -60,7 +60,7 @@ def dividend_tax_due(acquired: str, sold: str, *, old_income: float, new_income:
 def _day(text: str) -> date:
     if not isinstance(text, str) or len(text) != 8 or not text.isdigit():
         raise ValueError(f"invalid dividend tax date: {text!r}; expected YYYYMMDD record_date/trade date")
-    return date(int(text[:4]), int(text[4:6]), int(text[6:8]))
+    return date.fromisoformat(text)
 
 
 def _months_later(day: date, months: int) -> date:

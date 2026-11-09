@@ -57,10 +57,12 @@ WORKSPACE_FILE_MODE = 0o666
 WORKSPACE_DIR_MODE = 0o777
 ALLOWED_SUFFIXES = frozenset({".py", ".json", ".md", ".txt", ".toml", ".yaml", ".yml"})
 # Deny-by-default allowlist for the frozen, inheritable ``models/`` directory.
-# Covers mainstream parameter/weight/serialization formats; executables, shared
-# libraries, scripts, and archives are excluded by design to keep the inherited
-# artifact auditable. Anti-overfit/anti-dump is enforced by byte caps + PIT
-# visibility + held-out, not by suffix.
+# Covers mainstream parameter/weight/serialization formats a strategy can read;
+# pickle and joblib files are excluded because the strategy loader blocks every
+# reader of them, and executables, shared libraries, scripts, and archives are
+# excluded by design to keep the inherited artifact auditable.
+# Anti-overfit/anti-dump is enforced by byte caps + PIT visibility + held-out,
+# not by suffix.
 MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
     {
         ".bin",
@@ -70,7 +72,6 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
         ".gguf",
         ".h5",
         ".hdf5",
-        ".joblib",
         ".json",
         ".keras",
         ".model",
@@ -82,8 +83,6 @@ MODEL_ARTIFACT_ALLOWED_SUFFIXES = frozenset(
         ".parquet",
         ".pb",
         ".pdparams",
-        ".pickle",
-        ".pkl",
         ".pt",
         ".pth",
         ".safetensors",
@@ -126,21 +125,6 @@ class ArtifactSnapshotUnstable(RuntimeError):
     existed. The copy is verified against its source and retaken once; a source
     still moving after that raises this instead of evaluating the mixture.
     """
-
-
-@dataclass(frozen=True)
-class StrategyArtifact:
-    root: Path
-    files: tuple[str, ...]
-    revision_id: str
-
-
-@dataclass(frozen=True)
-class ModelArtifacts:
-    root: Path
-    files: tuple[str, ...]
-    revision_id: str
-    total_bytes: int
 
 
 @dataclass(frozen=True)
@@ -355,9 +339,9 @@ class FilesystemArtifactStore:
         for name in ("revision_id", "epoch_id", "fold_id", "run_id", "source_step_id"):
             if not isinstance(manifest.get(name), str) or not str(manifest[name]).strip():
                 raise ArtifactError(f"registered artifact manifest is missing {name}: {artifact_id}")
-        load_strategy_artifact(output, revision_id=artifact_id)
+        check_strategy_artifact(output)
         if models.exists():
-            load_model_artifacts(models, revision_id=artifact_id)
+            check_model_artifacts(models)
         _assert_readonly_tree(resolved)
         return RegisteredArtifact(
             artifact_id=artifact_id,
@@ -387,8 +371,8 @@ class FilesystemArtifactStore:
         return root / identifier
 
 
-def load_strategy_artifact(root: str | Path, *, revision_id: str | None = None) -> StrategyArtifact:
-    """Load and validate the ``output/`` strategy artifact directory."""
+def check_strategy_artifact(root: str | Path) -> None:
+    """Validate the ``output/`` strategy artifact directory; raises ``ArtifactError``."""
     root = Path(root).resolve()
     files = _artifact_files(root)
     for required in REQUIRED_FILES:
@@ -398,7 +382,6 @@ def load_strategy_artifact(root: str | Path, *, revision_id: str | None = None) 
     if "generate_orders" not in defined_function_names(main):
         raise ArtifactError("main.py must define generate_orders(context)")
     reject_forbidden_code_references(root / relpath for relpath in files)
-    return StrategyArtifact(root, tuple(sorted(files)), revision_id or new_revision_id())
 
 
 def reject_forbidden_code_references(paths: Iterable[Path]) -> None:
@@ -418,14 +401,9 @@ def reject_forbidden_code_references(paths: Iterable[Path]) -> None:
                     raise ArtifactError(f"formal strategy code must not reference stage directories: {forbidden}")
 
 
-def load_model_artifacts(root: str | Path, *, revision_id: str | None = None) -> ModelArtifacts:
-    """Load and validate the optional ``models/`` artifact directory."""
-    root = Path(root).resolve()
-    files = _model_artifact_files(root, missing_ok=True)
-    return ModelArtifacts(
-        root, tuple(sorted(files)), revision_id or new_revision_id("models"),
-        sum((root / item).stat().st_size for item in files),
-    )
+def check_model_artifacts(root: str | Path) -> None:
+    """Validate the optional ``models/`` artifact directory; raises ``ArtifactError``."""
+    _model_artifact_files(Path(root).resolve(), missing_ok=True)
 
 
 def copy_artifact(source_root: str | Path, dest_root: str | Path) -> None:

@@ -141,11 +141,6 @@ class SandboxPaths:
     root: Path
 
     @property
-    def snapshot(self) -> Path:
-        """Development-visible decision-input mirror exposed as /mnt/snapshot."""
-        return self.root / "snapshot"
-
-    @property
     def runtime(self) -> Path:
         """Host-only runtime scratch root; never mounted to the Agent."""
         return self.root / "runtime"
@@ -277,6 +272,18 @@ def rmtree_keeping_file_modes(root: Path) -> None:
     shutil.rmtree(root)
 
 
+def link_or_copy(source: str | Path, dest: str | Path) -> None:
+    """Hard-link ``source`` at ``dest``, replacing a file already there; copy it
+    with its metadata when no link can be made (another filesystem, the link
+    limit). Also ``shutil.copytree``'s ``copy_function`` for a linked tree."""
+
+    Path(dest).unlink(missing_ok=True)
+    try:
+        os.link(source, dest)
+    except OSError:
+        shutil.copy2(source, dest)
+
+
 def _tree_directories(root: Path) -> Iterator[Path]:
     """``root`` and every real directory under it, parents before children."""
 
@@ -294,9 +301,9 @@ class RunManifest:
     """Per-run manifest with an Agent-visible public view and host audit view."""
 
     path: Path
+    host_path: Path
+    ref_store: AgentRefStore = field(repr=False)
     data: dict[str, object] = field(default_factory=dict)
-    host_path: Path | None = None
-    ref_store: AgentRefStore | None = field(default=None, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
 
     @classmethod
@@ -320,10 +327,7 @@ class RunManifest:
         return manifest
 
     def save(self) -> None:
-        if self.host_path is not None:
-            write_json_atomic(self.host_path, sanitize_for_log(self.data))
-        if self.ref_store is None:
-            raise RuntimeError("RunManifest requires an experiment AgentRefStore")
+        write_json_atomic(self.host_path, sanitize_for_log(self.data))
         write_json_atomic(self.path, _agent_visible_manifest(self.data, self.ref_store))
 
     def update(self, **fields: object) -> None:
@@ -429,8 +433,6 @@ def _agent_visible_manifest(
     """
 
     record = json.loads(json.dumps(sanitize_for_log(data), ensure_ascii=False, default=str))
-    if not isinstance(record, dict):
-        return {}
     public: dict[str, object] = {
         key: record[key]
         for key in (
@@ -483,9 +485,7 @@ def _agent_visible_snapshots(record: dict[str, object]) -> dict[str, object]:
     return {
         key: value
         for key, value in record.items()
-        if key not in {"test_decision_input", "test_replay", "heldout_decision_input", "heldout_replay"}
-        and not str(key).startswith("test_")
-        and not str(key).startswith("heldout_")
+        if not str(key).startswith(("test_", "heldout_"))
     }
 
 

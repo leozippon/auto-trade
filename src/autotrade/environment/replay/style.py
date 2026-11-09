@@ -31,7 +31,6 @@ attribution is advisory and must never fail a backtest.
 
 from __future__ import annotations
 
-import functools
 import math
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
@@ -47,6 +46,7 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.environment.runtime import utc_now_iso
 
+from .market import date_text
 from .stats import (
     TRADING_DAYS_PER_YEAR,
     ReplayResult,
@@ -105,20 +105,6 @@ def regression_method(benchmark_index: str) -> str:
     )
 
 
-def _date_text(value: object) -> str:
-    return _parsed_date_text(str(value))
-
-
-# Every stored series repeats the same trading days, so each distinct text is
-# parsed once: a verdict or a console listing reads millions of points.
-@functools.cache
-def _parsed_date_text(text: str) -> str:
-    try:
-        return pd.Timestamp(text).strftime("%Y%m%d")
-    except (TypeError, ValueError):
-        return text
-
-
 def slot_benchmark(
     replay_dir: Path | Sequence[Path] | None,
     *,
@@ -166,7 +152,7 @@ def slot_benchmark(
         if math.isfinite(value):
             # macro.parquet's index_daily keeps pct_chg in percent (no snapshot
             # factor), unlike daily.parquet's already-decimal pct_chg.
-            result[_date_text(date)] = value / 100.0
+            result[date_text(date)] = value / 100.0
     return result
 
 
@@ -200,7 +186,7 @@ def slot_membership(
             ],
         )
         for date, group in frame.groupby("trade_date"):
-            result[_date_text(date)] = frozenset(group["con_code"].astype(str))
+            result[date_text(date)] = frozenset(group["con_code"].astype(str))
     return result
 
 
@@ -220,7 +206,7 @@ def _industry_vintages(
                 for code, name in zip(frame["ts_code"], frame["l1_name"])
                 if isinstance(name, str) and name
             }
-        vintages.append((_date_text(day), industry))
+        vintages.append((date_text(day), industry))
     return sorted(vintages, key=lambda item: item[0])
 
 
@@ -229,7 +215,7 @@ def daily_returns_from_curve(
 ) -> list[tuple[str, float]]:
     rows = sorted(
         (row for row in curve if row.get("trade_date") is not None),
-        key=lambda row: _date_text(row["trade_date"]),
+        key=lambda row: date_text(row["trade_date"]),
     )
     if not rows:
         return []
@@ -246,7 +232,7 @@ def daily_returns_from_curve(
         if not math.isfinite(equity):
             continue
         if previous > 0:
-            result.append((_date_text(row["trade_date"]), equity / previous - 1.0))
+            result.append((date_text(row["trade_date"]), equity / previous - 1.0))
         previous = equity
     return result
 
@@ -352,7 +338,7 @@ def _prior_day_spread(
             continue
         value = float(high.mean() - low.mean())
         if math.isfinite(value):
-            result[_date_text(date)] = value
+            result[date_text(date)] = value
     return result
 
 
@@ -461,7 +447,7 @@ def _positions_from_curve(
                 continue
             if math.isfinite(quantity) and quantity > 0:
                 holdings.append((str(code), quantity))
-        result[_date_text(date)] = holdings
+        result[date_text(date)] = holdings
     return result
 
 
@@ -516,9 +502,9 @@ def _style_exposures(
         return _empty_style("no_holdings")
     wanted = set(positions)
     basics = {
-        _date_text(date): _rank_cross_section(group, symbol_column)
+        date_text(date): _rank_cross_section(group, symbol_column)
         for date, group in replay_daily.groupby("trade_date")
-        if _date_text(date) in wanted
+        if date_text(date) in wanted
     }
     tilt_sums = {"size": 0.0, "pb": 0.0, "turnover": 0.0}
     industry_sums: dict[str, float] = {}
@@ -618,7 +604,7 @@ def replay_style_analysis(
         graded = active_analysis(
             {"strategy_daily": strategy, "baseline_daily": baselines.get("baseline_daily")}
         )
-        active = [value for _date, value in _series_pairs(graded["strategy_daily"])] if graded else []
+        active = [value for _date, value in series_pairs(graded["strategy_daily"])] if graded else []
         plain = plain_statistics(active)
 
         def rounded(key: str) -> float | None:
@@ -699,7 +685,7 @@ def replay_style_analysis(
     }
 
 
-def _series_pairs(value: object) -> list[tuple[str, float]]:
+def series_pairs(value: object) -> list[tuple[str, float]]:
     """``[[date, value], ...]`` from a stored analysis series, skipping junk."""
 
     rows: list[tuple[str, float]] = []
@@ -713,7 +699,7 @@ def _series_pairs(value: object) -> list[tuple[str, float]]:
         ):
             continue
         try:
-            rows.append((_date_text(item[0]), float(item[1])))
+            rows.append((date_text(item[0]), float(item[1])))
         except (TypeError, ValueError):
             continue
     return rows
@@ -730,10 +716,10 @@ def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
     days raises: a day graded against nothing would read as pure skill.
     """
 
-    composite = dict(_series_pairs(analysis.get("baseline_daily")))
+    composite = dict(series_pairs(analysis.get("baseline_daily")))
     if not composite:
         return None
-    strategy = _series_pairs(analysis.get("strategy_daily"))
+    strategy = series_pairs(analysis.get("strategy_daily"))
     missing = [date for date, _value in strategy if date not in composite]
     if missing:
         raise ValueError(f"random baseline has no return for {missing[0]}")
@@ -759,7 +745,7 @@ def window_plain_excess(
 
     value = plain_statistics(
         value
-        for date, value in _series_pairs(analysis.get("strategy_daily"))
+        for date, value in series_pairs(analysis.get("strategy_daily"))
         if (not start or date >= start) and (not end or date <= end)
     )["plain_excess"]
     return None if value is None else float(value)
