@@ -725,11 +725,12 @@ class SessionValidations:
     def record_row(self, record: Mapping[str, object]) -> dict[str, object]:
         """One validation-record step as a test result lists it: the step, its
         window and test horizon, the candidate by handle and its entry without
-        the daily rows."""
+        the daily rows, and, where the step replayed seed replicates, each
+        one's active return (or its strategy error) by handle."""
 
         candidate = dict(record["candidate"])  # type: ignore[arg-type]
         entry = {key: _rounded(value) if isinstance(value, float) else value for key, value in dict(record["entry"]).items() if key != "daily"}  # type: ignore[arg-type]
-        return {
+        row = {
             "step": record["step"],
             "window": dict(record["window"]),  # type: ignore[arg-type]
             "test_horizon": record["test_horizon"],
@@ -737,6 +738,14 @@ class SessionValidations:
             "source": record["source"],
             **entry,
         }
+        replicates = [dict(item) for item in record.get("replicates") or ()]  # type: ignore[attr-defined]
+        if replicates:
+            names = self.named([str(item["step_id"]) for item in replicates])
+            row["seed_replicates"] = [
+                _replicate_cell(name, item.get("entry") or str(item["strategy_error"]), ("active_return",))  # type: ignore[arg-type]
+                for name, item in zip(names, replicates, strict=True)
+            ]
+        return row
 
     @property
     def session_ref(self) -> str:
@@ -1361,6 +1370,86 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
         evaluator.sandbox = config  # type: ignore[attr-defined]
 
 
+def replay_legs(
+    evaluator: EvaluationBackend,
+    requests: Sequence[EvaluationRequest],
+    *,
+    max_concurrency: int,
+    end_day: str | None = None,
+) -> list[_Replayed]:
+    """Replay prepared requests, at most ``max_concurrency`` at a time.
+
+    The one replay rule of ``validate``'s candidates and of a ``test``'s
+    candidate with its seed replicates, so a leg's card and clocks never
+    depend on which tool replays it: legs running side by side each take one
+    of the experiment's cards (:func:`leg_cards`) under both strategy clocks
+    widened to the width (:func:`_batch_replay_timeouts`); a width of one
+    attaches every card under the base clocks. ``end_day`` stops every replay
+    there (a test's horizon). Each evaluation owns its result directory, its
+    as-of view and its strategy container; the shared Timeview stash
+    serializes part publication with its own file locks. Outcomes come back
+    in input order, so the caller's bookkeeping does not depend on which
+    replay finished first.
+    """
+
+    outcomes: list[_Replayed | None] = [None] * len(requests)
+    workers = min(len(requests), max_concurrency)
+    # One card per running leg, taken when the leg starts and handed back
+    # when it ends, so a leg never lands on a card another running leg
+    # holds while a free one waits.
+    free_cards: queue.SimpleQueue[int] = queue.SimpleQueue()
+    sandbox = getattr(evaluator, "sandbox", None)
+    pinned = sandbox.spec.gpu if isinstance(sandbox, SandboxConfig) else None
+    devices = pinned if isinstance(pinned, tuple) else ()
+    cards = leg_cards(devices, workers)
+    for card in cards:
+        free_cards.put(card)
+
+    def run_one(index: int) -> _Replayed:
+        card = free_cards.get() if cards else None
+        request = requests[index]
+        if card is not None:
+            request = replace(request, gpu_devices=(card,))
+        started = time.perf_counter()
+        try:
+            evaluation = (
+                evaluator.evaluate(request)
+                if end_day is None
+                else evaluator.evaluate(request, end_day=end_day)
+            )
+        except SessionInterrupt:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the text IS this leg's result
+            return _Replayed(None, exc, started, time.perf_counter(), card)
+        finally:
+            if card is not None:
+                free_cards.put(card)
+        return _Replayed(evaluation, None, started, time.perf_counter(), card)
+
+    if workers <= 1:
+        return [run_one(index) for index in range(len(requests))]
+    interrupt: SessionInterrupt | None = None
+    with (
+        _batch_replay_timeouts(evaluator, workers),
+        ThreadPoolExecutor(max_workers=workers, thread_name_prefix="replay-leg") as pool,
+    ):
+        futures = {pool.submit(run_one, index): index for index in range(len(requests))}
+        for future in as_completed(futures):
+            index = futures[future]
+            try:
+                outcomes[index] = future.result()
+            except SessionInterrupt as exc:
+                interrupt = exc
+    if interrupt is not None:
+        raise interrupt
+    return [
+        outcome
+        if outcome is not None
+        else _Replayed(None, RuntimeError("replay did not run"), 0.0, 0.0)
+        for outcome in outcomes
+    ]
+
+
 @dataclass(frozen=True)
 class _BatchCandidate:
     name: str
@@ -1634,7 +1723,11 @@ class ValidateTool(SessionTimeBudgetAware):
         revisions = self._commit(candidates, checks, span)
         # Counted once the batch runs: a refusal above costs nothing.
         self.backtest.validates_in_interval += 1
-        outcomes = self._replay(revisions, span)
+        outcomes = replay_legs(
+            self.backtest.evaluator,
+            [self.backtest.validation_request(revision, span) for revision in revisions],
+            max_concurrency=self.max_concurrency,
+        )
         # How many candidates the host, not the strategy, failed: measured
         # nothing, so the row says the candidate may be resent unchanged.
         refunded = sum(
@@ -1958,75 +2051,6 @@ class ValidateTool(SessionTimeBudgetAware):
             ) from exc
         return revisions
 
-    def _replay(
-        self, revisions: Sequence[ArtifactRevision], span: ReplaySpan
-    ) -> list[_Replayed]:
-        """Replay every committed revision over ``span``, bounded-concurrently.
-
-        Each evaluation owns its result directory, its as-of view and its
-        strategy container; the shared Timeview stash serializes part
-        publication with its own file locks. Bookkeeping (revisions above,
-        step-tree nodes below) stays on this thread and in input order, so the
-        recorded lineage does not depend on which replay finished first.
-        """
-
-        outcomes: list[_Replayed | None] = [None] * len(revisions)
-        workers = min(len(revisions), self.max_concurrency)
-        # One card per running leg, taken when the leg starts and handed back
-        # when it ends, so a leg never lands on a card another running leg
-        # holds while a free one waits.
-        free_cards: queue.SimpleQueue[int] = queue.SimpleQueue()
-        sandbox = getattr(self.backtest.evaluator, "sandbox", None)
-        pinned = sandbox.spec.gpu if isinstance(sandbox, SandboxConfig) else None
-        devices = pinned if isinstance(pinned, tuple) else ()
-        cards = leg_cards(devices, workers)
-        for card in cards:
-            free_cards.put(card)
-
-        def run_one(index: int) -> _Replayed:
-            card = free_cards.get() if cards else None
-            request = self.backtest.validation_request(revisions[index], span)
-            if card is not None:
-                request = replace(request, gpu_devices=(card,))
-            started = time.perf_counter()
-            try:
-                evaluation = self.backtest.evaluator.evaluate(request)
-            except SessionInterrupt:
-                raise
-            except Exception as exc:  # noqa: BLE001 - the text IS this row's result
-                return _Replayed(None, exc, started, time.perf_counter(), card)
-            finally:
-                if card is not None:
-                    free_cards.put(card)
-            return _Replayed(evaluation, None, started, time.perf_counter(), card)
-
-        if workers <= 1:
-            return [run_one(index) for index in range(len(revisions))]
-        interrupt: SessionInterrupt | None = None
-        with (
-            _batch_replay_timeouts(self.backtest.evaluator, workers),
-            ThreadPoolExecutor(
-                max_workers=workers, thread_name_prefix="batch-validate"
-            ) as pool,
-        ):
-            futures = {
-                pool.submit(run_one, index): index for index in range(len(revisions))
-            }
-            for future in as_completed(futures):
-                index = futures[future]
-                try:
-                    outcomes[index] = future.result()
-                except SessionInterrupt as exc:
-                    interrupt = exc
-        if interrupt is not None:
-            raise interrupt
-        return [
-            outcome
-            if outcome is not None
-            else _Replayed(None, RuntimeError("replay did not run"), 0.0, 0.0)
-            for outcome in outcomes
-        ]
-
     # ---- recording ----
 
     def _record_success(
@@ -2164,7 +2188,12 @@ TEST_DESCRIPTION = (
     "any candidate: seed_replicates may name other full-span nodes of this session "
     "whose bytes differ from the candidate's in exactly one integer seed assignment "
     "(e.g. SEED_BASE = 1000 -> 2000); they are registered and replayed forward beside "
-    "it. Registration reads no performance; a "
+    "it, and every test that names them replays each alongside the candidate over the "
+    "same span. Each replay, candidate or replicate, takes one replay slot "
+    "(budgets.batch_validate_max_concurrency, strategy clocks widened as in validate), so "
+    "with fewer slots than 1 + replicates the step takes about ceil((1 + replicates) / "
+    "slots) replays of wall clock; none of it runs on the session clock. Registration "
+    "reads no performance; a "
     "candidate that does not register is refused with named reasons and the test horizon "
     "does not move. A registered candidate is replayed with its random baseline as one "
     "fresh continuous book from the validation start to the end of the next step; "
@@ -2180,11 +2209,13 @@ TEST_DESCRIPTION = (
     "as a validate row carries them); step_table, one row per step from the validation "
     "start to the test horizon, each over that step's window, so the rows are quarters for "
     "quarterly steps and months for monthly ones (return, max_drawdown, turnover, fees, "
-    "active_return against the random baseline, index_return); record, the record to date, one row "
-    "per step with the "
-    "candidate that produced it; and significance, the record's residual information "
-    "ratio of the stitched daily active series on the market, size and value legs, the "
-    "betas, the one-sided p_value and the threshold for the record's current length. These "
+    "active_return against the random baseline, index_return), and with seed replicates "
+    "named, seed_replicates: each one's handle with its active_return, return, max_drawdown "
+    "and turnover over that step, or its strategy_error where its own code raised (the "
+    "step is still recorded); record, the record to date, one row per step with the "
+    "candidate that produced it (and its replicates' active_return); and significance, "
+    "the record's residual information ratio of the stitched daily active series on the "
+    "market, size and value legs, the betas, the one-sided p_value and the threshold for the record's current length. These "
     "are readings, never a pass or a fail. When this call tests the last step, the "
     "session ends and this candidate is the registered strategy. The call starts only "
     "after every background sub-agent has finished."
@@ -2236,9 +2267,13 @@ class TestTool(SessionTimeBudgetAware):
         backtest: SessionValidations,
         *,
         trace_emit: Callable[[TraceEvent, dict[str, object]], object] | None = None,
+        max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     ) -> None:
         self.backtest = backtest
         self._trace_emit = trace_emit
+        # The replay width ``validate`` has (``batch_validate_max_concurrency``):
+        # the candidate and its seed replicates replay as one batch's legs.
+        self.max_concurrency = max_concurrency
         # Consecutive test replays the host, not the strategy, failed: the
         # second ends the attempt, as ``validate`` does for one span.
         self._environment_failed = 0
@@ -2284,28 +2319,35 @@ class TestTool(SessionTimeBudgetAware):
         if step > steps.count:
             raise ToolError("test refused: the validation period is complete", error_type="validation_complete")
         test_horizon = steps.horizon_after(step)
-        candidate = next(item for item in backtest.steps if item.step_id == node_id)
+        # The candidate and the seed replicates named, replayed side by side.
+        legs = [next(item for item in backtest.steps if item.step_id == named) for named in (node_id, *replicates)]
+        names = backtest.named(replicates)
         with backtest.time_budget.pause():
             # The prebuilt as-of state the replay opens on must be in the seed before
             # the replay runs: a seed that lacks it ends the attempt by name.
             try:
                 require_prebuilt = getattr(backtest.evaluator, "require_prebuilt_asof_state", None)
-                request = backtest.validation_request(
-                    backtest.artifact_store.revision(candidate.revision_id),
-                    backtest.request.validation,
-                )
+                requests = [
+                    backtest.validation_request(
+                        backtest.artifact_store.revision(leg.revision_id),
+                        backtest.request.validation,
+                    )
+                    for leg in legs
+                ]
                 if callable(require_prebuilt):
-                    require_prebuilt(request)
+                    require_prebuilt(requests[0])
             except (FileNotFoundError, RuntimeError) as exc:
                 raise EnvironmentBlocked(f"test step {step}: {_public_error_text(exc)}") from exc
             started = time.perf_counter()
-            try:
-                evaluation = backtest.evaluator.evaluate(request, end_day=test_horizon)
-            except SessionInterrupt:
-                raise
-            except Exception as exc:
-                backtest.test_replays += 1
+            outcomes = replay_legs(
+                backtest.evaluator, requests, max_concurrency=self.max_concurrency, end_day=test_horizon
+            )
+            backtest.test_replays += 1
+            failed = _failed_leg(outcomes)
+            if failed is not None:
+                index, exc = failed
                 cause = _failure_cause(exc)
+                which = "the replay" if index == 0 else f"seed replicate {names[index - 1]}'s replay"
                 if cause == BATCH_FAILURE_ENVIRONMENT:
                     self._environment_failed += 1
                     if self._environment_failed >= ENVIRONMENT_BLOCKED_BATCHES:
@@ -2318,32 +2360,58 @@ class TestTool(SessionTimeBudgetAware):
                     + (
                         "The candidate's own code raised on the validation data: "
                         if cause == BATCH_FAILURE_STRATEGY
-                        else "The host failed the replay (cause environment), so the same "
-                        "call may be resent unchanged: "
+                        else f"The host failed {which} (cause environment), so the same call "
+                        "may be resent unchanged: "
                     )
                     + _public_error_text(exc),
                     error_type="test_replay_failed",
-                    details={"cause": cause, **batch_candidate_resources(strategy_resources_of(exc))},
+                    details={
+                        "cause": cause,
+                        **({"seed_replicate": names[index - 1]} if index else {}),
+                        **batch_candidate_resources(strategy_resources_of(exc)),
+                    },
                 ) from exc
             self._environment_failed = 0
-            backtest.test_replays += 1
+            evaluation = outcomes[0].evaluation
+            assert evaluation is not None
             replay, analysis = replay_and_analysis(evaluation.result_ref)
             window = steps.window(step)
             entry = step_entry(replay, analysis, start=window[0], end=window[1])
+            # Each replicate's rows over every step so far, or the error text
+            # its own code raised: a reading, recorded beside the candidate's.
+            replicate_rows: list[list[dict[str, object]] | str] = []
+            replicate_records: list[dict[str, object]] = []
+            for leg, outcome in zip(legs[1:], outcomes[1:], strict=True):
+                identity = {"step_id": leg.step_id, "revision_id": leg.revision_id}
+                if outcome.evaluation is None:
+                    error = _public_error_text(outcome.error)  # type: ignore[arg-type]
+                    replicate_rows.append(error)
+                    replicate_records.append({**identity, "result_ref": None, "strategy_error": error})
+                    continue
+                leg_replay, leg_analysis = replay_and_analysis(outcome.evaluation.result_ref)
+                replicate_rows.append(step_table(leg_replay, leg_analysis, steps, through=step))
+                replicate_records.append(
+                    {
+                        **identity,
+                        "result_ref": outcome.evaluation.result_ref,
+                        "entry": step_entry(leg_replay, leg_analysis, start=window[0], end=window[1]),
+                    }
+                )
             record = test_step_record(
                 head=backtest.ledger_head(),
                 steps=steps,
                 step=step,
                 candidate={
                     "step_id": node_id,
-                    "revision_id": candidate.revision_id,
-                    "fingerprint": candidate.fingerprint,
+                    "revision_id": legs[0].revision_id,
+                    "fingerprint": legs[0].fingerprint,
                     "seed_replicates": list(replicates),
                 },
                 replay={"start": steps.start, "end": test_horizon, "result_ref": evaluation.result_ref},
                 entry=entry,
                 registration=registration,
                 source=SOURCE_TEST,
+                replicates=replicate_records,
             )
             # Durable before anything is returned: a resumed attempt
             # continues from this test horizon.
@@ -2351,6 +2419,13 @@ class TestTool(SessionTimeBudgetAware):
             backtest.tests.append(record)
             backtest.validates_in_interval = 0
             finished = step == steps.count
+        table = [_rounded_row(row) for row in step_table(replay, analysis, steps, through=step)]
+        if replicates:
+            for index, row in enumerate(table):
+                row["seed_replicates"] = [
+                    _replicate_cell(name, rows if isinstance(rows, str) else rows[index], REPLICATE_STEP_KEYS)
+                    for name, rows in zip(names, replicate_rows, strict=True)
+                ]
         if self._trace_emit is not None:
             self._trace_emit(
                 TraceEvent.TOOL_CALL_STARTED,
@@ -2372,7 +2447,7 @@ class TestTool(SessionTimeBudgetAware):
             **batch_candidate_resources(evaluation.summary.get("resources")),
             "raw_readings": {name: _rounded(v) for name, v in holder_readings(analysis).items()},
             "residual_reading": backtest.residual_reading_of(analysis, evaluation.summary),
-            "step_table": [_rounded_row(row) for row in step_table(replay, analysis, steps, through=step)],
+            "step_table": table,
             "record": [backtest.record_row(row) for row in backtest.tests],
             "significance": _rounded_row(record_significance([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)),
             "test_replays": backtest.test_replays,
@@ -2390,6 +2465,21 @@ class TestTool(SessionTimeBudgetAware):
         return ToolResult(True, value=value, finish=finished)
 
 
+def _failed_leg(outcomes: Sequence[_Replayed]) -> tuple[int, Exception] | None:
+    """The leg whose failure fails a test step, by its index (0 the
+    candidate): the candidate's own failure, else the first replicate the
+    host failed. A replicate whose own code raised fails nothing; its error
+    is its reading."""
+
+    for index, outcome in enumerate(outcomes):
+        if outcome.evaluation is not None:
+            continue
+        error = outcome.error or RuntimeError("unknown replay failure")
+        if index == 0 or _failure_cause(error) == BATCH_FAILURE_ENVIRONMENT:
+            return index, error
+    return None
+
+
 def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
     """A result row with its floats at six decimals and no daily rows."""
 
@@ -2398,6 +2488,23 @@ def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
         for key, value in row.items()
         if key != "daily"
     }
+
+
+# What a test's step_table row carries of each seed replicate replayed beside
+# its candidate; a record row carries the first alone.
+REPLICATE_STEP_KEYS = ("active_return", "return", "max_drawdown", "turnover")
+
+
+def _replicate_cell(
+    handle: str, row: Mapping[str, object] | str, keys: Sequence[str]
+) -> dict[str, object]:
+    """One seed replicate in a step's row: its handle and ``keys`` of its own
+    row over the step at six decimals, or, where ``row`` is the error text
+    its own code raised, that text as ``strategy_error``."""
+
+    if isinstance(row, str):
+        return {"handle": handle, "strategy_error": row}
+    return {"handle": handle, **{key: _rounded(row[key]) for key in keys}}  # type: ignore[arg-type]
 
 
 NULL_CONTROL_NOTE = (

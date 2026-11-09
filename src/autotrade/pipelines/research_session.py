@@ -1103,8 +1103,15 @@ class LLMResearchDeveloper:
             StepRollbackTool(tree, output_dir, models_dir, session_ref=session_ref)
         )
         # The one way forward and the one way the session ends: a test records
-        # its step in the ledger and returns its results; the view stays.
-        tools.append(TestTool(backtest, trace_emit=trace.emit))
+        # its step in the ledger and returns its results; the view stays. Its
+        # candidate and seed replicates replay at validate's width.
+        tools.append(
+            TestTool(
+                backtest,
+                trace_emit=trace.emit,
+                max_concurrency=request.batch_validate_max_concurrency,
+            )
+        )
         return backtest, smoke, tools, null_control_tool
 
     def _session_runner(

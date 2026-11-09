@@ -3875,6 +3875,7 @@ function recordPanel(detail) {
         { label: "来源" },
         { label: "收益", num: true },
         { label: "主动收益", num: true, title: "本步账户收益减随机对照组合收益" },
+        { label: "复现主动收益", num: true, title: "本步与候选一起回放的种子复现各自的主动收益；自身代码报错的复现记「报错」" },
         { label: "回撤", num: true },
         { label: "换手", num: true },
         { label: "费用", num: true },
@@ -3889,6 +3890,10 @@ function recordPanel(detail) {
         { value: SOURCE_LABELS[row.source] || row.source },
         { value: fmtPct(row.return), cls: signCls(row.return) },
         { value: fmtPct(row.active_return), cls: signCls(row.active_return) },
+        {
+          value: (row.seed_replicates || []).map((item) => (item.strategy_error ? "报错" : fmtPct(item.active_return))).join(" · ") || "—",
+          title: (row.seed_replicates || []).map((item) => `${item.node}：${item.strategy_error || fmtPct(item.active_return)}`).join("\n") || null,
+        },
         { value: fmtPct(row.max_drawdown) },
         { value: fmtSharpe(row.turnover) },
         { value: fmtAmount(row.fees) },

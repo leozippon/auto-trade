@@ -229,3 +229,47 @@ def test_the_ledger_refuses_a_line_of_the_old_record_shape(tmp_path: Path) -> No
     )
     with pytest.raises(ValueError, match=rf"ledger record schema_version 1 != {LEDGER_RECORD_SCHEMA_VERSION}"):
         ExperimentLedger(path).read()
+
+
+def test_a_step_keeps_the_entries_of_its_replicates_beside_the_candidates_and_only_when_named(
+    tmp_path: Path,
+) -> None:
+    """A test's seed replicates are recorded beside its candidate -- an entry
+    over the same window, or the error their own code raised -- under the
+    ledger's schema version; a step without them has no key, and the
+    significance test and the readout read the candidate alone either way."""
+
+    days = _days("20200803", 70)
+    replay, analysis = _replay(days, np.random.default_rng(4))
+    other, other_analysis = _replay(days, np.random.default_rng(5), edge=-0.002)
+    steps = ValidationSteps.of(VALIDATION, 3)
+    first, last = steps.window(1)
+    step = {
+        "head": HEAD,
+        "steps": steps,
+        "step": 1,
+        "candidate": {"step_id": "node_a", "revision_id": "rev_a", "fingerprint": "aaa", "seed_replicates": ["node_b", "node_c"]},
+        "replay": {"start": steps.start, "end": last, "result_ref": "a.json"},
+        "entry": step_entry(replay, analysis, start=first, end=last),
+        "registration": {"passed": True, "reasons": []},
+        "source": SOURCE_TEST,
+    }
+    replicates = [
+        {"step_id": "node_b", "revision_id": "rev_b", "result_ref": "b.json", "entry": step_entry(other, other_analysis, start=first, end=last)},
+        {"step_id": "node_c", "revision_id": "rev_c", "result_ref": None, "strategy_error": "KeyError: 'close'"},
+    ]
+    alone = validation_record.test_step_record(**step)
+    assert "replicates" not in alone
+    ledger = ExperimentLedger(tmp_path / "ledger.jsonl")
+    ledger.append(validation_record.test_step_record(**step, replicates=replicates))
+    [read] = validation_record.test_step_records(ledger.read())
+    assert read["schema_version"] == LEDGER_RECORD_SCHEMA_VERSION and read["replicates"] == replicates
+    unread = {"slice": "forward", "error": "KeyError"}
+    assert validation_record.readout([read], alpha=0.05, strategy_error=unread)["record"] == (
+        validation_record.readout([alone], alpha=0.05, strategy_error=unread)["record"]
+    )
+    # A replicate entry over another window than the step's is refused.
+    with pytest.raises(ValueError, match="not step 1"):
+        validation_record.test_step_record(
+            **step, replicates=[{**replicates[0], "entry": step_entry(other, other_analysis, start=first, end="20200930")}]
+        )

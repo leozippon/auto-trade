@@ -27,6 +27,7 @@ from autotrade.environment.tools.report_issue import (
     append_issue_resolution,
     issue_reports_path,
 )
+from autotrade.pipelines import validation_record
 from autotrade.pipelines.ledger import ExperimentLedger, recorded_path
 from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.webui import registry
@@ -463,6 +464,21 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     assert alone["replicates"] == []
     assert "seed_mean" not in single["forward"]["slices"]["forward"]
     assert isinstance(single["forward"]["slices"]["forward"]["lower_bound"], float)
+    # The record row the session's own test wrote names the replicate it
+    # replayed beside the nominee with that replicate's active return; the
+    # host's completion replays the nominee alone, and so does every step of
+    # an experiment on one seed.
+    tested = validation_record.test_step_records(_records(tmp_path / "seeded"))[0]
+    rows = seeded["record"]["rows"]
+    assert rows[0]["seed_replicates"] == [
+        {
+            "node": gate["replicates"][0]["step_id"],
+            "active_return": tested["replicates"][0]["entry"]["active_return"],
+            "strategy_error": None,
+        }
+    ]
+    assert all(row["seed_replicates"] == [] for row in rows[1:])
+    assert all(row["seed_replicates"] == [] for row in single["record"]["rows"])
 
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -481,6 +497,8 @@ def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwis
     for name in ("registeredPanel", "registrationChecklist"):
         assert reads(name, "seeds") <= set(gate), name
         assert reads(name, "entry") <= set(gate["replicates"][0]), name
+    assert "row.seed_replicates" in body("recordPanel")
+    assert reads("recordPanel", "item") <= set(rows[0]["seed_replicates"][0])
     assert "if (!shown.length) return null;" in body("seedReadingsTable")
     for panel in ("forwardStagePanel", "heldoutStagePanel", "readoutStagePanel"):
         assert "seedReadingsTable(" in body(panel), panel

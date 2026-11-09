@@ -923,8 +923,10 @@ def _record_detail(
     identity: PublicIdentity, records: Sequence[Mapping[str, object]], params: Mapping[str, object]
 ) -> dict[str, object] | None:
     """The record for the experiment page: :func:`_record_view` with one row per
-    step (its window, test horizon, candidate by public ref, source and entry
-    without the daily rows) and the daily curve the stitched entries give --
+    step (its window, test horizon, candidate by public ref, source, entry
+    without the daily rows, and each seed replicate the step replayed beside
+    the candidate, by public ref with its active return or its strategy error)
+    and the daily curve the stitched entries give --
     the book and its random baseline compounded, with each step's bounds and
     whether its candidate changed, for the chart's markers."""
 
@@ -945,6 +947,7 @@ def _record_detail(
         fingerprint = str(candidate.get("fingerprint") or "")
         changed = previous is not None and fingerprint != previous
         previous = fingerprint
+        replicates = [_mapping(item) for item in record.get("replicates") or ()]  # type: ignore[attr-defined]
         rows.append(
             {
                 "step": record.get("step"),
@@ -954,6 +957,16 @@ def _record_detail(
                 "changed": changed,
                 "source": record.get("source"),
                 **{key: value for key, value in entry.items() if key != "daily"},
+                "seed_replicates": [
+                    {
+                        "node": identity.public_text(str(item.get("step_id") or "")),
+                        "active_return": _mapping(item.get("entry")).get("active_return"),
+                        "strategy_error": (
+                            identity.public_text(str(item["strategy_error"])) if item.get("strategy_error") else None
+                        ),
+                    }
+                    for item in replicates
+                ],
             }
         )
         for day, strategy, baseline_value, *_legs in entry.get("daily") or ():  # type: ignore[misc]

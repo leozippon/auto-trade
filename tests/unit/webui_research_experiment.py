@@ -273,7 +273,10 @@ def build_experiment(
     the two together, in the shapes ``pipelines.experiment`` records
     (tests/unit/test_seed_replicates.py): the gate's ``seed_replicates``
     block, the registered block's, each slice's ``seed_replicates`` and
-    ``seed_mean``, and the record's own rows.
+    ``seed_mean``, and the record's own rows. Its first validation step is the
+    session's own test, which replayed the replicate beside the nominee
+    (``validation_record.test_step_record``'s ``replicates``); the host
+    completed the rest, which replays the nominee alone.
     """
 
     if stage not in STAGES:
@@ -443,8 +446,21 @@ def build_experiment(
         _with_baselines(record_ref, 0.9, series="benchmark_daily")
         record_replay = json.loads(Path(record_ref).read_text(encoding="utf-8"))
         record_analysis = _analysis(record_ref)
+        if seeded:
+            # The test of step 1 replayed to that step's end.
+            replicate_ref = write_result(
+                directory,
+                "valid",
+                start=VALIDATION[0],
+                days=_business_day_count(VALIDATION[0], plan.window(1)[1]),
+                edge=0.001,
+                seed=22,
+            )
+            replicate_replay = json.loads(Path(replicate_ref).read_text(encoding="utf-8"))
+            replicate_analysis = _analysis(replicate_ref)
         for step in range(1, plan.count + 1):
             first, last = plan.window(step)
+            tested = seeded and step == 1
             step_record = validation_record.test_step_record(
                     head={
                         "experiment_id": experiment_id,
@@ -459,12 +475,26 @@ def build_experiment(
                         "step_id": nominee["step_id"],
                         "revision_id": nominee["revision_id"],
                         "fingerprint": nominee["fingerprint"],
-                        "seed_replicates": [],
+                        "seed_replicates": [replicate["step_id"]] if tested else [],
                     },
                     replay={"start": plan.start, "end": plan.end, "result_ref": record_ref},
                     entry=validation_record.step_entry(record_replay, record_analysis, start=first, end=last),
                     registration=gate,
-                    source=validation_record.SOURCE_HOST_COMPLETION,
+                    source=validation_record.SOURCE_TEST if tested else validation_record.SOURCE_HOST_COMPLETION,
+                    replicates=(
+                        [
+                            {
+                                "step_id": replicate["step_id"],
+                                "revision_id": replicate["revision_id"],
+                                "result_ref": replicate_ref,
+                                "entry": validation_record.step_entry(
+                                    replicate_replay, replicate_analysis, start=first, end=last
+                                ),
+                            }
+                        ]
+                        if tested
+                        else ()
+                    ),
                 )
             # The session record is already in the ledger: the steps follow it.
             records.append(step_record)

@@ -17,8 +17,13 @@ import pytest
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.executor import StrategyExecutionError, StrategyRaised
+from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.pipelines import session_tools, validation_record
-from autotrade.pipelines.config import EvaluationResult
+from autotrade.pipelines.config import (
+    DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
+    EvaluationResult,
+)
+from autotrade.pipelines.experiment import replay_and_analysis
 from autotrade.pipelines.session_tools import EnvironmentBlocked, ToolError
 from autotrade.pipelines.validation_record import (
     SOURCE_TEST,
@@ -29,6 +34,10 @@ from autotrade.pipelines.validation_record import (
 from tests.unit.test_batch_validate import _Session, _strategy
 
 DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
+
+
+def _seeded(seed: int) -> str:
+    return f"SEED_BASE = {seed}\n\n\n{_strategy('1')}"
 
 
 class _WindowEvaluator:
@@ -45,11 +54,15 @@ class _WindowEvaluator:
         self.results_root = results_root
         self.raise_for = raise_for or {}
         self.requests: list[tuple[str, str, str | None]] = []
+        # Each replay's source, card and (inference, fit) clocks as it ran.
+        self.legs: list[tuple[str, tuple[int, ...] | None, tuple[float, float] | None]] = []
         self.sandbox = None
 
     def evaluate(self, request, max_days=None, start_day=None, end_day=None):
         source = (Path(request.revision.output_path) / "main.py").read_text(encoding="utf-8")
         self.requests.append((request.start, request.end, end_day))
+        clocks = None if self.sandbox is None else (self.sandbox.timeout_seconds, self.sandbox.fit_timeout_seconds)
+        self.legs.append((source, request.gpu_devices, clocks))
         for marker, error in self.raise_for.items():
             if marker in source:
                 raise error
@@ -100,20 +113,36 @@ class _WindowEvaluator:
 class _Harness:
     """A session with a real tree, revisions and tools over the deterministic replay."""
 
-    def __init__(self, root: Path, *, raise_for: dict[str, Exception] | None = None, **rules: object) -> None:
-        self.session = _Session(root, acceptance_rules={"max_drawdown": 0.25, **rules})
+    def __init__(
+        self,
+        root: Path,
+        *,
+        raise_for: dict[str, Exception] | None = None,
+        max_concurrency: int = DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
+        **rules: object,
+    ) -> None:
+        self.session = _Session(root, acceptance_rules={"max_drawdown": 0.25, **rules}, max_concurrency=max_concurrency)
         backtest = self.session.backtest
         self.evaluator = _WindowEvaluator(self.session.evaluator.results_root, raise_for=raise_for)
         backtest.evaluator = self.evaluator
         # Through the module: pytest would otherwise collect the class by its name.
-        self.test = session_tools.TestTool(backtest)
+        self.test = session_tools.TestTool(backtest, max_concurrency=max_concurrency)
 
     @property
     def backtest(self):
         return self.session.backtest
 
     def node(self, name: str, marker: str, *, span: str = "full", control: bool = False) -> str:
-        self.session.candidate(name, _strategy(marker))
+        return self.validated(name, _strategy(marker), span=span, control=control)
+
+    def seeded(self, name: str, seed: int) -> str:
+        """A full-span node of one strategy body on the training seed ``seed``:
+        nodes of different seeds are each other's seed replicates."""
+
+        return self.validated(name, _seeded(seed))
+
+    def validated(self, name: str, source: str, *, span: str = "full", control: bool = False) -> str:
+        self.session.candidate(name, source)
         result = self.session.call(name, span=span, controls=(name,) if control else ())
         assert result.ok, result.error
         return str(result.value["candidates"][0]["node_id"])
@@ -140,6 +169,9 @@ def test_a_test_advances_the_test_horizon_one_step_and_records_it_once() -> None
         [record] = harness.records()
         assert (record["step"], record["test_horizon"], record["source"]) == (1, "20250930", SOURCE_TEST)
         assert record["candidate"]["step_id"] == node and record["entry"]["start"] == "20250701"
+        # No seed replicate named: the record and every row keep the candidate's shape alone.
+        assert "replicates" not in record
+        assert all("seed_replicates" not in row for row in (*value["step_table"], *value["record"]))
         # The replay ran from the validation start to the new test horizon.
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20250930")
         assert value["test_replays"] == 1
@@ -271,6 +303,133 @@ def test_a_test_whose_replay_fails_leaves_the_test_horizon_where_it_was() -> Non
             harness.test.invoke({"candidate": environment})
         # A good candidate still advances.
         assert harness.test.invoke({"candidate": good}).value["step"] == 1
+
+
+def test_seed_replicates_are_replayed_beside_the_candidate_and_read_step_by_step() -> None:
+    """Every test that names seed replicates replays each beside the candidate
+    from the validation start: each step_table row reads every replicate over
+    its step, the record keeps their entries beside the candidate's, and what
+    the candidate reads -- its rows, its statistics, the record's
+    significance -- is what it reads alone."""
+
+    with TemporaryDirectory() as tmp, TemporaryDirectory() as alone_tmp:
+        harness = _Harness(Path(tmp))
+        nominee, second, third = (harness.seeded(name, seed) for name, seed in (("a", 1000), ("b", 2000), ("c", 3000)))
+        handles = harness.backtest.named([second, third])
+        first = harness.test.invoke({"candidate": nominee, "seed_replicates": handles}).value
+        # Three replays from the validation start to the new horizon, one per leg.
+        assert harness.evaluator.requests[-3:] == [("20250701", "20260630", "20250930")] * 3
+        [record] = harness.records()
+        assert record["candidate"]["seed_replicates"] == [second, third]
+        steps = {item.step_id: item for item in harness.backtest.steps}
+        assert [(item["step_id"], item["revision_id"]) for item in record["replicates"]] == [
+            (second, steps[second].revision_id),
+            (third, steps[third].revision_id),
+        ]
+        assert all((item["entry"]["start"], item["entry"]["end"]) == ("20250701", "20250930") for item in record["replicates"])
+        # Each replicate's row is its own replay's reading over the step.
+        revision = harness.backtest.artifact_store.revision(steps[second].revision_id)
+        own = harness.evaluator.evaluate(
+            harness.backtest.validation_request(revision, harness.backtest.request.validation), end_day="20250930"
+        )
+        expected = step_entry(*replay_and_analysis(own.result_ref), start="20250701", end="20250930")
+        [row] = first["step_table"]
+        assert [cell["handle"] for cell in row["seed_replicates"]] == handles
+        cell = row["seed_replicates"][0]
+        assert set(cell) == {"handle", "active_return", "return", "max_drawdown", "turnover"}
+        for key in ("active_return", "return", "max_drawdown", "turnover"):
+            assert cell[key] == pytest.approx(expected[key], abs=1e-6), key
+        assert cell["active_return"] != pytest.approx(row["active_return"], abs=1e-6)
+        assert first["record"][0]["seed_replicates"] == [
+            {"handle": handle, "active_return": pytest.approx(item["entry"]["active_return"], abs=1e-6)}
+            for handle, item in zip(handles, record["replicates"], strict=True)
+        ]
+        # The next test, naming them by full id, reads them over every step so far.
+        later = harness.test.invoke({"candidate": nominee, "seed_replicates": [second, third]}).value
+        assert [row["step"] for row in later["step_table"]] == [1, 2]
+        assert later["step_table"][0]["seed_replicates"] == row["seed_replicates"]
+        assert [cell["handle"] for cell in later["step_table"][1]["seed_replicates"]] == handles
+        assert [len(row["seed_replicates"]) for row in later["record"]] == [2, 2]
+
+        # The same candidate tested alone reads the same as it did beside them.
+        solo = _Harness(Path(alone_tmp))
+        solo.seeded("a", 1000)
+        alone = [solo.test.invoke({"candidate": solo.backtest.steps[0].step_id}).value for _ in range(2)][-1]
+        assert [{k: v for k, v in row.items() if k != "seed_replicates"} for row in later["step_table"]] == alone["step_table"]
+        assert later["significance"] == alone["significance"] and later["stats"] == alone["stats"]
+
+
+def test_a_replicate_that_raises_is_a_reading_and_one_the_host_fails_fails_the_step() -> None:
+    """A replicate whose own code raises is recorded with its error and the
+    step stands, as forward reads one; a replicate the host failed measured
+    nothing, so the whole step fails as a host failure of the candidate does:
+    nothing is recorded, the horizon stays, and the call may be resent."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        nominee, raised, hosted = (harness.seeded(name, seed) for name, seed in (("a", 1000), ("b", 2000), ("c", 3000)))
+        host_failure = StrategyExecutionError("Docker generate_orders failed: timeout")
+        harness.evaluator.raise_for = {"SEED_BASE = 3000": host_failure}
+        handle = harness.backtest.named([hosted])[0]
+        with pytest.raises(ToolError) as failed:
+            harness.test.invoke({"candidate": nominee, "seed_replicates": [raised, hosted]})
+        assert failed.value.error_type == "test_replay_failed"
+        assert failed.value.details["cause"] == "environment" and failed.value.details["seed_replicate"] == handle
+        assert f"seed replicate {handle}'s replay" in str(failed.value) and "resent unchanged" in str(failed.value)
+        assert harness.records() == [] and harness.backtest.test_horizon == "20250630"
+        # It counts toward ending the attempt like the candidate's own host failure.
+        with pytest.raises(EnvironmentBlocked, match="2 replays failed on the environment"):
+            harness.test.invoke({"candidate": nominee, "seed_replicates": [hosted]})
+        assert harness.records() == []
+
+        harness.evaluator.raise_for = {"SEED_BASE = 2000": StrategyRaised("KeyError: 'close'")}
+        result = harness.test.invoke({"candidate": nominee, "seed_replicates": [raised, hosted]})
+        assert result.ok and result.value["step"] == 1 and harness.backtest.test_horizon == "20250930"
+        [record] = harness.records()
+        error_row, completed = record["replicates"]
+        assert (error_row["step_id"], error_row["result_ref"]) == (raised, None) and "entry" not in error_row
+        assert "KeyError: 'close'" in error_row["strategy_error"]
+        assert completed["step_id"] == hosted and completed["entry"]["end"] == "20250930"
+        name = harness.backtest.named([raised])[0]
+        [row] = result.value["step_table"]
+        assert row["seed_replicates"][0] == {"handle": name, "strategy_error": error_row["strategy_error"]}
+        assert result.value["record"][0]["seed_replicates"][0] == row["seed_replicates"][0]
+        assert result.value["test_replays"] == 3
+
+
+def test_a_test_replays_its_legs_under_the_card_and_clock_rules_of_validate() -> None:
+    """The candidate and its replicates replay as validate's candidates do, at
+    batch_validate_max_concurrency at once: side by side, each leg on one of
+    the experiment's cards under both strategy clocks widened to the width;
+    a lone replay, of a test or of a validate, attaches every card under the
+    base clocks. So a candidate's environment depends only on the width,
+    never on which tool replays it."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp), max_concurrency=2)
+        nominee, second, third = (harness.seeded(name, seed) for name, seed in (("a", 1000), ("b", 2000), ("c", 3000)))
+        cards = SandboxConfig(spec=SandboxSpec(gpu=(1, 4), gpu_count=2))
+        base = (cards.timeout_seconds, cards.fit_timeout_seconds)
+        widened = (2 * cards.timeout_seconds, 2 * cards.fit_timeout_seconds)
+        harness.evaluator.sandbox = cards
+        legs = harness.evaluator.legs
+        legs.clear()
+        harness.test.invoke({"candidate": nominee, "seed_replicates": [second, third]})
+        assert sorted(source for source, _card, _clocks in legs) == sorted(_seeded(seed) for seed in (1000, 2000, 3000))
+        assert {(card, clocks) for _source, card, clocks in legs} <= {((1,), widened), ((4,), widened)}
+        assert harness.evaluator.sandbox is cards
+        legs.clear()
+        harness.test.invoke({"candidate": nominee})
+        assert legs == [(_seeded(1000), None, base)]
+        # validate, at the same widths, under the same rules.
+        for name, marker in (("x", "21"), ("y", "22"), ("z", "23")):
+            harness.session.candidate(name, _strategy(marker))
+        legs.clear()
+        assert harness.session.call("x", "y", span="Y2").ok
+        assert {(card, clocks) for _source, card, clocks in legs} == {((1,), widened), ((4,), widened)}
+        legs.clear()
+        assert harness.session.call("z", span="Y2").ok
+        assert [(card, clocks) for _source, card, clocks in legs] == [(None, base)]
 
 
 def test_a_seed_that_lacks_the_prebuilt_asof_state_ends_the_attempt_by_name() -> None:

@@ -7,9 +7,11 @@ the validation start to the end of the next step, and the candidate's result
 over that newest step is the step's entry in the experiment's validation record: one
 ``test_step`` ledger record per step (:func:`test_step_record`), appended as
 the test completes and never rewritten, so a resumed attempt continues from
-the test horizon the ledger states (:func:`horizon_after`). A step the host
-completes after the session (budget out, or the agent never tested) is a
-record of the same shape with ``source`` ``host_completion``.
+the test horizon the ledger states (:func:`horizon_after`). The seed
+replicates a test names are replayed beside its candidate, and their entries
+are recorded next to the candidate's. A step the host completes after the
+session (budget out, or the agent never tested) is a record of the same shape
+with ``source`` ``host_completion`` and no replicate entries.
 
 The record's significance test (:func:`record_significance`) reads the entries' daily
 rows stitched in step order with the residual statistic every other reading
@@ -209,6 +211,7 @@ def test_step_record(
     entry: Mapping[str, object],
     registration: Mapping[str, object],
     source: str,
+    replicates: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """One ``test_step`` ledger record.
 
@@ -218,14 +221,22 @@ def test_step_record(
     (``start``, ``end``, ``result_ref``) the entry was read from; ``entry`` is
     :func:`step_entry` over the step's window, daily rows included;
     ``registration`` what the registration read; ``source`` is
-    :data:`SOURCE_TEST` or :data:`SOURCE_HOST_COMPLETION`.
+    :data:`SOURCE_TEST` or :data:`SOURCE_HOST_COMPLETION`. ``replicates``
+    are the named seed replicates replayed beside the candidate, each
+    ``step_id``, ``revision_id`` and ``result_ref`` with its own ``entry``
+    over the same window, or ``result_ref`` None and ``strategy_error`` (the
+    error text) when its own code raised; the significance test and the
+    readout read the candidate's entry alone.
     """
 
     if source not in (SOURCE_TEST, SOURCE_HOST_COMPLETION):
         raise ValueError(f"unknown test_step source {source!r}")
     first, last = steps.window(step)
-    if (entry.get("start"), entry.get("end")) != (first, last):
-        raise ValueError(f"the entry covers {entry.get('start')}..{entry.get('end')}, not step {step} {first}..{last}")
+    for covered in (entry, *(item["entry"] for item in replicates if item.get("entry") is not None)):
+        if (covered.get("start"), covered.get("end")) != (first, last):  # type: ignore[union-attr]
+            raise ValueError(
+                f"the entry covers {covered.get('start')}..{covered.get('end')}, not step {step} {first}..{last}"  # type: ignore[union-attr]
+            )
     return {
         "record_type": TEST_STEP_RECORD_TYPE,
         **{key: head[key] for key in ("experiment_id", "epoch_id", "fold_id", "run_id", "session_key")},
@@ -238,6 +249,12 @@ def test_step_record(
         "entry": dict(entry),
         "registration": dict(registration),
         "source": source,
+        # Optional and additive, so the ledger's schema version stays: a
+        # record without the key was written before replicates were replayed
+        # in a test, or named none, or was completed by the host (which
+        # replays the registered strategy alone), and in every case truly
+        # holds no replicate entry.
+        **({"replicates": [dict(item) for item in replicates]} if replicates else {}),
     }
 
 
