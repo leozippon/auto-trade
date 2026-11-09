@@ -490,7 +490,7 @@ def post(port: int, params: dict[str, object]) -> bool:
     experiment_id = params["experiment_id"]
     request = urllib.request.Request(
         f"http://127.0.0.1:{port}/api/experiments",
-        data=json.dumps(params).encode("utf-8"),
+        data=json.dumps({"params": params}).encode("utf-8"),
         headers={"Content-Type": "application/json"},
         method="POST",
     )

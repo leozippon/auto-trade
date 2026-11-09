@@ -7,12 +7,14 @@ that leaves the host process. A frozen dataclass whose fields are JSON scalars,
 tuples, string-keyed mappings or such dataclasses persists as
 ``dataclass_record`` and comes back through ``dataclass_from_record``, which
 refuses a missing or unknown key (a nested dataclass is rebuilt by its owner's
-``from_record`` and handed in).
+``from_record`` and handed in). ``finite_number`` and ``as_mapping`` read a
+field out of a record a display does not trust the shape of.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import uuid
@@ -58,6 +60,21 @@ def read_json_object_or_empty(path: str | Path) -> dict[str, object]:
         return read_json_object(path, missing_ok=True)
     except (OSError, ValueError):
         return {}
+
+
+def finite_number(value: object) -> float | None:
+    """``value`` as a finite float; ``None`` for a bool, a non-number, NaN or infinity."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    return result if math.isfinite(result) else None
+
+
+def as_mapping(value: object) -> Mapping[str, object]:
+    """``value`` when it is a mapping, else an empty one."""
+
+    return value if isinstance(value, Mapping) else {}
 
 
 def write_json_atomic(

@@ -679,7 +679,7 @@ class CreatePreflightTest(unittest.TestCase):
             **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
         }
         payload.update(overrides)
-        return self.client.post("/api/experiments", json=payload)
+        return self.client.post("/api/experiments", json={"params": payload})
 
     def _assert_nothing_was_created(self) -> None:
         self.assertEqual(list(self.experiments_root.iterdir()), [])
@@ -915,8 +915,10 @@ class RestartSlotRaceTest(unittest.TestCase):
         response = (client or self.client).post(
             "/api/experiments",
             json={
-                "experiment_id": experiment_id,
-                **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
+                "params": {
+                    "experiment_id": experiment_id,
+                    **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES, **NO_SEED,
+                }
             },
         )
         if response.status_code == 200:

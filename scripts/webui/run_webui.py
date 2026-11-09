@@ -24,7 +24,7 @@ from _bootstrap import add_repo_src
 
 add_repo_src(__file__)
 
-from autotrade.webui.server import is_loopback_host, run
+from autotrade.webui.server import run
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -46,11 +46,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Experiments root directory shared with the pipeline CLIs.",
     )
     args = parser.parse_args(argv)
-    if args.uds is None and not is_loopback_host(args.host):
-        parser.error(
-            "refusing unauthenticated non-loopback WebUI bind; use a protected Unix "
-            "socket or a loopback address"
-        )
     run(
         repo_root,
         host=args.host,

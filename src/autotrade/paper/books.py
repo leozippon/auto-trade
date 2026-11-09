@@ -37,18 +37,9 @@ def validate_book_id(book_id: str) -> str:
 
 
 def list_books(state_root: str | Path) -> list[str]:
-    """The ids of the books under ``state_root``, sorted.
-
-    A root that is itself a book is the single-book layout from before books
-    had directories; it is refused rather than read as one unnamed book.
-    """
+    """The ids of the books under ``state_root``, sorted."""
 
     root = Path(state_root)
-    if (root / BOOK_NAME).exists():
-        raise RuntimeError(
-            f"{root} holds one book in the single-book layout; books live in "
-            "<state root>/<book id>/"
-        )
     if not root.is_dir():
         return []
     return sorted(
@@ -136,7 +127,6 @@ def open_registered_book(repo_root: str | Path, experiment_dir: str | Path) -> s
     candidate = paper_candidate(records)
     if candidate is None:
         raise ValueError(f"{book_id} has no Paper candidate: no registered strategy with a forward record")
-    list_books(state_root)
     create_book(
         state_root / book_id,
         experiment_dir=experiment,

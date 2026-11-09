@@ -1,8 +1,9 @@
 """Creation-form parameter schema for the HITL console.
 
 Every field is a console parameter of ``pipelines.experiment_params.ExperimentParams`` and
-renders its default from ``hitl_state.WEB_CREATE_DEFAULTS`` (read off the
-record), so the form can never drift from what a create stamps. Each console
+renders its default from ``hitl_state.WEB_CREATE_DEFAULTS`` and whether a
+create must state it from the record's ``required`` (both read off the record),
+so the form can never drift from what a create stamps. Each console
 parameter has a form field here or is named in ``_FORMLESS``; the check below
 refuses either list drifting from the record. Descriptions follow
 docs/PARAMETERS_REFERENCE.md.
@@ -25,7 +26,7 @@ from autotrade.pipelines.config import (
     MANDATED_DEFAULTS,
     acceptance_default,
 )
-from autotrade.pipelines.experiment_params import Surface, parameters
+from autotrade.pipelines.experiment_params import PARAMETERS, Surface, parameters
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.skills import (
     SKILL_LIBRARY_MODES,
@@ -84,7 +85,6 @@ _FIELDS: list[dict[str, object]] = [
         "group": "基本与排程",
         "label": "实验名称（ID）",
         "type": "string",
-        "required": True,
         "help": "唯一实验标识，仅限字母、数字、下划线和连字符；对应 experiments/<id>/ 目录。",
     },
     {
@@ -92,7 +92,6 @@ _FIELDS: list[dict[str, object]] = [
         "group": "基本与排程",
         "label": "研究期起点",
         "type": "string",
-        "required": True,
         "help": "YYYYMMDD，必须是某月 1 日。研究期从这一天起按完整十二个月切块，研究会话只看研究期末的决策视图、只回测研究期。",
     },
     {
@@ -100,7 +99,6 @@ _FIELDS: list[dict[str, object]] = [
         "group": "基本与排程",
         "label": "研究期终点",
         "type": "string",
-        "required": True,
         "help": "YYYYMMDD，必须是起点同一月份至少一个完整周年后的前一天。",
     },
     {
@@ -108,7 +106,6 @@ _FIELDS: list[dict[str, object]] = [
         "group": "基本与排程",
         "label": "前推期终点",
         "type": "string",
-        "required": True,
         "help": "YYYYMMDD，必须是研究期终点之后恰好十二个月的那一天。定版产物从研究期终点次日起连续回测到这里，再接着回测 Held-out。",
     },
     {
@@ -116,7 +113,6 @@ _FIELDS: list[dict[str, object]] = [
         "group": "基本与排程",
         "label": "Held-out 终点",
         "type": "string",
-        "required": True,
         "help": "YYYYMMDD，晚于前推期终点；回测截到已固定发布的最后一个交易日，截断会记在前推记录里。",
     },
     {"key": "research_directive", "group": "基本与排程", "label": "研究方向", "type": "text",
@@ -136,7 +132,6 @@ _FIELDS: list[dict[str, object]] = [
         "group": "基本与排程",
         "label": "固定推理时间",
         "type": "time",
-        "required": True,
         "help": "Asia/Shanghai 24 小时制 HH:MM。",
     },
     {
@@ -473,7 +468,6 @@ _FIELDS: list[dict[str, object]] = [
         "label": "研究年数",
         "type": "int",
         "min": 1,
-        "required": True,
         "help": "研究几何的前这么多个研究年对会话可见，用于研究与验证；其余年份是验证年，由会话的每次 test 逐步揭示并形成验证记录。十年包取 5、6 或 7。至少 1，且须留至少一个验证年；必填。",
     },
     {
@@ -703,6 +697,7 @@ def parameter_schema() -> dict[str, object]:
         if isinstance(default, tuple):
             default = list(default)
         entry["default"] = default
+        entry["required"] = PARAMETERS[str(entry["key"])].required
         groups[str(entry.pop("group"))].append(entry)
     return {
         "schema_version": 6,

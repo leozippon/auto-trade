@@ -146,13 +146,6 @@ def test_book_ids_are_single_path_segments():
             validate_book_id(bad)
 
 
-def test_a_single_book_root_is_refused(tmp_path: Path):
-    root = paper_root(tmp_path)
-    write_book_record(root, experiment_id="exp")
-    with pytest.raises(RuntimeError, match="single-book layout"):
-        list_books(root)
-
-
 def _book_files(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 

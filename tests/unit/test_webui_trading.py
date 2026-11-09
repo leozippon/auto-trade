@@ -531,10 +531,6 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     # beta has not settled a day: the figure the card gates on is absent, and
     # with it every tile.
     assert beta["total_return"] is None
-    # A root still in the single-book layout is reported, not read as a book.
-    write_book_record(paper_root(tmp_path))
-    assert trading.books_payload(tmp_path)["state"] == "unreadable"
-    assert trading.health_payload(tmp_path)["ok"] is False
 
 
 # ---- profit and loss ---------------------------------------------------------

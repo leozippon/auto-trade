@@ -102,8 +102,10 @@ def render() -> str:
         "",
         _block(SESSION_GPU_ORIENTATION_BULLET),
         "",
-        "运行事实 `budgets` 写明 `strategy_inference_timeout_seconds` 与 `strategy_fit_timeout_seconds` 两项时，本区块最后（GPU 一条之后）再加一条，"
-        f"两项秒数写成中文时长，只写不为零的小时、分钟与秒（如 5400 秒写作「{chinese_duration(5400)}」）：",
+        (
+            "运行事实 `budgets` 写明 `strategy_inference_timeout_seconds` 与 `strategy_fit_timeout_seconds` 两项时，本区块最后（GPU 一条之后）再加一条，"
+            f"两项秒数写成中文时长，只写不为零的小时、分钟与秒（如 5400 秒写作「{chinese_duration(5400)}」）："
+        ),
         "",
         _block(SESSION_BUDGET_ORIENTATION_BULLET),
         "",

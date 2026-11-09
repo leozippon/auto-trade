@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import math
 import re
 import threading
 import uuid
@@ -33,7 +32,9 @@ from autotrade.agent.runner import (
 )
 from autotrade.common.ids import is_experiment_id
 from autotrade.common.records import (
+    as_mapping,
     dataclass_record,
+    finite_number,
     read_json_object,
 )
 from autotrade.environment.replay.style import (
@@ -54,6 +55,8 @@ from autotrade.pipelines.calendar import (
     Slot,
 )
 from autotrade.pipelines.config import (
+    FORWARD_PHASE,
+    RESEARCH_PHASE,
     AcceptanceRules,
     acceptance_for,
     experiment_default,
@@ -87,7 +90,6 @@ from autotrade.pipelines.ledger import (
     registered_record,
     research_records,
 )
-from autotrade.pipelines.pit_views_seed import FORWARD_PHASE, RESEARCH_PHASE
 from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
 from autotrade.pipelines.session_tools import BATCH_FAILURE_ENVIRONMENT
@@ -103,6 +105,7 @@ from .traces import resolve_trace_path, trace_stats
 
 ACTIVE_STATES = (
     ExperimentState.LAUNCHING,
+    ExperimentState.PREPARING,
     ExperimentState.INITIALIZING,
     ExperimentState.RUNNING_SESSION,
     ExperimentState.PAUSED,
@@ -258,17 +261,6 @@ def _age_seconds(stamp: object) -> float:
     return (datetime.now(UTC) - then).total_seconds()
 
 
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    result = float(value)
-    return result if math.isfinite(result) else None
-
-
-def _mapping(value: object) -> Mapping[str, object]:
-    return value if isinstance(value, Mapping) else {}
-
-
 def _created_at(directory: Path, params: Mapping[str, object]) -> str | None:
     if params.get("_created_at"):
         return str(params["_created_at"])
@@ -309,7 +301,7 @@ def _reason_line(text: str, limit: int = 80) -> str:
 def _percent(value: object) -> str:
     """One signed percentage of the ending's reason line."""
 
-    number = _number(value)
+    number = finite_number(value)
     return "—" if number is None else f"{number * 100:+.2f}%"
 
 
@@ -345,7 +337,7 @@ def experiment_ending(
     """
 
     if str(state.get("state") or "") == ExperimentState.FAILED:
-        error = str(_mapping(state.get("status")).get("error") or "")
+        error = str(as_mapping(state.get("status")).get("error") or "")
         if not error:
             failures = _attempt_failures(records)
             error = str(failures[-1].get("error") or "") if failures else ""
@@ -355,7 +347,7 @@ def experiment_ending(
     if verdict is None:
         return None
     if verdict["status"] == VerdictStatus.REGISTERED_WITH_RECORD:
-        return {"state": "registered_with_record", "reason": _readout_line(_mapping(_mapping(forward).get("readout")))}
+        return {"state": "registered_with_record", "reason": _readout_line(as_mapping(as_mapping(forward).get("readout")))}
     if verdict["status"] == VerdictStatus.ENVIRONMENT_BLOCKED:
         # The host's reason names the span and the error, like a broken
         # worker's: the error is what the operator acts on, so it is not cut.
@@ -363,7 +355,7 @@ def experiment_ending(
         text = str(reasons[0]) if isinstance(reasons, list) and reasons else ""
         line = identity.public_text(text).splitlines()
         return {"state": ENVIRONMENT_BLOCKED, "reason": line[0] if line else ""}
-    session = _mapping(
+    session = as_mapping(
         next((row for row in research_records(records) if row.get("experiment_end")), None)
     )
     finish = str(session.get("finish_reason") or "")
@@ -374,11 +366,11 @@ def _readout_line(readout: Mapping[str, object]) -> str:
     """One line of a registered strategy's readout: the validation record's residual
     IR, its p-value and candidate changes, then the forward lower bound."""
 
-    record = _mapping(readout.get("record"))
-    forward = _mapping(readout.get("forward"))
-    ratio, p_value = _number(record.get("residual_information_ratio")), _number(record.get("p_value"))
-    bound = _number(forward.get("lower_bound"))
-    error = _mapping(forward.get("strategy_error"))
+    record = as_mapping(readout.get("record"))
+    forward = as_mapping(readout.get("forward"))
+    ratio, p_value = finite_number(record.get("residual_information_ratio")), finite_number(record.get("p_value"))
+    bound = finite_number(forward.get("lower_bound"))
+    error = as_mapping(forward.get("strategy_error"))
     return (
         f"验证记录 残差 IR {'—' if ratio is None else f'{ratio:.2f}'}"
         f" · p {'—' if p_value is None else f'{p_value:.2f}'}"
@@ -431,22 +423,22 @@ def _forward_view(
 
     if record is None:
         return None
-    null = _mapping(record.get("null_control"))
+    null = as_mapping(record.get("null_control"))
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
-        "replay": dict(_mapping(record.get("replay"))),
+        "replay": dict(as_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
         "slices": {
             name: dict(block)
-            for name, block in _mapping(record.get("slices")).items()
+            for name, block in as_mapping(record.get("slices")).items()
             if isinstance(block, Mapping)
         },
         "refits_executed": record.get("refits_executed"),
         # Diagnostic: the forward slice's excess among random-name replays.
-        "null_percentile": _number(_mapping(null.get("step")).get("excess_percentile")),
+        "null_percentile": finite_number(as_mapping(null.get("step")).get("excess_percentile")),
         # The experiment's readout (``validation_record.readout``).
-        "readout": dict(_mapping(record.get("readout"))),
+        "readout": dict(as_mapping(record.get("readout"))),
     }
 
 
@@ -519,13 +511,13 @@ def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
     """
 
     effective = {**WEB_CREATE_DEFAULTS, **params}
-    minutes = _number(effective.get("max_research_minutes"))
-    calls = _number(effective.get("max_llm_calls"))
+    minutes = finite_number(effective.get("max_research_minutes"))
+    calls = finite_number(effective.get("max_llm_calls"))
     return {
         "inference_seconds": minutes * 60.0 if minutes is not None else None,
         "llm_calls": calls,
-        "null_controls": _number(effective.get("max_null_controls")),
-        "api_spend_usd": _number(
+        "null_controls": finite_number(effective.get("max_null_controls")),
+        "api_spend_usd": finite_number(
             effective.get("max_api_spend_usd", experiment_default("max_api_spend_usd"))
         ),
         "subagent_calls": (
@@ -548,7 +540,7 @@ def _budget_used(
         block = record.get("budget_used")
         if isinstance(block, Mapping):
             return dict(block)
-    status = _mapping(raw_status)
+    status = as_mapping(raw_status)
     if status.get("session_key") != SessionKind.RESEARCH:
         return None
     run_id = status.get("run_id")
@@ -575,7 +567,7 @@ def _ending_rank(row: Mapping[str, object]) -> int:
     """Listing order: the experiments that can still run, then the ended ones in
     :data:`ENDING_STATES` order."""
 
-    ending = _mapping(row.get("ending"))
+    ending = as_mapping(row.get("ending"))
     if not ending:
         return 0
     return 1 + _ENDING_ORDER.get(str(ending.get("state")), len(ENDING_STATES))
@@ -738,10 +730,10 @@ def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] |
 
     ranked: list[tuple[float, int, Mapping[str, object]]] = []
     for position, row in enumerate(rows):
-        if _mapping(row.get("ending")).get("state") != VerdictStatus.REGISTERED_WITH_RECORD:
+        if as_mapping(row.get("ending")).get("state") != VerdictStatus.REGISTERED_WITH_RECORD:
             continue
-        forward = _mapping(_mapping(_mapping(row.get("forward")).get("readout")).get("forward"))
-        bound = _number(forward.get("lower_bound"))
+        forward = as_mapping(as_mapping(as_mapping(row.get("forward")).get("readout")).get("forward"))
+        bound = finite_number(forward.get("lower_bound"))
         if bound is not None:
             ranked.append((-bound, position, row))
     if not ranked:
@@ -789,22 +781,22 @@ class ValidationView:
     def of(cls, row: Mapping[str, object], multiplier: float) -> ValidationView:
         """The view of one step row, the cost stress at ``multiplier``."""
 
-        summary = _mapping(row.get("summary"))
-        graded = _mapping(row.get("graded"))
+        summary = as_mapping(row.get("summary"))
+        graded = as_mapping(row.get("graded"))
         return cls(
             step_id=row.get("step_id"),
             span=row.get("span"),
-            total_return=_number(summary.get("total_return")),
-            excess_return=_number(_mapping(summary.get("benchmark")).get("excess_return")),
+            total_return=finite_number(summary.get("total_return")),
+            excess_return=finite_number(as_mapping(summary.get("benchmark")).get("excess_return")),
             excess_at_cost_stress=(
                 summary_excess_at_cost_stress(graded, summary, cost_stress_multiplier=multiplier)
-                if _number(graded.get("plain_excess")) is not None
+                if finite_number(graded.get("plain_excess")) is not None
                 else None
             ),
-            sharpe=_number(summary.get("sharpe")),
-            max_drawdown=_number(summary.get("max_drawdown")),
-            plain_excess=_number(graded.get("plain_excess")),
-            information_ratio=_number(graded.get("information_ratio")),
+            sharpe=finite_number(summary.get("sharpe")),
+            max_drawdown=finite_number(summary.get("max_drawdown")),
+            plain_excess=finite_number(graded.get("plain_excess")),
+            information_ratio=finite_number(graded.get("information_ratio")),
         )
 
 
@@ -843,7 +835,7 @@ def _live_steps(directory: Path) -> list[dict[str, object]]:
                 "step_id": record.get("step_id"),
                 "revision_id": record.get("revision_id"),
                 "span": record.get("span"),
-                "summary": dict(_mapping(record.get("summary"))),
+                "summary": dict(as_mapping(record.get("summary"))),
                 "validation_result_ref": reference,
                 "graded": figures,
                 **{name: record.get(name) for name in ("control", "batch_id")},
@@ -872,7 +864,7 @@ def _research_result(records: Sequence[Mapping[str, object]]) -> str | None:
     row = registered_record(records)
     if row is None:
         return None
-    return _result_name(_mapping(row.get("registered")).get("research_result_ref"))
+    return _result_name(as_mapping(row.get("registered")).get("research_result_ref"))
 
 
 def _record_alpha(params: Mapping[str, object]) -> float:
@@ -890,9 +882,9 @@ def record_passed(readout: Mapping[str, object]) -> bool:
     or not finite fails. Derived for display only: the stored verdict stays
     ``registered_with_record`` and no record is rewritten."""
 
-    record = _mapping(readout.get("record"))
-    ratio = _number(record.get("residual_information_ratio"))
-    threshold = _number(record.get("threshold"))
+    record = as_mapping(readout.get("record"))
+    ratio = finite_number(record.get("residual_information_ratio"))
+    threshold = finite_number(record.get("threshold"))
     return ratio is not None and threshold is not None and ratio >= threshold
 
 
@@ -908,7 +900,7 @@ def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, o
     if not tests:
         return None
     significance = validation_record.record_significance([row["entry"] for row in tests], alpha=_record_alpha(params))  # type: ignore[misc]
-    readout = _mapping(_mapping(forward_record(records)).get("readout"))
+    readout = as_mapping(as_mapping(forward_record(records)).get("readout"))
     return {
         **significance,
         "start": str(tests[0]["window"]["start"]),  # type: ignore[index]
@@ -942,16 +934,16 @@ def _record_detail(
     book_level = baseline_level = 1.0
     previous: str | None = None
     for record in tests:
-        candidate = _mapping(record.get("candidate"))
-        entry = _mapping(record.get("entry"))
+        candidate = as_mapping(record.get("candidate"))
+        entry = as_mapping(record.get("entry"))
         fingerprint = str(candidate.get("fingerprint") or "")
         changed = previous is not None and fingerprint != previous
         previous = fingerprint
-        replicates = [_mapping(item) for item in record.get("replicates") or ()]  # type: ignore[attr-defined]
+        replicates = [as_mapping(item) for item in record.get("replicates") or ()]  # type: ignore[attr-defined]
         rows.append(
             {
                 "step": record.get("step"),
-                "window": dict(_mapping(record.get("window"))),
+                "window": dict(as_mapping(record.get("window"))),
                 "test_horizon": record.get("test_horizon"),
                 "candidate": identity.public_text(str(candidate.get("step_id") or "")),
                 "changed": changed,
@@ -960,7 +952,7 @@ def _record_detail(
                 "seed_replicates": [
                     {
                         "node": identity.public_text(str(item.get("step_id") or "")),
-                        "active_return": _mapping(item.get("entry")).get("active_return"),
+                        "active_return": as_mapping(item.get("entry")).get("active_return"),
                         "strategy_error": (
                             identity.public_text(str(item["strategy_error"])) if item.get("strategy_error") else None
                         ),
@@ -975,7 +967,7 @@ def _record_detail(
             dates.append(str(day))
             book.append(book_level - 1.0)
             baseline.append(baseline_level - 1.0)
-        window = _mapping(record.get("window"))
+        window = as_mapping(record.get("window"))
         steps.append({"step": record.get("step"), "start": window.get("start"), "end": window.get("end"), "changed": changed})
     return {**view, "rows": rows, "curve": {"dates": dates, "book": book, "baseline": baseline, "steps": steps}}
 
@@ -1066,39 +1058,39 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
     silently.
     """
 
-    mine = _mapping(_mapping(record).get("readout"))
+    mine = as_mapping(as_mapping(record).get("readout"))
     if not mine:
         return None
-    window = _mapping(mine.get("record"))
+    window = as_mapping(mine.get("record"))
 
     def forward_months(row: Mapping[str, object]) -> tuple[object, object]:
-        replay = _mapping(row.get("replay"))
+        replay = as_mapping(row.get("replay"))
         return replay.get("start"), replay.get("forward_end")
 
-    months = forward_months(_mapping(record))
+    months = forward_months(as_mapping(record))
     records, unreadable = _experiment_forward_records(root)
     readings: list[dict[str, object]] = []
     pooled: list[dict[str, object]] = []
     raised = 0
     for experiment_id, other in records:
-        readout = _mapping(other.get("readout"))
+        readout = as_mapping(other.get("readout"))
         if not readout:
             continue
-        block = _mapping(readout.get("record"))
+        block = as_mapping(readout.get("record"))
         if (block.get("start"), block.get("end")) == (window.get("start"), window.get("end")):
-            ratio, years = _number(block.get("residual_information_ratio")), _number(block.get("years"))
+            ratio, years = finite_number(block.get("residual_information_ratio")), finite_number(block.get("years"))
             readings.append(
                 {
                     "experiment_id": experiment_id,
                     "residual_information_ratio": ratio,
                     "years": years,
-                    "p_value": _number(block.get("p_value")),
+                    "p_value": finite_number(block.get("p_value")),
                     "steps": block.get("steps"),
                     "candidate_changes": block.get("candidate_changes"),
                 }
             )
         if forward_months(other) == months:
-            slice_reading = _mapping(_mapping(readout.get("forward")).get("residual_reading"))
+            slice_reading = as_mapping(as_mapping(readout.get("forward")).get("residual_reading"))
             if slice_reading:
                 pooled.append(dict(slice_reading))
             else:
@@ -1126,7 +1118,7 @@ def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object
     -- the replicates it read, each one's seed line and IR or the problem that
     refused it -- or ``None`` for a check that never read the nominee."""
 
-    seeds = _mapping(block)
+    seeds = as_mapping(block)
     if not seeds:
         return None
     return {
@@ -1134,7 +1126,7 @@ def _seed_gate_view(identity: PublicIdentity, block: object) -> dict[str, object
             {
                 "step_id": entry.get("step_id"),
                 "seed_line": entry.get("seed_line"),
-                "information_ratio": _number(entry.get("information_ratio")),
+                "information_ratio": finite_number(entry.get("information_ratio")),
                 "problem": identity.public_text(str(entry.get("problem") or "")) or None,
             }
             for entry in seeds.get("replicates") or ()
@@ -1147,7 +1139,7 @@ def _research_session_view(
     directory: Path, identity: PublicIdentity, record: Mapping[str, object]
 ) -> dict[str, object]:
     steps = [row for row in record.get("steps") or () if isinstance(row, Mapping)]
-    gate = _mapping(record.get("registration"))
+    gate = as_mapping(record.get("registration"))
     run_id = str(record.get("run_id") or "")
     multiplier = _cost_stress_multiplier(directory)
     return {
@@ -1160,23 +1152,23 @@ def _research_session_view(
         # Whether the last attempt's trace is on disk: the page asks for its
         # counters and replay only then.
         "trace": resolve_trace_path(directory, run_id) is not None,
-        "run_wall_seconds": _number(record.get("run_wall_seconds")),
+        "run_wall_seconds": finite_number(record.get("run_wall_seconds")),
         "nominated_step_id": record.get("nominated_step_id"),
         "registration": (
             {
                 "passed": bool(gate.get("passed")),
                 "reasons": _recorded_reasons(gate.get("reasons")),
                 "mandate": {
-                    key: _number(value)
-                    for key, value in _mapping(gate.get("mandate")).items()
+                    key: finite_number(value)
+                    for key, value in as_mapping(gate.get("mandate")).items()
                 },
                 # The limits this nomination was actually judged against, as
                 # its own record states them, so a later change to any of them
                 # does not restate the experiment's gate and a limit the record does
                 # not carry is not drawn.
                 "thresholds": {
-                    key: _number(value)
-                    for key, value in _mapping(gate.get("thresholds")).items()
+                    key: finite_number(value)
+                    for key, value in as_mapping(gate.get("thresholds")).items()
                 },
                 "seed_replicates": _seed_gate_view(identity, gate.get("seed_replicates")),
             }
@@ -1189,7 +1181,7 @@ def _research_session_view(
         else None,
         "validations": [dataclass_record(ValidationView.of(row, multiplier)) for row in steps],
         "attempts": record.get("attempts"),
-        "budget_used": _mapping(record.get("budget_used")) or None,
+        "budget_used": as_mapping(record.get("budget_used")) or None,
     }
 
 
@@ -1201,26 +1193,26 @@ def _registered_view(
     row = registered_record(records)
     if row is None:
         return None
-    block = _mapping(row.get("registered"))
-    fit = _mapping(block.get("fit_plan"))
+    block = as_mapping(row.get("registered"))
+    fit = as_mapping(block.get("fit_plan"))
     return {
         "session_key": row.get("session_key"),
         "strategy_ref": identity.strategy_ref(block["artifact_id"]),
         "source_step_id": block.get("source_step_id"),
         "result": _result_name(block.get("research_result_ref")),
         "days": block.get("days"),
-        "plain_excess": _number(block.get("plain_excess")),
-        "tracking_error": _number(block.get("tracking_error")),
-        "information_ratio": _number(block.get("information_ratio")),
-        "forward_mde": _number(block.get("forward_mde")),
-        "null_percentile": _number(_mapping(block.get("null_control")).get("excess_percentile")),
+        "plain_excess": finite_number(block.get("plain_excess")),
+        "tracking_error": finite_number(block.get("tracking_error")),
+        "information_ratio": finite_number(block.get("information_ratio")),
+        "forward_mde": finite_number(block.get("forward_mde")),
+        "null_percentile": finite_number(as_mapping(block.get("null_control")).get("excess_percentile")),
         "fit": bool(fit.get("fit")),
         "refit_period": fit.get("refit_period"),
         "blocks": [dict(item) for item in block.get("blocks") or () if isinstance(item, Mapping)],
         # Registered beside replicates: the gate's reading of them, for the seed
         # mean beside the nominee's IR and their threshold. Absent on one seed.
         "seed_replicates": (
-            _seed_gate_view(identity, _mapping(row.get("registration")).get("seed_replicates"))
+            _seed_gate_view(identity, as_mapping(row.get("registration")).get("seed_replicates"))
             if block.get("seed_replicates")
             else None
         ),
@@ -1260,7 +1252,7 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
         "environment": sum(
             1
             for node in failed
-            if _mapping(node.get("metadata")).get("cause") == BATCH_FAILURE_ENVIRONMENT
+            if as_mapping(node.get("metadata")).get("cause") == BATCH_FAILURE_ENVIRONMENT
         ),
         "last_error": identity.public_text(str(last.get("error") or "")) or None if last else None,
     }
@@ -1291,11 +1283,11 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         if record is not None:
             entry["record"] = _research_session_view(directory, identity, record)
         if planned["kind"] == "forward":
-            replay = dict(_mapping(planned.get("replay")))
+            replay = dict(as_mapping(planned.get("replay")))
             entry["replay"] = replay
             entry["thresholds"] = _verdict_thresholds(params)
         sessions.append(entry)
-    raw_status = _mapping(experiment_state(directory).get("status"))
+    raw_status = as_mapping(experiment_state(directory).get("status"))
     current = raw_status.get("session_key")
     return {
         **detail,
@@ -1327,7 +1319,7 @@ def registered_strategy_dir(root: Path, experiment_id: str) -> Path:
 
     directory = resolve_experiment_dir(root, experiment_id)
     row = registered_record(read_ledger_records(directory))
-    value = _mapping(_mapping(row).get("registered")).get("output_path")
+    value = as_mapping(as_mapping(row).get("registered")).get("output_path")
     if not isinstance(value, str) or not value:
         raise KeyError("the experiment has no registered artifact")
     return recorded_path(directory, value)
@@ -1446,7 +1438,7 @@ def _order_stats(orders: list[dict[str, object]]) -> dict[str, object]:
         day = _order_trade_date(row)
         if not day:
             continue
-        amount = (_number(row.get("price")) or 0.0) * (_number(row.get("quantity")) or 0.0)
+        amount = (finite_number(row.get("price")) or 0.0) * (finite_number(row.get("quantity")) or 0.0)
         entry = daily.setdefault(day, [0.0, 0.0])
         entry[0] += 1
         entry[1] += amount
@@ -1455,7 +1447,7 @@ def _order_stats(orders: list[dict[str, object]]) -> dict[str, object]:
         "filled": len(filled),
         "rejected": sum(1 for row in orders if row.get("status") == "rejected"),
         "turnover": sum(
-            (_number(row.get("price")) or 0.0) * (_number(row.get("quantity")) or 0.0) for row in filled
+            (finite_number(row.get("price")) or 0.0) * (finite_number(row.get("quantity")) or 0.0) for row in filled
         ),
         "by_action": by_action,
         "reject_reasons": dict(sorted(reject_reasons.items(), key=lambda item: -item[1])[:6]),

@@ -17,7 +17,8 @@ MAX_TAIL_BYTES = 4 * 1024 * 1024
 MAX_BLOCK_READ_BYTES = 32 * 1024 * 1024
 STREAM_POLL_SECONDS = 1.0
 STREAM_IDLE_HEARTBEAT_EVERY = 15
-_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
+# The shape of a trace run id and of a sub-agent task id inside a trace.
+TRACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _BLOCK_TEXT_CHARS = 4_000
 _BLOCK_SUMMARY_CHARS = 160
 _BLOCK_SUBAGENT_SUMMARY_CHARS = 400
@@ -25,7 +26,6 @@ _BLOCK_DESCRIPTION_CHARS = 80
 _BLOCK_ERROR_CHARS = 240
 _BLOCK_ARGUMENT_CHARS = 600
 _BLOCK_RESULT_CHARS = 1_200
-SUBAGENT_TASK_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 # What a dead writer's unterminated trailing bytes are reported as. They are
 # never decoded: a torn record is not an event, and passing it through
 # ``_decode_event`` would present whatever parses as one.
@@ -43,7 +43,7 @@ def resolve_trace_path(experiment_dir: Path, run_id: str | None) -> Path | None:
         status = read_status(directory / "hitl/status.json")
         value = status.get("run_id")
         run_id = str(value) if isinstance(value, str) and value else None
-    if run_id is None or not _RUN_ID.fullmatch(run_id):
+    if run_id is None or not TRACE_ID.fullmatch(run_id):
         return None
     path = (directory / "artifacts/traces" / f"{run_id}.jsonl").resolve()
     trace_root = (directory / "artifacts/traces").resolve()

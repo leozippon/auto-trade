@@ -316,8 +316,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         }
 
     @app.post("/api/experiments")
-    def post_experiment(payload: dict = Body(...)) -> dict[str, object]:
-        params = payload.get("params") if isinstance(payload.get("params"), dict) else payload
+    def post_experiment(params: dict = Body(..., embed=True)) -> dict[str, object]:
         try:
             return manager.create_experiment(dict(params))
         except (ManagerError, ValueError) as exc:
@@ -374,14 +373,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         max_bytes: int | None = Query(None, ge=1, le=traces.MAX_BLOCK_READ_BYTES),
         tail_events: int | None = Query(None, ge=1, le=500),
     ) -> dict[str, object]:
-        directory, _unused_identity = _public_identity(experiment_id)
         path, raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         blocks = traces.read_trace_blocks(
             path,
             offset=offset,
             max_bytes=max_bytes,
             tail_events=tail_events,
-            writer_alive=traces.trace_writer_alive(directory, raw_run_id),
+            writer_alive=traces.trace_writer_alive(identity.experiment_dir, raw_run_id),
         )
         return _public_trace_blocks(blocks, identity)
 
@@ -393,7 +391,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     ) -> dict[str, object]:
         """One sub-agent's own turns, redacted like the parent projection."""
 
-        if not traces.SUBAGENT_TASK_ID.fullmatch(task_id):
+        if not traces.TRACE_ID.fullmatch(task_id):
             raise HTTPException(status_code=400, detail="invalid sub-agent task id")
         path, _raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         projected = traces.read_subagent_trace(path, task_id)
@@ -425,13 +423,12 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         run_id: str | None = Query(None),
         offset: int = Query(0, ge=0),
     ) -> StreamingResponse:
-        directory, _unused_identity = _public_identity(experiment_id)
-        _path, raw_run_id, _trace_ref, _identity = _trace_target(experiment_id, run_id)
+        _path, raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         resume = request.headers.get("last-event-id")
         if resume is not None and resume.isdigit():
             offset = max(offset, int(resume))
         return StreamingResponse(
-            traces.stream_trace(directory, raw_run_id, offset=offset),
+            traces.stream_trace(identity.experiment_dir, raw_run_id, offset=offset),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -919,6 +916,8 @@ def run(
     import uvicorn
     from uvicorn.config import LOGGING_CONFIG
 
+    if uds is None and not is_loopback_host(host):
+        raise ValueError("ADM-Cube console only accepts a loopback host or a Unix socket")
     # Auto-reap detached workers so exited experiments never linger as zombies
     # (their liveness is judged via status.json pid checks).
     # CAUTION: with SIGCHLD ignored, every subprocess.run() in THIS process
@@ -955,8 +954,6 @@ def run(
         uds.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         options["uds"] = str(uds)
     else:
-        if not is_loopback_host(host):
-            raise ValueError("ADM-Cube console only accepts a loopback host or a Unix socket")
         options.update({"host": host, "port": port})
     uvicorn.run(**options)
 

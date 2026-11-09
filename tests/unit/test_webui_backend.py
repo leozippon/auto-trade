@@ -23,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.common.records import write_json_atomic
@@ -37,6 +38,7 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
+    ExperimentState,
     StatusReporter,
     proc_start_ticks,
     read_control,
@@ -52,7 +54,7 @@ from autotrade.webui.manager import (
     ManagerError,
 )
 from autotrade.webui.public_identity import PublicIdentity
-from autotrade.webui.server import create_app, is_loopback_host
+from autotrade.webui.server import create_app, is_loopback_host, run
 from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
 from tests.unit.webui_research_experiment import build_experiment
@@ -358,13 +360,13 @@ def test_experiment_endpoint_rejects_console_managed_unknown_and_missing_paramet
     tmp_path: Path,
 ):
     client = TestClient(create_app(tmp_path))
-    closed = client.post("/api/experiments", json={"data_backend": "daily"})
+    closed = client.post("/api/experiments", json={"params": {"data_backend": "daily"}})
     assert closed.status_code == 400
     assert (
         closed.json()["detail"]
         == "console-managed parameters are not accepted: data_backend"
     )
-    old_model = client.post("/api/experiments", json={"llm_model": "deepseek-chat"})
+    old_model = client.post("/api/experiments", json={"params": {"llm_model": "deepseek-chat"}})
     assert old_model.status_code == 400
     assert (
         old_model.json()["detail"]
@@ -372,18 +374,22 @@ def test_experiment_endpoint_rejects_console_managed_unknown_and_missing_paramet
     )
     endpoint = client.post(
         "/api/experiments",
-        json={"llm_base_url": "https://untrusted.example.test/v1"},
+        json={"params": {"llm_base_url": "https://untrusted.example.test/v1"}},
     )
     assert endpoint.status_code == 400
     assert endpoint.json()["detail"] == (
         "console-managed parameters are not accepted: llm_base_url"
     )
-    unknown = client.post("/api/experiments", json={"period": "month"})
+    unknown = client.post("/api/experiments", json={"params": {"period": "month"}})
     assert unknown.status_code == 400
     assert unknown.json()["detail"] == "unknown experiment parameters: period"
-    missing = client.post("/api/experiments", json={})
+    missing = client.post("/api/experiments", json={"params": {}})
     assert missing.status_code == 400
     assert "experiment_id" in missing.json()["detail"]
+    # The request carries its parameters under "params" and nowhere else.
+    bare = client.post("/api/experiments", json={"experiment_id": "bare_demo"})
+    assert bare.status_code == 422
+    assert not (tmp_path / "experiments" / "bare_demo").exists()
 
 
 def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: Path):
@@ -544,6 +550,10 @@ def test_qmt_backend_is_absent_and_loopback_validation_is_single_source(tmp_path
     assert is_loopback_host("localhost")
     assert not is_loopback_host("0.0.0.0")
     assert not is_loopback_host("example.test")
+    # The server entry point refuses a public bind before it builds anything.
+    with pytest.raises(ValueError, match="loopback"):
+        run(tmp_path, host="0.0.0.0")
+    assert not (tmp_path / "logs").exists()
 
 
 def test_worker_liveness_rejects_unstamped_or_recycled_process_ids():
@@ -2073,6 +2083,33 @@ def test_a_worker_that_dies_during_boot_reads_as_interrupted(tmp_path: Path) -> 
     state = experiment_state(directory)
     assert state["state"] == "interrupted"
     # …and the console offers the researcher a way out of it.
+    assert state["state"] in _TERMINAL_RESUMABLE_STATES
+
+
+def test_a_worker_that_dies_while_preparing_reads_as_interrupted(tmp_path: Path) -> None:
+    """The worker's bootstrap reports ``preparing`` while it checks its
+    parameters and PIT data, before ``StatusReporter`` hands over to the
+    pipeline. A worker killed there (OOM, reboot) must read as interrupted
+    and be resumable like any other dead worker, not keep a raw
+    ``preparing`` badge whose resume never respawns it."""
+    from autotrade.webui.manager import _TERMINAL_RESUMABLE_STATES
+    from autotrade.webui.registry import experiment_state
+
+    directory = tmp_path / "experiments/demo"
+    hitl = directory / "hitl"
+    hitl.mkdir(parents=True)
+    reporter = StatusReporter(hitl / "status.json")
+    reporter.start()
+    reporter.set(state=ExperimentState.PREPARING, phase="strict_params_and_pit_data")
+    reporter.stop()
+    preparing = read_status(hitl / "status.json")
+    assert preparing["state"] == ExperimentState.PREPARING
+
+    write_json_atomic(
+        hitl / "status.json", {**preparing, "pid": 999_999_999, "pid_start_ticks": 1}
+    )
+    state = experiment_state(directory)
+    assert state["state"] == "interrupted"
     assert state["state"] in _TERMINAL_RESUMABLE_STATES
 
 

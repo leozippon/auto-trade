@@ -51,7 +51,7 @@ from autotrade.environment.broker import DailyBroker, Execution, Lot, Position
 from autotrade.environment.broker_core import validate_buy_lot
 from autotrade.environment.strategy import StrategyOrder
 
-from .storage import append_jsonl_once, read_jsonl
+from .storage import append_jsonl, read_jsonl
 
 FILLS_NAME = "fills.jsonl"
 CORRECTIONS_NAME = "corrections.jsonl"
@@ -196,15 +196,14 @@ def read_records(root: Path) -> Records:
 
 
 def append_records(root: Path, records: Iterable[Mapping[str, object]]) -> list[dict[str, object]]:
-    """Validate every record, then append them in order; the stamped lines."""
+    """Validate every record, then append them in order in one write; the stamped lines."""
 
     now = datetime.now(CN_TZ).isoformat(timespec="seconds")
     lines = [
         {"event_id": f"fill_{uuid.uuid4().hex}", "recorded_at": now, **normalize_record(record)}
         for record in records
     ]
-    for line in lines:
-        append_jsonl_once(Path(root) / FILLS_NAME, line)
+    append_jsonl(Path(root) / FILLS_NAME, lines)
     return lines
 
 

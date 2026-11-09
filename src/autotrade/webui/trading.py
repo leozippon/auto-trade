@@ -33,13 +33,12 @@ are already offset-aware and pass through as opaque display text.
 
 from __future__ import annotations
 
-import math
 from datetime import UTC, date, datetime, time, timedelta
 from pathlib import Path
 
 import pyarrow as pa
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import as_mapping, finite_number, read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
@@ -55,7 +54,7 @@ from autotrade.paper.book import (
 from autotrade.paper.book import (
     book_status as persisted_book_status,
 )
-from autotrade.paper.books import BOOK_ID_PATTERN, PAPER_STATE_DIR, list_books
+from autotrade.paper.books import PAPER_STATE_DIR, list_books, validate_book_id
 from autotrade.paper.engine import (
     PAPER_STATE_NAME,
     REFERENCE_KEY,
@@ -96,10 +95,13 @@ def env_dir(repo_root: Path, env: str) -> Path:
 
 def book_dir(repo_root: Path, book: str, env: str = "paper") -> Path:
     """One book's directory; anything that is not a book under the root is unknown."""
-    root = env_dir(repo_root, env)
-    if not BOOK_ID_PATTERN.fullmatch(book) or ".." in book or not (root / book / BOOK_NAME).is_file():
+    try:
+        directory = env_dir(repo_root, env) / validate_book_id(book)
+    except ValueError as exc:
+        raise KeyError(f"unknown Paper account: {book}") from exc
+    if not (directory / BOOK_NAME).is_file():
         raise KeyError(f"unknown Paper account: {book}")
-    return root / book
+    return directory
 
 
 def _valid_date(value: str) -> bool:
@@ -112,13 +114,6 @@ def _dates(root: Path, prefix: str) -> list[str]:
 
 def _text(value: object) -> str | None:
     return value if isinstance(value, str) and value else None
-
-
-def _number(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    result = float(value)
-    return result if math.isfinite(result) else None
 
 
 def _quantity(value: object) -> int | None:
@@ -163,10 +158,6 @@ def _read_json(path: Path) -> tuple[dict[str, object] | None, str | None]:
         return None, omit_private_paths(str(exc))
 
 
-def _mapping(value: object) -> dict[str, object]:
-    return value if isinstance(value, dict) else {}
-
-
 def _decisions(state: dict[str, object] | None) -> list[dict[str, object]]:
     decisions = (state or {}).get("decisions")
     return [
@@ -186,8 +177,7 @@ def _today(state: dict[str, object] | None) -> dict[str, object]:
     The book decides a session on that session's own morning, so a decision for
     the current Asia/Shanghai calendar day is the sheet the operator places at
     the next open. ``ready`` is that record's existence and nothing else: no
-    deadline, no judgement about how long a run may still take. ``decided_at``
-    is absent for a decision the engine took before it recorded one."""
+    deadline, no judgement about how long a run may still take."""
     latest = (_decisions(state) or [{}])[-1]
     return {
         "trade_date": _text(latest.get("trade_date")),
@@ -214,7 +204,7 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
             "experiment_id": _text(record.get("experiment_id")),
             "artifact_id": _text(record.get("artifact_id")),
             "note": _text(record.get("note")),
-            "initial_cash": _number(_mapping(record.get("profile")).get("initial_cash")),
+            "initial_cash": finite_number(as_mapping(record.get("profile")).get("initial_cash")),
         }
     state = state or {}
     warnings = state.get("warnings")
@@ -265,8 +255,8 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
                 "name": _text(row["name"]),
                 "action": _text(row["action"]),
                 "quantity": _quantity(row["quantity"]),
-                "reference_price": _number(row["reference_price"]),
-                "notional": _number(row["notional"]),
+                "reference_price": finite_number(row["reference_price"]),
+                "notional": finite_number(row["notional"]),
             }
             for row in sheet["orders"]
         ],
@@ -277,8 +267,8 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
                 "title": _text(group["title"]),
                 "how": _text(group["how"]),
                 "orders": list(group["orders"]),
-                "buy": _number(group["flows"]["buy"]),
-                "sell": _number(group["flows"]["sell"]),
+                "buy": finite_number(group["flows"]["buy"]),
+                "sell": finite_number(group["flows"]["sell"]),
             }
             for group in sheet["groups"]
         ],
@@ -288,14 +278,14 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
                 "symbol": _text(row["symbol"]),
                 "name": _text(row["name"]),
                 "quantity": _quantity(row["quantity"]),
-                "reference_price": _number(row["reference_price"]),
-                "value": _number(row["value"]),
-                "weight": _number(row["weight"]),
+                "reference_price": finite_number(row["reference_price"]),
+                "value": finite_number(row["value"]),
+                "weight": finite_number(row["weight"]),
             }
             for row in sheet["target"]
         ],
-        "cash_after": _number(sheet["cash_after"]),
-        "cash_weight": _number(sheet["cash_weight"]),
+        "cash_after": finite_number(sheet["cash_after"]),
+        "cash_weight": finite_number(sheet["cash_weight"]),
         "skipped_lines": int(sheet["skipped_lines"]),
     }
 
@@ -315,7 +305,7 @@ def signal_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, 
                 "transition": {key: _text(transitions[0].get(key)) for key in ("status", "date", "reason")},
                 "orders": [], "groups": [],
                 "target": [{"symbol": _text(row["symbol"]), "name": _text(row["name"]),
-                            "quantity": _quantity(row["quantity"]), "reference_price": _number(row["reference_price"])}
+                            "quantity": _quantity(row["quantity"]), "reference_price": finite_number(row["reference_price"])}
                            for row in holdings], "limit_guidance": None,
                 "cash_after": None, "cash_weight": None, "skipped_lines": 0,
             }}
@@ -338,12 +328,12 @@ def _dividend_tax(row: dict[str, object]) -> float | None:
     """The dividend tax a sale paid; a row journaled before the Broker charged
     it carries no key and paid none."""
 
-    return _number(row.get("dividend_tax", 0.0))
+    return finite_number(row.get("dividend_tax", 0.0))
 
 
 def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, object]:
     symbol = _text(row.get("symbol"))
-    commission, stamp_duty = _number(row.get("commission")), _number(row.get("stamp_duty"))
+    commission, stamp_duty = finite_number(row.get("commission")), finite_number(row.get("stamp_duty"))
     dividend_tax = _dividend_tax(row)
     return {
         "symbol": symbol,
@@ -352,7 +342,7 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
         "quantity": _quantity(row.get("quantity")),
         "matched_at": _text(row.get("matched_at")),
         "status": _text(row.get("status")),
-        "price": _number(row.get("price")),
+        "price": finite_number(row.get("price")),
         "cost": None
         if commission is None and stamp_duty is None
         else (commission or 0.0) + (stamp_duty or 0.0) + (dividend_tax or 0.0),
@@ -368,12 +358,12 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
 # ------------------------------------------------------- real fills
 
 def _outcome(value: object) -> dict[str, object]:
-    row = _mapping(value)
-    commission, stamp = _number(row.get("commission")) or 0.0, _number(row.get("stamp_duty")) or 0.0
+    row = as_mapping(value)
+    commission, stamp = finite_number(row.get("commission")) or 0.0, finite_number(row.get("stamp_duty")) or 0.0
     tax = _dividend_tax(row) or 0.0
     return {
         "quantity": _count(row.get("quantity")),
-        "price": _number(row.get("price")),
+        "price": finite_number(row.get("price")),
         "fees": commission + stamp,
         "dividend_tax": tax,
         "reason": _text(row.get("reason")),
@@ -386,7 +376,7 @@ def _key_view(day: str, key: str, names: dict[str, str], references: dict[str, o
     return {
         "key": key, "time": clock, "window": order_window(execute_at),
         "window_label": window_text(execute_at, day)[0], "symbol": symbol,
-        "name": names.get(symbol), "action": action, "reference_price": _number(references.get(symbol)),
+        "name": names.get(symbol), "action": action, "reference_price": finite_number(references.get(symbol)),
     }
 
 
@@ -394,8 +384,8 @@ def _record_view(record: fills.Record | None) -> dict[str, object] | None:
     if record is None:
         return None
     return {
-        "outcome": record.outcome, "quantity": record.quantity or None, "price": _number(record.price),
-        "commission": _number(record.commission), "recorded_at": _utc_iso(_to_utc(record.recorded_at)),
+        "outcome": record.outcome, "quantity": record.quantity or None, "price": finite_number(record.price),
+        "commission": finite_number(record.commission), "recorded_at": _utc_iso(_to_utc(record.recorded_at)),
     }
 
 
@@ -407,11 +397,11 @@ def _settled_rows(day: str, ledger: dict[str, object], names: dict[str, str]) ->
         compared = fills.compare(key, entry)
         rows.append({
             **_key_view(day, key, names, {}),
-            "ordered": _count(_mapping(entry).get("ordered")),
-            "simulated": _outcome(_mapping(entry).get("simulated")),
-            "real": _outcome(_mapping(entry).get("real")),
+            "ordered": _count(as_mapping(entry).get("ordered")),
+            "simulated": _outcome(as_mapping(entry).get("simulated")),
+            "real": _outcome(as_mapping(entry).get("real")),
             "status": compared["status"],
-            "price_bp": _number(compared["price_bp"]),
+            "price_bp": finite_number(compared["price_bp"]),
             # To the cent: a sub-cent difference is no difference.
             **{
                 name: None if compared[name] is None else round(compared[name], 2) + 0.0
@@ -425,7 +415,7 @@ def _equity_gaps(root: Path) -> dict[str, float]:
     """Per real-fill session: the simulated account's close less the real one."""
     gaps = {}
     for row in read_jsonl(root / EQUITY_JOURNAL_NAME)[0]:
-        day, simulated, real = _text(row.get("trade_date")), _number(row.get("simulated_equity")), _number(row.get("equity"))
+        day, simulated, real = _text(row.get("trade_date")), finite_number(row.get("simulated_equity")), finite_number(row.get("equity"))
         if day and simulated is not None and real is not None:
             gaps[day] = simulated - real
     return gaps
@@ -458,7 +448,7 @@ def _open_sessions(root: Path, state: dict[str, object], records: fills.Records)
     sessions = []
     for day in sorted(days):
         references = {
-            str(row.get("symbol")): _mapping(row.get(REFERENCE_KEY)).get("close")
+            str(row.get("symbol")): as_mapping(row.get(REFERENCE_KEY)).get("close")
             for row in read_jsonl(root / f"orders_{day}.jsonl")[0]
         }
         keys = ordered.get(day, {})
@@ -523,7 +513,7 @@ def fills_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, o
     gaps = _equity_gaps(root)
     settled = [
         {"trade_date": day, "settled": True, "gap": gaps.get(day), "rows": _settled_rows(day, ledger, names)}
-        for day, ledger in sorted(_mapping((current or {}).get("sessions")).items(), reverse=True)
+        for day, ledger in sorted(as_mapping((current or {}).get("sessions")).items(), reverse=True)
         if ledger
     ]
     compared = [row for session in settled for row in session["rows"]]
@@ -564,14 +554,14 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
     days = sorted(set(decided[:-1]) | set(_dates(root, "executions_")), reverse=True)
     # A real-fill book's settled sessions, key by key against the simulator,
     # and the corrections each later session booked.
-    ledgers = _mapping(_mapping(fills.mode(state or {})).get("sessions"))
+    ledgers = as_mapping(as_mapping(fills.mode(state or {})).get("sessions"))
     gaps = _equity_gaps(root) if ledgers else {}
     booked: dict[str, list[dict[str, object]]] = {}
     for row in read_jsonl(root / fills.CORRECTIONS_NAME)[0] if ledgers else ():
         booked.setdefault(str(row.get("trade_date")), []).append({
             "corrects": _text(row.get("corrects")), "symbol": _text(row.get("symbol")),
-            "action": _text(row.get("action")), "quantity": _number(row.get("quantity")),
-            "cash": _number(row.get("cash")), "realized_pnl": _number(row.get("realized_pnl")),
+            "action": _text(row.get("action")), "quantity": finite_number(row.get("quantity")),
+            "cash": finite_number(row.get("cash")), "realized_pnl": finite_number(row.get("realized_pnl")),
         })
     all_names = _names(root) if ledgers else {}
     rows = []
@@ -597,7 +587,7 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
             "cash_weight": sheet["cash_weight"] if sheet else None,
             "fills": [_fill(row, names) for row in executed],
             "reconciliation": (
-                {"gap": gaps.get(day), "rows": _settled_rows(day, _mapping(ledger), names)}
+                {"gap": gaps.get(day), "rows": _settled_rows(day, as_mapping(ledger), names)}
                 if isinstance(ledger, dict) else None
             ),
             "corrections": booked.get(day, []),
@@ -642,10 +632,10 @@ def _benchmark(root: Path, index: str) -> tuple[dict[str, float], str | None]:
 
 def _curve_entry(value: object) -> dict[str, object] | None:
     """One compounded curve of the book's source history, whitelisted."""
-    row = _mapping(value)
+    row = as_mapping(value)
     dates = [day for day in row.get("dates") or () if isinstance(day, str) and _valid_date(day)]
-    cumulative = [_number(item) for item in row.get("cum") or ()]
-    drawdown = [_number(item) for item in row.get("drawdown") or ()]
+    cumulative = [finite_number(item) for item in row.get("cum") or ()]
+    drawdown = [finite_number(item) for item in row.get("drawdown") or ()]
     if not dates or len(cumulative) != len(dates) or len(drawdown) != len(dates):
         return None
     if any(item is None for item in (*cumulative, *drawdown)):
@@ -656,7 +646,7 @@ def _curve_entry(value: object) -> dict[str, object] | None:
         "dates": dates,
         "cum": cumulative,
         "drawdown": drawdown,
-        "final": _number(row.get("final")),
+        "final": finite_number(row.get("final")),
     }
 
 
@@ -687,14 +677,14 @@ def _simulated_returns(rows: list[dict[str, object]], initial: float) -> list[tu
     Each real-fill session is simulated from the real account it opened with,
     so its return is that session's simulated close over the real close
     before it; a session settled before the switch is the account's own."""
-    if not any(_number(row.get("simulated_equity")) is not None for row in rows):
+    if not any(finite_number(row.get("simulated_equity")) is not None for row in rows):
         return None
     result, previous = [], initial
     for row in rows:
-        day, equity = _text(row.get("trade_date")), _number(row.get("equity"))
+        day, equity = _text(row.get("trade_date")), finite_number(row.get("equity"))
         if not day or not _valid_date(day) or equity is None:
             continue
-        simulated = _number(row.get("simulated_equity"))
+        simulated = finite_number(row.get("simulated_equity"))
         result.append((day, (simulated if simulated is not None else equity) / previous - 1.0))
         previous = equity
     return result
@@ -706,15 +696,15 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
     source experiment's out-of-sample curve the book's own days continue."""
     root = book_dir(repo_root, book, env)
     record, error = _read_json(root / BOOK_NAME)
-    initial = _number(_mapping(_mapping(record).get("profile")).get("initial_cash"))
+    initial = finite_number(as_mapping(as_mapping(record).get("profile")).get("initial_cash"))
     rows, _skipped = read_jsonl(root / EQUITY_JOURNAL_NAME)
     # One row per settled day: equity marked at that day's close and the cash
     # after that day's fills, as the engine journals them together.
     curve = [
-        {"trade_date": day, "equity": equity, "cash": _number(row.get("cash")), "initial_equity": initial}
+        {"trade_date": day, "equity": equity, "cash": finite_number(row.get("cash")), "initial_equity": initial}
         for row in rows
         if (day := _text(row.get("trade_date"))) and _valid_date(day)
-        and (equity := _number(row.get("equity"))) is not None
+        and (equity := finite_number(row.get("equity"))) is not None
     ]
     base = {"env": env, "min_days": MIN_STATISTICS_DAYS}
     source, source_error = _source_history(root)
@@ -760,8 +750,8 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
             curve_entry("strategy", "实际成交", [(anchor, 0.0), *returns]),
             curve_entry("simulated", "按模拟成交", [(anchor, 0.0), *simulated]),
         ]
-    total_return = _number(stats["total_return"])
-    benchmark_return = _number(benchmark["final"]) if covered else None
+    total_return = finite_number(stats["total_return"])
+    benchmark_return = finite_number(benchmark["final"]) if covered else None
     return {
         **base,
         "state": "ok",
@@ -791,14 +781,14 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
             "excess_return": total_return - benchmark_return
             if total_return is not None and benchmark_return is not None
             else None,
-            "annualized_return": _number(stats["annualized_return"]) if enough else None,
-            "sharpe": _number(stats["sharpe"]) if enough else None,
-            "max_drawdown": _number(stats["max_drawdown"]) if enough else None,
-            "turnover": _number(stats["turnover"]),
-            "fees": _number(stats["fees_paid"]),
-            "stamp_duty": _number(stats["stamp_duty_paid"]),
-            "dividend_tax": _number(stats.get("dividend_tax_paid", 0.0)),
-            "fills": int(_mapping(stats["order_status_counts"]).get("filled", 0)),
+            "annualized_return": finite_number(stats["annualized_return"]) if enough else None,
+            "sharpe": finite_number(stats["sharpe"]) if enough else None,
+            "max_drawdown": finite_number(stats["max_drawdown"]) if enough else None,
+            "turnover": finite_number(stats["turnover"]),
+            "fees": finite_number(stats["fees_paid"]),
+            "stamp_duty": finite_number(stats["stamp_duty_paid"]),
+            "dividend_tax": finite_number(stats.get("dividend_tax_paid", 0.0)),
+            "fills": int(as_mapping(stats["order_status_counts"]).get("filled", 0)),
         },
     }
 
@@ -811,8 +801,8 @@ _POSITION_FIELDS = (
     ("symbol", "symbol", _text),
     ("quantity", "quantity", _count),
     ("available_quantity", "available_quantity", _count),
-    ("average_cost", "average_cost", _number),
-    ("last_price", "last_price", _number),
+    ("average_cost", "average_cost", finite_number),
+    ("last_price", "last_price", finite_number),
 )
 
 
@@ -829,11 +819,11 @@ def _project_position(record: dict[str, object], equity: float | None) -> dict[s
 
 def _project_snapshot(raw: dict[str, object]) -> dict[str, object]:
     positions = raw.get("positions") if isinstance(raw.get("positions"), list) else []
-    equity = _number(raw.get("equity"))
+    equity = finite_number(raw.get("equity"))
     rows = [_project_position(row, equity) for row in positions if isinstance(row, dict)]
     return {
         "settled_through": _text(raw.get("settled_through")),
-        "cash": _number(raw.get("cash")),
+        "cash": finite_number(raw.get("cash")),
         "equity": equity,
         "market_value": sum(row["market_value"] or 0.0 for row in rows),
         "pending_order_count": _count(raw.get("pending_order_count")),
@@ -931,22 +921,22 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
     for name, row in _journal_rows(root, "executions_"):
         if row.get("status") != "filled":
             continue
-        realized = _number(row.get("realized_pnl")) if row.get("action") == "sell" else 0.0
-        add(name, row, commission=_number(row.get("commission")),
-            stamp_duty=_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
+        realized = finite_number(row.get("realized_pnl")) if row.get("action") == "sell" else 0.0
+        add(name, row, commission=finite_number(row.get("commission")),
+            stamp_duty=finite_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
             realized_pnl=realized)
     for name, row in _journal_rows(root, "corporate_actions_"):
-        withheld = _number(row.get("dividend_tax_withheld", 0.0))
-        add(name, row, dividends=_number(row.get("cash_credit")),
+        withheld = finite_number(row.get("dividend_tax_withheld", 0.0))
+        add(name, row, dividends=finite_number(row.get("cash_credit")),
             dividend_tax=withheld, realized_pnl=-withheld if withheld is not None else None)
     # A real-fill book's corrections move the same money a fill does.
     corrections, skipped = read_jsonl(root / fills.CORRECTIONS_NAME)
     if skipped:
         raise ValueError(f"{fills.CORRECTIONS_NAME} has {skipped} unreadable line(s)")
     for row in corrections:
-        add(fills.CORRECTIONS_NAME, row, commission=_number(row.get("commission")),
-            stamp_duty=_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
-            realized_pnl=_number(row.get("realized_pnl")))
+        add(fills.CORRECTIONS_NAME, row, commission=finite_number(row.get("commission")),
+            stamp_duty=finite_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
+            realized_pnl=finite_number(row.get("realized_pnl")))
     return flows
 
 
@@ -956,7 +946,7 @@ def _names(root: Path) -> dict[str, str]:
     names = {}
     for day in _dates(root, "orders_"):
         for row in read_jsonl(root / f"orders_{day}.jsonl")[0]:
-            symbol, name = _text(row.get("symbol")), _text(_mapping(row.get(REFERENCE_KEY)).get("name"))
+            symbol, name = _text(row.get("symbol")), _text(as_mapping(row.get(REFERENCE_KEY)).get("name"))
             if symbol and name:
                 names[symbol] = name
     return names
@@ -982,8 +972,8 @@ def pnl_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
     root = book_dir(repo_root, book, env)
     record, error = _read_json(root / BOOK_NAME)
     state, state_error = _read_json(root / PAPER_STATE_NAME)
-    initial = _number(_mapping(_mapping(record).get("profile")).get("initial_cash"))
-    mark_date = _text(_mapping(state).get("settled_through"))
+    initial = finite_number(as_mapping(as_mapping(record).get("profile")).get("initial_cash"))
+    mark_date = _text(as_mapping(state).get("settled_through"))
     base: dict[str, object] = {
         "env": env, "state": "ok", "error": None, "mark_date": mark_date, "initial_cash": initial,
         "equity": None, "total_pnl": None, "total_return": None,
@@ -993,15 +983,15 @@ def pnl_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
         return {**base, "state": "unreadable", "error": error or state_error}
     if not mark_date:  # never run, or nothing settled yet: nothing to measure
         return {**base, "state": "absent"}
-    account = _mapping(_mapping(state).get("account"))
-    cash, raw = _number(account.get("cash")), account.get("positions")
+    account = as_mapping(as_mapping(state).get("account"))
+    cash, raw = finite_number(account.get("cash")), account.get("positions")
     if initial is None or initial <= 0 or cash is None or not isinstance(raw, list):
         return {**base, "state": "unreadable", "error": "no valid initial cash or account checkpoint"}
     positions = {}
     for item in raw:
-        row = _mapping(item)
+        row = as_mapping(item)
         symbol = _text(row.get("symbol"))
-        held = (_quantity(row.get("quantity")), _number(row.get("average_cost")), _number(row.get("last_price")))
+        held = (_quantity(row.get("quantity")), finite_number(row.get("average_cost")), finite_number(row.get("last_price")))
         if symbol is None or None in held:
             return {**base, "state": "unreadable", "error": "the account checkpoint has an invalid position"}
         positions[symbol] = held
@@ -1080,12 +1070,8 @@ def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
 
 def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
     """The overview: one row per book, each figure read off that book's panels."""
-    try:
-        books = list_books(env_dir(repo_root, env))
-    except RuntimeError as exc:  # a root still in the single-book layout
-        return {"env": env, "state": "unreadable", "error": str(exc), "books": []}
     rows = []
-    for book in books:
+    for book in list_books(env_dir(repo_root, env)):
         identity = book_payload(repo_root, book, env)
         signal = signal_payload(repo_root, book, env)["signal"]
         performance = performance_payload(repo_root, book, env)
@@ -1126,8 +1112,5 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
 def health_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
     """For external monitors: false for an unreadable book or a failed run.
     A book awaiting the owner's fills is waiting on him, not failing."""
-    try:
-        books = [book_status(repo_root, book, env) for book in list_books(env_dir(repo_root, env))]
-    except RuntimeError as exc:
-        return {"ok": False, "env": env, "error": str(exc), "books": []}
+    books = [book_status(repo_root, book, env) for book in list_books(env_dir(repo_root, env))]
     return {"ok": all(row["state"] not in {"unreadable", "export_error"} for row in books), "env": env, "error": None, "books": books}

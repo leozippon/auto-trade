@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Sequence
 from pathlib import Path
 
 
@@ -51,8 +52,18 @@ def append_jsonl_once(path: Path, payload: dict[str, object], *, identity_key: s
     rows, _skipped = read_jsonl(path)
     if any(row.get(identity_key) == identity for row in rows):
         return
+    append_jsonl(path, [payload])
+
+
+def append_jsonl(path: Path, payloads: Sequence[dict[str, object]]) -> None:
+    """Append ``payloads`` as JSON lines in one write, fsynced: lines that
+    belong together land together instead of one at a time."""
+
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    encoded = json.dumps(payload, ensure_ascii=False, default=str, allow_nan=False).encode("utf-8") + b"\n"
+    encoded = b"".join(
+        json.dumps(payload, ensure_ascii=False, default=str, allow_nan=False).encode("utf-8") + b"\n"
+        for payload in payloads
+    )
     with path.open("a+b") as stream:
         stream.seek(0, os.SEEK_END)
         if stream.tell():
@@ -65,4 +76,4 @@ def append_jsonl_once(path: Path, payload: dict[str, object], *, identity_key: s
     path.chmod(0o600)
 
 
-__all__ = ["append_jsonl_once", "read_jsonl"]
+__all__ = ["append_jsonl", "append_jsonl_once", "read_jsonl"]

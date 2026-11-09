@@ -7,6 +7,7 @@ const $toastRoot = document.getElementById("toast-root");
 
 const STATE_LABELS = {
   launching: "启动中",
+  preparing: "准备中",
   initializing: "初始化中",
   running_session: "运行中",
   paused: "已暂停",
@@ -570,7 +571,7 @@ function escapeHtml(text) {
    Specs: thin marks (bars ≤24px, 2px surface gap, 4px rounded data-end,
    square baseline; 2px lines; ≥8px markers with 2px surface ring), hairline
    solid gridlines, muted-ink labels, legend, hover tooltips. One categorical
-   slot (the accent) against a neutral dashed 沪深300. The inks are the
+   slot (the accent) against a neutral dashed benchmark. The inks are the
    stylesheet's tokens for the theme on screen, read when a chart is drawn, so
    a chart never carries a palette of its own. */
 function themeInk() {
@@ -643,12 +644,13 @@ function chartLegend(items) {
   );
 }
 
-/* ---- daily equity line + drawdown and position panes (vs 沪深300) ----
+/* ---- daily equity line + drawdown and position panes (vs the benchmark) ----
    One ledger-named replay result per payload (equity.result_equity_payload),
-   compounded on the server; 沪深300 is served on the strategy's own days, so
-   both lines start at 0 together. A marker is a dashed vertical line, a band
-   a labelled wash over a date range. `points` asks for that many evenly
-   spaced days instead of every day: a card's miniature has no use for more. */
+   compounded on the server; the experiment's own benchmark index is served on
+   the strategy's own days, so both lines start at 0 together. A marker is a
+   dashed vertical line, a band a labelled wash over a date range. `points`
+   asks for that many evenly spaced days instead of every day: a card's
+   miniature has no use for more. */
 const RESULT_EQUITY_CACHE = new Map(); // `${experiment_id}/${result}/${points}` -> promise
 const CARD_CURVE_POINTS = 200;
 
@@ -7325,9 +7327,6 @@ function renderBooksOverview(payload) {
         { class: "page-head" },
         el("h2", {}, "模拟交易", el("span", { class: "mode-note" }, `${books.length} 个模拟账户`)),
       ),
-      payload.state === "unreadable"
-        ? el("div", { class: "banner bad" }, payload.error)
-        : null,
       books.length
         ? el("div", { class: "grid" }, ...books.map(bookCard))
         : el("div", { class: "empty" }, "暂无模拟账户"),

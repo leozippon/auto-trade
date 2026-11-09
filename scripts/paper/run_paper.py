@@ -204,7 +204,6 @@ def _resources(label: str) -> None:
 
 
 def init(args: argparse.Namespace) -> int:
-    list_books(args.state_root)  # refuses a root still in the single-book layout
     book = create_book(
         args.state_root / validate_book_id(args.book or args.experiment),
         experiment_dir=REPO_ROOT / "experiments" / args.experiment,

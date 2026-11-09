@@ -327,7 +327,7 @@ class ExperimentManager:
         # One mutation lock per experiment, not one for the console. Mutating
         # calls that touch the SAME experiment's worker, control state or
         # directory still serialize, but terminate and restart wait out a
-        # SIGTERM grace (10 s / 35 s) and delete can spend minutes escalating a
+        # SIGTERM grace (10 s / 30 s) and delete can spend minutes escalating a
         # stuck rmtree through docker; under a console-wide lock every one of
         # those waits blocked every other experiment's create, start, pause,
         # resume and set_directive.
@@ -880,7 +880,10 @@ class ExperimentManager:
             raise ManagerError("worker 已退出") from exc
         escalated = not _await_worker_exit(status_path, _TERMINATE_GRACE_SECONDS)
         if escalated:
-            _signal_worker_group(pid, signal.SIGKILL)
+            try:
+                _signal_worker_group(pid, signal.SIGKILL)
+            except ProcessLookupError:  # exited just after the last poll
+                pass
         result: dict[str, object] = {
             "terminated_pid": pid,
             "escalated": escalated,
