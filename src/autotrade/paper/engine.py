@@ -23,6 +23,12 @@ with that day's PIT view and journaled account, and discards their outputs
 before the real call. The journals, not those re-issued calls, are the record
 of what the book decided.
 
+Every decision runs on a staged copy of the published strategy state and
+publishes it once the decision succeeds, so a run holds two copies of the state
+on disk. A superseded state the run cannot remove does not fail a decision already
+journaled: it is recorded as a warning, which the order sheet and the console
+print, and every later decision retries every superseded entry until it is gone.
+
 A book its owner switched to real fills settles every later session from the
 owner's recorded outcomes instead of the simulator's, so each decision sees the
 account the owner actually holds (``paper.fills``).

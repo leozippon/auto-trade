@@ -27,8 +27,8 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # the morning the run falls.
 #
 # The runs work back from 09:10 (PAPER_SHEET_DUE in src/autotrade/paper/book.py)
-# with a 45-minute budget for one attempt: the strategy container's start
-# clock (15 min) plus the Paper decision clock (30 min,
+# with a 75-minute budget for one attempt: the strategy container's start
+# clock (15 min) plus the Paper decision clock (60 min,
 # PAPER_DECISION_TIMEOUT_SECONDS, one decision call in every book, whatever its
 # experiment's). A book's whole run -- its PIT build, the replay of its earlier
 # decisions and one decision -- takes 8-13 min on a quiet host and 42 min
@@ -44,25 +44,25 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # from its experiment's strategy_fit_timeout_seconds; the last retry's budget
 # does not cover a fit.
 #
-# 07:40 and 08:25 are retries for a morning whose data landed late or whose
+# 06:40 and 07:55 are retries for a morning whose data landed late or whose
 # first run was slow: flock skips a retry while an earlier run is still
 # working, and a book whose session is already decided is a no-op re-render,
-# never a second decision. 07:40 follows the latest the PIT event build has
-# run; 08:25 is the last that still has the budget before 09:10, and the two
-# are a budget apart, so a 07:40 retry that runs one book in full has ended
-# when the last one starts. The PIT event build is the part of the chain that
-# can push past 05:40 under load (03:35-05:32 on a quiet night, 03:35-07:14 on
-# 2026-09-16 with four experiments running); a night where it runs past 08:25 needs
-# the experiments throttled, not another retry.
+# never a second decision. 07:55 is the last that still has the budget before
+# 09:10, and it follows the latest the PIT event build has run; 06:40 is a
+# budget before it, so a 06:40 retry that runs one book in full has ended when
+# the last one starts. The PIT event build is the part of the chain that can
+# push past 05:40 under load (03:35-05:32 on a quiet night, 03:35-07:14 on
+# 2026-09-16 with four experiments running); a night where it runs past 07:55
+# needs the experiments throttled, not another retry.
 #
 # A GPU book takes its card only as its strategy container starts; with no
-# eligible card it looks again every 60 s until 165 min after its run began
+# eligible card it looks again every 60 s until 135 min after its run began
 # (run_paper.py --gpu-poll-seconds / --gpu-wait-minutes), so the 05:40 run keeps
-# looking until 08:25, when the last retry starts: a card found at its last
+# looking until 07:55, when the last retry starts: a card found at its last
 # look still leaves the budget before the sheet is due. A run waiting for
 # a card is still working: the retries skip while it waits, so a book that
 # failed in it for late data is retried only after it ends, or by hand with
 # run_paper.py run --book <book>.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-40 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-25 8 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+40 6 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+55 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1

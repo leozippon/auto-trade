@@ -77,10 +77,11 @@ PAPER_INITIAL_CASH = 200_000.0
 PAPER_SHEET_DUE = time(9, 10)
 # The wall clock of one decision call in every Paper run -- the day's decision
 # and the replay of each earlier one -- in place of the experiment's
-# strategy_inference_timeout_seconds, which is sized for research replays (an
-# hour by default) and would not fit the schedule above. A strategy whose
-# decisions take longer than this passes its research replays and fails here.
-PAPER_DECISION_TIMEOUT_SECONDS = 1800.0
+# strategy_inference_timeout_seconds, which an experiment may set to anything
+# while every book has to fit the schedule above: an hour, the research
+# default (the owner's decision of 2026-11-09). A strategy whose decisions take
+# longer than this passes its research replays and fails here.
+PAPER_DECISION_TIMEOUT_SECONDS = 3600.0
 # The Paper verdict's rules, pinned into every new book. A statistical check
 # runs only every CHECKPOINT_DAYS settled Paper sessions (half a year): kill
 # when the KILL_CONFIDENCE upper bound of the plain active mean is below zero

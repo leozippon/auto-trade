@@ -112,6 +112,20 @@ def test_the_book_panel_is_a_whitelist_of_the_frozen_identity(tmp_path: Path):
     assert "/private/lake" not in json.dumps(payload)
 
 
+def test_the_book_panel_carries_the_last_decisions_warnings_without_host_paths(tmp_path: Path):
+    """A superseded strategy state the run could not remove is a warning the
+    order sheet prints; the book's page shows the same text."""
+    root = engine_book(tmp_path, "20260105")
+    assert trading.book_payload(tmp_path, BOOK)["warnings"] == []
+    state = json.loads((root / ".paper_state.json").read_text(encoding="utf-8"))
+    leftover = root / ".strategy_state" / "20260102"
+    state["warnings"] = [f"cannot remove superseded strategy state 20260102: cannot remove strategy state: {leftover}"]
+    (root / ".paper_state.json").write_text(json.dumps(state), encoding="utf-8")
+    [warning] = trading.book_payload(tmp_path, BOOK)["warnings"]
+    assert warning.startswith("cannot remove superseded strategy state 20260102")
+    assert str(tmp_path) not in warning and HOST_PATH_MARKER in warning
+
+
 def test_a_broken_book_record_reads_unreadable_without_its_host_path(tmp_path: Path):
     root = engine_book(tmp_path, "20260105")
     for content in ("{broken", "[1, 2]"):

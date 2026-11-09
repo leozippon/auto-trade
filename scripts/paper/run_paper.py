@@ -95,12 +95,12 @@ DEFAULT_STATE_ROOT = PAPER_STATE_DIR
 DEFAULT_ORDERS_DIR = Path("logs/paper")
 DEFAULT_VINTAGE_REPORT = Path("results/data_quality/paper_vintages.json")
 # How long after a run starts a GPU book keeps looking for an eligible card,
-# and how often it looks. The 05:40 run (ops/cron/paper.cron) looks until 08:25,
-# when the last retry starts, the container-start and decision clocks (45 min)
+# and how often it looks. The 05:40 run (ops/cron/paper.cron) looks until 07:55,
+# when the last retry starts, the container-start and decision clocks (75 min)
 # before the sheet is due at 09:10 (paper.book.PAPER_SHEET_DUE): a card that
 # frees up any time in the morning is used, and a sheet decided on it is no
 # later than the last retry's would be.
-GPU_WAIT_MINUTES = 165
+GPU_WAIT_MINUTES = 135
 GPU_POLL_SECONDS = 60
 
 

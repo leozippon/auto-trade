@@ -284,6 +284,40 @@ def test_every_decision_publishes_the_state_it_wrote_and_a_failed_one_publishes_
     assert [row["trade_date"] for row in state["decisions"]] == ["20260105", "20260106"]
 
 
+def test_a_superseded_state_that_cannot_be_removed_warns_until_a_later_decision_removes_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The decision a prune follows is already journaled, so a leftover never
+    fails it: the run persists a warning the order sheet prints, and every
+    later decision retries every superseded entry until it is gone."""
+
+    from autotrade.paper import engine as paper_engine
+
+    book = _Book(tmp_path, STATE_STRATEGY.replace('"20260107"', '"never"'), sessions=("20260102", *SESSIONS))
+    states = book.root / ".strategy_state"
+    book.run("20260105")
+    discard = paper_engine.discard_strategy_state
+
+    def stuck(state_dir: Path) -> None:
+        if state_dir.name == "20260105":
+            raise OSError(f"cannot remove strategy state: {state_dir}")
+        discard(state_dir)
+
+    monkeypatch.setattr(paper_engine, "discard_strategy_state", stuck)
+    for day in ("20260106", "20260107"):
+        book.run(day)
+        state = book.state()
+        assert (state["fit_state"], state["decisions"][-1]["trade_date"]) == (day, day)
+        assert sorted(entry.name for entry in states.iterdir()) == ["20260105", day]
+        [warning] = state["warnings"]
+        assert warning.startswith("cannot remove superseded strategy state 20260105")
+        assert f"注意：{warning}" in render_orders(_sheet_book(book), day)
+    monkeypatch.setattr(paper_engine, "discard_strategy_state", discard)
+    book.run("20260108")
+    assert [entry.name for entry in states.iterdir()] == ["20260108"]
+    assert book.state()["warnings"] == []
+
+
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
 def test_real_superseded_state_with_a_container_written_subdirectory_is_pruned(
     tmp_path: Path,

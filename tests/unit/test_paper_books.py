@@ -397,10 +397,10 @@ def test_a_book_of_an_older_schema_is_refused(tmp_path: Path):
 def test_every_book_decides_under_the_paper_decision_clock(tmp_path: Path):
     """A new book carries no decision clock: every Paper decision call runs under
     PAPER_DECISION_TIMEOUT_SECONDS, whatever the experiment's."""
-    book = _registered_book(tmp_path)
+    book = _registered_book(tmp_path, strategy_inference_timeout_seconds=7200)
     record = read_json_object(book.root / BOOK_NAME)
     assert "timeout_seconds" not in record["sandbox"]
-    assert book.sandbox.timeout_seconds == PAPER_DECISION_TIMEOUT_SECONDS != SandboxConfig().timeout_seconds
+    assert book.sandbox.timeout_seconds == PAPER_DECISION_TIMEOUT_SECONDS != 7200
     assert SandboxConfig.from_record({**record["sandbox"], "timeout_seconds": PAPER_DECISION_TIMEOUT_SECONDS}) == book.sandbox
 
 

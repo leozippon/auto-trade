@@ -217,6 +217,7 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
             "initial_cash": _number(_mapping(record.get("profile")).get("initial_cash")),
         }
     state = state or {}
+    warnings = state.get("warnings")
     return {
         "env": env,
         "state": status,
@@ -226,6 +227,13 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
         "start_date": _text(state.get("start_date")),
         "settled_through": _text(state.get("settled_through")),
         "last_fit_date": _text(state.get("last_fit_date")),
+        # What the last decision left to clear (a superseded strategy state
+        # it could not remove), as the order sheet prints it.
+        "warnings": [
+            omit_private_paths(text)
+            for text in (warnings if isinstance(warnings, list) else ())
+            if isinstance(text, str)
+        ],
     }
 
 

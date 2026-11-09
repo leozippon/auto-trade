@@ -7077,6 +7077,13 @@ function paperBanners(status) {
   return [];
 }
 
+/* What the last decision left to clear, as the order sheet prints it: a
+   superseded strategy state the run could not remove, retried by every later
+   decision. */
+function paperWarnings(payload) {
+  return (payload.warnings || []).map((text) => el("div", { class: "banner warn" }, `注意：${text}`));
+}
+
 /* The state as one badge. On a card the reason rides in its tooltip: an
    overview lists books, and a writer's error message belongs on the book's own
    page, where paperBanners prints it whole. */
@@ -7351,6 +7358,7 @@ function renderBookBundle(bundle) {
         { id: "trading-page" },
         paperHead(status, bundle.identity),
         ...paperBanners(status),
+        ...paperWarnings(bundle.identity),
         paperSignalPanel(bundle.signal, bundle.identity),
         paperFillsPanel(bundle.fills, status.book_id),
         paperVerdictPanel(bundle.identity),
