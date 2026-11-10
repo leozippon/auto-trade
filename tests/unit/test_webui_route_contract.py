@@ -207,7 +207,6 @@ def test_paper_bundle_serves_the_key_names_the_console_reads(tmp_path: Path):
     for route in PAPER_PANEL_ROUTES:
         response = client.get(f"/api/trading/paper/books/exp/{route}")
         assert response.status_code == 200, route
-    assert client.get("/api/trading/paper/health").status_code == 200
 
     history = client.get("/api/trading/paper/books/exp/history").json()
     assert history["days"][0]["fills"][0]["status"] == "filled"
@@ -257,15 +256,6 @@ def test_the_paper_page_names_each_books_own_benchmark() -> None:
 def test_the_paper_routes_the_console_reads_are_named_on_both_sides(route: str):
     assert f"/api/trading/{{}}/books/{{}}/{route}" in client_api_paths()
     assert f"/api/trading/{{}}/books/{{}}/{route}" in server_api_paths()
-
-
-def test_the_paper_health_route_is_an_external_probe_only() -> None:
-    """``/health`` returns the roster entry the page already reads plus an
-    ``ok`` flag. Polling it from the console would spend a request per refresh
-    on data the page never renders, so it stays server-side only."""
-
-    assert "/api/trading/{}/health" in server_api_paths()
-    assert "/api/trading/{}/health" not in client_api_paths()
 
 
 def _js_function_body(name: str) -> str:

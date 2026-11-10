@@ -13,8 +13,7 @@ its order sheet), ``book_payload`` (identity, ``book.json``, and the stored Pape
 the book's benchmark, equity and cash tracks, statistics, and the source experiment's
 out-of-sample curve the book copied at creation), ``snapshot_payload``
 (account and positions) and ``pnl_payload`` (the account's profit and loss and
-each traded name's share of it). ``health_payload`` is the external probe over
-every book.
+each traded name's share of it).
 
 Every function is total: degradation is a structured payload state
 (absent / no_snapshot / unreadable / export_error / stale / ok), never a 500.
@@ -1108,9 +1107,3 @@ def books_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
         })
     return {"env": env, "state": "ok" if rows else "absent", "error": None, "books": rows}
 
-
-def health_payload(repo_root: Path, env: str = "paper") -> dict[str, object]:
-    """For external monitors: false for an unreadable book or a failed run.
-    A book awaiting the owner's fills is waiting on him, not failing."""
-    books = [book_status(repo_root, book, env) for book in list_books(env_dir(repo_root, env))]
-    return {"ok": all(row["state"] not in {"unreadable", "export_error"} for row in books), "env": env, "error": None, "books": books}

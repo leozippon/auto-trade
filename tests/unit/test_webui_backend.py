@@ -543,8 +543,8 @@ def test_the_session_gpu_panel_marks_the_cards_the_experiment_claimed(tmp_path: 
 
 def test_qmt_backend_is_absent_and_loopback_validation_is_single_source(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
-    assert client.get("/api/trading/live/health").status_code == 404
-    assert client.get("/api/trading/sim/health").status_code == 404
+    assert client.get("/api/trading/live/books").status_code == 404
+    assert client.get("/api/trading/sim/books").status_code == 404
     assert is_loopback_host("127.0.0.2")
     assert is_loopback_host("::1")
     assert is_loopback_host("localhost")

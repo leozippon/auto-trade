@@ -408,7 +408,6 @@ def test_missing_and_damaged_book_files_degrade_per_panel(tmp_path: Path):
         payload = projection(tmp_path, BOOK)
         assert payload["state"] == "unreadable" and payload["error"], projection.__name__
     assert trading.book_status(tmp_path, BOOK)["state"] == "unreadable"
-    assert trading.health_payload(tmp_path)["ok"] is False
     client = TestClient(create_app(tmp_path))
     for route in BOOK_ROUTES:
         assert client.get(f"/api/trading/paper/books/{BOOK}/{route}").status_code == 200, route
@@ -446,7 +445,6 @@ def test_env_and_book_whitelists_reject_everything_else(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
     for env in ("live", "sim", "prod", "%2E%2E%2Fpaper", "%2E"):
         assert client.get(f"/api/trading/{env}/books").status_code == 404, env
-        assert client.get(f"/api/trading/{env}/health").status_code == 404, env
         for route in BOOK_ROUTES:
             assert client.get(f"/api/trading/{env}/books/{BOOK}/{route}").status_code == 404, (env, route)
     for book in ("..", "%2E%2E", ".hidden", "not-a-book"):
@@ -515,8 +513,6 @@ def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):
     # A book whose first decision has not settled yet has no return to show.
     assert (beta["total_return"], beta["order_count"]) == (None, 1)
     assert beta["curve"] is None
-    health = trading.health_payload(tmp_path)
-    assert health["ok"] is True and [row["book_id"] for row in health["books"]] == ["alpha", "beta"]
     # The card's six figures are one set: they arrive together with the first
     # settled day, so the card never draws a half-filled row of tiles.
     _csi300_slot(
@@ -761,7 +757,6 @@ def test_a_book_is_switched_to_real_fills_recorded_and_compared_through_the_cons
     status = client.get(f"{base}/status").json()
     assert (status["state"], status["awaiting_fills"]) == ("awaiting_fills", ["20260105"])
     assert status["error"].startswith("PaperAwaitingFills: fills not recorded")
-    assert client.get("/api/trading/paper/health").json()["ok"] is True
 
     for bad in (
         {"time": "15:00", "symbol": "600000.SH", "action": "buy", "outcome": "filled", "quantity": 250, "price": 15.2},
@@ -900,7 +895,6 @@ def test_no_snapshot_and_unreadable_snapshots_are_distinguishable(tmp_path: Path
         assert payload["state"] == "unreadable", content
         assert payload["snapshot"] is None
         assert payload["error"]
-        assert trading.health_payload(tmp_path)["ok"] is False
 
 
 def test_writer_error_surfaces_only_its_first_line(tmp_path: Path):
@@ -941,7 +935,6 @@ def test_a_stale_snapshot_is_served_and_flagged_against_the_exported_threshold(t
     assert payload["snapshot"]["equity"] == 1_000_000.0
     summary = trading.book_status(tmp_path, BOOK)
     assert summary["state"] == "stale"
-    assert trading.health_payload(tmp_path)["ok"] is True  # degraded, not broken
 
 
 def test_a_fresh_snapshot_is_ok(tmp_path: Path):
@@ -1080,8 +1073,6 @@ def test_the_status_and_health_carry_the_status_ladder(tmp_path: Path):
     assert (status["env"], status["book_id"], status["state"]) == ("paper", BOOK, "ok")
     assert status["generated_at"].endswith("Z")
     assert status["stale_threshold_seconds"] == trading.STALE_SNAPSHOT_ALERT_SECONDS
-    health = trading.health_payload(tmp_path)
-    assert health["ok"] is True and [(row["book_id"], row["state"]) for row in health["books"]] == [(BOOK, "ok")]
 
 
 # ---- the client renders the states the server emits -------------------------

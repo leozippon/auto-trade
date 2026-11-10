@@ -107,7 +107,6 @@ def test_tampered_complete_artifact_refused_visibly_before_execution(tmp_path, m
     assert "fingerprint mismatch" in (tmp_path / "orders/exp/latest_orders.md").read_text(encoding="utf-8")
     assert trading.book_status(tmp_path, "exp")["state"] == "export_error"
     assert trading.signal_payload(tmp_path, "exp")["signal"] is None
-    assert trading.health_payload(tmp_path)["ok"] is False
 
 
 @pytest.mark.parametrize(

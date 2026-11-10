@@ -895,10 +895,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=400, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "book_id": book, "real_fills": True}
 
-    @app.get("/api/trading/{env}/health")
-    def trading_health(env: str):
-        return trading.health_payload(root, _trading_env(env))
-
     if STATIC_DIR.is_dir():
         app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
