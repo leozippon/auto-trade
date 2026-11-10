@@ -151,16 +151,6 @@ INPUT_ONLY_WINDOW_MODELS = ("gemini-4-argon",)
 # No temperature: Google's Gemini 3 guide keeps the default 1.0 (lower can loop).
 PROVIDER_TEMPERATURE_MODELS = ("gemini-4-argon",)
 
-# The responses endpoint takes the shared effort scale narrowed to its own
-# tiers; the shared scale's top tier is xhigh.
-_RESPONSES_REASONING_EFFORTS = {
-    "low": "low",
-    "medium": "medium",
-    "high": "high",
-    "max": "xhigh",
-    "xhigh": "xhigh",
-}
-
 # A rejected or exhausted relay key answers with 401/402/403, or with a
 # 400/429 whose message names the account state ("insufficient quota",
 # "余额不足"). Only those attempts move to the fallback key; every other
@@ -418,9 +408,8 @@ def _responses_body(
         "max_output_tokens": max_output_tokens,
     }
     if config.thinking_enabled and config.reasoning_effort is not None:
-        body["reasoning"] = {
-            "effort": _RESPONSES_REASONING_EFFORTS[config.reasoning_effort]
-        }
+        # The responses tiers include the shared scale's low/medium/xhigh.
+        body["reasoning"] = {"effort": config.reasoning_effort}
     if tools:
         body["tools"] = [_responses_tool(tool) for tool in tools]
         body["tool_choice"] = _responses_tool_choice(tool_choice)

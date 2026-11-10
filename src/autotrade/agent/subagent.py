@@ -40,6 +40,7 @@ from autotrade.environment.llm import (
     malformed_tool_call_messages,
     output_shares_context_window,
 )
+from autotrade.environment.llm.openai_compatible import REASONING_EFFORTS
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
 from autotrade.environment.time_budget import (
@@ -68,10 +69,9 @@ from .compact import (
 )
 from .prompts import FILE_PATH_RULE, PATH_RULES_BULLET
 
-SUBAGENT_THINKING_LEVELS = ("off", "low", "medium", "xhigh")
-# Read-compatible aliases from older traces and prompts, each mapped to the
-# level the gateway always sent for it (``_qwen_reasoning_effort``): minimal
-# was low on the wire, high and max were xhigh.
+SUBAGENT_THINKING_LEVELS = ("off", *REASONING_EFFORTS)
+# Aliases a parent still writes, each mapped to the level it was always sent
+# as: minimal was low on the wire, high and max were xhigh.
 _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 # Children a parent may run at once; the rest queue in the same pool.
 # Several writable children may run together as long as each writes only its
@@ -483,11 +483,11 @@ def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
     """Return the effective thinking level for one launch.
 
     Precedence: the call argument, then the role default, then
-    ``DEFAULT_SUBAGENT_THINKING``. Omitted, empty, or inherit aliases fall
-    through to the defaults; a child never inherits the parent session's
-    reasoning intensity. The legacy aliases are already canonical here: the
-    launch tool maps them in ``normalize_arguments``, before the schema enum
-    that would otherwise reject them.
+    ``DEFAULT_SUBAGENT_THINKING``; an omitted level falls through to the
+    defaults, and a child never inherits the parent session's reasoning
+    intensity. The legacy aliases are already canonical here: the launch tool
+    maps them in ``normalize_arguments``, before the schema enum that would
+    otherwise reject them.
     """
 
     default = subagent_role(role).default_thinking if role is not None else DEFAULT_SUBAGENT_THINKING
@@ -496,8 +496,6 @@ def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
     if not isinstance(value, str):
         raise ValueError("agent.thinking must be a string")
     text = value.strip().lower()
-    if text in {"", "inherit", "parent"}:
-        return default
     if text not in SUBAGENT_THINKING_LEVELS:
         raise ValueError(
             "agent.thinking must be one of: " + ", ".join(SUBAGENT_THINKING_LEVELS)

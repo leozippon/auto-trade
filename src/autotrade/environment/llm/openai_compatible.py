@@ -47,10 +47,10 @@ from .proxy import (
     max_tokens_after_provider_overflow,
 )
 
-SUPPORTED_REASONING_EFFORTS = frozenset({"low", "medium", "high", "max", "xhigh"})
-# The local gateway contract accepts only these tiers; shared entry points
-# map the wider UI scale onto them, and the transport rejects the rest.
-_QWEN_REASONING_EFFORTS = frozenset({"low", "medium", "xhigh"})
+# The one reasoning-effort scale: the local Qwen chat template's own tiers,
+# which the local gateway sends as they are and the other dialects with
+# levels map onto theirs. A config carrying any other level is refused.
+REASONING_EFFORTS = ("low", "medium", "xhigh")
 USER_ID_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,512}$")
 _EMPTY_PROVIDER_RESPONSE_ERROR = "provider response must contain content or tool calls"
 # A generation cut at max_tokens inside a tool call (finish_reason=length)
@@ -96,14 +96,8 @@ _QWEN_NON_THINKING_SAMPLING = {
 }
 # DeepSeek's distinct effort tiers are low / high / max (it folds medium and
 # xhigh into high). The shared scale keeps its order on the wire: its top tier
-# (xhigh, legacy high/max) is DeepSeek's max, as it is Qwen's xhigh.
-_DEEPSEEK_REASONING_EFFORTS = {
-    "low": "low",
-    "medium": "high",
-    "high": "max",
-    "xhigh": "max",
-    "max": "max",
-}
+# xhigh is DeepSeek's max, as it is Qwen's xhigh.
+_DEEPSEEK_REASONING_EFFORTS = {"low": "low", "medium": "high", "xhigh": "max"}
 # MiMo's Chat Completions contract: the output budget is named
 # ``max_completion_tokens``, thinking is on/off with no effort level,
 # temperature is bounded at 1.5, and ``tool_choice`` only knows ``auto`` (any
@@ -337,18 +331,10 @@ class OpenAICompatibleConfig:
             raise ValueError("temperature must be in [0, 2]")
         if (
             self.reasoning_effort is not None
-            and self.reasoning_effort not in SUPPORTED_REASONING_EFFORTS
+            and self.reasoning_effort not in REASONING_EFFORTS
         ):
             raise ValueError(
-                "reasoning_effort must be one of low, medium, high, max, xhigh"
-            )
-        if (
-            self.request_dialect == "vllm-qwen"
-            and self.reasoning_effort is not None
-            and self.reasoning_effort not in _QWEN_REASONING_EFFORTS
-        ):
-            raise ValueError(
-                "vllm-qwen reasoning_effort must be one of low, medium, xhigh"
+                "reasoning_effort must be one of " + ", ".join(REASONING_EFFORTS)
             )
         if self.request_dialect == "mimo":
             if self.reasoning_effort is not None:

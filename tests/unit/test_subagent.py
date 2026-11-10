@@ -1129,7 +1129,6 @@ def test_normalize_subagent_thinking_resolves_the_launch_precedence() -> None:
 
     assert DEFAULT_SUBAGENT_THINKING == "xhigh"
     assert normalize_subagent_thinking(None) == "xhigh"
-    assert normalize_subagent_thinking("inherit") == "xhigh"
     assert normalize_subagent_thinking("low") == "low"
     assert normalize_subagent_thinking("medium") == "medium"
     assert SUBAGENT_THINKING_LEVELS == ("off", "low", "medium", "xhigh")

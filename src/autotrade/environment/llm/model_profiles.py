@@ -153,19 +153,6 @@ DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 2.0
 AGENT_MAX_OUTPUT_TOKENS = 32_768
 
 
-def _qwen_reasoning_effort(value: str | None) -> str:
-    """Map the shared UI scale onto the gateway's low/medium/xhigh contract."""
-
-    return {
-        "minimal": "low",
-        "low": "low",
-        "medium": "medium",
-        "high": "xhigh",
-        "max": "xhigh",
-        "xhigh": "xhigh",
-    }.get(value or "", "xhigh")
-
-
 # An experiment's ``llm_key``: which relay credential its calls start on
 # (``lighting.LLM_KEY_ENVS``). Every other provider has one key, so only
 # ``primary`` applies to it.
@@ -293,14 +280,11 @@ def build_model_gateway(
             llm_key=llm_key,
         )
     deepseek = profile.request_dialect == "deepseek"
-    if deepseek:
-        # DeepSeek sends no level with thinking off, so the level rides as given.
-        effort = reasoning_effort
-    elif thinking_enabled and profile.request_dialect == "vllm-qwen":
-        effort = _qwen_reasoning_effort(reasoning_effort)
-    else:
-        # MiMo's thinking is on/off only: no effort level to send.
-        effort = None
+    # DeepSeek and the local Qwen send no level with thinking off, so the level
+    # rides as given; MiMo's thinking is on/off only: no effort level to send.
+    effort = (
+        reasoning_effort if profile.request_dialect in ("deepseek", "vllm-qwen") else None
+    )
     return cast(
         LLMProxy,
         OpenAICompatibleProxy(
