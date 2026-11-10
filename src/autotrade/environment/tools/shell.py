@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import re
-import shlex
 import threading
 from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
@@ -67,13 +66,6 @@ ARGV_TOO_LONG_HINT = (
 # The shell a command string is handed to: the same form this tool's own
 # description names, so a repaired call and an explicit one run identically.
 COMMAND_STRING_SHELL = ("bash", "-lc")
-FORBIDDEN_WAIT = "forbidden_wait"
-_WAIT_COMMANDS = frozenset({"sleep", "usleep"})
-_WAIT_WRAPPERS = frozenset({"env", "timeout", "nice", "stdbuf", "nohup", "time"})
-_SHELLS = frozenset({"sh", "bash", "dash"})
-_DURATION_RE = re.compile(r"\d+(?:\.\d+)?[smhd]?")
-_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
-_SHELL_SEPARATORS = frozenset({";", "&&", "||", "|", "&", "|&"})
 
 
 def _shell_input_schema(timeout_seconds: float) -> dict[str, object]:
@@ -114,7 +106,8 @@ def _shell_description(
         f"{max_timeout_seconds:g}; the command is killed at the timeout, so try a script "
         "on a sample of dates/stocks first. Longer work runs as chunks that each finish in time, or as a "
         "detached job: start it with setsid, stdin, stdout and stderr redirected to "
-        "workspace files, checkpoint there and read its log in later calls; it runs past "
+        "workspace files, checkpoint there and read its log in later calls (a bounded "
+        "`sleep` can wait for it); it runs past "
         "the timeout until the session container ends (a `vllm serve` on 127.0.0.1 "
         f"starts the same way). stdout and stderr over {max_output_chars} chars come back "
         "as an inline head plus `<stream>_tail`; the whole stream is spilled and "
@@ -199,7 +192,6 @@ class SandboxShellTool:
         if not isinstance(raw_argv, list) or not raw_argv:
             raise ToolError("argv must contain at least one argument")
         argv: Sequence[str] = tuple(str(item) for item in raw_argv)
-        reject_forbidden_wait(argv)
         if PurePosixPath(argv[0]).name not in FREE_SPACE_RECOVERY_COMMANDS:
             self.workspace.require_free_space("shell")
         requested_cwd = str(arguments.get("cwd", "."))
@@ -372,144 +364,6 @@ def _reject_long_argv_elements(argv: Sequence[object]) -> None:
             )
 
 
-def reject_forbidden_wait(argv: Sequence[str]) -> None:
-    """Refuse sleep/usleep and a small set of wait wrappers before execution."""
-
-    if not argv_is_forbidden_wait(argv):
-        return
-    raise ToolError(
-        "shell wait is forbidden",
-        error_type=FORBIDDEN_WAIT,
-        reason=FORBIDDEN_WAIT,
-        retry_hint=(
-            "Run one bounded foreground command and do not sleep; check a detached job "
-            "by reading its log in a later call."
-        ),
-    )
-
-
-def argv_is_forbidden_wait(argv: Sequence[str]) -> bool:
-    """True when the effective first command is sleep/usleep.
-
-    Unwraps env/timeout/nice/stdbuf/nohup/time and sh/bash/dash -c/-lc first
-    commands. Unparseable scripts and unrelated binaries (pyright, python,
-    grep, echo) are not waits.
-    """
-
-    tokens = [str(item) for item in argv if str(item)]
-    return _argv_waits(tokens)
-
-
-def _argv_waits(tokens: list[str]) -> bool:
-    if not tokens:
-        return False
-    name = _basename(tokens[0]).lower()
-    if name in _WAIT_COMMANDS:
-        return True
-    if name in _SHELLS:
-        script = _shell_c_script(tokens)
-        if script is None:
-            return False
-        return _argv_waits(_first_command_tokens(script))
-    if name in _WAIT_WRAPPERS:
-        return _argv_waits(_unwrap_wrapper(name, tokens[1:]))
-    return False
-
-
-def _shell_c_script(argv: Sequence[str]) -> str | None:
-    index = 1
-    while index < len(argv):
-        arg = argv[index]
-        if arg == "--":
-            return None
-        if arg == "-c":
-            return argv[index + 1] if index + 1 < len(argv) else None
-        if arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]:
-            return argv[index + 1] if index + 1 < len(argv) else None
-        if arg.startswith("-"):
-            index += 1
-            continue
-        return None
-    return None
-
-
-def _first_command_tokens(script: str) -> list[str]:
-    try:
-        tokens = shlex.split(script, posix=True)
-    except ValueError:
-        return []
-    first: list[str] = []
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            break
-        if (
-            not first
-            and _ASSIGNMENT_RE.match(token)
-            and not token.startswith("-")
-        ):
-            continue
-        first.append(token)
-    return first
-
-
-_WRAPPER_VALUE_FLAGS = {
-    "timeout": frozenset({"-k", "-s", "--kill-after", "--signal"}),
-    "env": frozenset(
-        {
-            "-u",
-            "-C",
-            "-S",
-            "--unset",
-            "--chdir",
-            "--split-string",
-            "--block-signal",
-            "--default-signal",
-        }
-    ),
-    "nice": frozenset({"-n", "--adjustment"}),
-    "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
-    "time": frozenset({"-f", "-o", "--format", "--output"}),
-}
-_WRAPPER_GLUED_PREFIXES = {
-    "nice": ("-n",),
-    "stdbuf": ("-i", "-o", "-e"),
-}
-
-
-def _unwrap_wrapper(name: str, args: list[str]) -> list[str]:
-    if name == "nohup":
-        return args[1:] if args[:1] == ["--"] else args
-    value_flags = _WRAPPER_VALUE_FLAGS.get(name, frozenset())
-    glued = _WRAPPER_GLUED_PREFIXES.get(name, ())
-    index = 0
-    while index < len(args):
-        arg = args[index]
-        if arg == "--":
-            rest = args[index + 1 :]
-            return _skip_duration(rest) if name == "timeout" else rest
-        if name == "env" and (
-            arg == "-" or (_ASSIGNMENT_RE.match(arg) and not arg.startswith("-"))
-        ):
-            index += 1
-            continue
-        if arg.startswith("-") and arg not in {"-", "--"}:
-            option, eq, _tail = arg.partition("=")
-            if eq or any(arg.startswith(prefix) and arg != prefix for prefix in glued):
-                index += 1
-                continue
-            index += 2 if option in value_flags else 1
-            continue
-        rest = args[index:]
-        return _skip_duration(rest) if name == "timeout" else rest
-    return []
-
-
-def _skip_duration(args: list[str]) -> list[str]:
-    if args and _DURATION_RE.fullmatch(args[0]):
-        return args[1:]
-    return args
-
-
 def _stderr_suppression_reminder(tokens: Sequence[str]) -> str | None:
     """Advisory when the command redirects stderr away; never blocks the call.
 
@@ -520,10 +374,6 @@ def _stderr_suppression_reminder(tokens: Sequence[str]) -> str | None:
     return STDERR_SUPPRESSION_REMINDER if STDERR_SUPPRESSION_RE.search(" ".join(tokens)) else None
 
 
-def _basename(token: str) -> str:
-    return token.rstrip("/").rsplit("/", 1)[-1]
-
-
 __all__ = [
     "ARGV_ONE_ELEMENT_NOTE",
     "ARGV_SHELL_NOTE",
@@ -532,11 +382,8 @@ __all__ = [
     "COMMAND_STRING_SHELL",
     "DEFAULT_SHELL_OUTPUT_CHARS",
     "DEFAULT_SHELL_TIMEOUT_SECONDS",
-    "FORBIDDEN_WAIT",
     "MAX_SHELL_TIMEOUT_SECONDS",
     "SHELL_ARGV_MAX_CHARS",
     "SHELL_CAPTURE_MAX_CHARS",
     "SandboxShellTool",
-    "argv_is_forbidden_wait",
-    "reject_forbidden_wait",
 ]

@@ -41,10 +41,8 @@ from autotrade.environment.tools.shell import (
     ARGV_STRING_NOTE,
     ARGV_TOO_LONG_HINT,
     DEFAULT_SHELL_TIMEOUT_SECONDS,
-    FORBIDDEN_WAIT,
     MAX_SHELL_TIMEOUT_SECONDS,
     SHELL_ARGV_MAX_CHARS,
-    argv_is_forbidden_wait,
 )
 from autotrade.environment.tools.workspace import (
     LOW_DISK_SPACE,
@@ -372,8 +370,8 @@ class ShellToolTest(unittest.TestCase):
 
     def test_shell_unwraps_a_command_line_sent_as_a_one_element_array(self) -> None:
         """`["python -c 'print(1)'"]` names no executable, so the element can
-        only be a command line: it runs through the shell, and the guards that
-        follow normalization still see the array that will actually run."""
+        only be a command line: it runs through the shell, and the guard that
+        follows normalization still sees the array that will actually run."""
 
         with tempfile.TemporaryDirectory() as tmp:
             _, _, workspace = build_sandbox(Path(tmp))
@@ -390,23 +388,19 @@ class ShellToolTest(unittest.TestCase):
             self.assertTrue(bare.ok, bare.error)
             self.assertEqual(runner.calls[1][0], ("pwd",))
             self.assertNotIn("argv_normalized", bare.value)
-            # The wait guard runs on the normalized argv, not the wrapper, and
-            # reaches the wait through the shell the repair introduced.
-            waited = registry.invoke("shell", {"argv": ["sleep 30"]})
-            self.assertFalse(waited.ok)
-            self.assertEqual(waited.value["error_type"], FORBIDDEN_WAIT)
-            waited_pipeline = registry.invoke(
-                "shell", {"argv": "sleep 180 && ls notes"}
+            # A bounded wait for a detached job is an ordinary command.
+            waited = registry.invoke("shell", {"argv": "sleep 180 && tail -n 5 notes/job.log"})
+            self.assertTrue(waited.ok, waited.error)
+            self.assertEqual(
+                runner.calls[2][0], ("bash", "-lc", "sleep 180 && tail -n 5 notes/job.log")
             )
-            self.assertFalse(waited_pipeline.ok)
-            self.assertEqual(waited_pipeline.value["error_type"], FORBIDDEN_WAIT)
-            # So does the per-element cap: the command line is one element.
+            # The per-element cap sees the normalized argv: the command line is one element.
             long_element = registry.invoke(
                 "shell", {"argv": [f"python -c {'x' * (SHELL_ARGV_MAX_CHARS + 1)}"]}
             )
             self.assertFalse(long_element.ok)
             self.assertIn("argv[2] is too long", long_element.error)
-            self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(len(runner.calls), 3)
 
     def test_shell_runs_a_command_line_that_needs_a_shell(self) -> None:
         """The friction this removes: every one of these shapes used to be
@@ -532,49 +526,6 @@ class ShellToolTest(unittest.TestCase):
             )
             self.assertFalse(blocked.ok)
             self.assertIn("above its maximum", blocked.error)
-
-    def test_shell_rejects_forbidden_wait_and_allows_foreground_commands(self) -> None:
-        rejected = (
-            ["sleep", "5"],
-            ["/bin/sleep", "1"],
-            ["usleep", "1000"],
-            ["env", "sleep", "1"],
-            ["timeout", "5", "sleep", "1"],
-            ["nice", "-n", "10", "sleep", "1"],
-            ["stdbuf", "-oL", "sleep", "1"],
-            ["nohup", "sleep", "1"],
-            ["time", "sleep", "1"],
-            ["bash", "-c", "sleep 5"],
-            ["bash", "-lc", "sleep 1"],
-            ["sh", "-c", "sleep 1"],
-            ["dash", "-c", "env sleep 1"],
-            ["timeout", "5", "env", "sleep", "1"],
-        )
-        allowed = (
-            ["pyright"],
-            ["timeout", "pyright"],
-            ["timeout", "5", "pyright"],
-            ["python", "-c", "import time; time.sleep(1)"],
-            ["grep", "sleep", "file.py"],
-            ["echo", "sleep"],
-            ["bash", "-c", "echo hello"],
-            ["env", "FOO=1", "pyright"],
-        )
-        for argv in rejected:
-            self.assertTrue(argv_is_forbidden_wait(argv), argv)
-        for argv in allowed:
-            self.assertFalse(argv_is_forbidden_wait(argv), argv)
-        with tempfile.TemporaryDirectory() as tmp:
-            _, _, workspace = build_sandbox(Path(tmp))
-            runner = FakeRunner()
-            registry = ToolRegistry([SandboxShellTool(workspace, runner)])
-            result = registry.invoke("shell", {"argv": ["sleep", "5"]})
-            self.assertFalse(result.ok)
-            self.assertEqual(result.value.get("error_type"), FORBIDDEN_WAIT)
-            self.assertEqual(runner.calls, [])
-            ok = registry.invoke("shell", {"argv": ["echo", "hello"]})
-            self.assertTrue(ok.ok)
-            self.assertEqual(len(runner.calls), 1)
 
 
 @unittest.skipUnless(RG_AVAILABLE, "ripgrep is required for the structured search tools")
