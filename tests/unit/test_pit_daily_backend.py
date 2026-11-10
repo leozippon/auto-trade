@@ -727,7 +727,13 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert [Path(slot).name for slot in slots] == record["pit"]["replay_slots"]
     assert HOST_PATH_RE.search(json.dumps(record)) is None
     # A result whose slots cannot be resolved is refused before it draws
-    # anything, so the caller knows it measured nothing and owes nothing.
+    # anything, so the caller knows it measured nothing and owes nothing:
+    # a sidecar without the decision view whose membership the draws read,
+    # or none at all.
+    recorded = json.loads(sidecar.read_text(encoding="utf-8"))
+    sidecar.write_text(json.dumps({**recorded, "decision_slot": None}), encoding="utf-8")
+    with pytest.raises(NullControlSetupError, match="names no decision view"):
+        restarted.null_control(result.result_ref, **null_control_call)
     sidecar.unlink()
     with pytest.raises(NullControlSetupError, match="replay slots are unknown"):
         restarted.null_control(result.result_ref, **null_control_call)

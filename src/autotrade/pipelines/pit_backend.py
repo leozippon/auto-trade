@@ -1227,8 +1227,7 @@ class PITDailyEvaluationBackend:
             daily = _span_daily(replay_dirs, start, end)
             benchmark = slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index)
             membership = slot_membership(
-                replay_dirs if decision_dir is None else (decision_dir, *replay_dirs),
-                benchmark_index=self.benchmark_index,
+                (decision_dir, *replay_dirs), benchmark_index=self.benchmark_index
             )
             corporate_actions = _span_corporate_actions(
                 replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
@@ -1945,12 +1944,12 @@ def _result_json(result_ref: str | Path) -> Path:
     return path / "result.json" if path.is_dir() else path
 
 
-def _result_replay_slots(result_json: Path) -> tuple[Path | None, tuple[Path, ...]]:
+def _result_replay_slots(result_json: Path) -> tuple[Path, tuple[Path, ...]]:
     """The decision view and the replay slots a result was evaluated against.
 
     Read from the host-only sidecar written with the record, so ranking a node
     never depends on the backend instance that produced it still being alive.
-    A sidecar written before the decision view was recorded names none.
+    A sidecar that does not name both is refused.
     """
 
     sidecar = result_json.parent / REPLAY_SLOTS_SIDECAR
@@ -1964,8 +1963,10 @@ def _result_replay_slots(result_json: Path) -> tuple[Path | None, tuple[Path, ..
     if not isinstance(slots, list) or not slots:
         raise ValueError(f"{sidecar} names no PIT replay slot")
     decision = record.get("decision_slot")
+    if not isinstance(decision, str) or not decision:
+        raise ValueError(f"{sidecar} names no decision view")
     return (
-        Path(str(decision)).resolve(strict=True) if decision else None,
+        Path(decision).resolve(strict=True),
         tuple(Path(str(slot)).resolve(strict=True) for slot in slots),
     )
 
