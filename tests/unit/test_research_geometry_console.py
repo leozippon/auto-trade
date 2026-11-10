@@ -3,7 +3,7 @@
 The console lists experiments from whatever is on disk, so a ``params.json``
 naming parameters no parameter declares must degrade to an unreadable row
 instead of taking the listing down; the experiment's verdict reaches the listing once its forward record
-exists; and the create form is seeded with the research geometry the worker
+exists, with the Paper action only for an experiment created on this host; and the create form is seeded with the research geometry the worker
 actually runs.
 """
 
@@ -70,48 +70,84 @@ def test_a_params_file_of_unknown_keys_is_flagged_unreadable_and_the_rest_still_
     assert detail["params"] == {}
 
 
+def _registration(directory: Path) -> dict[str, object]:
+    """The research session that registered ``strategy_research_abc``."""
+
+    frozen = directory / "artifacts/strategy/registered/strategy_research_abc/output"
+    return {
+        "record_type": "research_session",
+        "experiment_id": directory.name,
+        "epoch_id": "research",
+        "fold_id": "research",
+        "run_id": "run_research",
+        "session_key": "research",
+        "outcome": "completed",
+        "steps": [],
+        "registered": {"artifact_id": "strategy_research_abc", "output_path": str(frozen)},
+    }
+
+
+def _forward(directory: Path) -> dict[str, object]:
+    """The forward record of that registration, with its readout."""
+
+    return {
+        "record_type": "forward",
+        "experiment_id": directory.name,
+        "epoch_id": "forward",
+        "fold_id": "forward",
+        "run_id": "run_forward",
+        "session_key": "forward",
+        "artifact_id": "strategy_research_abc",
+        "status": "ok",
+        "readout": {"state": "registered_with_record", "record": {}, "forward": {}},
+    }
+
+
 def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path: Path):
     root = tmp_path / "experiments"
     directory = _experiment(root, "registered", _CURRENT)
     write_json_atomic(directory / "hitl/schedule.json", build_session_plan(forward={}))
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
-    frozen = directory / "artifacts/strategy/registered/strategy_research_abc/output"
-    ledger.append(
-        {
-            "record_type": "research_session",
-            "experiment_id": "registered",
-            "epoch_id": "research",
-            "fold_id": "research",
-            "run_id": "run_research",
-            "session_key": "research",
-            "outcome": "completed",
-            "steps": [],
-            "registered": {"artifact_id": "strategy_research_abc", "output_path": str(frozen)},
-        }
-    )
-    # Frozen, forward still running: no verdict and no Paper candidate.
+    ledger.append(_registration(directory))
+    # Frozen, forward still running: no verdict and nothing to open on Paper.
     summary = summarize_experiment(directory)
     assert summary["verdict"] is None
-    assert summary["paper_candidate"] is None
-    ledger.append(
-        {
-            "record_type": "forward",
-            "experiment_id": "registered",
-            "epoch_id": "forward",
-            "fold_id": "forward",
-            "run_id": "run_forward",
-            "session_key": "forward",
-            "artifact_id": "strategy_research_abc",
-            "status": "ok",
-            "readout": {"state": "registered_with_record", "record": {}, "forward": {}},
-        }
-    )
+    assert summary["paper_openable"] is False
+    ledger.append(_forward(directory))
     summary = summarize_experiment(directory)
     assert summary["verdict"]["status"] == "registered_with_record"
     assert summary["verdict"]["reasons"] == []
-    assert summary["paper_candidate"]["artifact_id"] == "strategy_research_abc"
+    assert summary["paper_openable"] is True
     detail = TestClient(create_app(tmp_path)).get("/api/experiments/registered").json()
     assert detail["verdict"]["status"] == "registered_with_record"
+
+
+def test_a_registered_strategy_synced_from_another_host_is_listed_without_the_paper_action(tmp_path: Path):
+    """Opening a Paper account rebuilds the experiment's settings, which refuse an
+    ``experiments_root`` other than the directory's parent: an experiment created
+    on the ZGCA instance and synced back is read here, but the console does not
+    offer what would fail. Its own experiments, recorded absolute (the console)
+    or repository-relative (the command line), still offer it."""
+
+    root = tmp_path / "experiments"
+    for experiment_id, recorded in (
+        ("console", str(root)),
+        ("command_line", "experiments"),
+        ("synced", "/personal_fast_storage/auto-trade/experiments"),
+    ):
+        directory = _experiment(root, experiment_id, {**_CURRENT, "experiments_root": recorded})
+        ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
+        ledger.append(_registration(directory))
+        ledger.append(_forward(directory))
+    rows = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
+    assert {name: row["ending"]["state"] for name, row in rows.items()} == dict.fromkeys(rows, "registered_with_record")
+    assert {name: row["paper_openable"] for name, row in rows.items()} == {
+        "console": True,
+        "command_line": True,
+        "synced": False,
+    }
+    # The raw artifact id stays on the host side of the listing.
+    assert "strategy_research_abc" not in json.dumps(rows)
 
 
 def test_the_create_form_is_seeded_with_the_research_geometry(tmp_path: Path):

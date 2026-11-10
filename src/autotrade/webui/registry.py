@@ -118,18 +118,12 @@ _PRIVATE_PARAMS = {
     "raw_dir",
     "fundamental_events_root",
     "fundamental_events_status",
-    "pit_cache_root",
-    "template_dir",
-    "local_dev",
     "experiments_root",
     "work_root",
     "llm_env_file",
 }
 # Replay result modes a style sidecar may carry: research and forward replays.
 _RESULT_MODES = frozenset({RESEARCH_PHASE, FORWARD_PHASE})
-# Experiment stages, in order: researching, registered with the forward replay pending or
-# running, readout recorded.
-STAGES = ("research", "forward", "readout")
 # How an experiment ended, in the order the homepage lists them. The console says an
 # ending in this one vocabulary wherever it says it at all, so the ledger's own
 # words (``no_deliverable``, the session outcomes) never have to be read twice.
@@ -281,7 +275,9 @@ def _public_params(params: Mapping[str, object]) -> dict[str, object]:
 
 
 def experiment_stage(records: Sequence[Mapping[str, object]]) -> str:
-    """Which of :data:`STAGES` the experiment is in, read off the ledger alone."""
+    """The experiment's stage, read off the ledger alone: ``research`` until it
+    registers, ``forward`` while its forward replay is pending or running,
+    ``readout`` once the readout is recorded."""
 
     if experiment_verdict(records) is not None:
         return "readout"
@@ -434,7 +430,6 @@ def _forward_view(
             for name, block in as_mapping(record.get("slices")).items()
             if isinstance(block, Mapping)
         },
-        "refits_executed": record.get("refits_executed"),
         # Diagnostic: the forward slice's excess among random-name replays.
         "null_percentile": finite_number(as_mapping(null.get("step")).get("excess_percentile")),
         # The experiment's readout (``validation_record.readout``).
@@ -442,12 +437,25 @@ def _forward_view(
     }
 
 
-def _paper_candidate_view(records: list[dict[str, object]]) -> dict[str, object] | None:
-    """The registered artifact the experiment's Paper account is opened from."""
-    candidate = paper_candidate(records)
-    if candidate is None:
-        return None
-    return {"artifact_id": candidate["artifact_id"]}
+def _paper_openable(
+    directory: Path, params: Mapping[str, object], records: Sequence[Mapping[str, object]]
+) -> bool:
+    """Whether this console can open a Paper account on the experiment: it has a
+    Paper candidate (``ledger.paper_candidate``) and was not created under another
+    experiments root. Opening rebuilds the experiment's settings, which refuse a
+    recorded ``experiments_root`` other than the directory's parent
+    (``pipelines.worker``; a relative one is read against the repository, the
+    experiments root's parent), so a strategy registered on the ZGCA instance and
+    synced back is read here but never offered."""
+
+    if paper_candidate(records) is None:
+        return False
+    if "experiments_root" not in params:
+        return True
+    root = Path(str(params["experiments_root"]))
+    if not root.is_absolute():
+        root = directory.parents[1] / root
+    return root.resolve() == directory.parent.resolve()
 
 
 def summarize_experiment(directory: Path) -> dict[str, object]:
@@ -487,7 +495,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "ending": ending,
                 "attention": experiment_attention(identity, directory, ending),
                 "forward": forward,
-                "paper_candidate": _paper_candidate_view(records),
+                "paper_openable": _paper_openable(directory, params, records),
             }
         )
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable
@@ -912,9 +920,12 @@ def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, o
 
 
 def _record_detail(
-    identity: PublicIdentity, records: Sequence[Mapping[str, object]], params: Mapping[str, object]
+    identity: PublicIdentity,
+    records: Sequence[Mapping[str, object]],
+    view: Mapping[str, object],
 ) -> dict[str, object] | None:
-    """The record for the experiment page: :func:`_record_view` with one row per
+    """The record for the experiment page: the summary's ``view``
+    (:func:`_record_view`, empty before the first step) with one row per
     step (its window, test horizon, candidate by public ref, source, entry
     without the daily rows, and each seed replicate the step replayed beside
     the candidate, by public ref with its active return or its strategy error)
@@ -922,8 +933,7 @@ def _record_detail(
     the book and its random baseline compounded, with each step's bounds and
     whether its candidate changed, for the chart's markers."""
 
-    view = _record_view(records, params)
-    if view is None:
+    if not view:
         return None
     tests = validation_record.test_step_records(records)
     rows: list[dict[str, object]] = []
@@ -1015,13 +1025,12 @@ def _verdict_thresholds(params: Mapping[str, object]) -> dict[str, object]:
 _FORWARD_RECORDS: dict[Path, tuple[tuple[int, int], Mapping[str, object] | None]] = {}
 
 
-def _experiment_forward_records(root: Path) -> tuple[list[tuple[str, Mapping[str, object]]], int]:
+def _experiment_forward_records(root: Path) -> list[tuple[str, Mapping[str, object]]]:
     """The forward record of every experiment under ``root`` that has one, by
-    experiment id, archived experiments included, and how many experiments' ledgers could
-    not be read (a readout counts them rather than skip them silently)."""
+    experiment id, archived experiments included. A ledger that cannot be read is
+    left out here; the listing flags its experiment unreadable."""
 
     found: list[tuple[str, Mapping[str, object]]] = []
-    unreadable = 0
     for directory in sorted(path for path in root.iterdir() if path.is_dir()):
         ledger = directory / "ledgers" / "experiment_ledger.jsonl"
         if not ledger.is_file():
@@ -1033,12 +1042,11 @@ def _experiment_forward_records(root: Path) -> tuple[list[tuple[str, Mapping[str
             try:
                 cached = (signature, forward_record(read_ledger_records(directory)))
             except (OSError, ValueError):
-                unreadable += 1
                 continue
             _FORWARD_RECORDS[ledger] = cached
         if cached[1] is not None:
             found.append((directory.name, cached[1]))
-    return found, unreadable
+    return found
 
 
 def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[str, object] | None:
@@ -1068,11 +1076,10 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
         return replay.get("start"), replay.get("forward_end")
 
     months = forward_months(as_mapping(record))
-    records, unreadable = _experiment_forward_records(root)
     readings: list[dict[str, object]] = []
     pooled: list[dict[str, object]] = []
     raised = 0
-    for experiment_id, other in records:
+    for experiment_id, other in _experiment_forward_records(root):
         readout = as_mapping(other.get("readout"))
         if not readout:
             continue
@@ -1109,7 +1116,6 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
             **pooled_reading(pooled),
             "raised": raised,
         },
-        "unreadable_experiments": unreadable,
     }
 
 
@@ -1303,7 +1309,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         ),
         "sessions": sessions,
         "registered": _registered_view(identity, records),
-        "record": _record_detail(identity, records, params),
+        "record": _record_detail(identity, records, as_mapping(detail.get("record"))),
         "readouts": _record_readouts(root, forward_record(records)),
         # Two different failures, kept apart: a forward replay attempt that
         # raised before its record -- selected by the pipeline's stage, not by

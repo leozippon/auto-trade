@@ -747,8 +747,6 @@ class WebuiBackendTest(unittest.TestCase):
             "raw_dir",
             "fundamental_events_root",
             "fundamental_events_status",
-            "template_dir",
-            "local_dev",
         ):
             self.assertNotIn(hidden, fields, hidden)
         for model_field in ("model", "subagent_model", "compact_model"):

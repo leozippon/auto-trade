@@ -74,7 +74,7 @@ def test_a_researching_experiment_shows_its_plan_and_nothing_registered(tmp_path
     assert detail["verdict"] is None
     assert detail["forward"] is None
     assert detail["registered"] is None
-    assert detail["paper_candidate"] is None
+    assert detail["paper_openable"] is False
     assert [session["key"] for session in detail["sessions"]] == ["research", "forward"]
     assert [session["kind"] for session in detail["sessions"]] == ["research", "forward"]
     # The session in flight has no ledger record yet; its plan entry stands.
@@ -112,7 +112,7 @@ def test_a_registered_experiment_serves_no_replay_until_its_readout_exists(tmp_p
     assert detail["status"]["session_key"] == "forward"
     assert detail["verdict"] is None
     assert detail["forward"] is None
-    assert detail["paper_candidate"] is None
+    assert detail["paper_openable"] is False
     frozen = detail["registered"]
     assert frozen["session_key"] == "research"
     assert frozen["strategy_ref"].startswith("strategy_ref_")
@@ -263,7 +263,7 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
         f" · p {readout['record']['p_value']:.2f} · 换候选 0 次"
         f" · 前推下界 {readout['forward']['lower_bound'] * 100:+.2f}%"
     )
-    assert rows["registered_with_record"]["paper_candidate"] is not None
+    assert rows["registered_with_record"]["paper_openable"] is True
     assert endings["budget_exhausted"]["reason"] == "模型调用次数用尽"
     # The host's reason in full, its error included: that is what to act on.
     assert endings["environment_blocked"]["reason"] == ENVIRONMENT_BLOCKED_REASON
@@ -1448,7 +1448,7 @@ def test_every_record_of_a_validation_window_is_listed_with_its_p_value_and_coun
     build_experiment(tmp_path, "early", "research")
     readouts = experiment_detail(tmp_path, "good")["readouts"]
     window = readouts["validation_window"]
-    assert window["count"] == 2 and readouts["unreadable_experiments"] == 0
+    assert window["count"] == 2
     by_experiment = {row["experiment_id"]: row for row in window["readings"]}
     assert set(by_experiment) == {"good", "other"}
     for name in ("good", "other"):

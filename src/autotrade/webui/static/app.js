@@ -84,11 +84,13 @@ const P_VALUE_TITLE = "零技能原假设下读到至少这么高的残差 IR �
 // The holder's money, which no active figure is: the account's own return
 // after every cost minus the benchmark index's price return over the same days.
 const RAW_EXCESS_TITLE = "账户自身扣费收益减基准指数（价格指数）同期收益，整段累计";
-// The cost-stress reading the registration check and F5 judge (verdict.py
-// `excess_at_cost_stress`), at the experiment's multiplier.
-const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；研究期每次验证与前推裁决读的是同一个数";
+// The cost-stress reading (verdict.py `excess_at_cost_stress`) at the
+// experiment's multiplier: every research validation and the Forward slice
+// report it, and nothing is judged on it.
+const STRESS_TITLE = "滑点按成本压力倍数加价后的年化主动超额；研究期每次验证与前推切片报告的是同一个数，只报告，不作判定";
 const BASELINE_RETURN_TITLE = "随机对照组合（同一成交骨架随机换名）自身扣费后的整段收益";
-// What F2 judges (verdict.py `forward_lower_bound`): the lower bound of one
+// The Forward lower bound the readout reports beside the record and gates
+// nothing on (verdict.py `forward_lower_bound`): the lower bound of one
 // daily series' mean. The mean itself is the slice's `plain_excess`, or with
 // seed replicates `seed_mean.plain_excess`.
 const LOWER_BOUND_TITLE = "主动序列（登记了种子复现时为定版产物与各复现逐日平均）年化均值的移动块自助法单侧下界";
@@ -3320,10 +3322,11 @@ function paperHandoff(detail) {
     },
     "建立模拟账户",
   );
-  // Only an experiment with a Paper candidate can open a book here; any experiment shows the book it has.
+  // Only an experiment this console can open a book on (its Paper candidate,
+  // created on this host) offers the button; any experiment shows the book it has.
   const host = el(
     "div",
-    { class: "section-gap", hidden: detail.paper_candidate ? null : "" },
+    { class: "section-gap", hidden: detail.paper_openable ? null : "" },
     title,
     button,
   );
