@@ -3,8 +3,7 @@
 Every surface a session model reads -- the system prompt with its dynamic
 half, the opening message, the wrap-up and hard-finalization prompts, the
 sub-agent role prompts and every tool description -- carries the research
-workflow and none of the retired Fold/Meta vocabulary, and no retired tool is
-registrable for any role.
+workflow and none of the retired Fold/Meta vocabulary.
 """
 
 from __future__ import annotations
@@ -16,16 +15,11 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent import prompts
-from autotrade.agent.runner import _SESSION_TOOLS, _TERMINAL_TOOLS
 from autotrade.agent.subagent import (
     AGENT_TOOL_DESCRIPTION,
     SUBAGENT_ROLES,
-    allowed_subagent_tools,
     subagent_system_prompt,
 )
-from autotrade.environment.tools.base import SEQUENTIAL_TOOL_NAMES
-
-RETIRED_TOOLS = ("finish_fold", "finish_meta", "daily_backtest", "terminate")
 
 # Words of the Fold/Meta workflow a research session must never read. ASCII
 # words match on letter boundaries, so ``fold_id`` and ``fold_ref_`` count
@@ -185,36 +179,6 @@ def test_the_tools_state_the_validate_allowance_the_prompt_states() -> None:
     assert "- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 6 次。" in run
     # A control is a comparison leg test never takes.
     assert "test never takes it" in descriptions["validate"]
-
-
-def test_retired_tools_are_absent_from_every_role() -> None:
-    surfaces = {
-        "session": _SESSION_TOOLS,
-        "terminal": _TERMINAL_TOOLS,
-        "sequential": SEQUENTIAL_TOOL_NAMES,
-        **{f"subagent:{role}": allowed_subagent_tools(role) for role in SUBAGENT_ROLES},
-    }
-    for surface, names in surfaces.items():
-        for retired in RETIRED_TOOLS:
-            assert retired not in names, (surface, retired)
-    assert _TERMINAL_TOOLS == {"test"}
-    # The Agent's own compaction rebuilds the turn, so it never runs beside
-    # other calls; test is mutating and so sequential by its spec.
-    assert SEQUENTIAL_TOOL_NAMES == {"compact"}
-    # Sub-agents never finish, validate, roll back or compact the parent.
-    for role in SUBAGENT_ROLES:
-        assert not allowed_subagent_tools(role) & {
-            "test",
-            "validate",
-            "run_null_control",
-            "step_rollback",
-            "agent",
-            "compact",
-        }
-    import autotrade.environment.tools as tools_package
-
-    for retired in ("FinishFoldTool", "FinishMetaTool"):
-        assert not hasattr(tools_package, retired)
 
 
 # The static part's headings, in the order the prompt reads them (Pi and

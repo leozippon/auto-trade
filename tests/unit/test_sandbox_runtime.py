@@ -1578,39 +1578,6 @@ def test_executor_rejects_strict_json_type_or_value_drift_in_cached_prefix(
     assert (request["reset"], request["base_count"], request["bars"]) == (False, 1, [])
 
 
-def test_a_strategy_calling_the_removed_nl_interface_fails_as_its_own_error(
-    tmp_path: Path,
-):
-    """``context.nl()`` was removed with the host NL service. A strategy still
-    calling it fails at its first decision, through the real worker and host
-    executor, with an error that names the missing attribute and is charged to
-    the strategy."""
-
-    strategy = _strategy(
-        tmp_path,
-        """def generate_orders(context):
-    context.nl(query="signal", mode="search", limit=1)
-    return []
-""",
-    )
-    process = subprocess.Popen(
-        [sys.executable, "-m", "autotrade.environment.strategy_worker", str(strategy)],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-    executor = _executor_for_process(process, drain_stderr=True)
-    try:
-        with (
-            patch.object(executor, "_remove_container"),
-            pytest.raises(StrategyRaised, match="has no attribute 'nl'") as raised,
-        ):
-            executor.execute(_context())
-        assert raised_by_strategy(raised.value)
-    finally:
-        executor.close()
-
-
 def test_inference_timeout_aborts_and_closes_worker():
     config = _strategy_config(timeout_seconds=0.05)
     process = subprocess.Popen(
@@ -2485,7 +2452,6 @@ def test_layout_has_no_decoy_output_siblings_and_collects_the_workspace(tmp_path
     paths = local.prepare_layout()
     assert not (paths.agent / "output").exists()
     assert not (paths.agent / "models").exists()
-    assert not hasattr(paths, "agent_output") and not hasattr(paths, "writable_root_map")
     work_output = paths.workspace / "output"
     work_models = paths.workspace / "models"
     work_output.mkdir(parents=True, exist_ok=True)

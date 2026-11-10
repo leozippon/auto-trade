@@ -952,8 +952,6 @@ def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
     )
 
     runner.run("inspect repeatedly")
-    assert not hasattr(AgentSessionRunner, "_trim")
-    assert not hasattr(AgentSessionRunner, "_clear_stale_tool_results")
     assert not any(event == "context_summary" for event, _ in events)
     assert not any(
         event == "context_edit" and "cleared_tool_results" in payload

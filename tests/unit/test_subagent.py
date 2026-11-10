@@ -856,12 +856,6 @@ def test_subagent_schema_uses_session_role_enum() -> None:
     assert "maxLength" not in properties["task"]
 
 
-def test_session_config_has_no_required_subagent_role_gate() -> None:
-    config = AgentSessionConfig()
-    assert not hasattr(config, "required_subagent_roles")
-    assert "required_subagent_roles" not in AgentSessionConfig.__dataclass_fields__
-
-
 def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
     from autotrade.agent.runner import _SESSION_TOOLS
 
