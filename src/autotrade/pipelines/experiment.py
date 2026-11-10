@@ -62,6 +62,7 @@ from .config import (
     DEFAULT_MAX_RESEARCH_MINUTES,
     FORWARD_PHASE,
     RESEARCH_PHASE,
+    VALIDATION_PERIOD_COMPLETE,
     AcceptanceRules,
     ArtifactStore,
     BudgetUsed,
@@ -354,7 +355,9 @@ class ExperimentPipeline:
         failed before that record is continued, not repeated: the next attempt
         starts from the budget, the compaction summary, the Validations and
         the test steps the interrupted ones left in the trace, the step tree
-        and the ledger.
+        and the ledger. Where those test steps already reach the end of the
+        validation years, no conversation opens: the session is ``completed``
+        with the last test's candidate (:func:`_tested_through`).
         """
 
         records = self.ledger.read()
@@ -380,28 +383,42 @@ class ExperimentPipeline:
         try:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.RESEARCH)
             decision, years = self.research_inputs()
-            session = self.developer(
-                ResearchSessionRequest.for_experiment(
-                    self.config,
-                    budgets=budgets,
-                    run_id=run_id,
-                    snapshot=decision,
-                    decision_time=self.research_view_time(),
-                    years=years,
-                    validation=self.validation_span(),
-                    tests_before=tuple(test_step_records(records)),
-                    directive=str(context.get("directive") or ""),
-                    sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
-                    snapshot_config=_snapshot_config_record(self.snapshots),
-                    progress_hook=progress,
-                    skills_source_ref=(
-                        str(current_skills.root) if current_skills.root is not None else ""
-                    ),
-                    budget_used=resume.budget_used if resume is not None else BudgetUsed(),
-                    steps_before=steps_before,
-                    resume=resume,
+            tests_before = tuple(test_step_records(records))
+            budget_used = resume.budget_used if resume is not None else BudgetUsed()
+            if len(tests_before) >= self.validation_steps().count:
+                # The last step is tested and the attempt that tested it died
+                # before this record: the session is over, and an agent
+                # session could only spend its budget against a test that
+                # refuses. It completes from what the ledger recorded.
+                session = _tested_through(
+                    tests_before,
+                    steps_before,
+                    budget_used=budget_used,
+                    attempt=resume.attempt if resume is not None else 1,
                 )
-            )
+            else:
+                session = self.developer(
+                    ResearchSessionRequest.for_experiment(
+                        self.config,
+                        budgets=budgets,
+                        run_id=run_id,
+                        snapshot=decision,
+                        decision_time=self.research_view_time(),
+                        years=years,
+                        validation=self.validation_span(),
+                        tests_before=tests_before,
+                        directive=str(context.get("directive") or ""),
+                        sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
+                        snapshot_config=_snapshot_config_record(self.snapshots),
+                        progress_hook=progress,
+                        skills_source_ref=(
+                            str(current_skills.root) if current_skills.root is not None else ""
+                        ),
+                        budget_used=budget_used,
+                        steps_before=steps_before,
+                        resume=resume,
+                    )
+                )
             # Every row the ledger records names the bytes it replayed.
             step_rows = completed_rows(
                 self.config.experiment_dir,
@@ -475,7 +492,7 @@ class ExperimentPipeline:
             record = {
                 "record_type": "research_session",
                 **link,
-                "conversation_id": session.conversation_id,
+                "conversation_id": session.conversation_id or None,
                 "finish_reason": session.finish_reason,
                 "outcome": session.outcome,
                 "reason": session.reason or None,
@@ -1164,6 +1181,32 @@ class ExperimentPipeline:
             generation_id=generation_id,
             previous=current,
         )
+
+
+def _tested_through(
+    tests: Sequence[Mapping[str, object]],
+    steps: tuple[StepResult, ...],
+    *,
+    budget_used: BudgetUsed,
+    attempt: int,
+) -> ResearchSessionResult:
+    """The session whose recorded tests already reach the end of the
+    validation years: ``completed`` with the last test's candidate and seed
+    replicates, as that test registered them, over the Validations ``steps``
+    the earlier attempts recorded. No conversation ran, so it names none and
+    leaves the skills where the ledger has them."""
+
+    candidate: Mapping[str, object] = tests[-1]["candidate"]  # type: ignore[assignment]
+    return ResearchSessionResult(
+        "",
+        steps,
+        "completed",
+        node_id=str(candidate["step_id"]),
+        seed_replicates=tuple(str(item) for item in candidate.get("seed_replicates") or ()),  # type: ignore[union-attr]
+        finish_reason=VALIDATION_PERIOD_COMPLETE,
+        budget_used=budget_used,
+        attempt=attempt,
+    )
 
 
 def research_step_record(step: StepResult) -> dict[str, object]:

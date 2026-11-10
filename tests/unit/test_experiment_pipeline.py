@@ -650,6 +650,64 @@ def test_a_resumed_attempt_continues_from_the_test_horizon_and_the_record(tmp_pa
     assert (record["test_horizon"], record["steps_tested"], record["attempts"]) == (steps.end, 4, 2)
 
 
+def test_an_attempt_that_died_after_its_last_test_completes_without_a_session(tmp_path: Path):
+    """The last test records the validation period's last step before the
+    pipeline writes the session record; an attempt that dies in between leaves
+    a record that is complete. The next attempt opens no conversation (one
+    could only spend its budget against a test that refuses) and registers the
+    last tested candidate as a ``completed`` session, completing nothing."""
+
+    pipeline, _snapshots, evaluator, _developer, ledger = _pipeline(tmp_path, {})
+    from autotrade.pipelines.session_resume import load_recorded_steps
+
+    node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=4, node=True)
+    [earlier] = load_recorded_steps(pipeline.config.experiment_dir)
+    steps = pipeline.validation_steps()
+    replayed = evaluator.evaluate(
+        pipeline.validation_span().request(
+            pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
+        )
+    )
+    replay, analysis = replay_and_analysis(replayed.result_ref)
+    head = {"experiment_id": "experiment", "epoch_id": "research", "fold_id": "research", "run_id": "run_ref_first", "session_key": "research"}
+    candidate = {"step_id": node_id, "revision_id": earlier.revision_id, "fingerprint": earlier.fingerprint, "seed_replicates": []}
+    for step in range(1, steps.count + 1):
+        first, last = steps.window(step)
+        ledger.append(
+            validation_record.test_step_record(
+                head=head,
+                steps=steps,
+                step=step,
+                candidate=candidate,
+                replay={"start": steps.start, "end": last, "result_ref": replayed.result_ref},
+                entry=validation_record.step_entry(replay, analysis, start=first, end=last),
+                registration={"passed": True, "reasons": []},
+                source=validation_record.SOURCE_TEST,
+            )
+        )
+
+    def no_session(_request):
+        raise AssertionError("a session whose record is complete opened a conversation")
+
+    pipeline.developer = no_session
+    replays = evaluator.count
+    record = pipeline.run_research_session()
+
+    assert (record["outcome"], record["finish_reason"], record["experiment_end"]) == (
+        "completed", "validation_period_complete", None,
+    )
+    assert record["conversation_id"] is None and record["attempts"] == 2
+    assert record["registered"]["source_step_id"] == node_id == record["nominated_step_id"]
+    assert record["registration"]["passed"] is True
+    assert record["budget_used"]["test_replays"] == 4
+    # The record was complete: no host completion, and the only replays are the
+    # registration's own (none here: the fixture backend has no null control).
+    rows = [row for row in ledger.read() if row["record_type"] == TEST_STEP_RECORD_TYPE]
+    assert {row["source"] for row in rows} == {"test"} and evaluator.count == replays
+    assert (record["test_horizon"], record["steps_tested"]) == (steps.end, steps.count)
+    assert research_over(ledger.read())
+
+
 def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_experiment(tmp_path: Path):
     """A session the host ended on its environment ends the attempt, not the
     research: the next attempt resumes from the test horizon and the record. Only

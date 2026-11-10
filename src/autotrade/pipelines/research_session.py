@@ -117,6 +117,7 @@ from .calendar import (
 from .config import (
     DEFAULT_MAX_API_SPEND_USD,
     TEST_STEP_NAMES,
+    VALIDATION_PERIOD_COMPLETE,
     BudgetUsed,
     EvaluationBackend,
     ReplaySpan,
@@ -1260,7 +1261,7 @@ class LLMResearchDeveloper:
             conversation_id = result.conversation_id
             outcome, node_id, reason = "completed", _completed_candidate(result.finish_value), ""
             replicates = _seed_replicates(result.finish_value)
-            finish_reason = "validation_period_complete"
+            finish_reason = VALIDATION_PERIOD_COMPLETE
         except AgentSessionBudgetExhausted as exc:
             # The session closed on an exhausted budget (its wrap-up grace,
             # its model calls or its API spend); the Validations it completed

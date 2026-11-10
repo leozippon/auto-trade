@@ -991,6 +991,9 @@ class SessionResume:
 # failing on the environment (``session_tools.EnvironmentBlocked``), which
 # ends the attempt, not the research, until the attempts are spent.
 SESSION_OUTCOMES = ("completed", "deadline", ENVIRONMENT_BLOCKED)
+# The finish reason of a ``completed`` session: its last test reached the end
+# of the validation years.
+VALIDATION_PERIOD_COMPLETE = "validation_period_complete"
 
 
 @dataclass(frozen=True)
@@ -1167,6 +1170,7 @@ __all__ = [
     "SESSION_OUTCOMES",
     "TEST_STEP_MONTHS",
     "TEST_STEP_NAMES",
+    "VALIDATION_PERIOD_COMPLETE",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",
