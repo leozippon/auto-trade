@@ -203,13 +203,22 @@ _BUDGET_REMAINING_KEYS = {
     "api_spend": "remaining_usd",
     "llm_calls": "remaining_calls",
 }
-# What each budget's notice asks the session to keep back.
+# What each budget's notice says about the rest of it: replays pause the
+# inference clock, so the time left is research time; spend and calls are
+# charged per model call, the session's own validate and test included.
 _BUDGET_NOTICE_ADVICE = {
-    "inference_time": "一次回测的耗时随其区间覆盖的年数增长，为仍要跑的 validate 与 test 预留时间",
+    "inference_time": "回放的等待不计入推理时间，剩下的时间都用于研究与实现",
     "api_spend": "子代理与压缩的调用也计入花费，为仍要跑的 validate 与 test 留出花费",
     "llm_calls": "子代理与压缩的调用也计入，为仍要跑的 validate 与 test 留出调用次数",
 }
 _BACKTEST_TOOLS = ("smoke_backtest", "validate", "test")
+# Each session budget as the status on a successful ``test`` result names it,
+# in the order the run section lists the budgets.
+_BUDGET_STATUS_LABELS = (
+    ("inference_time", "推理时间"),
+    ("llm_calls", "模型调用"),
+    ("api_spend", "API 花费"),
+)
 # The trace events that carry one tool outcome. The session_end tool_failures
 # scalar and the Agent Trace summary must count the same events, or an audit
 # that reads only the scalar undercounts a session whose children did the work.
@@ -260,6 +269,22 @@ def _budget_spent_phrase(level: _BudgetLevel, fraction: float) -> str:
     if level.budget == "api_spend":
         return f"API 花费已用去上限的 {fraction:.0%}，剩余约 ${level.left:.2f}"
     return f"模型调用已用去上限的 {fraction:.0%}，剩余 {level.left:.0f} 次"
+
+
+def _test_budget_status(levels: Sequence[_BudgetLevel], value: object) -> str:
+    """The used share of each session budget and how far the walk-forward
+    is, facts only: the ``budget_status`` every successful ``test`` result
+    carries. The progress is the result's own ``step`` of ``steps``."""
+
+    used = {level.budget: level.used for level in levels}
+    status = "预算已用：" + "、".join(
+        f"{label} {used[budget]:.0%}"
+        for budget, label in _BUDGET_STATUS_LABELS
+        if budget in used
+    )
+    if isinstance(value, Mapping) and "step" in value and "steps" in value:
+        status += f"；验证期已测 {value['step']}/{value['steps']} 步"
+    return status + "。"
 
 
 def _inbox_trace_text(text: str) -> str:
@@ -728,7 +753,7 @@ class AgentSessionRunner:
                     continue
                 nudge: dict[str, object] = {
                     "observation": "no_tool_call",
-                    "retry_hint": "Use an injected tool to advance the session; text alone does not finish it.",
+                    "retry_hint": "Text alone does nothing: continue the research with the injected tools.",
                 }
                 messages.append(
                     ChatMessage("user", json.dumps(nudge, ensure_ascii=False))
@@ -757,6 +782,11 @@ class AgentSessionRunner:
                 else:
                     apply_point = INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM
             for call, record in results:
+                if call.name == "test" and record.get("ok") is True:
+                    record["budget_status"] = _test_budget_status(
+                        self._budget_levels(time_budget.remaining(), budget_total),
+                        record.get("value"),
+                    )
                 messages.append(
                     ChatMessage(
                         "tool",
