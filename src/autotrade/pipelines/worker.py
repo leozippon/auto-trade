@@ -87,7 +87,6 @@ from .ledger import (
     assert_no_registered_artifact_mutation,
     experiment_verdict,
     paper_candidate,
-    registered_record,
     research_records,
 )
 from .local_backend import (
@@ -269,7 +268,6 @@ class InteractiveWorkerOptions:
     raw_dir: Path | None = None
     fundamental_events_root: Path | None = None
     fundamental_events_status: Path | None = None
-    pit_cache_root: Path | None = None
     pit_views_seed: Path | None = None
     # A named seed must apply or the run fails; with none every view is built
     # cold.
@@ -368,8 +366,7 @@ def resolve_worker_options(
     work_root = _path_value(read_param(params, "work_root"), repository, "work_root")
     if repository != work_root and repository not in work_root.parents:
         raise ValueError("work_root must stay inside the repository")
-    baseline_value = params.get("baseline_strategy_path", params.get("strategy_path"))
-    baseline = repo_file(repository, baseline_value, "baseline strategy")
+    baseline = repo_file(repository, read_param(params, "strategy_path"), "baseline strategy")
     requested_backend = params.get("data_backend")
     if requested_backend in (None, ""):
         production_raw = repository / "data" / "raw"
@@ -419,19 +416,6 @@ def resolve_worker_options(
         if data_backend == "pit"
         else None
     )
-    pit_cache_root = (
-        _path_value(
-            params.get("pit_cache_root", str(directory / "pit_views")),
-            repository,
-            "pit_cache_root",
-        )
-        if data_backend == "pit"
-        else None
-    )
-    if pit_cache_root is not None and not (
-        pit_cache_root == directory or pit_cache_root.is_relative_to(directory)
-    ):
-        raise ValueError("pit_cache_root must stay inside the experiment directory")
     pit_views_seed, seed_generation = (
         _pit_views_seed(read_param(params, "pit_views_seed"), repository, snapshot_config)
         if data_backend == "pit"
@@ -583,7 +567,6 @@ def resolve_worker_options(
         raw_dir=raw_dir,
         fundamental_events_root=events_root,
         fundamental_events_status=events_status,
-        pit_cache_root=pit_cache_root,
         pit_views_seed=pit_views_seed,
         pit_views_seed_required=seed_generation is not None,
         snapshot_config=snapshot_config,
@@ -735,7 +718,6 @@ def build_experiment_pipeline(
             fundamental_events_root=options.fundamental_events_root,
             fundamental_events_status=options.fundamental_events_status,
             config=options.snapshot_config,
-            cache_root=options.pit_cache_root,
             pit_views_seed=options.pit_views_seed,
             pit_views_seed_required=options.pit_views_seed_required,
         )
@@ -969,12 +951,11 @@ def release_finished_sandbox(options: InteractiveWorkerOptions) -> None:
 
 
 def pit_views_tree(experiment_dir: Path) -> Path | None:
-    """The experiment's PIT view cache, ``<experiment>/pit_views``, or None without one.
+    """The experiment's PIT view cache, ``<experiment>/pit_views`` (where its
+    ``ResearchPITSnapshotProvider`` builds), or None without one.
 
-    The fixed name, not the ``pit_cache_root`` parameter, which may name the
-    experiment directory itself. Raises ValueError when ``pit_views`` is not a
-    plain directory: deleting through a link could reach a tree the experiment does
-    not own.
+    Raises ValueError when ``pit_views`` is not a plain directory: deleting
+    through a link could reach a tree the experiment does not own.
     """
 
     views = experiment_dir / "pit_views"
@@ -1011,7 +992,6 @@ def _terminal_status(
     ``paper_candidate`` are re-read from the ledger on every publish."""
 
     records = ledger.read()
-    registered = registered_record(records)
     return {
         "schema_version": 1,
         "state": ExperimentState.COMPLETED,
@@ -1020,9 +1000,6 @@ def _terminal_status(
         "developer_mode": developer_mode or source.get("developer_mode"),
         "completed_sessions": len(research_records(records))
         + sum(1 for record in records if record.get("record_type") == "forward"),
-        "final_strategy_artifact": (
-            str(registered["registered"]["artifact_id"]) if registered is not None else None  # type: ignore[index]
-        ),
         "verdict": experiment_verdict(records),
         "paper_candidate": paper_candidate(records),
     }

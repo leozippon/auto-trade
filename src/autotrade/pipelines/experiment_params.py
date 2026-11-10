@@ -289,11 +289,7 @@ class EnvironmentParams:
     )
     execution_mode: str | None = _managed("sandbox")
     developer_mode: str | None = _managed("llm", default="baseline")
-    # Left out: strategy_path.
-    baseline_strategy_path: str | None = _host()
     daily_path: str | None = _host()
-    # Left out: the experiment directory's pit_views.
-    pit_cache_root: str | None = _host()
     experiments_root: str | None = _host()
     work_root: str | None = _host(".runtime/sandboxes")
 

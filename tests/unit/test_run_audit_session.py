@@ -285,7 +285,6 @@ def test_the_pipeline_uses_the_experiments_own_pit_view_seed(
         fundamental_events_root=tmp_path / "fundamentals",
         fundamental_events_status=tmp_path / "fundamentals-status.json",
         snapshot_config=object(),
-        pit_cache_root=tmp_path / "pit-cache",
         pit_views_seed=tmp_path / "data/pit_views_seed_ext",
         pit_views_seed_required=True,
     )

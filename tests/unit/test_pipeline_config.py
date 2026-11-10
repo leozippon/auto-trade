@@ -1293,13 +1293,12 @@ class PitViewsSeedParameterTest(unittest.TestCase):
                 fundamental_events_root=options.fundamental_events_root,
                 fundamental_events_status=options.fundamental_events_status,
                 config=options.snapshot_config,
-                cache_root=options.pit_cache_root,
                 pit_views_seed=options.pit_views_seed,
                 pit_views_seed_required=options.pit_views_seed_required,
             )
             self.assertEqual(snapshots.release.generation_id, "gen_seed")
             self.assertTrue(
-                (options.pit_cache_root / "decision" / view.name / "manifest.json").is_file()
+                (options.experiment_dir / "pit_views" / "decision" / view.name / "manifest.json").is_file()
             )
 
             unseeded = self._resolve(

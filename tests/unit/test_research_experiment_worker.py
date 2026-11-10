@@ -182,7 +182,6 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     assert paper_candidate(records)["artifact_id"] == frozen["artifact_id"]
     assert result["state"] == "completed"
     assert result["verdict"] == verdict
-    assert result["final_strategy_artifact"] == frozen["artifact_id"]
     assert read_status(experiment / "hitl" / "status.json")["verdict"] == verdict
     # The terminal step released the PIT view cache, and only that: the durable
     # record read above and below is intact.
