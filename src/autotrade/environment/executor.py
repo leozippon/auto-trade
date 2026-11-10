@@ -31,7 +31,7 @@ from .sandbox import (
     DockerSandbox,
     SandboxConfig,
     SandboxSpec,
-    container_thread_env,
+    container_numeric_env,
     remove_sandbox_tree,
 )
 from .strategy import (
@@ -562,7 +562,7 @@ class DockerStrategyExecutor:
             command.extend(["--label", f"{key}={value}"])
         if self.gpu_indices:
             command.extend(["--gpus", device_request(self.gpu_indices)])
-        for key, value in sorted(container_thread_env(spec.cpus).items()):
+        for key, value in sorted(container_numeric_env(spec.cpus).items()):
             command.extend(["--env", f"{key}={value}"])
         command.extend(["--mount", strategy_mount])
         for source, target in (

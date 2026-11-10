@@ -185,18 +185,25 @@ _IMAGE_TAG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+-]{0,200}$")
 MAX_CONTAINER_THREADS = 16
 
 
-def container_thread_env(cpus: float) -> dict[str, str]:
-    """Numeric-library thread caps for a container with ``cpus`` of quota.
+def container_numeric_env(cpus: float) -> dict[str, str]:
+    """Numeric-library environment for a container with ``cpus`` of quota.
 
     One source for the Agent session container and the strategy container:
     the Agent runs the same pandas/pyarrow/duckdb stack under ``shell`` that a
     strategy runs under ``fit``, and the mounted refs promise both are capped.
+    NumPy's huge-page hint is off: the host runs transparent hugepages in
+    ``always`` mode with ``defrag=madvise`` and other tenants keep its memory
+    fragmented, so every large array madvised MADV_HUGEPAGE stalls in
+    synchronous compaction (a 2 GiB copy over 120 s against 4 s without the
+    hint, 2026-11-10); host processes get the same from the quant
+    interpreter's site hook (docs/DEPLOYMENT_DOCUMENTATION.md 环境准备).
     """
 
     limit = str(max(1, min(MAX_CONTAINER_THREADS, math.ceil(cpus))))
     return {
         "MKL_NUM_THREADS": limit,
         "NUMEXPR_NUM_THREADS": limit,
+        "NUMPY_MADVISE_HUGEPAGE": "0",
         "OMP_NUM_THREADS": limit,
         "OPENBLAS_NUM_THREADS": limit,
     }
@@ -624,7 +631,7 @@ class DockerSandbox:
             # output/ or a candidate fails modification_check; the prefix
             # sends every .pyc to the tmpfs instead.
             ("PYTHONPYCACHEPREFIX", "/tmp/cache/pycache"),
-            *sorted(container_thread_env(self.spec.cpus).items()),
+            *sorted(container_numeric_env(self.spec.cpus).items()),
         ):
             command.extend(["--env", f"{key}={value}"])
         command.extend([
@@ -820,7 +827,7 @@ __all__ = [
     "SandboxConfig",
     "SandboxSpec",
     "attached_stdin",
-    "container_thread_env",
+    "container_numeric_env",
     "experiment_container_labels",
     "link_copytree",
     "probe_image_runtime",

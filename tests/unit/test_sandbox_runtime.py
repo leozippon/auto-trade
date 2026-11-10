@@ -61,6 +61,7 @@ from autotrade.environment.sandbox import (
     SandboxConfig,
     SandboxSpec,
     attached_stdin,
+    container_numeric_env,
     experiment_container_labels,
 )
 from autotrade.environment.sandbox_images import (
@@ -225,13 +226,16 @@ def test_both_containers_cap_numeric_threads_from_the_same_cpu_quota(tmp_path: P
         pairs = [command[i + 1] for i, value in enumerate(command) if value == "--env"]
         return dict(pair.split("=", 1) for pair in pairs)
 
-    session = env_of(DockerSandbox(local, SandboxSpec(cpus=8.0, gpu=None)).docker_command())
-    assert {key: session[key] for key in sorted(session) if key.endswith("_NUM_THREADS")} == {
+    numeric = container_numeric_env(8.0)
+    assert numeric == {
         "MKL_NUM_THREADS": "8",
         "NUMEXPR_NUM_THREADS": "8",
+        "NUMPY_MADVISE_HUGEPAGE": "0",
         "OMP_NUM_THREADS": "8",
         "OPENBLAS_NUM_THREADS": "8",
     }
+    session = env_of(DockerSandbox(local, SandboxSpec(cpus=8.0, gpu=None)).docker_command())
+    assert {key: session[key] for key in numeric} == numeric
     # The caches the session container also needs are untouched.
     assert session["XDG_CACHE_HOME"] == "/tmp/cache"
 
@@ -240,9 +244,7 @@ def test_both_containers_cap_numeric_threads_from_the_same_cpu_quota(tmp_path: P
     strategy = _strategy(package)
     with patch.object(DockerStrategyExecutor, "_start"):
         executor = DockerStrategyExecutor(strategy, _strategy_config(cpus=8.0))
-    assert env_of(executor.docker_command()) == {
-        key: value for key, value in session.items() if key.endswith("_NUM_THREADS")
-    }
+    assert env_of(executor.docker_command()) == numeric
     executor.close()
 
     # A fractional quota rounds up, and the ceiling holds above it.
@@ -1047,6 +1049,7 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     assert env_pairs == [
         "MKL_NUM_THREADS=8",
         "NUMEXPR_NUM_THREADS=8",
+        "NUMPY_MADVISE_HUGEPAGE=0",
         "OMP_NUM_THREADS=8",
         "OPENBLAS_NUM_THREADS=8",
     ]
@@ -1126,6 +1129,7 @@ def test_strategy_thread_limit_tracks_fractional_cpus_and_stays_bounded(
     } == {
         f"MKL_NUM_THREADS={expected}",
         f"NUMEXPR_NUM_THREADS={expected}",
+        "NUMPY_MADVISE_HUGEPAGE=0",
         f"OMP_NUM_THREADS={expected}",
         f"OPENBLAS_NUM_THREADS={expected}",
     }
