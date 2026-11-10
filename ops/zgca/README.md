@@ -33,7 +33,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 模型库最后传：实例盘上的余量要容下库里还缺的字节，另留 20 GiB 给镜像重建的新层和容器的临时文件。容不下就不传库，打印 `dev report` 后以非零退出，写明还缺多少、盘上空多少：代码、种子、release 和镜像都已部署，库没有，开发机上就不能新建或启动任何实验（建实验要读库的清单）。这样放不下的库不会把盘写满，也不会让人误以为实例已就绪。`deploy` 以 `dev report` 收尾。
 
-`run <轮次文件> [启动器参数...]` 要求轮次文件是仓库里的受管文件（否则 `deploy` 不会把它带过去）。它先确保控制台在 tmux 会话 `autotrade-console` 里以 `AUTOTRADE_GPU_NAME=A100` 运行并回答 `/api/health`：控制台只用它启动时的代码，所以没有实验在跑时，已有的控制台先被结束、在当前检出上重启，`deploy` 之后建实验就按新代码校验；有实验在跑时保留它，直到实验都结束（等待中的填充循环每一遍都重新连控制台，正赶上重启那几秒的一遍以非零退出、结束循环，`status` 里看得到）。然后把启动器放进 tmux 会话 `autotrade-round`，同样带着 `AUTOTRADE_GPU_NAME=A100`，端口由脚本补上，其余参数（`--dry-run`、`--fill`、实验 id）原样传给轮次文件；输出写到开发机的 `logs/zgca/<轮次文件名>_<UTC 时间>.log`，结束时追加一行 `round-exit <退出码>`。上一轮启动器还在跑时拒绝再启动。启动器创建实验之前要先做起步策略的冒烟回放，在 A100 上实测约两小时；通过的记录在开发机的 `logs/research/smoke/` 下按种子、几何与起步策略字节保存，下次直接复用。
+`run <轮次文件> [启动器参数...]` 要求轮次文件是仓库里的受管文件（否则 `deploy` 不会把它带过去），并且开发机上次部署记下的提交（`deployed_commit`）就是本机的 HEAD：开发机跑的是部署过去的那棵树，不一致或从未部署时拒绝，什么也不启动，先部署这个提交。核对通过后，它先确保控制台在 tmux 会话 `autotrade-console` 里以 `AUTOTRADE_GPU_NAME=A100` 运行并回答 `/api/health`：控制台只用它启动时的代码，所以没有实验在跑时，已有的控制台先被结束、在当前检出上重启，`deploy` 之后建实验就按新代码校验；有实验在跑时保留它，直到实验都结束（等待中的填充循环每一遍都重新连控制台，正赶上重启那几秒的一遍以非零退出、结束循环，`status` 里看得到）。然后把启动器放进 tmux 会话 `autotrade-round`，同样带着 `AUTOTRADE_GPU_NAME=A100`，端口由脚本补上，其余参数（`--dry-run`、`--fill`、实验 id）原样传给轮次文件；输出写到开发机的 `logs/zgca/<轮次文件名>_<UTC 时间>.log`，结束时追加一行 `round-exit <退出码>`。上一轮启动器还在跑时拒绝再启动。启动器创建实验之前要先做起步策略的冒烟回放，在 A100 上实测约两小时；通过的记录在开发机的 `logs/research/smoke/` 下按种子、几何与起步策略字节保存，下次直接复用。
 
 带 `--fill` 而不是 `--dry-run` 时，启动器改放进 tmux 会话 `autotrade-fill`，每十分钟跑一遍，直到轮次里没有待建的实验。一遍 `--fill` 只建当下空闲槽位与空闲卡容得下的实验，其余留作待建；本机由研究填充 cron（`ops/cron/research_fill.cron`）每十分钟再跑一遍，开发机上没有 crontab，所以由这个循环来跑。每一遍都追加到同一份 `logs/zgca/fill_<轮次文件名>_<UTC 时间>.log`：某一遍的汇总行报 `0 pending` 时循环以 `round-exit 0` 结束；某一遍以非零退出（创建被拒、控制台不回答）时循环以那个退出码结束，不再重试，留给操作者处理。它与 `autotrade-round` 分开，之后别的轮次的 `run` 既不等它也不会结束它；同一时间只有一个填充循环，要提前停下就 `~/zgca-compute/dev tmux kill-session -t autotrade-fill`。
 
@@ -74,6 +74,8 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 实例盘上的模型库和镜像停机再开后仍在，这是观察而不是保证；丢了就要重传模型库。
 
 `deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录和仓库根下不再受管的文件仍留在开发机上。镜像只在合同指纹说它缺失或过期时重建，所以只改 Dockerfile、合同文件不变的改动不会让实例重建，要先在实例上删掉镜像 tag 再部署。`deploy` 本身不重启控制台，下一次 `run` 在没有实验运行时才重启它；部署之后若先有实验经旧控制台建起（例如填充循环），新的建实验校验或参数表要等它们结束、再 `run` 时才生效。`status` 只认 `create_round_*` 与 `fill_create_round_*` 命名的启动器日志。
+
+`deploy` 只镜像这次点名的种子和它的 release，从不删除开发机上以前部署的种子与 release，而它们都占约 100 GiB 的个人存储配额：2026-11-10 两份种子（各约 20 GB）、两份 release（各约 13 GB）连同实验与 smoke 暂存把配额写满，一遍填充的 smoke 以 `Disk quota exceeded` 失败。换种子之后，等开发机上没有未结束的实验再钉旧种子和旧 release，就手工删掉它们：`~/zgca-compute/dev rm -rf /personal_fast_storage/auto-trade/data/<旧种子目录> /personal_fast_storage/auto-trade/data/research_releases/<旧 generation>`。已结束实验的 `pit_views/` 硬链接着种子的文件（可从种子重建，`sync` 也不拉回），这部分要连那些 `pit_views/` 一起删掉才真正腾出配额。
 
 模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 只有在某个对话角色跑在本机模型上时 worker 才要求，开发机上没有这个网关，所以用不上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几个实验写在同一棵目录里，续跑换了进程号的旧文件也无从按实验认出，一条 gpt-6 实验就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有实验在跑时目录仍在增长，所以不用 `dev copy` 比对）。
 

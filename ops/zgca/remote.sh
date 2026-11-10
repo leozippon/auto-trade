@@ -410,6 +410,12 @@ PY
     fi
 }
 
+# The commit the last deploy shipped, which `run` compares with the local HEAD.
+deployed_commit() {
+    [ -s "$ROOT/.runtime/zgca/deployed_commit" ] || die "no deployed commit is recorded at $ROOT/.runtime/zgca/deployed_commit: deploy first"
+    cat "$ROOT/.runtime/zgca/deployed_commit"
+}
+
 # One experiment's recorded state, and a refusal while it runs: a running experiment
 # rewrites its status every few seconds and grows its worker log, so no copy
 # of it could pass the transfer's verification.
@@ -447,6 +453,7 @@ case "$step" in
     console-up) console_up ;;
     round) [ $# -ge 1 ] || die "round needs the round file"; round "$@" ;;
     status) status ;;
+    deployed-commit) deployed_commit ;;
     experiment-state) [ $# -eq 1 ] || die "experiment-state needs one experiment id"; experiment_state "$1" ;;
     *) die "unknown remote step: '$step'" ;;
 esac

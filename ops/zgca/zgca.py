@@ -16,7 +16,8 @@ minute datasets its configuration does not read), prunes code the tree no
 longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
 on the instance's GPU driver), and last copies the pretrained-model store every
 new experiment pins and mounts to the instance's own disk, or refuses when it does
-not fit there. A run starts the console (restarting it onto the deployed
+not fit there. A run refuses unless the last deploy shipped the local HEAD,
+then starts the console (restarting it onto the deployed
 checkout when no experiment runs) and a round launcher in tmux with
 AUTOTRADE_GPU_NAME set, and repeats a `--fill` launcher every ten minutes in
 a session of its own until its round has nothing pending; status and sync
@@ -207,7 +208,8 @@ class Workflow:
     instance: str = INSTANCE_ID
 
     def __post_init__(self) -> None:
-        for name in ("zenith", "dev", "instance"):
+        # The workflow calls these two alone; they reach the API through `zenith` and fail without it.
+        for name in ("dev", "instance"):
             if not os.access(self.tools / name, os.X_OK):
                 raise WorkflowError(
                     f"{self.tools / name} is not executable: ZGCA_COMPUTE must name the "
@@ -423,7 +425,16 @@ class Workflow:
         )
         if tracked.returncode != 0 or not (self.repo_root / round_file).is_file():
             raise WorkflowError(f"{round_file} is not a tracked file of the repository, so deploy would not have carried it")
+        head = self.git("rev-parse", "HEAD").decode("ascii").strip()
         self.require_running()
+        # The instance runs the tree the last deploy shipped, which the checks
+        # above say nothing about; the console and the launcher must run this one.
+        deployed = self.remote("deployed-commit", capture=True).split()[-1:]
+        if deployed != [head]:
+            raise WorkflowError(
+                f"the instance runs commit {deployed[0] if deployed else '(none recorded)'}, not this checkout's HEAD {head}: "
+                "deploy this commit first"
+            )
         self.remote("console-up")
         self.remote("round", round_file, *args)
 
@@ -476,7 +487,7 @@ def main(
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
     deploy = commands.add_parser("deploy", help="refuse an uncommitted tree or running experiments; copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
     deploy.add_argument("seed", help="prebuilt view cache directory, relative to the repository (data/pit_views_seed_...)")
-    run = commands.add_parser("run", help="start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
+    run = commands.add_parser("run", help="refuse unless the instance runs this checkout's HEAD; start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
     run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, experiment ids)")
     commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, deployed commit, console, experiments, image, round log")

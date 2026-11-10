@@ -3,9 +3,8 @@
 The mock `instance` (the shared lifecycle entry) and the mock `dev` (whose
 copy, put, bootstrap and report primitives verify their own results) record
 their arguments and the instance they were pointed at, and answer from the
-environment; both are tested for real in ~/zgca-compute. The mock `zenith`
-only records, since the workflow reaches the API through those two. The
-remote script's steps run for real against a temporary layout (a root with its
+environment; both are tested for real in ~/zgca-compute, and the workflow
+reaches the API through those two alone. The remote script's steps run for real against a temporary layout (a root with its
 venv inside, a local directory beside it), with stubs for the venv's python,
 docker, tmux and sleep where a step would reach them.
 """
@@ -35,12 +34,6 @@ sys.modules[SPEC.name] = zgca  # dataclasses resolve the module's annotations th
 SPEC.loader.exec_module(zgca)
 
 INSTANCE = zgca.INSTANCE_ID
-MOCK_ZENITH = r"""#!/usr/bin/env python3
-import json, os, sys
-with open(os.environ["MOCK_LOG"], "a") as log:
-    log.write(json.dumps({"tool": "zenith", "args": sys.argv[1:]}) + "\n")
-sys.exit("the workflow reaches the API only through instance and dev")
-"""
 MOCK_INSTANCE = r"""#!/usr/bin/env python3
 import json, os, sys
 args = sys.argv[1:]
@@ -62,6 +55,8 @@ if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir>
     step = args[args.index("remote.sh") + 4]
     if step == "local-disk":  # bytes already in the store's directory, bytes free on its disk
         print(os.environ.get("MOCK_LOCAL_DISK", "0 100000000000000"))
+    if step == "deployed-commit":
+        print(os.environ.get("MOCK_DEPLOYED_COMMIT", ""))
     sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + step.replace("-", "_").upper(), "0")))
 sys.exit(int(os.environ.get("MOCK_DEV_EXIT_" + args[0].upper(), "0")))
 """
@@ -78,7 +73,7 @@ if answer == "fail":
 with open(args[args.index("-o") + 1], "wb") as out:
     out.write(b"another release\n" if answer == "wrong" else os.environ.get("MOCK_CURL_BODY", "").encode())
 """
-TOOLS = {"zenith": MOCK_ZENITH, "instance": MOCK_INSTANCE, "dev": MOCK_DEV, "curl": MOCK_CURL}
+TOOLS = {"instance": MOCK_INSTANCE, "dev": MOCK_DEV, "curl": MOCK_CURL}
 # A local .env as the host keeps it: data tokens beside the model gateway keys.
 LOCAL_ENV = (
     "TUSHARE_TOKEN=tushare-relay\nTUSHARE_TOKEN_TMP=tushare-official\nHF_TOKEN=hf\n"
@@ -548,20 +543,47 @@ class ZgcaWorkflowTest(unittest.TestCase):
 
     # ----- run, sync -----
 
+    def _head(self) -> str:
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout.strip()
+
     def test_run_forwards_the_launcher_arguments_and_refuses_an_untracked_round(self) -> None:
         self._tracked_repo()
         code, err = self.run_main("run", "untracked.py", "--dry-run")
         self.assertEqual(code, 1)
         self.assertIn("not a tracked file", err)
         self.assertFalse(self.calls("dev"))
-        code, err = self.run_main("run", "scripts/experiments/create_round_test.py", "--dry-run", "experiment_one")
+        deployed = self._head()
+        code, err = self.run_main("run", "scripts/experiments/create_round_test.py", "--dry-run", "experiment_one", MOCK_DEPLOYED_COMMIT=deployed)
         self.assertEqual(code, 0, err)
         steps = [self.remote(call) for call in self.calls("dev")]
-        self.assertEqual(steps, [["console-up"], ["round", "scripts/experiments/create_round_test.py", "--dry-run", "experiment_one"]])
-        code, err = self.run_main("run", "scripts/experiments/create_round_test.py", MOCK_STEP_EXIT_CONSOLE_UP="1")
+        self.assertEqual(steps, [["deployed-commit"], ["console-up"], ["round", "scripts/experiments/create_round_test.py", "--dry-run", "experiment_one"]])
+        code, err = self.run_main("run", "scripts/experiments/create_round_test.py", MOCK_DEPLOYED_COMMIT=deployed, MOCK_STEP_EXIT_CONSOLE_UP="1")
         self.assertEqual(code, 1)
         self.assertIn("console-up failed", err)
         self.assertEqual(self.step(self.calls()[-1]), "console-up")
+
+    def test_run_refuses_while_the_instance_runs_another_commit(self) -> None:
+        """The round file is checked here, but the instance runs what the last deploy shipped: a run is refused
+        before the console or a launcher starts unless that is the local HEAD, and with no deploy recorded."""
+        self._tracked_repo()
+        head = self._head()
+        for recorded, said in (("0" * 40, f"the instance runs commit {'0' * 40}, not this checkout's HEAD {head}: deploy this commit first"),
+                               ("", "the instance runs commit (none recorded)")):
+            with self.subTest(recorded=recorded):
+                self.log.unlink(missing_ok=True)
+                code, err = self.run_main("run", "scripts/experiments/create_round_test.py", "--fill", MOCK_DEPLOYED_COMMIT=recorded)
+                self.assertEqual(code, 1)
+                self.assertIn(said, err)
+                self.assertEqual([self.step(call) for call in self.calls("dev")], ["deployed-commit"])
+        # The instance's side: the commit the deploy shipped, or a refusal before any deploy.
+        root = Path(self.temp.name) / "instance"
+        missing = self.remote_step(root, "deployed-commit")
+        self.assertEqual(missing.returncode, 1)
+        self.assertIn("no deployed commit is recorded", missing.stderr)
+        (root / ".runtime" / "zgca").mkdir(parents=True)
+        (root / ".runtime" / "zgca" / zgca.DEPLOYED_COMMIT_NAME).write_text(head + "\n", encoding="utf-8")
+        shown = self.remote_step(root, "deployed-commit")
+        self.assertEqual((shown.returncode, shown.stdout), (0, head + "\n"), shown.stderr)
 
     def test_sync_pulls_an_instance_experiment_and_refuses_to_overwrite_a_local_one(self) -> None:
         local = self.repo / "experiments" / "experiment_local"
@@ -779,7 +801,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual((temp / "calls").read_text(encoding="utf-8").split(), calls)
 
     def test_the_tools_must_exist_and_the_remote_script_rejects_unknown_steps(self) -> None:
-        for name in ("zenith", "instance", "dev"):
+        for name in ("instance", "dev"):
             with self.subTest(tool=name):
                 (self.tools / name).unlink()
                 code, err = self.run_main("status")
