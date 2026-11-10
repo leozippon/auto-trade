@@ -59,7 +59,7 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "research_end": "20250731",
     "forward_end": "20260731",
     "heldout_end": "20261031",
-    "pit_views_seed": "data/pit_views_seed_research_10y_fundanns_20261106",
+    "pit_views_seed": "data/pit_views_seed_research_10y_fundanns_20261110",
     "include_fundamentals": True,
     "fundamental_datasets": (),
     "include_macro": True,

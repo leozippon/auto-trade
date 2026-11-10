@@ -120,12 +120,13 @@ DEFAULT_RESEARCH_GEOMETRY = ResearchGeometry(
 
 # The prebuilt view cache the console's create form names, built for its
 # defaults: the geometry above and the console's dataset selection, from
-# release 85cd2284caa943689c72117369f9ca0c (logs/data/seed_build_20261106_10y.log).
+# release 0ae8461dc6e84294b9f794a19e2d4c1a, the first generation whose disclosure
+# schedules carry no realised date before it happened (2026-11-10 build).
 # Also where the offline prebuild writes by default, and the scratch directory
 # it pins its research release in. Repo-relative and gitignored; the contract
 # that decides reuse lives in ``autotrade.pipelines.pit_views_seed``.
-DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed_research_10y_fundanns_20261106")
-DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed_research_10y_fundanns_20261106_workspace")
+DEFAULT_PIT_VIEWS_SEED = Path("data/pit_views_seed_research_10y_fundanns_20261110")
+DEFAULT_PIT_VIEWS_SEED_WORKSPACE = Path("data/pit_views_seed_research_10y_fundanns_20261110_workspace")
 
 
 @dataclass(frozen=True)

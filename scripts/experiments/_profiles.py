@@ -26,9 +26,9 @@ CSI1000 = "000852.SH"
 # (``experiment_params.DataParams``). A round relies on it through
 # ``_round.BASE_EXPECTED_DEFAULTS``, which stops the launcher if the console's
 # defaults move. Its seed, the console's default too, is prebuilt at snapshot
-# cache format 16 from release 85cd2284caa943689c72117369f9ca0c for research
-# years 5, 6 and 7 (logs/data/seed_build_20261106_10y.log).
-FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_fundanns_20261106"
+# cache format 17 from release 0ae8461dc6e84294b9f794a19e2d4c1a for research
+# years 5, 6 and 7 (2026-11-10, after the disclosure_date fix).
+FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_fundanns_20261110"
 
 # That selection graded against CSI 1000, which drew down 48 % over the
 # eight years from 2017-07, hence the 0.55 equity drawdown limit round 20261005
