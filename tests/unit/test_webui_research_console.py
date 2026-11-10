@@ -1315,7 +1315,7 @@ def test_the_step_tree_names_the_session_and_the_registered_node(tmp_path: Path)
     ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
     records = ledger.read()
     records[0]["registered"]["source_step_id"] = node_id
-    ledger.rewrite(records)
+    ledger.path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
     [node] = step_tree_view(directory)["nodes"]
     assert node["session_key"] == "research"
     assert node["registered"] is True

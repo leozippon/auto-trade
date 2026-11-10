@@ -428,27 +428,6 @@ def proc_start_ticks(pid: int) -> int | None:
         return None
 
 
-def assert_no_live_writer(experiment_dir: str | Path) -> None:
-    """Rolling-upgrade write isolation for maintenance rewrites.
-
-    A running experiment worker keeps its launch-time code in memory and keeps
-    writing that code's formats regardless of what is deployed or migrated on
-    disk: rewriting experiment-owned files (ledger, hitl state) under it loses
-    in-flight appends and reintroduces the pre-migration format afterwards.
-    Every migration/maintenance rewrite must call this first and stop the
-    worker if it raises. This is process coexistence, not format compatibility.
-    """
-    status_path = Path(experiment_dir) / HITL_DIR_NAME / STATUS_NAME
-    if not status_path.exists():
-        return
-    status = read_status(status_path)
-    if status_pid_alive(status):
-        raise RuntimeError(
-            f"experiment {Path(experiment_dir).name!r} has a live worker "
-            f"(pid {status.get('pid')}); stop it before rewriting experiment-owned files"
-        )
-
-
 def status_pid_alive(status: Mapping[str, object]) -> bool:
     pid = status.get("pid")
     if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:

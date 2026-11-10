@@ -954,10 +954,10 @@ def test_a_moved_experiment_replays_the_artifact_its_registered_block_names(tmp_
     ):
         edited = json.loads(json.dumps(records))
         registered_record(edited)["registered"]["output_path"] = reference
-        ledger.rewrite(edited)
+        ledger.path.write_text("".join(json.dumps(row) + "\n" for row in edited), encoding="utf-8")
         with pytest.raises(FileNotFoundError, match=refusal):
             pipeline.run_forward()
-    ledger.rewrite(records)
+    ledger.path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
 
     record = pipeline.run_forward()
 

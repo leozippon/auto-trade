@@ -337,37 +337,6 @@ class ExperimentLedger:
             self.path, record, schema_version=LEDGER_RECORD_SCHEMA_VERSION
         )
 
-    def rewrite(self, records: list[dict[str, object]]) -> None:
-        """Atomic full rewrite for migrations and console maintenance.
-
-        The rolling-upgrade write-isolation guard is part of the primitive,
-        not a procedural convention: the rewrite refuses while the owning
-        experiment worker is alive, and refuses records that do not already
-        carry the current schema stamp (a migration must hand over fully
-        migrated records). Callers must go through this method instead of
-        editing the file by hand.
-        """
-        # Local import: hitl_state pulls in the config/session stack, which
-        # this module must not load for its plain append/read paths.
-        from autotrade.pipelines.hitl_state import assert_no_live_writer
-
-        assert_no_live_writer(self.path.parent.parent)
-        for record in records:
-            version = record.get("schema_version")
-            if type(version) is not int or version != LEDGER_RECORD_SCHEMA_VERSION:
-                raise ValueError(
-                    f"rewrite requires fully migrated records; got schema_version {version!r}"
-                )
-        tmp = self.path.with_suffix(".jsonl.tmp")
-        tmp.write_text(
-            "".join(
-                json.dumps(record, ensure_ascii=False, sort_keys=True, default=str) + "\n"
-                for record in records
-            ),
-            encoding="utf-8",
-        )
-        tmp.replace(self.path)
-
     def read(self, record_type: str | None = None) -> list[dict[str, object]]:
         records = read_versioned_jsonl(
             self.path,

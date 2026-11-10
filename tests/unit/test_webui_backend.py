@@ -868,7 +868,7 @@ class WebuiBackendTest(unittest.TestCase):
             json.dumps({"schema_version": 1, "mode": "valid"}), encoding="utf-8"
         )
         records[0]["steps"][0]["validation_result_ref"] = str(outside)
-        ledger.rewrite(records)
+        ledger.path.write_text("".join(json.dumps(row) + "\n" for row in records), encoding="utf-8")
         for route in ("equity", "style", "orders", "orders.csv"):
             response = self.client.get(
                 f"/api/experiments/exp_replaying/results/valid_outside/{route}"
@@ -1397,26 +1397,6 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["raw_generation"]["state"], "unreadable")
         self.assertEqual(response.json()["status"], "degraded")
-
-    def test_assert_no_live_writer_guards_migrations(self) -> None:
-        from autotrade.pipelines.hitl_state import assert_no_live_writer
-
-        write_json_atomic(
-            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {
-                "schema_version": 1,
-                "pid": os.getpid(),
-                "pid_start_ticks": proc_start_ticks(os.getpid()),
-                "state": "running_session",
-            },
-        )
-        with self.assertRaises(RuntimeError):
-            assert_no_live_writer(self.experiments_root / "exp_hitl")
-        write_json_atomic(
-            self.experiments_root / "exp_hitl" / "hitl" / "status.json",
-            {"schema_version": 1, "pid": 999_999_999, "state": "stopped"},
-        )
-        assert_no_live_writer(self.experiments_root / "exp_hitl")
 
     def test_broken_experiment_is_isolated_from_creation_and_detail(self) -> None:
         broken = self.experiments_root / "exp_broken" / "hitl"
