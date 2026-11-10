@@ -1031,39 +1031,6 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
             self.assertFalse((repo_root / "experiments/params_gpu").exists())
 
 
-class WorkerEntryPointTest(unittest.TestCase):
-    def test_the_worker_accepts_and_threads_a_poll_interval(self) -> None:
-        import inspect
-
-        from autotrade.pipelines.worker import run_local_interactive_worker
-
-        signature = inspect.signature(run_local_interactive_worker)
-        self.assertIn("poll_seconds", signature.parameters)
-        self.assertEqual(signature.parameters["poll_seconds"].default, 2.0)
-
-    def test_the_interactive_entry_point_exposes_the_flag(self) -> None:
-        import importlib.util
-
-        repo_root = Path(__file__).resolve().parents[2]
-        spec = importlib.util.spec_from_file_location(
-            "run_interactive_experiment",
-            repo_root / "scripts/experiments/run_interactive_experiment.py",
-        )
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        parser = module.build_parser()
-        args = parser.parse_args(
-            ["--experiment-dir", "/tmp/exp", "--poll-seconds", "0.5"]
-        )
-        self.assertEqual(args.poll_seconds, 0.5)
-        # A knob that is accepted and never forwarded is the defect class this
-        # covers: the flag must reach the worker call.
-        source = (
-            repo_root / "scripts/experiments/run_interactive_experiment.py"
-        ).read_text(encoding="utf-8")
-        self.assertIn("poll_seconds=", source)
-
-
 PIT_SEED_BASE_PARAMS = {
     "experiment_id": "seed_demo",
     # The span the synthetic release covers.

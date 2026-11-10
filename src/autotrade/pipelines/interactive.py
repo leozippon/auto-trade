@@ -18,7 +18,7 @@ files (atomic replace, no locking needed):
   schedule.json  written by the worker at startup (the research session and the forward replay)
 
 Pausing always lands at a session boundary: the worker finishes the session in
-flight, then blocks at the next gate. A deferred restart lands at the same
+flight, then returns ``status="pause"`` and exits. A deferred restart lands at the same
 boundary: the run returns ``status="restart"`` so the worker entrypoint can
 re-execute itself on the new code without discarding the session it was
 running.
@@ -31,7 +31,6 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.environment.trace import (
@@ -79,11 +78,8 @@ class InteractiveExperimentRunner:
         control_path: str | Path,
         status_path: str | Path,
         ref_store: AgentRefStore | None = None,
-        poll_seconds: float = 2.0,
         session_max_attempts: int = 3,
     ) -> None:
-        if poll_seconds <= 0:
-            raise ValueError("poll_seconds must be positive")
         if session_max_attempts <= 0:
             raise ValueError("session_max_attempts must be positive")
         self.experiment_id = experiment_id
@@ -94,7 +90,6 @@ class InteractiveExperimentRunner:
         self.control_path = Path(control_path)
         self.status = StatusReporter(status_path)
         self.ref_store = ref_store
-        self.poll_seconds = poll_seconds
         self._session_started_monotonic: float | None = None
         self._session_started_at: str | None = None
 
@@ -141,11 +136,6 @@ class InteractiveExperimentRunner:
                 ):
                     return self._restart_result(ran)
             return {"status": "complete", "sessions_run": ran}
-        except AgentSessionBudgetExhausted:
-            # Expected control flow: the session already closed gracefully on
-            # an exhausted budget and the pipeline recorded it. Never mark the
-            # run failed for it; only real errors take the failed state below.
-            raise
         except Exception as exc:
             self.status.set(state=ExperimentState.FAILED, error=f"{type(exc).__name__}: {exc}")
             raise
@@ -171,7 +161,7 @@ class InteractiveExperimentRunner:
             self._begin_session(session)
             try:
                 self.execute_session(session, context)
-            except (ExperimentStopped, AgentSessionBudgetExhausted, RegisteredArtifactMutated):
+            except RegisteredArtifactMutated:
                 raise
             except Exception as exc:  # noqa: BLE001 - session failure is kept and retried or re-raised after the last attempt
                 last_error = exc

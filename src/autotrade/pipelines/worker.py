@@ -821,7 +821,6 @@ def run_local_interactive_worker(
     *,
     llm: LLMProxy | None = None,
     command_runner_factory: Callable[[Path], CommandRunner] | None = None,
-    poll_seconds: float = 2.0,
 ) -> dict[str, object]:
     """Run the experiment from wherever its ledger ends: the research session, then
     the forward replay once an artifact registered, then the terminal status."""
@@ -896,7 +895,6 @@ def run_local_interactive_worker(
         control_path=hitl / "control.json",
         status_path=hitl / "status.json",
         ref_store=ref_store,
-        poll_seconds=poll_seconds,
         session_max_attempts=options.experiment.session_max_attempts,
     )
     result = interactive.run()

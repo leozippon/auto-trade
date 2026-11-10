@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Interactive (HITL) experiment worker entrypoint (docs/PIPELINE_DESIGN.md).
 
-Runs or resumes one experiment (research sessions, then the forward replay) from the parameters in
-``experiments/<id>/hitl/params.json``, honouring ``control.json`` (pause / step
-approvals / per-session directives / stop) and reporting position and heartbeats
-to ``status.json``. Normally spawned detached by the web console
+Runs or resumes one experiment (the research session, then the forward replay) from the parameters in
+``experiments/<id>/hitl/params.json``, honouring ``control.json`` (pause, stop,
+deferred restart and per-session directives and overrides, read at session
+boundaries) and reporting position and heartbeats to ``status.json``. Normally spawned detached by the web console
 (``scripts/webui/run_webui.py``); can also be launched manually for a headless
 HITL run driven purely through the control file.
 """
@@ -73,12 +73,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--experiment-dir", type=Path, required=True)
     parser.add_argument("--repo-root", type=Path, default=REPO_ROOT)
-    parser.add_argument(
-        "--poll-seconds",
-        type=float,
-        default=2.0,
-        help="control.json polling interval while paused or waiting for approval",
-    )
     return parser
 
 
@@ -96,7 +90,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         options = load_worker_options(experiment_dir, repo_root=args.repo_root)
         bootstrap.stop()
-        result = run_local_interactive_worker(options, poll_seconds=args.poll_seconds)
+        result = run_local_interactive_worker(options)
         if result.get("status") == "restart":
             print(
                 f"===== worker restart at session boundary {utc_now_iso()} =====",

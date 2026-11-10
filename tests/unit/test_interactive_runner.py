@@ -106,7 +106,6 @@ class RunnerTestCase(unittest.TestCase):
             "ledger": self.ledger,
             "control_path": self.control,
             "status_path": self.status,
-            "poll_seconds": 0.01,
         }
         options.update(kwargs)
         return InteractiveExperimentRunner(**options)
@@ -276,11 +275,6 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(read_status(self.status)["state"], "failed")
         # The final failure keeps its text, without an attempt suffix.
         self.assertEqual(read_status(self.status)["error"], "RuntimeError: still broken")
-
-    def test_a_positive_poll_interval_is_required(self) -> None:
-        for bad in (0, -1.0):
-            with self.subTest(poll_seconds=bad), self.assertRaisesRegex(ValueError, "poll_seconds"):
-                self.runner(PLAN, RecordingExecutor(self.ledger), poll_seconds=bad)
 
     def test_stop_requested_during_a_session_halts_at_the_next_boundary(self) -> None:
         executor = RecordingExecutor(self.ledger, outcomes={"research": FROZEN})

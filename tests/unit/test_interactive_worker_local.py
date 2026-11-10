@@ -722,7 +722,6 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
         control_path=control_path,
         status_path=status_path,
         ref_store=AgentRefStore(tmp_path / "experiment"),
-        poll_seconds=0.01,
     )
     assert runner.run()["status"] == "complete"
     assert captured["state"] == "running_session"
@@ -777,7 +776,6 @@ def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
         control_path=control_path,
         status_path=status_path,
         ref_store=AgentRefStore(tmp_path / "experiment"),
-        poll_seconds=0.01,
     )
 
     result = runner.run()
@@ -811,7 +809,6 @@ def test_session_boundary_restart_is_taken_before_the_next_session_starts(
         ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
         control_path=control_path,
         status_path=status_path,
-        poll_seconds=0.01,
     )
 
     result = runner.run()
