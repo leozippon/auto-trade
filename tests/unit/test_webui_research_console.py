@@ -1448,6 +1448,113 @@ def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
     }
 
 
+def _object_const(script: str, name: str) -> str:
+    """One ``const NAME = {…};`` of app.js, whose comments may hold a semicolon."""
+
+    start = script.index(f"const {name} = {{")
+    return script[start : script.index("\n};", start) + 3]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_a_replay_that_failed_is_drawn_failed_not_done_or_pending(tmp_path: Path) -> None:
+    """The forward replay can fail two ways and neither is a replay done. The
+    registered strategy's own error is recorded with the readout and no slice:
+    the ending names the slice it raised in and both replay steps wear the
+    cross. A worker that broke on the replay leaves no record: the replay
+    steps wear the cross, not the outline of a step still to run. A replay
+    that is merely waiting keeps its outline."""
+
+    root = tmp_path / "experiments"
+    waiting = build_experiment(root, "waiting", "forward")
+    raised = build_experiment(root, "raised", "forward")
+    error = {"slice": "heldout", "error": "KeyError: 'close'"}
+    ExperimentLedger(raised / "ledgers/experiment_ledger.jsonl").append(
+        {
+            # As ``ExperimentPipeline`` records a replay its strategy raised in.
+            "record_type": "forward",
+            "experiment_id": "raised",
+            "epoch_id": "forward",
+            "fold_id": "forward",
+            "run_id": "run_forward",
+            "session_key": "forward",
+            "artifact_id": "strategy_research_abc",
+            "replay": REPLAY,
+            "status": "strategy_error",
+            "strategy_error": error["slice"],
+            "error": error["error"],
+            "result_ref": None,
+            "slices": None,
+            "refits_executed": None,
+            "null_control": None,
+            "readout": validation_record.readout(_records(raised), alpha=0.05, strategy_error=error),
+        }
+    )
+    write_json_atomic(raised / "hitl/status.json", {"schema_version": 1, "state": "completed"})
+    broken = build_experiment(root, "broken", "forward")
+    for attempt in (1, 2, 3):
+        ExperimentLedger(broken / "ledgers/experiment_ledger.jsonl").append(
+            {
+                "record_type": "attempt_failed",
+                "experiment_id": "broken",
+                "epoch_id": "forward",
+                "fold_id": "forward",
+                "run_id": f"run_forward_{attempt}",
+                "session_key": "forward",
+                "phase": "forward",
+                "error": "OSError: replay host lost",
+            }
+        )
+    write_json_atomic(
+        broken / "hitl/status.json",
+        {"schema_version": 1, "state": "failed", "session_key": "forward", "error": "OSError: replay host lost"},
+    )
+    assert waiting.is_dir()
+    rows = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
+    assert rows["raised"]["ending"]["state"] == "registered_with_record"
+    assert rows["raised"]["ending"]["reason"].endswith(" · Held-out 段策略报错")
+    assert rows["raised"]["forward"]["error"] == "KeyError: 'close'"
+    assert rows["raised"]["paper_openable"] is False
+    assert rows["broken"]["ending"] == {"state": "broken", "reason": "OSError: replay host lost"}
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            *(
+                _object_const(script, name)
+                for name in ("STATE_LABELS", "OUTCOME_LABELS", "ENDING_LABELS", "STEP_LABELS", "STEP_STATUS_LABELS", "ENDING_STEP_STATES")
+            ),
+            *(
+                _fn(script, name)
+                for name in ("endingKey", "endingLabel", "researchStep", "pipelineTailSteps", "pipelineSteps")
+            ),
+            f"const rows = {json.dumps(rows)};",
+            "console.log(JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, row]) =>",
+            "  [id, pipelineSteps(row).map((step) => [step.key, step.state, step.status])]))));",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    drawn = json.loads(result.stdout)
+    done = [["research", "done", "验证期完成"], ["registered", "done", "已定版"]]
+    assert drawn["raised"] == [
+        *done,
+        ["forward", "failed", "策略报错"],
+        ["heldout", "failed", "策略报错"],
+        ["readout", "done", "通过" if rows["raised"]["record"]["passed"] else "未通过"],
+    ]
+    assert drawn["broken"] == [
+        *done,
+        ["forward", "failed", "失败"],
+        ["heldout", "failed", "失败"],
+        ["readout", "ended", "失败"],
+    ]
+    assert drawn["waiting"][2:4] == [["forward", "pending", "待记录"], ["heldout", "pending", "待记录"]]
+    # Both replay views say why there is no reading.
+    for view in ("forwardStagePanel", "heldoutStagePanel"):
+        assert "replayErrorNode(forward)" in _fn(script, view), view
+
+
 def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path: Path) -> None:
     """A research Validation that fails is no attempt failure: it leaves its
     dead-end node in the step tree and no ledger row, so the replay's attempt

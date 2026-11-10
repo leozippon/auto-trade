@@ -362,9 +362,14 @@ def experiment_ending(
     return {"state": "budget_exhausted", "reason": _BUDGET_EXHAUSTED.get(finish, finish)}
 
 
+# The continuous replay's two slices, as the console names them.
+_SLICE_LABELS = {"forward": "前推", "heldout": "Held-out "}
+
+
 def _readout_line(readout: Mapping[str, object]) -> str:
     """One line of a registered strategy's readout: the validation record's residual
-    IR, its p-value and candidate changes, then the forward lower bound."""
+    IR, its p-value and candidate changes, then the forward lower bound, or the
+    slice the strategy's own error stopped the replay in."""
 
     record = as_mapping(readout.get("record"))
     forward = as_mapping(readout.get("forward"))
@@ -375,7 +380,11 @@ def _readout_line(readout: Mapping[str, object]) -> str:
         f"验证记录 残差 IR {'—' if ratio is None else f'{ratio:.2f}'}"
         f" · p {'—' if p_value is None else f'{p_value:.2f}'}"
         f" · 换候选 {record.get('candidate_changes', '—')} 次"
-        + (f" · 前推下界 {_percent(bound)}" if not error else f" · 前推 {error.get('slice')} 段策略异常")
+        + (
+            f" · 前推下界 {_percent(bound)}"
+            if not error
+            else f" · {_SLICE_LABELS.get(str(error.get('slice')), '回放')}段策略报错"
+        )
     )
 
 

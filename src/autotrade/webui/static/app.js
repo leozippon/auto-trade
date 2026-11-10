@@ -1697,13 +1697,15 @@ const STEP_STATUS_LABELS = {
   not_registered: "未定版",
   unrecorded: "待记录",
   replayed: "已回放",
+  // The registered strategy's own code raised during the replay: recorded, with no reading.
+  strategy_error: "策略报错",
   not_replayed: "不回放",
   undecided: "待判定",
 };
 
 /* How an ending draws the 读出 node: a registered strategy with its record is
    the step done; an ending nothing judged is a terminus, and a broken worker
-   wears its cross on the step that broke. */
+   wears its cross on the step that broke (researchStep, pipelineTailSteps). */
 const ENDING_STEP_STATES = {
   registered_with_record: "done",
   budget_exhausted: "ended",
@@ -1751,16 +1753,22 @@ function pipelineTailSteps(item) {
     : researchOver
       ? { state: "skipped", status: STEP_STATUS_LABELS.not_registered }
       : { state: "pending", status: STEP_STATUS_LABELS.awaiting_nomination };
+  // A replay the strategy's own error stopped is recorded without a reading,
+  // and one the worker broke on has no record: neither is a replay done.
   const replay = item.forward
-    ? { state: "done", status: STEP_STATUS_LABELS.replayed }
+    ? item.forward.error
+      ? { state: "failed", status: STEP_STATUS_LABELS.strategy_error }
+      : { state: "done", status: STEP_STATUS_LABELS.replayed }
     : registered
-      ? {
-          state:
-            item.worker_alive && status.session_key === "forward"
-              ? "running"
-              : "pending",
-          status: STEP_STATUS_LABELS.unrecorded,
-        }
+      ? (item.ending || {}).state === "broken"
+        ? { state: "failed", status: endingLabel(item) }
+        : {
+            state:
+              item.worker_alive && status.session_key === "forward"
+                ? "running"
+                : "pending",
+            status: STEP_STATUS_LABELS.unrecorded,
+          }
       : researchOver
         ? { state: "skipped", status: STEP_STATUS_LABELS.not_replayed }
         : { state: "pending", status: STEP_STATUS_LABELS.awaiting_registration };
@@ -3118,6 +3126,11 @@ function replayContext(detail) {
   };
 }
 
+/* The registered strategy's own error, which left the replay without a reading. */
+function replayErrorNode(forward) {
+  return forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null;
+}
+
 function stageHead(key, detail) {
   const step = pipelineTailSteps(detail).find((row) => row.key === key);
   return panelHead(STEP_LABELS[key], el("span", { class: "badge kind" }, step.status));
@@ -3182,7 +3195,7 @@ function forwardStagePanel(detail) {
     { class: "panel section-gap" },
     stageHead("forward", detail),
     replaySpanBar(replay, "forward", { pending: !forward, progress }),
-    forward && forward.error ? el("div", { class: "hint warn" }, `策略报错：${forward.error}`) : null,
+    replayErrorNode(forward),
     holderLine("前推", f),
     seedReadingsTable((forward || {}).slices, ["forward"]),
     el("div", { class: "meta-line section-gap" }, "前推读数只报告，不作判定"),
@@ -3208,6 +3221,7 @@ function heldoutStagePanel(detail) {
     stageHead("heldout", detail),
     replaySpanBar(replay, "heldout", { pending: !forward, progress }),
     el("div", { class: "meta-line" }, "与前推是同一次连续回测的尾段，读数一并记入读出"),
+    replayErrorNode(forward),
     holderLine("Held-out", h),
     seedReadingsTable((forward || {}).slices, ["heldout"]),
     el("div", { class: "meta-line section-gap" }, "Held-out 读数只报告，不作判定"),
@@ -3291,7 +3305,7 @@ function readoutBlock(readout, total) {
     kvRow(
       "前推读数",
       error
-        ? `${SLICE_NAMES[error.slice] || error.slice}段策略异常：${error.error || "—"}`
+        ? `${SLICE_NAMES[error.slice] || error.slice}段策略报错：${error.error || "—"}`
         : `${fmtPct(forward.lower_bound)} 下界 · 残差 IR ${fmtSharpe((forward.residual_reading || {}).residual_information_ratio)}`,
     ),
   );
