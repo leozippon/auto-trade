@@ -1455,6 +1455,33 @@ def _object_const(script: str, name: str) -> str:
     return script[start : script.index("\n};", start) + 3]
 
 
+def _pipeline_steps(rows: dict[str, dict[str, object]]) -> dict[str, list[list[str]]]:
+    """Each listing row's five steps as the console's own stepper draws them:
+    key, node state and status word."""
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            *(
+                _object_const(script, name)
+                for name in ("STATE_LABELS", "OUTCOME_LABELS", "ENDING_LABELS", "STEP_LABELS", "STEP_STATUS_LABELS", "ENDING_STEP_STATES")
+            ),
+            *(
+                _fn(script, name)
+                for name in ("endingKey", "endingLabel", "researchStep", "pipelineTailSteps", "pipelineSteps")
+            ),
+            f"const rows = {json.dumps(rows)};",
+            "console.log(JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, row]) =>",
+            "  [id, pipelineSteps(row).map((step) => [step.key, step.state, step.status])]))));",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
 def test_a_replay_that_failed_is_drawn_failed_not_done_or_pending(tmp_path: Path) -> None:
     """The forward replay can fail two ways and neither is a replay done. The
@@ -1515,27 +1542,7 @@ def test_a_replay_that_failed_is_drawn_failed_not_done_or_pending(tmp_path: Path
     assert rows["raised"]["forward"]["error"] == "KeyError: 'close'"
     assert rows["raised"]["paper_openable"] is False
     assert rows["broken"]["ending"] == {"state": "broken", "reason": "OSError: replay host lost"}
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    harness = "\n".join(
-        [
-            *(
-                _object_const(script, name)
-                for name in ("STATE_LABELS", "OUTCOME_LABELS", "ENDING_LABELS", "STEP_LABELS", "STEP_STATUS_LABELS", "ENDING_STEP_STATES")
-            ),
-            *(
-                _fn(script, name)
-                for name in ("endingKey", "endingLabel", "researchStep", "pipelineTailSteps", "pipelineSteps")
-            ),
-            f"const rows = {json.dumps(rows)};",
-            "console.log(JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, row]) =>",
-            "  [id, pipelineSteps(row).map((step) => [step.key, step.state, step.status])]))));",
-        ]
-    )
-    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
-    assert result.returncode == 0, result.stderr
-    drawn = json.loads(result.stdout)
+    drawn = _pipeline_steps(rows)
     done = [["research", "done", "验证期完成"], ["registered", "done", "已定版"]]
     assert drawn["raised"] == [
         *done,
@@ -1551,8 +1558,28 @@ def test_a_replay_that_failed_is_drawn_failed_not_done_or_pending(tmp_path: Path
     ]
     assert drawn["waiting"][2:4] == [["forward", "pending", "待记录"], ["heldout", "pending", "待记录"]]
     # Both replay views say why there is no reading.
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
     for view in ("forwardStagePanel", "heldoutStagePanel"):
         assert "replayErrorNode(forward)" in _fn(script, view), view
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_the_steps_after_research_wait_on_what_the_pipeline_waits_on(tmp_path: Path) -> None:
+    """While research runs nothing is registered, replayed or read: the
+    registration and the replay wait on the registration, which the last test
+    or the host makes, and the readout waits on its record. Nothing is
+    nominated and nothing is judged."""
+
+    row = summarize_experiment(build_experiment(tmp_path, "experiment", "research", alive=True))
+    assert _pipeline_steps({"experiment": row})["experiment"] == [
+        ["research", "running", "运行中"],
+        ["registered", "pending", "待定版"],
+        ["forward", "pending", "待定版"],
+        ["heldout", "pending", "待定版"],
+        ["readout", "pending", "待记录"],
+    ]
 
 
 def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path: Path) -> None:

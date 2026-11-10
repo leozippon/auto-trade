@@ -62,8 +62,8 @@ const REASON_LABELS = {
   non_finite_max_drawdown: "研究期回撤可算",
   non_finite_sharpe: "研究期夏普可算",
   max_drawdown_above_limit: "研究期回撤",
-  registration_needs_full_span_validation: "提名节点为全区间验证",
-  registration_nominee_is_control: "提名节点不是对照",
+  registration_needs_full_span_validation: "候选为全区间验证",
+  registration_nominee_is_control: "候选不是对照",
   registration_tracking_error_above_cap: "研究期对基准指数跟踪误差",
   registration_beta_outside_band: "研究期市场 β",
   registration_unmeasurable: "研究期统计可算",
@@ -100,10 +100,10 @@ const LOWER_BOUND_TITLE = "主动序列（登记了种子复现时为定版产�
 const HOLDER_TITLE = "定版产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
 const PLAIN_SELECTION_TITLE = "账户收益减随机对照组合收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
 const ACTIVE_BETA_TITLE = "主动序列（账户 − 随机对照）对基准指数的回归载荷，只作诊断；为负表示相对随机对照的市场暴露较低，涨市中可能因此落后";
-// A model-training nominee read on its training seeds together (verdict.py
+// A model-training candidate read on its training seeds together (verdict.py
 // `seed_mean` and `forward_lower_bound`): a seed replicate is the same strategy
 // with only its seed line changed.
-const SEED_MEAN_TITLE = "定版产物与它的种子复现各自读数的平均；只有登记了种子复现的提名才有";
+const SEED_MEAN_TITLE = "定版产物与它的种子复现各自读数的平均；只有登记了种子复现的候选才有";
 
 function reasonLabel(reason) {
   return REASON_LABELS[reason] || String(reason);
@@ -119,6 +119,7 @@ const ENVIRONMENT_STAGE_LABELS = {
   tool_call: "执行工具",
   subagent_wait: "等待子代理",
   backtest: "执行验证回测",
+  test: "执行 test 回放",
   agent_complete: "Agent 推理完成",
   registering: "定版策略",
   completing_record: "宿主补完验证记录",
@@ -133,6 +134,7 @@ const ENVIRONMENT_STAGE_ICONS = {
   tool_call: "🛠",
   subagent_wait: "🧩",
   backtest: "📊",
+  test: "🧪",
   agent_complete: "🤖",
   registering: "❄",
   completing_record: "▶",
@@ -1689,9 +1691,7 @@ const STEP_STATUS_LABELS = {
   pending: "待运行",
   running: "运行中",
   paused: "已暂停",
-  skipped: "未运行",
-  // The registration has not been decided yet; the replay waits on that decision.
-  awaiting_nomination: "待定",
+  // Research has not registered yet: the registration and the replay wait on it.
   awaiting_registration: "待定版",
   registered: "已定版",
   not_registered: "未定版",
@@ -1700,7 +1700,6 @@ const STEP_STATUS_LABELS = {
   // The registered strategy's own code raised during the replay: recorded, with no reading.
   strategy_error: "策略报错",
   not_replayed: "不回放",
-  undecided: "待判定",
 };
 
 /* How an ending draws the 读出 node: a registered strategy with its record is
@@ -1752,7 +1751,7 @@ function pipelineTailSteps(item) {
     ? { state: "done", status: STEP_STATUS_LABELS.registered }
     : researchOver
       ? { state: "skipped", status: STEP_STATUS_LABELS.not_registered }
-      : { state: "pending", status: STEP_STATUS_LABELS.awaiting_nomination };
+      : { state: "pending", status: STEP_STATUS_LABELS.awaiting_registration };
   // A replay the strategy's own error stopped is recorded without a reading,
   // and one the worker broke on has no record: neither is a replay done.
   const replay = item.forward
@@ -1779,7 +1778,7 @@ function pipelineTailSteps(item) {
         state: ENDING_STEP_STATES[item.ending.state] || "ended",
         status: endingLabel(item),
       }
-    : { state: "pending", status: STEP_STATUS_LABELS.undecided };
+    : { state: "pending", status: STEP_STATUS_LABELS.unrecorded };
   return [
     { key: "registered", label: STEP_LABELS.registered, ...registration },
     { key: "forward", label: STEP_LABELS.forward, ...replay },
@@ -2029,7 +2028,7 @@ function experimentBadge(item) {
 
 /* The ending's reason, one quiet line. The homepage cards wear the badge alone
    and keep the reason in its tooltip, so the grid stays scannable; the sentence
-   itself belongs to the experiment page — its header and 裁决. */
+   itself belongs to the experiment page — its header and 读出. */
 function endingReason(item) {
   const reason = (item.ending || {}).reason;
   return reason ? el("div", { class: "ending-reason" }, reason) : null;
@@ -3246,7 +3245,7 @@ function readoutStagePanel(detail) {
   const validations = detail.research_validation_failures || {};
   const badge =
     endingBadge(detail) ||
-    el("span", { class: "badge kind" }, STEP_STATUS_LABELS.undecided);
+    el("span", { class: "badge kind" }, STEP_STATUS_LABELS.unrecorded);
   const recordedAt = forward ? forward.recorded_at : research && research.experiment_end ? research.recorded_at : null;
   const facts = [
     research && Number(research.attempts) > 1 ? kvRow("研究尝试", `${research.attempts} 次`) : null,
@@ -3275,7 +3274,7 @@ function readoutStagePanel(detail) {
           el(
             "div",
             { class: "meta-line" },
-            "验证期走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；没有通过或不通过",
+            "验证期走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；记录的残差 IR 不低于门槛写作通过，否则未通过，只是读法，不把关任何事",
           ),
     validationWindowBlock(detail.readouts),
     forwardPoolBlock(detail.readouts),
@@ -3412,7 +3411,7 @@ function registeredPanel(detail) {
     chipsRow([
       registered.null_percentile === null || registered.null_percentile === undefined
         ? null
-        : chip(`null 分位 ${fmtSharpe(registered.null_percentile)}`, "前推期超额在随机名单回放中的分位"),
+        : chip(`null 分位 ${fmtSharpe(registered.null_percentile)}`, "定版产物的研究期超额在随机换名回放中的分位"),
       chip(registered.fit ? ["fit", registered.refit_period ? `重训 ${registered.refit_period}` : null].filter(Boolean).join(" · ") : "无 fit"),
       registered.source_step_id
         ? chip(`节点 ${String(registered.source_step_id).split("__").pop()}`, registered.source_step_id)
@@ -3622,7 +3621,7 @@ function controlBar(detail, ...lead) {
               el(
                 "p",
                 {},
-                "立即终止 worker（SIGTERM，10 秒后 SIGKILL）；未落账的当前会话在恢复后整体重跑。",
+                "立即终止 worker（SIGTERM，10 秒后 SIGKILL）；恢复后被中断的研究原地续跑，被中断的前推回测整次重跑。",
               ),
               [
                 el("button", { class: "btn", onclick: closeModal }, "取消"),
@@ -3670,7 +3669,7 @@ function controlBar(detail, ...lead) {
                   el(
                     "p",
                     {},
-                    "立即重启：终止 worker 并按账本恢复，被中断的会话整体重跑。",
+                    "立即重启：终止 worker 并按账本恢复；被中断的研究原地续跑，被中断的前推回测整次重跑。",
                   ),
                   el(
                     "p",
@@ -4001,7 +4000,7 @@ function recordPanel(detail) {
   );
 }
 
-/* The registration check as the pipeline judged the nomination: every
+/* The registration check as the pipeline judged the candidate: every
    condition it failed, then the tracking mandate where the record's own
    thresholds state one. Where the experiment holds seed replicates the gate
    records them (`seed_replicates`): each invalid one's problem is in the
@@ -4027,8 +4026,8 @@ function registrationChecklist(gate) {
   ]);
 }
 
-/* The recorded research session: how it ended, the gate it met when it
-   nominated, the budget it spent, every Validation it ran, and its Trace. */
+/* The recorded research session: how it ended, the registration check its
+   candidate met, the budget it spent, every Validation it ran, and its Trace. */
 function researchSessionPanel(detail, session) {
   const record = session.record;
   const gate = record.registration;
@@ -4091,7 +4090,7 @@ function researchSessionPanel(detail, session) {
             value: [
               String(row.step_id || "").split("__").pop(),
               row.step_id === record.nominated_step_id
-                ? el("span", { class: "badge kind" }, "提名")
+                ? el("span", { class: "badge kind" }, "定版")
                 : null,
             ],
             title: row.step_id,

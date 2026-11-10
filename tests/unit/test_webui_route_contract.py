@@ -13,6 +13,7 @@ are asserted against a real response.
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -424,6 +425,32 @@ def test_every_progress_stage_the_pipeline_publishes_has_a_console_label() -> No
         Path(__file__).resolve().parents[2] / "src/autotrade/pipelines/experiment.py"
     ).read_text(encoding="utf-8")
     stages = set(re.findall(r'_publish_progress\(\s*progress,\s*"([a-z_]+)"', pipeline))
+    # The session's own stages: its preparation phases, and the one its event
+    # sink publishes for each model call, tool (``test`` has its own) and wait.
+    session = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/pipelines/research_session.py"
+    ).read_text(encoding="utf-8")
+    stages |= set(re.findall(r'_environment_phase\(\s*request\.progress_hook,\s*"([a-z_]+)"', session))
+
+    def literals(node: ast.expr) -> set[str]:
+        if isinstance(node, ast.IfExp):
+            return literals(node.body) | literals(node.orelse)
+        return {node.value} if isinstance(node, ast.Constant) and isinstance(node.value, str) else set()
+
+    sink = next(
+        node
+        for node in ast.walk(ast.parse(session))
+        if isinstance(node, ast.FunctionDef) and node.name == "_agent_event_sink"
+    )
+    published = set().union(
+        *(
+            literals(node.value)
+            for node in ast.walk(sink)
+            if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "stage"
+        )
+    )
+    assert {"llm_call", "backtest", "test"} <= published
+    stages |= published
     labels = set(
         re.findall(
             r'^  ([a-z_]+): "',
@@ -464,8 +491,6 @@ def test_every_track_status_and_verdict_reason_has_a_console_label() -> None:
     """The Paper page words the book's track, the verdict's status and the
     reason of its terminal row; a code added to paper/verdict.py without a
     label would render raw."""
-
-    import ast
 
     from autotrade.paper import verdict
 

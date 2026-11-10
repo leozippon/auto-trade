@@ -1361,7 +1361,7 @@ def _failed_attempts(
     identity: PublicIdentity, records: Sequence[Mapping[str, object]], phase: str
 ) -> dict[str, object]:
     """How many attempts of ``phase`` failed before their record, and the last
-    failure's reason: the retries the verdict view accounts for."""
+    failure's reason: the retries the readout view accounts for."""
 
     failed = _attempt_failures(records, phase)
     last = failed[-1] if failed else None
@@ -1373,8 +1373,7 @@ def _failed_attempts(
 
 def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, object]:
     """How many of the research session's Validations failed, how many of those
-    the environment failed (their replay-years were refunded), and the last
-    one's reason. A failed Validation is no attempt failure and leaves no
+    the environment failed, and the last one's reason. A failed Validation is no attempt failure and leaves no
     ledger row: its one record is its dead-end node in the step tree (written
     while ``record_failed_attempts`` is on, the default), the same nodes the
     step-tree view marks failed."""
