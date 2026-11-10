@@ -176,11 +176,11 @@ def test_subagent_events_land_on_the_parent_session_trace() -> None:
         llm=llm,
         tools=ToolRegistry([shell]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run(
+    ).run_with_transcript(
         "inspect snapshot schema",
         role="general-purpose",
         parent_call_id="call_parent",
-    )
+    )[0]
     types = [event for event, _payload in events]
     assert types[0] == "subagent_task"
     assert "subagent_llm" in types
@@ -274,7 +274,7 @@ def test_subagent_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
                 ModificationCheckTool(workspace / "output"),
             ]
         ),
-    ).run("write and check the strategy", role="general-purpose")
+    ).run_with_transcript("write and check the strategy", role="general-purpose")[0]
     assert result["status"] == "completed"
     written = (workspace / "output" / "main.py").read_text(encoding="utf-8")
     assert "return []  # ok" in written
@@ -362,7 +362,7 @@ def test_concurrent_subagents_do_not_drop_each_others_workspace_writes(
     def run(name: str) -> None:
         results[name] = SubAgentEngine(
             llm=_candidate_writer(name, barrier), tools=tools
-        ).run(f"实现候选 {name}", role="general-purpose")
+        ).run_with_transcript(f"实现候选 {name}", role="general-purpose")[0]
 
     threads = [threading.Thread(target=run, args=(name,)) for name in ("g20", "h1")]
     for thread in threads:
@@ -434,7 +434,7 @@ def test_later_subagent_write_to_one_path_wins_and_leaves_the_rest(
                 ]
             ),
             tools=tools,
-        ).run(f"写入 {name}", role="general-purpose")
+        ).run_with_transcript(f"写入 {name}", role="general-purpose")[0]
         assert result["status"] == "completed"
     candidates = workspace / "candidates"
     assert candidates.joinpath("shared.py").read_text(encoding="utf-8") == (
@@ -521,7 +521,7 @@ def test_subagent_readonly_write_failure_stays_an_observation(tmp_path: Path) ->
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([WriteFileTool(SafeWorkspace(workspace))]),
-    ).run("overwrite readme", role="general-purpose")
+    ).run_with_transcript("overwrite readme", role="general-purpose")[0]
     assert result["status"] == "completed"
     assert (workspace / "output" / "README.md").read_text(encoding="utf-8") == "keep\n"
 
@@ -539,7 +539,7 @@ def test_subagent_and_main_share_one_session_call_budget() -> None:
     result = SubAgentEngine(
         llm=budgeted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("count rows", role="Explore")
+    ).run_with_transcript("count rows", role="Explore")[0]
     assert result["status"] == "completed"
     with pytest.raises(RuntimeError, match="budget exhausted"):
         budgeted.complete([])
@@ -581,7 +581,7 @@ def test_explore_child_cannot_invoke_the_registered_shell() -> None:
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("inspect without shell", role="Explore")
+    ).run_with_transcript("inspect without shell", role="Explore")[0]
     assert result["status"] == "completed"
     assert result["summary"] == "shell blocked"
     assert shell.calls == []
@@ -601,7 +601,7 @@ def test_subagent_unknown_tool_call_is_rejected_without_invoke() -> None:
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("do not backtest", role="Explore")
+    ).run_with_transcript("do not backtest", role="Explore")[0]
     assert result["status"] == "completed"
     assert result["summary"] == "unknown tool blocked"
     assert shell.calls == []
@@ -617,9 +617,9 @@ def test_subagent_agent_call_is_rejected_by_name() -> None:
             ProviderResponse(content="did it myself"),
         ]
     )
-    SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()])).run(
+    SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()])).run_with_transcript(
         "inspect", role="Explore"
-    )
+    )[0]
     second = llm.calls[1]
     assert isinstance(second, dict)
     tool_message = second["messages"][-1]
@@ -1147,12 +1147,12 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
     result = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("summarize", role="Explore")
+    ).run_with_transcript("summarize", role="Explore")[0]
     assert result["thinking"] == "xhigh"
     lowered = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("quote the config lines", role="general-purpose", thinking="medium")
+    ).run_with_transcript("quote the config lines", role="general-purpose", thinking="medium")[0]
     assert lowered["thinking"] == "medium"
     assert (
         f"默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队"
@@ -1179,7 +1179,7 @@ def test_subagent_inherit_context_prepends_parent_digest() -> None:
     )
     engine = SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]))
     launch = ToolCall("p1", "agent", {"agent": "Explore", "task": "earlier"})
-    result = engine.run(
+    result = engine.run_with_transcript(
         "summarize",
         role="Explore",
         inherit_context=True,
@@ -1191,7 +1191,7 @@ def test_subagent_inherit_context_prepends_parent_digest() -> None:
         ],
         thinking="low",
         description="schema audit",
-    )
+    )[0]
     assert result["status"] == "completed"
     assert result["thinking"] == "low"
     assert result["inherit_context"] is True
@@ -1211,7 +1211,7 @@ def test_subagent_inherit_context_prepends_parent_digest() -> None:
         f"{INHERITED_CONTEXT_BOUNDARY.format(role='Explore')}\n\nsummarize"
     )
     assert "`agent`" in recorded[-1].content
-    engine.run("summarize", role="Explore")
+    engine.run_with_transcript("summarize", role="Explore")[0]
     fresh = llm.calls[1]
     assert isinstance(fresh, dict)
     assert [msg.role for msg in fresh["messages"]] == ["system", "user"]
@@ -1346,7 +1346,7 @@ def test_subagent_thinking_only_reply_does_not_finish_the_child() -> None:
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run("summarize", role="Explore")
+    ).run_with_transcript("summarize", role="Explore")[0]
     assert result["status"] == "completed"
     assert result["summary"] == "done after thinking"
     assert result["llm_calls"] == 2
@@ -1722,7 +1722,7 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
         llm=exhausted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=5),
-    ).run("look", role="Explore")
+    ).run_with_transcript("look", role="Explore")[0]
     assert result["status"] == "error"
     assert result["llm_calls"] == 1
     assert exhausted.calls == 1
@@ -1745,7 +1745,7 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
         llm=interrupted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=5),
-    ).run("look", role="Explore")
+    ).run_with_transcript("look", role="Explore")[0]
     assert result["status"] == "error"
     assert interrupted.calls == 1
 
@@ -1777,7 +1777,7 @@ def test_subagent_skips_tools_when_cancelled_after_llm() -> None:
     outcome: dict[str, object] = {}
 
     def run() -> None:
-        outcome.update(engine.run("look", role="general-purpose"))
+        outcome.update(engine.run_with_transcript("look", role="general-purpose")[0])
 
     worker = threading.Thread(target=run)
     worker.start()
@@ -3072,7 +3072,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         llm=cut,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
-    ).run("audit", role="Explore")
+    ).run_with_transcript("audit", role="Explore")[0]
     assert result["status"] == "completed" and result["truncated"] is True
     assert result["summary"].endswith(OUTPUT_TRUNCATED_MARKER.format(limit=500))
     assert result["summary"].startswith("结论：因子 A 在 2019 年后")
@@ -3100,7 +3100,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("audit", role="general-purpose")
+    ).run_with_transcript("audit", role="general-purpose")[0]
     assert result["status"] == "completed" and result["llm_calls"] == 3
     assert result["summary"] == "简洁结论" and result["tool_calls"] == 1
     assert result["truncated"] is True and result["truncated_turns"] == 1
@@ -3123,7 +3123,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         llm=exhausted,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
-    ).run("audit", role="Explore")
+    ).run_with_transcript("audit", role="Explore")[0]
     assert result["status"] == "error" and result["summary"] == ""
     assert result["llm_calls"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
     assert result["truncated_turns"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
@@ -3185,7 +3185,7 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
         llm=llm,  # type: ignore[arg-type]
         tools=ToolRegistry([_LongResultTool()]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("dig", role="Explore")
+    ).run_with_transcript("dig", role="Explore")[0]
     assert result["status"] == "completed" and result["summary"] == "recovered report"
     assert result["llm_errors"] == 1 and result["llm_calls"] == 3
     edits = [payload for event, payload in events if event == "subagent_context_edit"]
@@ -3211,7 +3211,7 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
     result = SubAgentEngine(
         llm=twice,  # type: ignore[arg-type]
         tools=ToolRegistry([_LongResultTool()]),
-    ).run("dig", role="Explore")
+    ).run_with_transcript("dig", role="Explore")[0]
     assert result["status"] == "error" and result["summary"] == ""
     assert result["llm_errors"] == 2 and len(twice.items) == 1
     assert "maximum context length" in result["error"]
@@ -3250,7 +3250,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
         config=SubAgentConfig(max_turns=4),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
-    result = engine.run("dig", role="Explore")
+    result = engine.run_with_transcript("dig", role="Explore")[0]
     assert result["turns"] == 4 and result["summary"] == "final"
     # Turn 2 of 4 opens with the wrap-up notice; turns 1 and 3 do not.
     second = busy.calls[1]["messages"]
@@ -3286,7 +3286,7 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     )
     result = SubAgentEngine(
         llm=short, tools=ToolRegistry([DeclaredReadOnlyShell()])
-    ).run("dig", role="Explore", max_turns=2)
+    ).run_with_transcript("dig", role="Explore", max_turns=2)[0]
     assert result["turns"] == 2 and result["summary"] == "done"
     assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])
 
@@ -3339,8 +3339,8 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     assert engine.time_budget is shared.time_budget
-    first = engine.run("dig", role="Explore")
-    second = engine.run("dig again", role="Explore")
+    first = engine.run_with_transcript("dig", role="Explore")[0]
+    second = engine.run_with_transcript("dig again", role="Explore")[0]
     assert first["summary"] == "first" and second["summary"] == "second"
     # Round 2 crossed the threshold: the request the model saw carries the
     # compaction summary in place of the older turns.
@@ -3428,7 +3428,7 @@ def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
         llm=llm,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=5),
-    ).run("look", role="Explore")
+    ).run_with_transcript("look", role="Explore")[0]
     assert result["status"] == "error" and llm.calls == 1
     assert "context window" in result["error"] and result["llm_errors"] == 1
 
@@ -3594,7 +3594,7 @@ def test_child_malformed_tool_call_keeps_its_analysis_and_re_issues_once() -> No
         llm=child,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("look", role="Explore")
+    ).run_with_transcript("look", role="Explore")[0]
 
     assert result["status"] == "completed" and result["summary"] == "recovered report"
     assert result["llm_errors"] == 2
@@ -3637,7 +3637,7 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
         llm=Flaky(),
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("look", role="Explore", parent_call_id="call_p")
+    ).run_with_transcript("look", role="Explore", parent_call_id="call_p")[0]
     assert result["status"] == "completed" and result["summary"] == "recovered report"
     assert result["llm_errors"] == 1 and result["llm_calls"] == 2 and "error" not in result
     traced = [payload for event, payload in events if event == "subagent_llm_error"]
@@ -3798,7 +3798,7 @@ def test_a_report_quoting_the_refusal_sentence_is_still_a_report() -> None:
     gateway, _transport = _mimo_child_gateway(_MIMO_REFUSAL, "stop")
     result = SubAgentEngine(
         llm=gateway, tools=ToolRegistry([DeclaredReadOnlyShell()])
-    ).run("screen limit events", role="general-purpose")
+    ).run_with_transcript("screen limit events", role="general-purpose")[0]
     assert result["status"] == "completed" and result["summary"] == _MIMO_REFUSAL
     assert "error" not in result and "llm_errors" not in result
 
@@ -3844,7 +3844,7 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
         llm=child,
         tools=ToolRegistry([_NamedTool("grep"), _NamedTool("read_file")]),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("look", role="Explore")
+    ).run_with_transcript("look", role="Explore")[0]
 
     assert result["status"] == "cancelled"
     assert result["error"] == "Sub-agent cancelled by worker shutdown"
@@ -3916,7 +3916,7 @@ def test_child_without_a_report_is_not_completed() -> None:
         llm=silent,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=1),
-    ).run("dig", role="general-purpose")
+    ).run_with_transcript("dig", role="general-purpose")[0]
     assert result["status"] == "error" and result["summary"] == ""
     assert result["error"] == "Sub-agent ended without a report"
     assert result["tool_calls"] == 1 and result["llm_calls"] == 2
@@ -3947,7 +3947,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=1),
         event_sink=lambda event, payload: events.append((event, payload)),
-    ).run("dig", role="general-purpose")
+    ).run_with_transcript("dig", role="general-purpose")[0]
 
     assert result["status"] == "exhausted"
     assert result["error"] == SUBAGENT_DEGRADED_SUMMARY_ERROR
@@ -3984,7 +3984,7 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         llm=quiet,
         tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=1),
-    ).run("dig", role="general-purpose")
+    ).run_with_transcript("dig", role="general-purpose")[0]
     assert fallback["status"] == "exhausted"
     assert str(fallback["summary"]) == (
         f"{SUBAGENT_DEGRADED_SUMMARY_MARKER.format(source='最后一条助手正文')}\n"
@@ -4099,7 +4099,7 @@ def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:
         ("low", {"enable_thinking": True, "reasoning_effort": "low"}),
         ("off", {"enable_thinking": False}),
     ):
-        result = engine.run("look", role="Explore", thinking=level)
+        result = engine.run_with_transcript("look", role="Explore", thinking=level)[0]
         assert result["status"] == "completed" and result["thinking_applied"] is True
         assert transport.bodies[-1]["chat_template_kwargs"] == expected
     # The session's own gateway and call budget are untouched by the clones.
@@ -4489,15 +4489,15 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
     assert any(STEER_MESSAGE_LABEL in str(message.content) for message in transcript)
     # A queued child (instruction sent before its first turn) reads it right after the task.
     early = _RecordingLLM([ProviderResponse(content="ok")])
-    result = SubAgentEngine(llm=early, tools=ToolRegistry([DeclaredReadOnlyShell()])).run(
+    result = SubAgentEngine(llm=early, tools=ToolRegistry([DeclaredReadOnlyShell()])).run_with_transcript(
         "queued task", role="Explore", steer_queue=deque(["先看 README"])
-    )
+    )[0]
     assert result["steers"] == 1
     assert early.seen[0][-2:] == [("user", "queued task"), ("user", f"{STEER_MESSAGE_LABEL} 先看 README")]
     # No instruction: no message, no counter.
     plain = SubAgentEngine(
         llm=ScriptedLLM([ProviderResponse(content="ok")]), tools=ToolRegistry([DeclaredReadOnlyShell()])
-    ).run("plain", role="Explore")
+    ).run_with_transcript("plain", role="Explore")[0]
     assert "steers" not in plain
 
 
@@ -4656,7 +4656,7 @@ def test_children_run_on_their_own_gateway_inside_the_shared_session_quota() -> 
         "qwen-3.8-27b-fp8",
         262_144,
     )
-    result = engine.run("dig", role="Explore")
+    result = engine.run_with_transcript("dig", role="Explore")[0]
     assert result["status"] == "completed" and result["summary"] == "done"
     assert (result["provider"], result["model"]) == ("vllm", "qwen-3.8-27b-fp8")
     started = next(payload for event, payload in events if event == "subagent_task")

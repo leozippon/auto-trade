@@ -8,9 +8,9 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
+from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, ReplayResult
 from autotrade.environment.replay.style import (
-    BENCHMARK_LABEL,
     BENCHMARK_TS_CODE,
     _benchmark_regression,
     _factor_regression,
@@ -348,7 +348,8 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
     )
     block = benchmark_summary_block(analysis)
     assert block is not None
-    assert block["label"] == BENCHMARK_LABEL and block["ts_code"] == BENCHMARK_TS_CODE
+    assert block["label"] == benchmark_index_label(BENCHMARK_TS_CODE)
+    assert block["ts_code"] == BENCHMARK_TS_CODE
     assert block["benchmark_return"] == analysis["compact"]["benchmark_return"]
     assert block["excess_return"] == analysis["compact"]["excess_return"]
 

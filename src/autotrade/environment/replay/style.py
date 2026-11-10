@@ -59,7 +59,6 @@ from .stats import (
 # below takes the experiment's ``benchmark_index`` explicitly, so none can grade
 # against this one by omission.
 BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
-BENCHMARK_LABEL = benchmark_index_label(BENCHMARK_TS_CODE)
 # The fewest overlapping days the factor regression runs on: a span shorter
 # than this has no loadings and no residual tracking error. The Held-out slot
 # is refused below it (``pipelines.calendar.ResearchGeometry.heldout``), so a
@@ -788,7 +787,6 @@ def write_style_rollup(result_dir: Path, payload: Mapping[str, object]) -> Path:
 
 
 __all__ = [
-    "BENCHMARK_LABEL",
     "BENCHMARK_TS_CODE",
     "FACTOR_SERIES",
     "MIN_REGRESSION_DAYS",

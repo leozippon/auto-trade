@@ -622,7 +622,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
         config: SubAgentConfig | None = None,
         time_budget: InferenceTimeBudget | None = None,
         event_sink: Callable[[TraceEvent, dict[str, object]], None] | None = None,
-        cancel_event: threading.Event | None = None,
         compactor: ContextCompactor | None = None,
     ) -> None:
         self.llm = llm
@@ -639,7 +638,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
         # The runner sets it from its own session config; zero means the plain
         # session deadline is the only bound.
         self.parent_reserve_seconds = 0.0
-        self._cancel_event = cancel_event or threading.Event()
+        # The runner attaches its session's event (``attach_cancel_event``).
+        self._cancel_event = threading.Event()
         bindings: list[TimeBudgetBinding] = []
         if isinstance(llm, SessionTimeBudgetAware):
             bindings.append(TimeBudgetBinding("subagent_llm", llm.session_time_budget))
@@ -664,12 +664,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
 
     def _cancelled(self) -> bool:
         return self._cancel_event.is_set()
-
-    def run(self, task: str, **kwargs: object) -> dict[str, object]:
-        """Run one child and return its result record (see ``run_with_transcript``)."""
-
-        result, _transcript = self.run_with_transcript(task, **kwargs)  # type: ignore[arg-type]
-        return result
 
     def run_with_transcript(
         self,

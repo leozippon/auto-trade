@@ -21,40 +21,20 @@ class InferenceTimeBudget:
     def __init__(
         self,
         *,
-        duration_seconds: float | None = None,
-        deadline: float | None = None,
+        duration_seconds: float,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        if (duration_seconds is None) == (deadline is None):
-            raise ValueError("provide exactly one of duration_seconds or deadline")
-        self._clock = clock or time.monotonic
-        now = self._clock()
-        target = now + float(duration_seconds) if duration_seconds is not None else float(deadline)
-        if not math.isfinite(target):
-            raise ValueError("inference deadline must be finite")
-        if duration_seconds is not None and (
+        if (
             isinstance(duration_seconds, bool)
             or not math.isfinite(float(duration_seconds))
             or duration_seconds <= 0
         ):
             raise ValueError("duration_seconds must be a positive finite number")
-        self._deadline = target
+        self._clock = clock or time.monotonic
+        self._deadline = self._clock() + float(duration_seconds)
         self._pause_depth = 0
         self._pause_started: float | None = None
         self._lock = threading.RLock()
-
-    @property
-    def deadline(self) -> float:
-        """Current absolute deadline, including an in-progress pause."""
-
-        with self._lock:
-            now = self._clock()
-            extension = (
-                max(0.0, now - self._pause_started)
-                if self._pause_started is not None
-                else 0.0
-            )
-            return self._deadline + extension
 
     def remaining(self) -> float:
         with self._lock:

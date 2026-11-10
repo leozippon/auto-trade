@@ -22,9 +22,9 @@ import numpy as np
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
+from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import (
-    BENCHMARK_LABEL,
     BENCHMARK_TS_CODE,
     STYLE_ARTIFACT_NAME,
     STYLE_SCHEMA_VERSION,
@@ -173,7 +173,10 @@ def write_result(
         {
             "schema_version": STYLE_SCHEMA_VERSION,
             "mode": mode,
-            "benchmark": {"ts_code": BENCHMARK_TS_CODE, "label": BENCHMARK_LABEL},
+            "benchmark": {
+                "ts_code": BENCHMARK_TS_CODE,
+                "label": benchmark_index_label(BENCHMARK_TS_CODE),
+            },
             "benchmark_regression": {"available": True, "beta": 0.9, "alpha_annualized": 0.05, "r2": 0.8, "n_days": days},
             "style": {"available": False, "reason": "no_holdings"},
             "strategy_daily": [[day, float(value)] for day, value in zip(dates, strategy, strict=True)],

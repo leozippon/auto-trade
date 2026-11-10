@@ -1200,7 +1200,7 @@ def test_subagent_dispatches_full_shell_commands():
     result = SubAgentEngine(
         llm=llm,
         tools=ToolRegistry([shell]),
-    ).run("inspect", role="general-purpose")
+    ).run_with_transcript("inspect", role="general-purpose")[0]
     assert result["summary"] == "ran full shell"
     assert shell.calls == [
         {"argv": ["python", "-V"]},
