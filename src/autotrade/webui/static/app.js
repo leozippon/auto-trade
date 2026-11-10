@@ -3995,7 +3995,8 @@ function recordPanel(detail) {
         { value: String(row.step) },
         { value: `${row.window.start}–${row.window.end}` },
         {
-          value: [row.candidate, row.changed ? el("span", { class: "badge kind" }, "换") : null],
+          // The node's short handle; its whole id would push every figure off the screen.
+          value: [String(row.candidate || "").split("__").pop(), row.changed ? el("span", { class: "badge kind" }, "换") : null],
           title: row.candidate,
         },
         { value: SOURCE_LABELS[row.source] || row.source },

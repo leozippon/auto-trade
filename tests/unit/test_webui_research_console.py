@@ -1545,6 +1545,58 @@ def test_a_failed_forward_replay_attempt_is_counted(tmp_path: Path) -> None:
     }
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_the_validation_record_names_a_candidate_by_its_handle(tmp_path: Path) -> None:
+    """A step's candidate is a node id over a hundred characters long; written
+    out it pushed the step's figures off the screen. The table shows the
+    node's handle and keeps the whole id in the cell's hover."""
+
+    build_experiment(tmp_path, "experiment", "registered_with_record")
+    record = experiment_detail(tmp_path, "experiment")["record"]
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            """
+const node = (tag) => ({
+  tag, nodeType: 1, style: {}, children: [], attrs: {},
+  append(...nodes) { this.children.push(...nodes); },
+  addEventListener() {}, setAttribute(key, value) { this.attrs[key] = value; },
+});
+const document = { createElement: node, createTextNode: (text) => ({ nodeType: 3, text }) };
+// The router's listeners sit between dataTable and the next function.
+const window = { addEventListener() {} };
+const route = null;
+const equityChart = () => null;
+const fmtAmount = String;
+""",
+            _const_block(script, "SOURCE_LABELS"),
+            *(
+                _fn(script, name)
+                for name in (
+                    "el", "panelHead", "dataTable", "fmtSteps", "fmtSharpe", "fmtPValue",
+                    "fmtPct", "signCls", "drawdownOf", "recordPanel",
+                )
+            ),
+            f"const record = {json.dumps({**record, 'curve': {}})};",
+            """
+const text = (item) => item.nodeType === 3 ? item.text : item.children.map(text).join("");
+const find = (item, tag) => item.nodeType !== 1 ? [] : [
+  ...(item.tag === tag ? [item] : []), ...item.children.flatMap((child) => find(child, tag)),
+];
+const cell = find(find(recordPanel({ record, validation_steps: 4 }), "tr")[1], "td")[2];
+console.log(JSON.stringify([text(cell), cell.attrs.title]));
+""",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    candidate = record["rows"][0]["candidate"]
+    assert json.loads(result.stdout) == [candidate.rsplit("__", 1)[1], candidate]
+    assert candidate.rsplit("__", 1)[1].startswith("valid_")
+
+
 def _object_const(script: str, name: str) -> str:
     """One ``const NAME = {…};`` of app.js, whose comments may hold a semicolon."""
 
