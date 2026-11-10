@@ -1365,6 +1365,26 @@ def _registered_view(
     }
 
 
+def _research_attempts(
+    directory: Path, identity: PublicIdentity, records: Sequence[Mapping[str, object]]
+) -> list[dict[str, object]]:
+    """The research attempts that failed before the session's record, in order:
+    when each was recorded, the first line of its error, its run by public ref
+    and whether its trace is on disk. The next attempt resumed the session in
+    place, so most of a resumed session's research sits in these traces, which
+    the session's own record (its last attempt's) does not name."""
+
+    return [
+        {
+            "recorded_at": row.get("recorded_at"),
+            "error": next(iter(identity.public_text(str(row.get("error") or "")).splitlines()), ""),
+            "run_ref": identity.run_ref(row["run_id"]),
+            "trace": resolve_trace_path(directory, str(row["run_id"])) is not None,
+        }
+        for row in _attempt_failures(records, Stage.RESEARCH)
+    ]
+
+
 def _failed_attempts(
     identity: PublicIdentity, records: Sequence[Mapping[str, object]], phase: str
 ) -> dict[str, object]:
@@ -1478,6 +1498,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         # raised before its record -- selected by the pipeline's stage, not by
         # the provider phase the replay reads (``FORWARD_PHASE``) -- and a
         # research Validation that failed.
+        "research_attempts": _research_attempts(directory, identity, records),
         "replay_attempts": _failed_attempts(identity, records, Stage.FORWARD),
         "research_validation_failures": _failed_validations(identity, directory),
     }

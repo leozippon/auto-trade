@@ -3551,8 +3551,13 @@ function controlPanel(detail) {
     const activity = fresh.worker_alive ? activityNode(fresh.status) : null;
     activityHost.replaceChildren(...(activity ? [activity] : []));
     const error = (fresh.status || {}).error;
+    // A worker that failed or was lost left its stdout and stderr in its log.
+    const log =
+      !fresh.worker_alive && fresh.worker_log && ["failed", "interrupted"].includes(fresh.state)
+        ? el("div", { class: "hint" }, `Worker 日志：${fresh.worker_log}`)
+        : null;
     errorHost.replaceChildren(
-      ...(error ? [el("div", { class: "hint warn" }, `错误：${error}`)] : []),
+      ...[error ? el("div", { class: "hint warn" }, `错误：${error}`) : null, log].filter(Boolean),
     );
     const bars = budgetBars(fresh.budget_used, detail.budget);
     // The live trace reached its size cap: the worker spends on unrecorded.
@@ -3851,7 +3856,32 @@ function sessionDetailPanel(detail, selectedKey) {
         });
     }
   }
+  const earlier = earlierAttemptsPanel(detail);
+  if (earlier) panel.append(earlier);
   return panel;
+}
+
+/* The research attempts that failed before the session's record
+   (registry._research_attempts): each one's time, error and Trace. The session
+   resumed in place after each, so the research they hold is in no other view. */
+function earlierAttemptsPanel(detail) {
+  const attempts = detail.research_attempts || [];
+  if (!attempts.length) return null;
+  return el(
+    "div",
+    { class: "panel section-gap" },
+    panelHead("此前失败的尝试", el("span", { class: "meta-line" }, "研究在其后的尝试里原地续跑")),
+    ...attempts.map((attempt, index) =>
+      el(
+        "div",
+        { class: "section-gap" },
+        el("div", { class: "meta-line" }, `第 ${index + 1} 次 · ${fmtTs(attempt.recorded_at)} · ${attempt.error || "—"}`),
+        attempt.trace
+          ? traceReplayNode(detail.experiment_id, attempt.run_ref, detail)
+          : el("div", { class: "hint" }, "这次尝试的 Trace 不在磁盘上"),
+      ),
+    ),
+  );
 }
 
 /* The research that preceded each test (webui/registry.py research_depth): one

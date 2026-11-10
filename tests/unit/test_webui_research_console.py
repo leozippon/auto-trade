@@ -721,6 +721,104 @@ console.log(JSON.stringify([before, text(panel)]));
     assert before == "" and after.startswith("Trace 已达大小上限，此后的用量不再记录")
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_the_attempts_before_a_resume_keep_their_traces_in_reach(tmp_path: Path) -> None:
+    """A session that failed and resumed holds most of its research in the
+    traces of the attempts before the last, which the session's record does not
+    name. The detail lists each failed research attempt with its error's first
+    line and whether its trace is on disk, and the trace routes serve it by the
+    attempt's own run ref; a failed forward attempt is no research attempt.
+    A worker that failed or was lost also names its log under the error."""
+
+    directory = build_experiment(tmp_path / "experiments", "broken", "broken")
+    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
+        {
+            "record_type": "attempt_failed",
+            "experiment_id": "broken",
+            "epoch_id": "forward",
+            "fold_id": "forward",
+            "run_id": "run_forward_1",
+            "session_key": "forward",
+            "phase": "forward",
+            "error": "OSError: replay host lost",
+        }
+    )
+    trace = directory / "artifacts/traces/run_research_2.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(json.dumps({"event_type": "user_message", "content": "second attempt"}) + "\n", encoding="utf-8")
+    client = TestClient(create_app(tmp_path, tmp_path / "experiments"))
+    detail = client.get("/api/experiments/broken").json()
+    attempts = detail["research_attempts"]
+    assert [(row["error"], row["trace"]) for row in attempts] == [
+        ("RuntimeError: sandbox image is gone", False),
+        ("RuntimeError: sandbox image is gone", True),
+        ("RuntimeError: sandbox image is gone", False),
+    ]
+    assert all(row["run_ref"].startswith("run_ref_") and row["recorded_at"] for row in attempts)
+    assert "run_research_2" not in json.dumps(detail)
+    blocks = client.get("/api/experiments/broken/trace/blocks", params={"run_id": attempts[1]["run_ref"]}).json()
+    assert [block["text"] for block in blocks["blocks"]] == ["second attempt"]
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            """
+const node = (tag) => ({
+  tag, nodeType: 1, style: {}, children: [],
+  append(...nodes) { this.children.push(...nodes); },
+  replaceChildren(...nodes) { this.children = nodes; },
+  addEventListener() {}, setAttribute() {},
+});
+const document = { createElement: node, createTextNode: (text) => ({ nodeType: 3, text }) };
+const controlBar = () => node("div");
+const experimentBadge = () => null, activityNode = () => null, experimentEquityHost = () => null;
+const budgetBars = () => null;
+const fmtTs = () => "then";
+const traceReplayNode = (id, run) => document.createTextNode(`[trace ${run}]`);
+""",
+            *(_fn(script, name) for name in ("el", "panelHead", "controlPanel", "earlierAttemptsPanel")),
+            f"const detail = {json.dumps(detail)};",
+            """
+const text = (item) => item.nodeType === 3 ? item.text : item.children.map(text).join("");
+const lost = { ...detail, state: "interrupted", status: {} };
+console.log(JSON.stringify({
+  attempts: text(earlierAttemptsPanel(detail)),
+  none: earlierAttemptsPanel({ ...detail, research_attempts: [] }),
+  failed: text(controlPanel(detail)),
+  lost: text(controlPanel(lost)),
+  stopped: text(controlPanel({ ...lost, state: "stopped" })),
+}));
+""",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    drawn = json.loads(result.stdout)
+    assert drawn["attempts"] == (
+        "此前失败的尝试研究在其后的尝试里原地续跑"
+        "第 1 次 · then · RuntimeError: sandbox image is gone这次尝试的 Trace 不在磁盘上"
+        f"第 2 次 · then · RuntimeError: sandbox image is gone[trace {attempts[1]['run_ref']}]"
+        "第 3 次 · then · RuntimeError: sandbox image is gone这次尝试的 Trace 不在磁盘上"
+    )
+    assert drawn["none"] is None
+    # The synthetic repository has no worker log; one that exists is named.
+    assert "Worker 日志" not in drawn["failed"] and drawn["failed"].startswith("错误：RuntimeError")
+    log = tmp_path / "logs/workers/broken.log"
+    log.parent.mkdir(parents=True)
+    log.write_text("Traceback\n", encoding="utf-8")
+    named = client.get("/api/experiments/broken/status").json()
+    assert named["worker_log"] == "logs/workers/broken.log"
+    harness = harness.replace(f"const detail = {json.dumps(detail)};", f"const detail = {json.dumps({**detail, **named})};")
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    drawn = json.loads(result.stdout)
+    assert drawn["failed"].endswith("Worker 日志：logs/workers/broken.log")
+    assert drawn["lost"] == "Worker 日志：logs/workers/broken.log"
+    assert drawn["stopped"] == ""
+
+
 def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_path: Path) -> None:
     """The one curve per experiment starts from the research-period validation of the
     candidate the tiles name — the registered artifact's own once the experiment registered —
