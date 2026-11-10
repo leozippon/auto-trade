@@ -1299,9 +1299,9 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
             )
         )
 
-    # Six validates over three attempts, all before a first test: more than the
-    # default allowance of 3, which is not what this test is about.
-    repo, experiment = make_experiment(tmp_path, developer_mode="llm", validates_per_step=6)
+    # Six validates over three attempts, all before a first test, under an
+    # allowance of two: a batch that measured nothing is not counted.
+    repo, experiment = make_experiment(tmp_path, developer_mode="llm", validates_per_step=2)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     never = ProviderResponse(tool_calls=(ToolCall("test", "test", {"candidate": "working_copy"}),))
@@ -1327,7 +1327,6 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
     )
     assert record["experiment_end"] == {"status": "environment_blocked", "reason": reason}
     assert record["steps"] == []
-    # The failed batches were refunded: no replay-year was spent.
     assert record["budget_used"]["test_replays"] == 0
     verdict = {"status": "environment_blocked", "reasons": [reason]}
     assert result["verdict"] == verdict

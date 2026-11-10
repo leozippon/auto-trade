@@ -889,16 +889,21 @@ class SessionValidations:
 
 
 def _validates_since(tree: StepTree, since: object) -> int:
-    """How many validate calls the step tree records after ``since`` (the last
-    test's ledger stamp; None counts every call): the distinct batch ids of
-    the nodes, complete and failed, created after it. A resumed attempt
-    continues the interval's count from here."""
+    """How many counted validate calls the step tree records after ``since``
+    (the last test's ledger stamp; None counts every call): the distinct batch
+    ids of the complete Validations created after it, so a batch counts
+    exactly when ``ValidateTool`` counted it live. A resumed attempt continues
+    the interval's count from here."""
 
     batches = set()
     for node in tree.nodes():
         metadata = node.get("metadata")
         batch = metadata.get("batch_id") if isinstance(metadata, Mapping) else None
-        if batch and (since is None or str(node.get("created_at") or "") > str(since)):
+        if (
+            batch
+            and node.get("complete_validation") is True
+            and (since is None or str(node.get("created_at") or "") > str(since))
+        ):
             batches.add(str(batch))
     return len(batches)
 
@@ -1036,8 +1041,7 @@ def _shared_gpu_note(siblings: Sequence[str]) -> str:
     same device. The CUDA report cannot say whose memory filled the card -- a
     sibling's, the candidate's own other strategy container's, or a process
     outside the experiment -- so the note names the siblings as sharers, not as the
-    cause, and the failure stays the environment's and is refunded like any
-    other contention.
+    cause, and the failure stays the environment's, like any other contention.
     """
 
     return (
@@ -1411,9 +1415,11 @@ class ValidateTool(SessionTimeBudgetAware):
     """The one Validation tool: candidates as sibling Steps.
 
     Every candidate gets its own ``modification_check``, its own immutable
-    revision, one replay over the batch's span and one Step node; the call
-    counts once against the interval's ``validates_per_step`` allowance,
-    whatever its width. The candidates of a call share
+    revision, one replay over the batch's span and one Step node. The
+    interval's ``validates_per_step`` allowance rations readings: a call
+    counts once, whatever its width, when at least one of its candidates
+    completed its replay and returned a reading, and not at all when none
+    did, whatever the cause. The candidates of a call share
     one parent node and one span, so a round's numbers are comparable and each
     hypothesis is recorded before its result, at every width from one to six.
 
@@ -1428,18 +1434,18 @@ class ValidateTool(SessionTimeBudgetAware):
         "to make a node that test can take. span is full (default), one research "
         "year Yk or contiguous years Yi..Yj, replayed as one continuous book from "
         "its first year; a span reaching into the validation years is refused. "
-        "Calls count per interval: at most "
-        "acceptance_rules.validation.validates_per_step before the first test and "
-        "between two tests.\n\nA candidate's path is a workspace directory laid out "
+        "At most acceptance_rules.validation.validates_per_step counted calls "
+        "before the first test and between two tests; a call counts only if one of "
+        "its candidates completes its replay.\n\nA candidate's path is a workspace directory laid out "
         "like output/ (main.py and siblings; read-only template files are supplied; "
         "models/ is shared), or output itself; copy it from output/, not refs/. A "
         "completed candidate becomes an immutable revision and Step node under the "
         "current node; a failed one is a dead end with cause strategy (its own code "
         "raised, or it exceeded budgets.strategy_memory_bytes or "
         "budgets.strategy_state_disk_bytes) or environment (the host failed it: "
-        "resending it unchanged is reasonable). The whole batch is refused, "
-        "uncounted, if the span leaves the research years, the calls are used up, "
-        "two candidates are byte-identical or one fails modification_check. It "
+        "resending it unchanged is reasonable). The whole batch is refused if the "
+        "calls are used up, two candidates are byte-identical or one fails "
+        "modification_check. It "
         "waits briefly for sub-agents that can write and is refused while one "
         "runs.\n\nthreshold is z(1-alpha)/sqrt(years) for this span, as "
         "acceptance_rules.significance reads it. In each row, active is the graded "
@@ -1569,17 +1575,17 @@ class ValidateTool(SessionTimeBudgetAware):
             return self._invoke_exempt(arguments)
 
     def _invoke_exempt(self, arguments: Mapping[str, object]) -> ToolResult:
-        # Everything that can refuse the batch runs before any replay starts
-        # or the call counts against validates_per_step, so a rejected batch
-        # costs nothing and the Agent can fix the offending input and call
-        # again. Because it costs nothing, the same rejection can also repeat
-        # forever: ``_rejected`` counts it.
+        # Everything that can refuse the batch runs before any replay starts,
+        # so a rejected batch costs nothing and the Agent can fix the
+        # offending input and call again. Because it costs nothing, the same
+        # rejection can also repeat forever: ``_rejected`` counts it.
         if self.backtest.validates_in_interval >= self.backtest.validates_per_step:
             raise ToolError(
                 f"validate refused: acceptance_rules.validation.validates_per_step allows "
-                f"{self.backtest.validates_per_step} validate call(s) before the first test and "
-                f"between two tests, and this interval has made {self.backtest.validates_in_interval}; "
-                "0 remain until the next test",
+                f"{self.backtest.validates_per_step} counted validate call(s) before the first test and "
+                f"between two tests, and this interval has counted {self.backtest.validates_in_interval}; "
+                "0 remain in this interval. shell, smoke_backtest, sub-agents and offline "
+                "evaluation stay available.",
                 error_type="validates_per_step_exhausted",
                 details={
                     "validates_in_step": self.backtest.validates_in_interval,
@@ -1606,8 +1612,6 @@ class ValidateTool(SessionTimeBudgetAware):
         batch_id = uuid.uuid4().hex[:12]
         parent_node_id = self.backtest.tree.current_node_id
         revisions = self._commit(candidates, checks, span)
-        # Counted once the batch runs: a refusal above costs nothing.
-        self.backtest.validates_in_interval += 1
         outcomes = replay_legs(
             self.backtest.evaluator,
             [self.backtest.validation_request(revision, span) for revision in revisions],
@@ -1615,7 +1619,7 @@ class ValidateTool(SessionTimeBudgetAware):
         )
         # How many candidates the host, not the strategy, failed: measured
         # nothing, so the row says the candidate may be resent unchanged.
-        refunded = sum(
+        environment_failures = sum(
             1
             for replayed in outcomes
             if replayed.error is not None
@@ -1674,6 +1678,12 @@ class ValidateTool(SessionTimeBudgetAware):
                         )
                     )
                     recorded.append((row, self.backtest.steps[-1]))
+                    if len(recorded) == 1:
+                        # The batch's first reading is what the allowance
+                        # rations: the call counts here, once, and a batch
+                        # that completes no candidate never does
+                        # (``_validates_since`` counts the same on resume).
+                        self.backtest.validates_in_interval += 1
                 rows.append(row)
         finally:
             # The batch never touched the working copy, so the tree position
@@ -1682,13 +1692,13 @@ class ValidateTool(SessionTimeBudgetAware):
             # a winner.
             self.backtest.tree.set_position(parent_node_id)
         if not recorded:
-            charged = len(rows) - refunded
-            if refunded == len(rows):
+            if environment_failures == len(rows):
                 self._environment_blocked(span, rows)
             raise ToolError(
                 f"validate: all {len(rows)} candidates failed their "
-                f"Validation; {charged} of them raised in their own code, "
-                f"{refunded} failed on the environment. No Validation was recorded",
+                f"Validation; {len(rows) - environment_failures} of them raised in their own code, "
+                f"{environment_failures} failed on the environment. No Validation was recorded "
+                "and the call was not counted",
                 error_type="validation_failed",
                 details={"batch_id": batch_id, "candidates": [_validate_row(row) for row in rows]},
             )
@@ -2525,8 +2535,8 @@ class NullControlTool(SessionTimeBudgetAware):
             except Exception as exc:
                 if isinstance(exc, NullControlSetupError):
                     # It never reached its first draw, so none of the host
-                    # compute the charge stands for was spent: give the call
-                    # back, as validate refunds an environment failure.
+                    # compute the charge stands for was spent and nothing was
+                    # measured: give the call back.
                     self.used -= 1
                 raise ToolError(
                     "run_null_control failed: " + _public_error_text(exc),

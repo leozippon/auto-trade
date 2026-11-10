@@ -89,8 +89,8 @@ DEFAULT_MAX_API_SPEND_USD = 50.0
 # pre-registers each hypothesis before any result exists. One candidate is a
 # round too: the hypothesis is the same binding pre-registration at any width.
 BATCH_VALIDATE_MIN_CANDIDATES = 1
-# The rules' ``validates_per_step`` bounds how many calls an interval between
-# tests may make; this cap only bounds what one observation may carry, and six
+# The rules' ``validates_per_step`` bounds how many counted calls an interval
+# between tests may make; this cap only bounds what one observation may carry, and six
 # screening candidates already make a wide round.
 BATCH_VALIDATE_MAX_CANDIDATES = 6
 # Concurrent replays per batch, the experiment's ``batch_validate_max_concurrency``
@@ -263,11 +263,14 @@ class AcceptanceRules:
     research_years: int = _required(
         "Research years the session sees; the rest of the geometry are the validation years."
     )
-    # How far one test advances the test horizon, and how many
-    # validate calls an interval between tests may make.
+    # How far one test advances the test horizon, and how many counted
+    # validate calls an interval between tests may make
+    # (``session_tools.ValidateTool`` counts them).
     test_step_months: int = _rule(3, "Months the test horizon advances per test (1 or 3).")
     validates_per_step: int = _rule(
-        3, "validate calls allowed before the first test and between consecutive tests."
+        3,
+        "validate calls counted before the first test and between consecutive tests; "
+        "a call counts only if one of its candidates completes its replay.",
     )
 
     def __post_init__(self) -> None:

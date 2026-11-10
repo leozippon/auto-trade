@@ -259,6 +259,46 @@ def test_validate_is_bounded_per_interval_freed_by_a_test_and_kept_to_the_resear
         assert len(harness.evaluator.requests) == replays and harness.backtest.validates_in_interval == 1
 
 
+def test_a_validate_call_counts_only_when_a_candidate_completes_its_replay() -> None:
+    """The allowance rations readings: a call none of whose candidates
+    completed its replay is not counted, whether their own code raised or the
+    host failed them, and a call with one completed candidate counts once
+    however many failed beside it. A resumed attempt reads the same count off
+    the step tree."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(
+            Path(tmp),
+            validates_per_step=2,
+            raise_for={
+                "_ = 5": StrategyRaised("KeyError: 'close'"),
+                "_ = 6": StrategyExecutionError("Docker generate_orders failed: timeout"),
+            },
+        )
+        harness.session.candidate("s", _strategy("5"))
+        harness.session.candidate("e", _strategy("6"))
+        for name in ("s", "e"):
+            with pytest.raises(ToolError) as failed:
+                harness.session.call(name)
+            assert failed.value.error_type == "validation_failed"
+            assert "the call was not counted" in str(failed.value)
+        assert harness.backtest.validates_in_interval == 0
+        # Both dead ends are in the tree; neither batch counts on resume either.
+        assert len(harness.backtest.tree.nodes()) == 2
+        assert session_tools._validates_since(harness.backtest.tree, None) == 0
+        harness.session.candidate("a", _strategy("1"))
+        mixed = harness.session.call("a", "s", "e")
+        assert mixed.ok and mixed.value["failed"] == 2 and mixed.value["validates_in_step"] == 1
+        harness.node("b", "2")
+        assert harness.backtest.validates_in_interval == 2
+        assert session_tools._validates_since(harness.backtest.tree, None) == 2
+        harness.session.candidate("c", _strategy("3"))
+        with pytest.raises(ToolError) as refused:
+            harness.session.call("c")
+        assert refused.value.error_type == "validates_per_step_exhausted"
+        assert "next test" not in str(refused.value)
+
+
 def test_the_last_test_finishes_the_session_with_its_candidate() -> None:
     with TemporaryDirectory() as tmp:
         harness = _Harness(Path(tmp))
