@@ -1669,6 +1669,16 @@ def prebuild_asof_stash(
                 "parts": _stash_part_counts(slot.stash_dir),
             },
         )
+    # Published, the stash's files are read-only, as a replay's lock leaves
+    # them; its directories stay writable for the days a replay reaches beyond
+    # the prebuild. A seed hardlinks these parts into every experiment, so a
+    # mode left for the experiment's lock to set would move on the seed's own
+    # inodes (2026-11-10: a deploy's verifying rsync found 2,013 parts changed
+    # under it).
+    for slot in slots:
+        for path in slot.stash_dir.rglob("*"):
+            if path.is_file():
+                path.chmod(0o444)
     return {
         "stash_dir": str(slots[0].stash_dir),
         "trade_days": len(trade_dates),
