@@ -515,10 +515,11 @@ def test_incomplete_stash_is_never_taken_for_a_finished_one(tmp_path: Path) -> N
     kept = record.read_text(encoding="utf-8")
     record.unlink()
     assert _prebuild_stash(tmp_path, slots, "second")["reused"] is False
-    assert record.is_file()
+    # The resumed build writes the same record (the file is read-only again).
+    assert record.read_text(encoding="utf-8") == kept
+    assert not os.access(record, os.W_OK)
 
     # A part has since gone missing: the record alone does not make it complete.
-    record.write_text(kept, encoding="utf-8")
     missing = stash / "daily" / "part_0002.parquet"
     missing.unlink()
     rebuilt = _prebuild_stash(tmp_path, slots, "third")
