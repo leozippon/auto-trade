@@ -2416,19 +2416,20 @@ def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() ->
             750,
             0.375,
         ),
-        # vLLM reports no cache count: the ratio is unknown, never 0.0.
+        # vLLM reports no cache count: no hit is counted and the ratio is
+        # unknown, never 0.0, exactly as in the session's own block.
         (
             (
                 {"prompt_tokens": 1_000, "completion_tokens": 10},
                 {"prompt_tokens": 1_000, "completion_tokens": 10, "prompt_tokens_details": None},
             ),
-            None,
+            0,
             None,
         ),
     ],
 )
 def test_session_token_usage_reports_the_subagent_cache_hit_ratio(
-    child_usages: tuple[dict[str, object], ...], hits: int | None, ratio: float | None
+    child_usages: tuple[dict[str, object], ...], hits: int, ratio: float | None
 ) -> None:
     subagent = SubAgentEngine(
         llm=ScriptedLLM(
@@ -2464,10 +2465,74 @@ def test_session_token_usage_reports_the_subagent_cache_hit_ratio(
     ]["subagent"]
     assert children["llm_calls"] == 2
     assert children["prompt_tokens"] == 2_000
-    assert children.get("cache_hit_tokens") == hits
+    assert children["cache_hit_tokens"] == hits
     assert "cache_hit_ratio" in children
     assert children["cache_hit_ratio"] == ratio
     assert result.usage["subagent"] == children
+
+
+def test_child_token_totals_keep_reasoning_and_cache_counts() -> None:
+    """A child sums its calls with the session's own accumulator: the usage
+    shapes of the session-level test above give the same counters in the
+    child's ``usage_totals`` and in the session's ``subagent`` block, where
+    reasoning and cache misses and writes used to be dropped."""
+
+    chat = {
+        "prompt_tokens": 1_000,
+        "completion_tokens": 50,
+        "prompt_tokens_details": {"cached_tokens": 0},
+        "completion_tokens_details": {"reasoning_tokens": 0},
+    }
+    responses = {
+        "prompt_tokens": 1_000,
+        "completion_tokens": 300,
+        "input_tokens_details": {"cached_tokens": 600, "cache_write_tokens": 300},
+        "output_tokens_details": {"reasoning_tokens": 200},
+    }
+    vllm = {"prompt_tokens": 1_000, "completion_tokens": 100, "prompt_tokens_details": None}
+    child = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("s0", "shell", {"argv": ["ls"]}),), usage=chat),
+            ProviderResponse(
+                tool_calls=(ToolCall("s1", "shell", {"argv": ["ls"]}),), usage=responses
+            ),
+            ProviderResponse(content="done", usage=vllm),
+        ]
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=ScriptedLLM(
+            [
+                ProviderResponse(
+                    tool_calls=(ToolCall("g1", "agent", {"agent": "general-purpose", "task": "t"}),)
+                ),
+                ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+            ]
+        ),
+        tools=ToolRegistry([_FinishStub("test")]),
+        system_prompt="research",
+        config=_session_config(),
+        subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    runner.run("delegate")
+
+    expected = {
+        "llm_calls_with_usage": 3,
+        "prompt_tokens": 3_000,
+        "completion_tokens": 450,
+        "reasoning_tokens": 200,
+        "cache_hit_tokens": 600,
+        "cache_miss_tokens": 1_400,
+        "cache_write_tokens": 300,
+    }
+    ended = next(payload for event, payload in events if event == "subagent")
+    assert {key: ended["usage_totals"][key] for key in expected} == expected
+    block = next(payload for event, payload in events if event == "session_end")[
+        "token_usage"
+    ]["subagent"]
+    assert {key: block[key] for key in expected} == expected
+    assert block["llm_calls"] == 3 and block["cache_hit_ratio"] == 0.2
 
 
 def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
@@ -3038,16 +3103,13 @@ def test_parent_and_child_output_budgets_share_the_safety_ceiling() -> None:
     assert AGENT_MAX_OUTPUT_TOKENS == 32_768
     assert AgentSessionConfig().max_response_tokens == AGENT_MAX_OUTPUT_TOKENS
     assert SubAgentConfig().max_tokens == AGENT_MAX_OUTPUT_TOKENS
-    llm = _GateLLM(threading.Event(), threading.Event())  # 128k window
-    messages = [ChatMessage("user", "x")]
-    shared = SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]))
-    assert shared._output_tokens(llm, messages, ()) == AGENT_MAX_OUTPUT_TOKENS
-    capped = SubAgentEngine(
-        llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        config=SubAgentConfig(max_tokens=500),
-    )
-    assert capped._output_tokens(llm, messages, ()) == 500
+    # The cap a child sends, with room to spare in a 128k window.
+    for config, cap in ((None, AGENT_MAX_OUTPUT_TOKENS), (SubAgentConfig(max_tokens=500), 500)):
+        llm = ScriptedLLM([ProviderResponse(content="done")], context_window_tokens=128_000)
+        SubAgentEngine(
+            llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]), config=config
+        ).run_with_transcript("look", role="Explore")
+        assert llm.calls[0]["max_tokens"] == cap
 
 
 def test_child_output_truncation_is_marked_and_never_silent() -> None:
@@ -3425,6 +3487,60 @@ def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
     ).run_with_transcript("look", role="Explore")[0]
     assert result["status"] == "error" and llm.calls == 1
     assert "context window" in result["error"] and result["llm_errors"] == 1
+
+
+def test_child_never_sends_a_request_that_cannot_be_made_to_fit() -> None:
+    """The parent's send/fail line holds for a child: a request that still
+    does not fit once compaction and tool-result trimming have run — here a
+    task larger than the window, with nothing to trim — fails before the
+    gateway, gets the single overflow recovery, and ends the child with an
+    explicit error instead of spending a call on a request known to fail."""
+
+    llm = ScriptedLLM(
+        [ProviderResponse(content="must not be requested")], context_window_tokens=2_000
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    result = SubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run_with_transcript("x" * 20_000, role="Explore")[0]
+    assert llm.calls == []
+    assert result["status"] == "error" and result["summary"] == ""
+    assert "before provider request" in result["error"] and result["llm_errors"] == 1
+    assert [event for event, _ in events if event == "subagent_llm_error"] == [
+        "subagent_llm_error"
+    ]
+
+
+def test_child_trims_tool_results_before_lowering_its_output_cap() -> None:
+    """A child measures the fit against its full output budget, as the parent
+    does: when that budget no longer fits, the largest tool result is
+    summarized in place before the request goes out with a lowered cap."""
+
+    llm = ScriptedLLM(
+        [
+            ProviderResponse(tool_calls=(ToolCall("r1", "read_file", {}),)),
+            ProviderResponse(content="done"),
+        ],
+        context_window_tokens=12_000,
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    result = SubAgentEngine(
+        llm=llm,
+        tools=ToolRegistry([_LongResultTool()]),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    ).run_with_transcript("dig", role="Explore")[0]
+    assert result["status"] == "completed" and result["summary"] == "done"
+    ((_event, edit),) = [
+        (event, payload) for event, payload in events if event == "subagent_context_edit"
+    ]
+    assert edit["turn"] == 2 and edit["context_edit"]["reason"] == "context_window_budget"
+    assert edit["context_edit"]["summarized_tool_results"] == 1
+    sent = llm.calls[1]
+    (tool_message,) = [m for m in sent["messages"] if m.role == "tool"]
+    assert json.loads(str(tool_message.content))["observation"] == "context_tool_result_summary"
+    assert sent["max_tokens"] < SubAgentConfig().max_tokens
 
 
 def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> None:

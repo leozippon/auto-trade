@@ -1530,33 +1530,33 @@ def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:
     )
 
 
-def test_prepare_context_request_returns_messages_that_fit():
+def test_context_fit_returns_messages_that_fit():
     runner = _context_runner(ScriptedLLM([], context_window_tokens=100_000))
     messages = [ChatMessage("user", "short")]
-    prepared, cap = runner._prepare_context_request(messages, (), 30.0)
+    prepared, cap = runner._context.fit(messages, (), 30.0)
     assert prepared is messages and cap == runner.config.max_response_tokens
 
 
-def test_prepare_context_request_passes_when_window_is_unknown():
+def test_context_fit_passes_when_window_is_unknown():
     runner = _context_runner(ScriptedLLM([], context_window_tokens=None))
     messages = [ChatMessage("user", "x" * 8_000)]
-    prepared, cap = runner._prepare_context_request(messages, (), 30.0)
+    prepared, cap = runner._context.fit(messages, (), 30.0)
     assert prepared is messages and cap == runner.config.max_response_tokens
 
 
-def test_prepare_context_request_raises_context_overflow_error():
+def test_context_fit_raises_context_overflow_error():
     runner = _context_runner(
         ScriptedLLM([], context_window_tokens=200),
         max_response_tokens=50,
     )
     messages = [ChatMessage("user", "x" * 5_000)]
     with pytest.raises(LLMProxyError) as excinfo:
-        runner._prepare_context_request(messages, (), 30.0)
+        runner._context.fit(messages, (), 30.0)
     assert is_context_overflow_error(excinfo.value)
     assert "context window 200" in str(excinfo.value)
 
 
-def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_output_budget_overflows():
+def test_context_fit_sends_with_the_gateway_clamp_when_only_the_output_budget_overflows():
     """Parity with the gateway: a prompt that leaves output room short of the
     configured ceiling goes out with a clamped budget instead of failing the
     session, and the room reported is the gateway's own clamp arithmetic."""
@@ -1586,7 +1586,7 @@ def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_outp
     # Untouched content: no compactor is attached and there is no tool result
     # to summarize, so the emergency fit hands back an unedited copy, and the
     # cap to send is the gateway's clamp, not the configured ceiling.
-    assert runner._prepare_context_request(messages, (), 30.0) == (messages, clamped)
+    assert runner._context.fit(messages, (), 30.0) == (messages, clamped)
     ((_event, payload),) = [
         (event, payload) for event, payload in events if event == "context_output_clamped"
     ]
@@ -1607,7 +1607,7 @@ def test_prepare_context_request_sends_with_the_gateway_clamp_when_only_the_outp
         - 1,
     )
     with pytest.raises(LLMProxyError) as excinfo:
-        _context_runner(tight, max_response_tokens=5_000)._prepare_context_request(
+        _context_runner(tight, max_response_tokens=5_000)._context.fit(
             messages, (), 30.0
         )
     assert is_context_overflow_error(excinfo.value)
@@ -1666,15 +1666,15 @@ def test_forced_compaction_proceeds_past_the_call_cap_and_message_floor():
     assert broken.should_compact(messages, force=True)[1]["skip_reason"] == "failure_circuit_open"
 
 
-def test_prepare_context_request_rejects_missing_window_without_assert(monkeypatch):
+def test_context_fit_rejects_missing_window_without_assert(monkeypatch):
     runner = _context_runner(ScriptedLLM([], context_window_tokens=200))
     messages = [ChatMessage("user", "short")]
     monkeypatch.setattr(
-        "autotrade.agent.runner.context_request_fits",
+        "autotrade.agent.compact.context_request_fits",
         lambda *args, **kwargs: (False, 10, None),
     )
     with pytest.raises(RuntimeError, match="context window is unavailable"):
-        runner._prepare_context_request(messages, (), 30.0)
+        runner._context.fit(messages, (), 30.0)
 
 
 def test_compaction_trigger_counts_the_provider_tool_schemas():

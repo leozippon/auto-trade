@@ -6,9 +6,10 @@ summary it wrote (``compact_with_summary``); the runtime safety net asks a
 cheap no-thinking model for a Markdown continuation summary (Pi's compaction
 shape) when the estimated window crosses the threshold, or when a request is
 forced because it does not fit (``ContextCompactor``). One attempt per
-runtime trigger: a failed compaction is recorded and the runner continues
-with the emergency in-place tool-result fitting, the fail-closed overflow
-recovery.
+runtime trigger: a failed compaction is recorded and the conversation
+continues with the emergency in-place tool-result fitting, the fail-closed
+overflow recovery. ``ContextFitter`` is that discipline around each model
+call, one implementation for the session loop and every sub-agent.
 
 Compaction rewrites history only: the conversation's system prompt is carried
 over verbatim, so the session (or child) keeps the exact contract it was
@@ -24,26 +25,31 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from autotrade.environment.llm import (
     AGENT_MAX_OUTPUT_TOKENS,
+    CONTEXT_OUTPUT_MIN_TOKENS,
     CONTEXT_OUTPUT_TOKEN_MARGIN,
     MIN_CONTEXT_WINDOW_TOKENS,
     ChatMessage,
     LLMProxy,
     ProviderResponse,
+    clamp_requested_max_tokens,
+    context_overflow_error,
     context_request_fits,
     estimate_chat_request_tokens,
+    output_shares_context_window,
 )
 from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
 )
+from autotrade.environment.trace import TraceEvent
 
 if TYPE_CHECKING:
     from autotrade.environment.tools.base import ToolResultStore
@@ -369,6 +375,149 @@ class ContextCompactor(SessionTimeBudgetAware):
                 f"{previous_block}## 此后的新消息（JSON 记录）\n{transcript}",
             ),
         )
+
+
+@dataclass(frozen=True)
+class ContextFitter:
+    """One conversation's context-window discipline around each model call:
+    the session loop and every sub-agent run this one implementation.
+
+    ``record`` receives what was done to the conversation under the session
+    loop's event names (``context_compaction``, ``context_edit``,
+    ``context_output_clamped``); a sub-agent files them under its identity.
+    """
+
+    llm: object
+    # The configured output ceiling every fit is measured against.
+    max_tokens: int
+    compactor: ContextCompactor | None
+    result_store: ToolResultStore | None
+    record: Callable[[TraceEvent, dict[str, object]], None]
+
+    def compact(
+        self,
+        messages: list[ChatMessage],
+        tools: Sequence[Mapping[str, object]],
+        remaining_seconds: float,
+        *,
+        force: bool = False,
+    ) -> tuple[list[ChatMessage], bool]:
+        """Runtime compaction at the threshold, or forced when the next request
+        does not fit; returns the conversation and whether it was compacted."""
+
+        if self.compactor is None:
+            return messages, False
+        result = self.compactor.compact(
+            messages, tools=tools, remaining_seconds=remaining_seconds, force=force
+        )
+        if result is None:
+            return messages, False
+        self.record(TraceEvent.CONTEXT_COMPACTION, dict(result.event))
+        # An ``ok`` compaction always drops messages older than the retained
+        # tail; a failed one hands the history back unchanged.
+        return list(result.messages), result.event.get("status") == "ok"
+
+    def fit(
+        self,
+        messages: list[ChatMessage],
+        tools: Sequence[Mapping[str, object]],
+        remaining_seconds: float,
+    ) -> tuple[list[ChatMessage], int]:
+        """Fit the next request into the window; return it with its output cap.
+
+        A request whose full output budget does not fit is compacted (forced),
+        then its largest tool results are summarized in place. What still does
+        not fit follows the gateway's own line: it goes out with a smaller
+        output ceiling while ``CONTEXT_OUTPUT_MIN_TOKENS`` remain after the
+        margin, and otherwise fails here, before the network, with the
+        gateway's overflow error — a request known not to fit is never sent.
+        The cap is the gateway's clamp of the configured ceiling, so the caller
+        sends it as is and a reply cut at a lowered cap still reads as
+        truncated.
+        """
+
+        requested = self.max_tokens
+        fits, prompt_tokens, context_window = context_request_fits(
+            self.llm, messages, tools=tools, max_tokens=requested
+        )
+        if not fits:
+            messages, _ = self.compact(messages, tools, remaining_seconds, force=True)
+            fits, prompt_tokens, context_window = context_request_fits(
+                self.llm, messages, tools=tools, max_tokens=requested
+            )
+        if not fits:
+            messages, edit = fit_tool_results_to_context(
+                self.llm,
+                messages,
+                tools=tools,
+                max_tokens=requested,
+                result_store=self.result_store,
+            )
+            if edit:
+                self.record(TraceEvent.CONTEXT_EDIT, edit)
+            fits, prompt_tokens, context_window = context_request_fits(
+                self.llm, messages, tools=tools, max_tokens=requested
+            )
+        if not fits and context_window is None:
+            raise RuntimeError(
+                "context window is unavailable after the request did not fit"
+            )
+        available, prompt_fits = clamp_requested_max_tokens(
+            requested_max_tokens=requested,
+            estimated_prompt_tokens=prompt_tokens,
+            context_window=context_window,
+            output_shares_window=output_shares_context_window(self.llm),
+        )
+        if fits:
+            return messages, available
+        # Nothing more can be freed. The gateway refuses only a prompt that
+        # leaves no room, so the send/fail line is its clamp, with a usable
+        # minimum output on top.
+        if prompt_fits and available >= CONTEXT_OUTPUT_MIN_TOKENS:
+            self.record(
+                TraceEvent.CONTEXT_OUTPUT_CLAMPED,
+                {
+                    "estimated_prompt_tokens": prompt_tokens,
+                    "context_window": context_window,
+                    "requested_max_output_tokens": requested,
+                    "available_output_tokens": available,
+                },
+            )
+            return messages, available
+        raise context_overflow_error(
+            estimated_prompt_tokens=prompt_tokens,
+            max_tokens=requested,
+            context_window=context_window,
+        )
+
+    def recover(
+        self,
+        messages: list[ChatMessage],
+        tools: Sequence[Mapping[str, object]],
+        remaining_seconds: float,
+    ) -> tuple[list[ChatMessage], bool]:
+        """The recovery after an overflow error, the provider's or ``fit``'s
+        own: forced compaction, then at least one tool-result summary unless
+        the compaction already changed the request. Returns whether anything
+        changed; the caller allows it once per conversation."""
+
+        recovered, compacted = self.compact(
+            messages, tools, remaining_seconds, force=True
+        )
+        recovered, edit = fit_tool_results_to_context(
+            self.llm,
+            recovered,
+            tools=tools,
+            max_tokens=self.max_tokens,
+            force=not compacted,
+            result_store=self.result_store,
+        )
+        if edit:
+            self.record(
+                TraceEvent.CONTEXT_EDIT,
+                {**edit, "reason": "provider_context_overflow_recovery"},
+            )
+        return recovered, compacted or bool(edit)
 
 
 def compact_with_summary(

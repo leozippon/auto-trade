@@ -33,12 +33,10 @@ from autotrade.environment.llm import (
     ProviderRefusalError,
     ProviderResponse,
     ToolCall,
+    cache_write_tokens,
     cached_prompt_tokens,
-    clamp_requested_max_tokens,
-    context_request_fits,
     is_context_overflow_error,
     malformed_tool_call_messages,
-    output_shares_context_window,
 )
 from autotrade.environment.llm.openai_compatible import REASONING_EFFORTS
 from autotrade.environment.runtime import sanitize_for_log
@@ -63,8 +61,8 @@ from autotrade.environment.trace import TraceEvent
 
 from .compact import (
     ContextCompactor,
+    ContextFitter,
     drop_trailing_unanswered_tool_calls,
-    fit_tool_results_to_context,
     safe_error_summary,
 )
 from .prompts import FILE_PATH_RULE, PATH_RULES_BULLET
@@ -700,7 +698,25 @@ class SubAgentEngine(SessionTimeBudgetAware):
         task_id = task_id or f"{SUBAGENT_TASK_ID_PREFIX}{uuid.uuid4().hex[:12]}"
         llm = llm_with_thinking(self.llm, thinking)
         thinking_applied = llm is not self.llm
-        compactor = self.compactor.fresh() if self.compactor is not None else None
+        # The parent loop's own context discipline, over this child's model
+        # and a fresh instance of the compactor. The record is late-bound: it
+        # names the turn it was made in.
+        context = ContextFitter(
+            llm,
+            max_tokens=self.config.max_tokens,
+            compactor=self.compactor.fresh() if self.compactor is not None else None,
+            result_store=self.tools.result_store(),
+            record=lambda event, payload: self._record_context(
+                event,
+                payload,
+                {
+                    "task_id": task_id,
+                    "role": role,
+                    "turn": turns,
+                    "parent_call_id": parent_call_id,
+                },
+            ),
+        )
         started = {
             "task_id": task_id,
             "role": role,
@@ -746,7 +762,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 messages.extend(forked)
                 brief = f"{INHERITED_CONTEXT_BOUNDARY.format(role=role)}\n\n{brief}"
         messages.append(ChatMessage("user", brief))
-        usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        usage = new_token_totals()
         turns = 0
         tool_calls_made = 0
         summary = ""
@@ -813,17 +829,15 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         },
                     )
                 provider_tools = self._provider_tools(allowed)
-                messages, output_tokens = self._fit_context(
-                    compactor,
-                    llm,
-                    messages,
-                    provider_tools,
-                    task_id=task_id,
-                    role=role,
-                    turn_index=turns,
-                    parent_call_id=parent_call_id,
+                messages, _ = context.compact(
+                    messages, provider_tools, self._remaining_seconds()
                 )
                 try:
+                    # A request that cannot be made to fit fails here, before
+                    # the gateway, and is handled as the overflow it is.
+                    messages, output_tokens = context.fit(
+                        messages, provider_tools, self._remaining_seconds()
+                    )
                     response = llm.complete(
                         messages,
                         tools=provider_tools,
@@ -860,17 +874,8 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         status = "refused"
                         break
                     if is_context_overflow_error(exc) and not overflow_recovery_used:
-                        messages, progressed = self._recover_context_overflow(
-                            compactor,
-                            llm,
-                            messages,
-                            provider_tools,
-                            identity={
-                                "task_id": task_id,
-                                "role": role,
-                                "turn": turns,
-                                "parent_call_id": parent_call_id,
-                            },
+                        messages, progressed = context.recover(
+                            messages, provider_tools, self._remaining_seconds()
                         )
                         if progressed:
                             overflow_recovery_used = True
@@ -911,7 +916,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 # not this child's outcome.
                 error = ""
                 malformed_reissue_used = False
-                _add_usage(usage, response.usage)
+                accumulate_usage(usage, response.usage)
                 cut_off = output_truncated(response.usage, output_tokens)
                 truncated_turns += int(cut_off)
                 messages.append(
@@ -1048,15 +1053,11 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     )
                 )
                 provider_tools = self._provider_tools(allowed)
-                messages, output_tokens = self._fit_context(
-                    compactor,
-                    llm,
-                    messages,
-                    provider_tools,
-                    task_id=task_id,
-                    role=role,
-                    turn_index=turns,
-                    parent_call_id=parent_call_id,
+                messages, _ = context.compact(
+                    messages, provider_tools, self._remaining_seconds()
+                )
+                messages, output_tokens = context.fit(
+                    messages, provider_tools, self._remaining_seconds()
                 )
                 response = llm.complete(
                     messages,
@@ -1065,7 +1066,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     max_tokens=output_tokens,
                 )
                 llm_calls += 1
-                _add_usage(usage, response.usage)
+                accumulate_usage(usage, response.usage)
                 self._emit(
                     TraceEvent.SUBAGENT_LLM,
                     {
@@ -1149,146 +1150,30 @@ class SubAgentEngine(SessionTimeBudgetAware):
         )
         return result, tuple(messages)
 
-    def _fit_context(
+    def _record_context(
         self,
-        compactor: ContextCompactor | None,
-        llm: LLMProxy,
-        messages: list[ChatMessage],
-        provider_tools: tuple[dict[str, object], ...],
-        *,
-        task_id: str,
-        role: str,
-        turn_index: int,
-        parent_call_id: str | None,
-    ) -> tuple[list[ChatMessage], int]:
-        """The parent loop's context discipline before one child request.
+        event: TraceEvent,
+        payload: dict[str, object],
+        identity: Mapping[str, object],
+    ) -> None:
+        """File one context-fitter record under this child's identity, nested
+        so a compaction's own ``status``/``summary`` never reads as the child's
+        outcome or report. A lowered output cap has no sub-agent event: that
+        request still fits."""
 
-        Semantic compaction at the shared threshold (forced when the request
-        does not fit), then the emergency in-place tool-result summary; a
-        request that still does not fit fails at the gateway, after which the
-        child gets the parent's single post-provider overflow recovery
-        (``_recover_context_overflow``) and then ends instead of retrying.
-        """
-
-        output_tokens = self._output_tokens(llm, messages, provider_tools)
-        identity = {
-            "task_id": task_id,
-            "role": role,
-            "turn": turn_index,
-            "parent_call_id": parent_call_id,
-        }
-        if compactor is not None:
-            fits, _prompt_tokens, _window = context_request_fits(
-                llm, messages, tools=provider_tools, max_tokens=output_tokens
-            )
-            result = compactor.compact(
-                messages,
-                tools=provider_tools,
-                remaining_seconds=self._remaining_seconds(),
-                force=not fits,
-            )
-            if result is not None:
-                # Nested: the compaction record's own ``status``/``summary``
-                # must not read as the child's outcome or report.
-                self._emit(
-                    TraceEvent.SUBAGENT_CONTEXT_COMPACTION,
-                    {**identity, "compaction": dict(result.event)},
-                )
-                messages = list(result.messages)
-                output_tokens = self._output_tokens(llm, messages, provider_tools)
-        messages, edit = fit_tool_results_to_context(
-            llm,
-            messages,
-            tools=provider_tools,
-            max_tokens=output_tokens,
-            result_store=self.tools.result_store(),
-        )
-        if edit:
-            self._emit(TraceEvent.SUBAGENT_CONTEXT_EDIT, {**identity, "context_edit": edit})
-            output_tokens = self._output_tokens(llm, messages, provider_tools)
-        return messages, output_tokens
-
-    def _recover_context_overflow(
-        self,
-        compactor: ContextCompactor | None,
-        llm: LLMProxy,
-        messages: list[ChatMessage],
-        provider_tools: tuple[dict[str, object], ...],
-        *,
-        identity: dict[str, object],
-    ) -> tuple[list[ChatMessage], bool]:
-        """The parent's sole post-provider overflow recovery, for one child.
-
-        The provider is authoritative: when it refused a request the local
-        estimate called fitting, force one compaction and guarantee one
-        tool-result edit, exactly as ``AgentSessionRunner`` does once per
-        session. Returns whether the conversation changed at all.
-        """
-
-        recovered = messages
-        compacted = False
-        if compactor is not None:
-            result = compactor.compact(
-                recovered,
-                tools=provider_tools,
-                remaining_seconds=self._remaining_seconds(),
-                force=True,
-            )
-            if result is not None:
-                self._emit(
-                    TraceEvent.SUBAGENT_CONTEXT_COMPACTION,
-                    {**identity, "compaction": dict(result.event)},
-                )
-                compacted = result.event.get("status") == "ok" and tuple(
-                    result.messages
-                ) != tuple(recovered)
-                recovered = list(result.messages)
-        recovered, edit = fit_tool_results_to_context(
-            llm,
-            recovered,
-            tools=provider_tools,
-            max_tokens=self._output_tokens(llm, recovered, provider_tools),
-            force=not compacted,
-            result_store=self.tools.result_store(),
-        )
-        if edit:
+        if event == TraceEvent.CONTEXT_COMPACTION:
             self._emit(
-                TraceEvent.SUBAGENT_CONTEXT_EDIT,
-                {
-                    **identity,
-                    "context_edit": {
-                        **edit,
-                        "reason": "provider_context_overflow_recovery",
-                    },
-                },
+                TraceEvent.SUBAGENT_CONTEXT_COMPACTION, {**identity, "compaction": payload}
             )
-        return recovered, compacted or bool(edit)
+        elif event == TraceEvent.CONTEXT_EDIT:
+            self._emit(
+                TraceEvent.SUBAGENT_CONTEXT_EDIT, {**identity, "context_edit": payload}
+            )
 
     def _remaining_seconds(self) -> float:
         if self.time_budget is None:
             return float("inf")
         return max(self.time_budget.remaining() - self.parent_reserve_seconds, 0.0)
-
-    def _output_tokens(
-        self,
-        llm: LLMProxy,
-        messages: Sequence[ChatMessage],
-        tools: Sequence[object],
-    ) -> int:
-        requested = self.config.max_tokens
-        _fits, prompt_tokens, resolved_window = context_request_fits(
-            llm,
-            messages,
-            tools=tuple(tools),  # type: ignore[arg-type]
-            max_tokens=requested,
-        )
-        clamped, _prompt_fits = clamp_requested_max_tokens(
-            requested_max_tokens=requested,
-            estimated_prompt_tokens=max(prompt_tokens, 1),
-            context_window=resolved_window,
-            output_shares_window=output_shares_context_window(llm),
-        )
-        return clamped
 
     def _provider_tools(self, allowed: frozenset[str]) -> tuple[dict[str, object], ...]:
         visible = {spec.name for spec in self.tools.specs() if spec.name in allowed}
@@ -1395,6 +1280,61 @@ def output_truncated(usage: object, max_tokens: int) -> bool:
     )
 
 
+def new_token_totals() -> dict[str, int]:
+    """One conversation's token counters, the session's and each child's."""
+
+    return dict.fromkeys(
+        (
+            "llm_calls_with_usage",
+            "prompt_tokens",
+            "completion_tokens",
+            "total_tokens",
+            "reasoning_tokens",
+            "cache_hit_tokens",
+            "cache_miss_tokens",
+            "cache_write_tokens",
+        ),
+        0,
+    )
+
+
+def accumulate_usage(total: dict[str, int], usage: object) -> None:
+    """Add one call's usage to ``new_token_totals`` counters; shared with the
+    parent session runner, which imports it from here.
+
+    A miss is a prompt token not read from the cache, the call's cache writes
+    included; hits and misses are summed only from a usage that reports a
+    cache count, because one without (vLLM) leaves its hit rate unknown, not
+    zero. Reasoning comes from ``completion_tokens_details`` or, in the
+    responses dialect, ``output_tokens_details``.
+
+    Cache hits are only realized while the request prefix (system prompt +
+    tool schemas + early history) stays byte-stable; semantic compaction and
+    emergency tool-result fitting rewrite history and reset that prefix.
+    """
+
+    if not isinstance(usage, dict):
+        return
+    total["llm_calls_with_usage"] += 1
+    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(key)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total[key] += int(value)
+    cached = cached_prompt_tokens(usage)
+    prompt = usage.get("prompt_tokens")
+    if cached is not None:
+        total["cache_hit_tokens"] += cached
+        if isinstance(prompt, (int, float)) and not isinstance(prompt, bool):
+            total["cache_miss_tokens"] += max(int(prompt) - cached, 0)
+    total["cache_write_tokens"] += cache_write_tokens(usage)
+    for key in ("completion_tokens_details", "output_tokens_details"):
+        details = usage.get(key)
+        reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+        if isinstance(reasoning, (int, float)) and not isinstance(reasoning, bool):
+            total["reasoning_tokens"] += int(reasoning)
+            break
+
+
 def _recovered_summary(
     response: ProviderResponse, messages: Sequence[ChatMessage]
 ) -> str:
@@ -1466,22 +1406,6 @@ def _clip_traced(value: object) -> object:
     if isinstance(value, str) and len(value) > TRACE_ARGUMENT_MAX_CHARS:
         return f"{value[: TRACE_ARGUMENT_MAX_CHARS - 1]}…"
     return value
-
-
-def _add_usage(total: dict[str, int], usage: object) -> None:
-    """Sum one call's usage. ``cache_hit_tokens`` appears only once a call
-    reports a cache count: one without (vLLM) leaves the hit rate unknown,
-    not zero."""
-
-    if not isinstance(usage, dict):
-        return
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        value = usage.get(key)
-        if isinstance(value, int) and not isinstance(value, bool):
-            total[key] += value
-    cached = cached_prompt_tokens(usage)
-    if cached is not None:
-        total["cache_hit_tokens"] = total.get("cache_hit_tokens", 0) + cached
 
 
 def _reject_tool_call(
