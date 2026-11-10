@@ -711,20 +711,30 @@ def test_an_attempt_that_died_after_its_last_test_completes_without_a_session(tm
 def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_experiment(tmp_path: Path):
     """A session the host ended on its environment ends the attempt, not the
     research: the next attempt resumes from the test horizon and the record. Only
-    when the attempts are spent does the experiment end ``environment_blocked``, with
-    nothing registered and no replay to follow."""
+    the third environment block ends the experiment ``environment_blocked``, with
+    nothing registered and no replay to follow; an attempt that failed
+    otherwise is not an environment block and does not count toward it."""
 
     reason = "span full: 2 batches failed on the environment in every candidate; last error: ArrowTypeError"
     plan = {attempt: ([], "environment_blocked", {"reason": reason}) for attempt in (1, 2, 3)}
     pipeline, *_rest, ledger = _pipeline(tmp_path, plan)
-    for attempt in (1, 2):
+    developer = pipeline.developer
+
+    def crash(_request):
+        raise RuntimeError("session container died")
+
+    pipeline.developer = crash
+    with pytest.raises(RuntimeError, match="container died"):
+        pipeline.run_research_session()
+    pipeline.developer = developer
+    for blocks in (1, 2):
         with pytest.raises(EnvironmentBlockedAttempt, match="2 batches failed"):
             pipeline.run_research_session()
         rows = ledger.read()
-        assert [row["record_type"] for row in rows] == ["attempt_failed"] * attempt
+        assert [row["record_type"] for row in rows] == ["attempt_failed"] * (1 + blocks)
         assert "EnvironmentBlockedAttempt" in str(rows[-1]["error"]) and not research_over(rows)
     record = pipeline.run_research_session()
-    assert (record["outcome"], record["attempts"], record["registered"]) == ("environment_blocked", 3, None)
+    assert (record["outcome"], record["attempts"], record["registered"]) == ("environment_blocked", 4, None)
     assert record["experiment_end"] == {"status": "environment_blocked", "reason": reason}
     assert research_over(ledger.read())
     assert experiment_verdict(ledger.read()) == {"status": "environment_blocked", "reasons": [reason]}

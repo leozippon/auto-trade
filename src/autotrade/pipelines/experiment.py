@@ -148,6 +148,23 @@ class EnvironmentBlockedAttempt(RuntimeError):
     and the record."""
 
 
+def _environment_blocks(records: Sequence[Mapping[str, object]]) -> int:
+    """How many of the research session's failed attempts ended on an
+    environment block: the ``attempt_failed`` rows whose error names
+    :class:`EnvironmentBlockedAttempt`, as ``run_research_session`` writes it.
+    Attempts that failed otherwise (a dead container, a killed worker) are
+    not environment failures and are not counted."""
+
+    prefix = f"{EnvironmentBlockedAttempt.__name__}:"
+    return sum(
+        1
+        for record in records
+        if record.get("record_type") == "attempt_failed"
+        and record.get("phase") == Stage.RESEARCH
+        and str(record.get("error") or "").startswith(prefix)
+    )
+
+
 class DailyStrategyPipeline:
     def __init__(
         self,
@@ -349,7 +366,8 @@ class ExperimentPipeline:
         host: the last tested candidate is registered, or before any test the last
         registrable full-span candidate; with none the experiment ends without a
         deliverable. An environment block ends the attempt, not the research,
-        until the experiment's attempts are spent, when it ends ``environment_blocked``
+        until the ``session_max_attempts``-th environment block (attempts that
+        failed otherwise do not count), which ends it ``environment_blocked``
         with nothing registered. The record always carries ``registered`` or
         ``experiment_end`` and research is over once it is written. An attempt that
         failed before that record is continued, not repeated: the next attempt
@@ -429,7 +447,7 @@ class ExperimentPipeline:
             experiment_end: dict[str, object] | None = None
             tests = test_step_records(self.ledger.read())
             if session.outcome == ENVIRONMENT_BLOCKED:
-                if session.attempt < self.config.session_max_attempts:
+                if 1 + _environment_blocks(records) < self.config.session_max_attempts:
                     # The attempt ends, the research does not: the next one
                     # resumes from the test horizon and the record.
                     raise EnvironmentBlockedAttempt(session.reason)
@@ -544,6 +562,7 @@ class ExperimentPipeline:
                     {
                         **attempt,
                         "record_type": "attempt_failed",
+                        # Led by the type name, which ``_environment_blocks`` reads.
                         "error": f"{type(exc).__name__}: {exc}",
                     }
                 )
