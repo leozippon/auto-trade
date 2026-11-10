@@ -604,14 +604,13 @@ def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: P
         ("readoutStagePanel", reads("readoutStagePanel", "attempts"), set(detail["replay_attempts"])),
         ("readoutStagePanel", reads("readoutStagePanel", "validations"), set(detail["research_validation_failures"])),
         ("readoutStagePanel", reads("readoutStagePanel", "research"), record),
+        ("readoutRule", reads("readoutRule", "t"), set(replay["thresholds"])),
         ("replaySpanBar", reads("replaySpanBar", "replay"), set(replay["replay"])),
         ("experimentEquityHost", reads("experimentEquityHost", "item"), set(detail)),
         ("stepper", set(re.findall(r'^  (\w+): "', _js_literal("const STEP_LABELS = {", "\n};"), re.MULTILINE)), {"research", "registered", "forward", "heldout", "readout"}),
     ):
         assert read, name
         assert read <= served, (name, sorted(read - served))
-    # The same threshold keys are served before the replay, from the plan.
-    assert {"alpha", "threshold"} <= set(replay["thresholds"])
     # The stage views' statistics rows are statistics their own slice carries,
     # and every row defined is one a view selects: two rows (残差跟踪误差, IR)
     # sat in the table definition that neither stage ever drew.

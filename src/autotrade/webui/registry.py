@@ -432,7 +432,6 @@ def _forward_view(
 
     if record is None:
         return None
-    null = as_mapping(record.get("null_control"))
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
@@ -443,8 +442,6 @@ def _forward_view(
             for name, block in as_mapping(record.get("slices")).items()
             if isinstance(block, Mapping)
         },
-        # Diagnostic: the forward slice's excess among random-name replays.
-        "null_percentile": finite_number(as_mapping(null.get("step")).get("excess_percentile")),
         # The experiment's readout (``validation_record.readout``).
         "readout": dict(as_mapping(record.get("readout"))),
     }

@@ -2934,8 +2934,7 @@ function processListPanel(detail, selectedKey) {
 }
 
 // One row per statistic of the forward and Held-out slices (verdict.py). A row
-// whose name states a threshold reads it from the same `thresholds` block the
-// criteria do, so the table and the checklist above it never disagree.
+// whose name states a parameter reads it from the slice's own `parameters`.
 // The holder's readings lead: account, benchmark, the raw excess between them,
 // the random baseline and the plain selection against it, then the active series the
 // gates grade and its market loading.
@@ -2993,10 +2992,10 @@ const HELDOUT_STAT_FIELDS = [
 /* One slice's statistics, the rows it carries only. Null before the record.
    The holder's readings sit in the slice's `raw_readings` block and are read
    as rows of the same table. */
-function sliceStats(slice, fields, thresholds) {
+function sliceStats(slice, fields) {
   if (!slice) return null;
-  // A slice recorded since 2026-11-03 states what its readings were taken at.
-  const t = { ...(slice.parameters || {}), ...(thresholds || {}) };
+  // The slice states what its readings were taken at.
+  const t = slice.parameters || {};
   const values = {
     ...slice,
     ...(slice.raw_readings || {}),
@@ -3107,8 +3106,9 @@ function mandateRows(capToken, bandToken, measured, row, t) {
   ];
 }
 
-/* What the three replay stages share: the plan's replay span, the thresholds
-   (the record's own once it exists), and how far a running replay has got. */
+/* What the three replay stages share: the plan's replay span, how the record
+   will be read (the experiment's own stamped rules), and how far a running
+   replay has got. */
 function replayContext(detail) {
   const forward = detail.forward;
   const session = (detail.sessions || []).find((entry) => entry.kind === "forward") || {};
@@ -3187,7 +3187,7 @@ function forwardPoolBlock(readouts) {
    once recorded the holder's line and its seed replicates, and the slice's
    own statistics. Reported, never judged. */
 function forwardStagePanel(detail) {
-  const { forward, replay, thresholds, progress } = replayContext(detail);
+  const { forward, replay, progress } = replayContext(detail);
   const f = ((forward || {}).slices || {}).forward;
   return el(
     "div",
@@ -3198,7 +3198,7 @@ function forwardStagePanel(detail) {
     holderLine("前推", f),
     seedReadingsTable((forward || {}).slices, ["forward"]),
     el("div", { class: "meta-line section-gap" }, "前推读数只报告，不作判定"),
-    sliceStats(f, FORWARD_STAT_FIELDS, thresholds),
+    sliceStats(f, FORWARD_STAT_FIELDS),
     forwardPoolBlock(detail.readouts),
     forward && forward.result ? styleCard(detail.experiment_id, forward.result) : null,
     forward && forward.result
@@ -3212,7 +3212,7 @@ function forwardStagePanel(detail) {
 
 /* Held-out: the tail of the same replay — its span and its statistics. */
 function heldoutStagePanel(detail) {
-  const { forward, replay, thresholds, progress } = replayContext(detail);
+  const { forward, replay, progress } = replayContext(detail);
   const h = ((forward || {}).slices || {}).heldout;
   return el(
     "div",
@@ -3224,7 +3224,7 @@ function heldoutStagePanel(detail) {
     holderLine("Held-out", h),
     seedReadingsTable((forward || {}).slices, ["heldout"]),
     el("div", { class: "meta-line section-gap" }, "Held-out 读数只报告，不作判定"),
-    sliceStats(h, HELDOUT_STAT_FIELDS, thresholds),
+    sliceStats(h, HELDOUT_STAT_FIELDS),
   );
 }
 
@@ -3237,7 +3237,7 @@ function heldoutStagePanel(detail) {
    and when it was recorded; and the Paper handoff. Nothing judges. An ending no
    replay decided has the reason alone; before any, the rule and 待记录. */
 function readoutStagePanel(detail) {
-  const { forward } = replayContext(detail);
+  const { forward, thresholds } = replayContext(detail);
   const slices = forward ? forward.slices || {} : {};
   const readout = (forward || {}).readout;
   const research = ((detail.sessions || []).find((entry) => entry.kind === "research") || {}).record;
@@ -3270,16 +3270,22 @@ function readoutStagePanel(detail) {
     seedReadingsTable(slices, ["forward", "heldout"]),
     forward
       ? null
-      : endingReason(detail) ||
-          el(
-            "div",
-            { class: "meta-line" },
-            "验证期走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；记录的残差 IR 不低于门槛写作通过，否则未通过，只是读法，不把关任何事",
-          ),
+      : endingReason(detail) || el("div", { class: "meta-line" }, readoutRule(thresholds || {})),
     validationWindowBlock(detail.readouts),
     forwardPoolBlock(detail.readouts),
     facts.length ? el("table", { class: "kv section-gap" }, ...facts) : null,
     paperHandoff(detail),
+  );
+}
+
+/* How the record will be read, before it exists, in the experiment's own
+   stamped rules (registry._verdict_thresholds): the research years, the
+   validation period and its step, and the threshold a record over the whole
+   period is held to at the experiment's level. */
+function readoutRule(t) {
+  return (
+    `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；` +
+    `整段记录的残差 IR 不低于门槛（约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）写作通过，否则未通过，只是读法，不把关任何事`
   );
 }
 

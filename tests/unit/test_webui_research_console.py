@@ -667,6 +667,21 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     }
     recorded = experiment_detail(tmp_path, "judged")["forward"]["readout"]["record"]
     assert isinstance(recorded["threshold"], float)
+    # The readout view words exactly these before the record exists.
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            *(_fn(script, name) for name in ("fmtSharpe", "readoutRule")),
+            f"console.log(readoutRule({json.dumps(preview)}));",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.startswith("1 个研究年之后的验证期 3 年按 3 个月一步走完或预算用尽后，")
+    assert "门槛（约 0.95，α = 0.05）写作通过，否则未通过" in result.stdout
+    assert "readoutRule(thresholds || {})" in _fn(script, "readoutStagePanel")
 
 
 def _sidecar(directory: Path, row: dict[str, object]) -> Path:
