@@ -30,7 +30,9 @@ _YYYYMMDD = re.compile(r"^\d{8}$")
 
 HELP = """\
 Screen one cross-sectional, long-only signal on the visible decision view in
-under a minute, before spending a validation replay on it. Measured on a
+under a minute, before spending a validation replay on it. The signal is any
+daily cross-sectional score, a single factor or a learned model's rolling
+out-of-sample predictions alike. Measured on a
 two-year view (about 490 days x 5,000 names, four horizons): 10-45 s of wall
 time depending on host load, peak memory under 1 GB — roughly 100x cheaper
 than one replay.
