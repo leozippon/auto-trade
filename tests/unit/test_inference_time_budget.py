@@ -29,6 +29,7 @@ from autotrade.environment.llm import (
     ToolCall,
     token_prices,
 )
+from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -209,6 +210,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         time_budget=time_budget,
         ref_store=ref_store,
         ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
+        manifest=RunManifest.create(tmp_path / "run_manifest.json", {}, ref_store=ref_store),
         experiment_dir=experiment,
     )
     working_copy = {
@@ -808,6 +810,10 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
         time_budget=backtest_budget,
         ref_store=AgentRefStore(tmp_path / "experiment"),
         ledger=ExperimentLedger(tmp_path / "ledger.jsonl"),
+        manifest=RunManifest.create(
+            tmp_path / "run_manifest.json", {}, ref_store=AgentRefStore(tmp_path / "experiment")
+        ),
+        experiment_dir=tmp_path / "experiment",
     )
     main = SessionBudgetLLM(
         ScriptedLLM([]),

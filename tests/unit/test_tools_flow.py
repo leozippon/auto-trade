@@ -2082,7 +2082,7 @@ class SpillAndRootContractTest(unittest.TestCase):
             self.assertIn("tools in this session: glob, read_file", unknown.error)
 
 
-def _fold_backtest_tool(
+def _validate_tool(
     tmp: Path, trades: int, *, tree=None, evaluator=None, manifest=None
 ):
     """A batch_validate tool over a fake evaluator, with its host paths; the
@@ -2092,6 +2092,7 @@ def _fold_backtest_tool(
     from autotrade.common.records import write_json_atomic
     from autotrade.environment.artifacts import FilesystemArtifactStore
     from autotrade.environment.identity import AgentRefStore
+    from autotrade.environment.runtime import RunManifest
     from autotrade.environment.step_tree import StepTree
     from autotrade.environment.time_budget import InferenceTimeBudget
     from autotrade.pipelines.config import (
@@ -2176,7 +2177,8 @@ def _fold_backtest_tool(
         time_budget=InferenceTimeBudget(duration_seconds=600.0),
         ref_store=AgentRefStore(experiment),
         ledger=ExperimentLedger(tmp / "ledger.jsonl"),
-        manifest=manifest,
+        manifest=manifest
+        or RunManifest.create(tmp / "run_manifest.json", {}, ref_store=AgentRefStore(experiment)),
         experiment_dir=experiment,
     )
     tool = ValidateTool(
@@ -2196,20 +2198,20 @@ WORKING_COPY = {
 }
 
 
-class FoldBacktestResultBudgetTest(unittest.TestCase):
+class ValidateResultSizeTest(unittest.TestCase):
     """A Validation row is the one payload that scales with the replay.
 
     The observation the model keeps for the rest of the session must stay a
     fixed-cost summary, and the reference it hands back for the full record
     must resolve through the Agent's own read path — a dangling reference costs
     a round of blind searching, and an inline per-position block once forced a
-    mid-Fold context compaction.
+    mid-session context compaction.
     """
 
 
     def test_inline_result_stays_in_budget_and_the_reference_reads_back(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
-            paths, tool, summary = _fold_backtest_tool(Path(tmp), 5000)
+            paths, tool, summary = _validate_tool(Path(tmp), 5000)
             result = ToolRegistry([tool]).invoke("validate", WORKING_COPY)
             self.assertTrue(result.ok, result.error)
             rendered = json.dumps(result.value, ensure_ascii=False, default=str)
@@ -2244,20 +2246,20 @@ class FoldBacktestResultBudgetTest(unittest.TestCase):
                 return super().record_step(output_root, **kwargs)
 
         with tempfile.TemporaryDirectory() as tmp:
-            _, tool, _ = _fold_backtest_tool(Path(tmp), 5, tree=TreeWithoutAttachments)
+            _, tool, _ = _validate_tool(Path(tmp), 5, tree=TreeWithoutAttachments)
             result = ToolRegistry([tool]).invoke("validate", WORKING_COPY)
             self.assertFalse(result.ok)
             self.assertIn("attachment is missing", result.error)
 
 
-class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
+class ValidateSnapshotAccountingTest(unittest.TestCase):
     """A formal call replays a snapshot, and one that never held is not an attempt.
 
     The Agent and its children keep running during a Validation, so the replay
     reads an immutable copy of the artifact taken at approval time rather than
     the live tree. That copy has to be the bytes the modification check just
     approved; when it is not, no revision was evaluated, so the call must cost
-    none of the Fold's handful of Validation slots — and a lost session sandbox
+    nothing against the interval's validate allowance — and a lost session sandbox
     must abort the session instead of reaching the Agent as a strategy failure
     it could try to fix.
     """
@@ -2272,7 +2274,7 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
     def test_a_snapshot_that_never_holds_costs_no_backtest_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest = self._Manifest()
-            _, tool, _ = _fold_backtest_tool(Path(tmp), 5, manifest=manifest)
+            _, tool, _ = _validate_tool(Path(tmp), 5, manifest=manifest)
             approved = tool.modification_check_factory(tool.backtest.output_dir)
 
             class DriftingCheck:
@@ -2333,7 +2335,7 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
                     self.output.write_text("# written mid-replay\n", encoding="utf-8")
                     return self.inner.evaluate(request, max_days=max_days)
 
-            paths, tool, _ = _fold_backtest_tool(root, 5)
+            paths, tool, _ = _validate_tool(root, 5)
             approved = (paths.agent / "output" / "main.py").read_text(encoding="utf-8")
             tool.backtest.evaluator = WritingEvaluator(
                 tool.backtest.evaluator, paths.agent / "output" / "main.py"
@@ -2363,7 +2365,7 @@ class FoldBacktestSnapshotAccountingTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             manifest = self._Manifest()
-            _, tool, _ = _fold_backtest_tool(
+            _, tool, _ = _validate_tool(
                 Path(tmp), 5, evaluator=InterruptedEvaluator(), manifest=manifest
             )
             # The registry re-raises a session interrupt instead of turning it

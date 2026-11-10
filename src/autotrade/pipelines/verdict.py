@@ -401,7 +401,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
     """One validation's graded series day by day, as the session reads it.
 
     One row per replayed day (``ACTIVE_DAILY_COLUMNS``), every column read off
-    the computations the gate itself runs on this sidecar: the strategy's
+    the computations every reading runs on this sidecar: the strategy's
     return and the random-baseline composite as stored, the active return
     :func:`style.active_analysis` grades -- its annualised mean over its
     annualised standard deviation is the active IR -- its
@@ -651,7 +651,7 @@ class ConditionStage(StrEnum):
 
 
 class ConditionReason(StrEnum):
-    """Every reason token a final registration records: one per condition of
+    """Every reason token a registration records: one per condition of
     :data:`CONDITIONS`, and the two a registration records when it never read
     a nominee. The values are persisted in ledger records."""
 

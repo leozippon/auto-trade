@@ -22,6 +22,7 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
 from autotrade.pipelines.config import ExperimentConfig
@@ -147,6 +148,10 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             time_budget=InferenceTimeBudget(duration_seconds=300),
             ref_store=AgentRefStore(root / "experiment"),
             ledger=ExperimentLedger(root / "ledger.jsonl"),
+            manifest=RunManifest.create(
+                root / "run_manifest.json", {}, ref_store=AgentRefStore(root / "experiment")
+            ),
+            experiment_dir=root / "experiment",
         )
         batch = ValidateTool(
             backtest=backtest,

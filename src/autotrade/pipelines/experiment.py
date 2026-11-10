@@ -98,7 +98,6 @@ from .ledger import (
     recorded_path,
     registered_record,
     research_over,
-    research_records,
 )
 from .session_resume import (
     REVISIONS_DIR,
@@ -340,16 +339,15 @@ class ExperimentPipeline:
         )
         return ValidationSteps.of(validation, self.config.acceptance.test_step_months)
 
-    def validation_span(self) -> ReplaySpan:
-        """The validation years as one span, replayed as one book from the
-        decision view at their first year and labelled ``validation``: what a
-        test replays up to its test horizon, and what the host completes a record
-        over."""
+    def validation_span(self, years: Sequence[ReplaySpan]) -> ReplaySpan:
+        """The validation years of ``years`` (every year of the geometry, as
+        :meth:`research_inputs` prepared them) as one span, replayed as one
+        book from the decision view at their first year and labelled
+        ``validation``: what a test replays up to its test horizon, and what
+        the host completes a record over."""
 
-        _research, validation = self.config.geometry.split_research(
-            self.config.acceptance.research_years
-        )
-        return replace(research_span(self.research_spans(validation), FULL_SPAN), label=VALIDATION_SPAN)
+        validation = years[self.config.acceptance.research_years :]
+        return replace(research_span(validation, FULL_SPAN), label=VALIDATION_SPAN)
 
     def run_research_session(
         self, *, session_context: dict[str, object] | None = None
@@ -381,8 +379,6 @@ class ExperimentPipeline:
         assert_no_registered_artifact_mutation(records)
         if research_over(records):
             raise RuntimeError("research is over; no further research session runs")
-        if research_records(records):
-            raise RuntimeError("the experiment's research session is already recorded")
         resume = resume_state(self.config.experiment_dir, records)
         steps_before = load_recorded_steps(self.config.experiment_dir)
         run_started = time.monotonic()
@@ -400,6 +396,7 @@ class ExperimentPipeline:
         try:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.RESEARCH)
             decision, years = self.research_inputs()
+            validation = self.validation_span(years)
             tests_before = tuple(test_step_records(records))
             budget_used = resume.budget_used if resume is not None else BudgetUsed()
             if len(tests_before) >= self.validation_steps().count:
@@ -422,7 +419,7 @@ class ExperimentPipeline:
                         snapshot=decision,
                         decision_time=self.research_view_time(),
                         years=years,
-                        validation=self.validation_span(),
+                        validation=validation,
                         tests_before=tests_before,
                         directive=str(context.get("directive") or ""),
                         sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
@@ -493,7 +490,12 @@ class ExperimentPipeline:
                     if session.outcome == "deadline":
                         _publish_progress(progress, "completing_record", run_id=run_id)
                         self.complete_record(
-                            registered, gate, tests, fingerprint=str(by_step[node_id]["fingerprint"]), run_id=run_id
+                            registered,
+                            gate,
+                            tests,
+                            validation=validation,
+                            fingerprint=str(by_step[node_id]["fingerprint"]),
+                            run_id=run_id,
                         )
             _publish_progress(progress, "publishing", run_id=run_id)
             skills = self._publish_or_keep_skills(
@@ -613,11 +615,13 @@ class ExperimentPipeline:
         gate: Mapping[str, object],
         tests: Sequence[Mapping[str, object]],
         *,
+        validation: ReplaySpan,
         fingerprint: str,
         run_id: str,
     ) -> list[dict[str, object]]:
         """Fill the validation record's remaining steps from one host replay of
-        the registered strategy over the whole validation period.
+        the registered strategy over the whole validation period
+        (``validation``, :meth:`validation_span`).
 
         The replay is the one a test would have run at the last step: the
         validation span as one fresh book with its matched random baseline, opened on
@@ -634,7 +638,7 @@ class ExperimentPipeline:
         if done >= steps.count:
             return []
         artifact = self._registered_artifact(registered)
-        span = self.validation_span()
+        span = validation
         request = span.request(
             _registered_revision(artifact),
             schedule=self.config.schedule,
@@ -1472,9 +1476,10 @@ def validation_statistics(result_ref: str) -> dict[str, object] | None:
     and loadings (``verdict.graded_statistics``).
 
     Every successful replay writes its style sidecar, so a missing or
-    unreadable one raises: dropping the row would silently narrow the registration
-    gate's IR dispersion. Only an unmeasurable span is None. The console's
-    live step listing reads its rows through this same function.
+    unreadable one raises rather than recording the row without its figures,
+    which a seed replicate's registration reads. Only an unmeasurable span is
+    None. The console's live step listing reads its rows through this same
+    function.
     """
 
     return _measured_or_none(result_analysis(result_ref))

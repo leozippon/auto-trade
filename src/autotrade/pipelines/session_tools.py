@@ -605,8 +605,8 @@ class SessionValidations:
         time_budget: InferenceTimeBudget,
         ref_store: AgentRefStore,
         ledger: ExperimentLedger,
-        manifest: RunManifest | None = None,
-        experiment_dir: Path | None = None,
+        manifest: RunManifest,
+        experiment_dir: Path,
     ) -> None:
         self.request = request
         # The run's acceptance rules (``AcceptanceRules.from_record``, which
@@ -739,17 +739,14 @@ class SessionValidations:
         register.
         """
 
-        rows = {
-            str(row["step_id"]): row for row in (research_step_record(item) for item in self.steps)
-        }
-        named = (node_id, *seed_replicates)
-        if any(step_id not in rows for step_id in named):
+        steps = {step.step_id: step for step in self.steps}
+        if any(step_id not in steps for step_id in (node_id, *seed_replicates)):
             return {"passed": False, "reasons": [ConditionReason.NOT_A_SESSION_STEP]}
         return check_registration(
-            rows[node_id],
+            research_step_record(steps[node_id]),
             experiment_dir=self.experiment_dir,
             acceptance=self.rules,
-            seed_replicates=[rows[step_id] for step_id in seed_replicates],
+            seed_replicates=[research_step_record(steps[step_id]) for step_id in seed_replicates],
         )
 
     def append_manifest_summary(self, summary: dict[str, object]) -> None:
@@ -757,8 +754,7 @@ class SessionValidations:
 
         It is the only durable per-run record of what the session actually ran.
         """
-        if self.manifest is not None:
-            self.manifest.append_backtest_summary(summary)
+        self.manifest.append_backtest_summary(summary)
 
     def commit_revision(
         self, source_output: Path, fingerprint: str, *, label: str
@@ -841,20 +837,17 @@ class SessionValidations:
             },
             metadata=metadata,
         )
-        if self.experiment_dir is not None:
-            record_step_sidecar(
-                self.experiment_dir,
-                recorded_step(
-                    node_id, revision.revision_id, evaluation, metadata or {}, fingerprint
-                ),
-            )
-            self.publish_tree()
+        record_step_sidecar(
+            self.experiment_dir,
+            recorded_step(node_id, revision.revision_id, evaluation, metadata or {}, fingerprint),
+        )
+        self.publish_tree()
         return node_id
 
     def publish_tree(self) -> None:
         """Publish the session's tree to the experiment, node snapshots included."""
 
-        if self.experiment_dir is not None and self.tree.tree_path.is_file():
+        if self.tree.tree_path.is_file():
             link_copytree(self.tree.root, self.experiment_dir / "steps")
 
     def validation_request(
@@ -2473,8 +2466,8 @@ class NullControlTool(SessionTimeBudgetAware):
             "excess_percentile near 0.5 means the names added nothing the timing "
             f"and sizing did not. At most {max_calls} calls per session "
             "(budgets.max_null_controls; a call the host cannot set up costs none); "
-            "refused for any other node, once spent, while a sub-agent that can "
-            "write runs, and in hard finalization. Use it on full-span finalists.",
+            "refused for any other node, once spent, and while a sub-agent that can "
+            "write runs. Use it on full-span finalists.",
             self.spec.input_schema,
             mutating=True,
             example=self.spec.example,

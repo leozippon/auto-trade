@@ -607,7 +607,7 @@ def test_a_resumed_attempt_continues_from_the_test_horizon_and_the_record(tmp_pa
     # The step the interrupted attempt tested: its candidate replayed from the
     # validation start to the first test horizon.
     replayed = evaluator.evaluate(
-        pipeline.validation_span().request(
+        pipeline.validation_span(pipeline.research_inputs()[1]).request(
             pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
         )
     )
@@ -665,7 +665,7 @@ def test_an_attempt_that_died_after_its_last_test_completes_without_a_session(tm
     [earlier] = load_recorded_steps(pipeline.config.experiment_dir)
     steps = pipeline.validation_steps()
     replayed = evaluator.evaluate(
-        pipeline.validation_span().request(
+        pipeline.validation_span(pipeline.research_inputs()[1]).request(
             pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
         )
     )
@@ -1196,8 +1196,9 @@ def test_the_null_control_seed_is_stable_per_key_and_role():
 
 
 def test_a_step_row_refuses_a_missing_style_sidecar(tmp_path: Path):
-    """A missing sidecar is a broken replay, not an unmeasurable span: dropping
-    the row would silently narrow the registration check's IR dispersion."""
+    """A missing sidecar is a broken replay, not an unmeasurable span: the row
+    is refused rather than recorded without the figures a seed replicate's
+    registration reads."""
 
     result = EvaluationResult({}, str(tmp_path / "result.json"))
     step = StepResult("research_step_1", "rev_1", result, span=FULL_SPAN, fingerprint="sha256:rev_1")

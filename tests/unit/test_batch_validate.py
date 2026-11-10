@@ -47,6 +47,7 @@ from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.replay.style import active_analysis
+from autotrade.environment.runtime import RunManifest
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -441,6 +442,9 @@ class _Session:
             time_budget=InferenceTimeBudget(duration_seconds=deadline_seconds),
             ref_store=AgentRefStore(root / "experiment"),
             ledger=ExperimentLedger(root / "ledger.jsonl"),
+            manifest=RunManifest.create(
+                root / "run_manifest.json", {}, ref_store=AgentRefStore(root / "experiment")
+            ),
             experiment_dir=experiment_dir,
         )
         self.workspace = SafeWorkspace(self.workspace_root)

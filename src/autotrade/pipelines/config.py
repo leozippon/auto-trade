@@ -229,7 +229,9 @@ class AcceptanceRules:
 
     # The registration's limit over the candidate's span, and the Paper account's
     # kill limits.
-    max_drawdown: float = _rule(0.45, "Equity drawdown limit of the final registration and of Paper.")
+    max_drawdown: float = _rule(
+        0.45, "Equity drawdown limit of a registration over the candidate's span, and of Paper."
+    )
     cost_stress_multiplier: float = _rule(
         2.0,
         "Forward reading: multiple of the profile's slippage its reported active excess is stressed at.",
@@ -1067,8 +1069,8 @@ class ResearchSessionRequest:
     # host path through Agent-visible facts or manifests.
     skills_source_ref: str = ""
     # What the session's earlier attempts consumed and recorded: the live
-    # counters continue from these amounts, the registration and the finish
-    # tool see these Validations, and ``resume`` says how the last attempt
+    # counters continue from these amounts, ``validate``, ``test`` and the
+    # registration see these Validations, and ``resume`` says how the last attempt
     # stopped. All empty on a first attempt.
     budget_used: BudgetUsed = field(default_factory=BudgetUsed)
     steps_before: tuple[StepResult, ...] = ()
@@ -1134,7 +1136,8 @@ class ResearchSessionResult:
     # ``environment_blocked``).
     node_id: str | None = None
     seed_replicates: tuple[str, ...] = ()
-    # The Agent's own account of its outcome.
+    # Why the host ended the session (an environment block's reason); empty
+    # for a session that completed or ran out of budget.
     reason: str = ""
     finish_reason: str = ""
     # Host path of this run's manifest.
