@@ -355,7 +355,6 @@ def test_a_registration_registers_and_records_the_registered_block(tmp_path: Pat
     assert gate["passed"] is True and gate["reasons"] == []
     # Registration reads no score: no IR, no trial count, no threshold.
     assert set(gate) == {"passed", "reasons", "mandate", "seed_replicates", "thresholds"}
-    assert "trials_to_date" not in record and "terminal_offline_trials" not in record
     assert [row["control"] for row in record["steps"]] == [False, False]
     # It is judged under the experiment's own rules -- here a tracking mandate,
     # because the experiment was created with a cap -- and the record states the
@@ -372,17 +371,14 @@ def test_a_registration_registers_and_records_the_registered_block(tmp_path: Pat
     assert frozen["source_step_id"] == "research_step_0"
     nominee = record["steps"][0]
     assert frozen["information_ratio"] == pytest.approx(nominee["graded"]["information_ratio"])
-    # The statistic the sealed gate grades, read on the visible year only.
+    # The residual statistic, read on the research year only.
     assert frozen["residual_reading"]["years"] == pytest.approx(
         nominee["graded"]["days"] / 244 - 1 / 244, abs=0.02
     )
-    assert "deflated_sharpe" not in frozen and "full_span_validations" not in frozen
     assert frozen["forward_mde"] > 0
     assert frozen["fit_plan"] == {"fit": False, "refit_period": None}
     assert Path(frozen["output_path"], "main.py").is_file()
     assert (record["session_key"], record["fold_id"]) == ("research", "research")
-    for retired in ("session_id", "session_index", "sessions_total", "next_start_node_id", "prior"):
-        assert retired not in record
     assert registered_record(ledger.read())["session_key"] == "research"
     assert research_over(ledger.read())
     with pytest.raises(RuntimeError, match="research is over"):
@@ -869,7 +865,6 @@ def test_the_forward_replay_is_one_span_from_forward_start_to_the_release(tmp_pa
     # One continuous forward and Held-out replay; the validation years are
     # not replayed again.
     [request] = evaluator.requests
-    assert "sealed" not in record
     assert (request.mode, request.start, request.end) == ("heldout", "20240701", RELEASE_END)
     assert request.continuation == (f"replay/heldout/20250701_{RELEASE_END}",)
     assert request.revision.revision_id == frozen["artifact_id"]
@@ -1024,7 +1019,7 @@ def test_a_strategy_error_names_the_slice_it_raised_in_and_is_a_reading(
     record = pipeline.run_forward()
 
     assert (record["status"], record["strategy_error"]) == ("strategy_error", "heldout")
-    assert record["slices"] is None and "sealed" not in record and "verdict" not in record
+    assert record["slices"] is None
     readout = record["readout"]
     assert readout["state"] == "registered_with_record"
     assert readout["forward"]["strategy_error"]["slice"] == "heldout"

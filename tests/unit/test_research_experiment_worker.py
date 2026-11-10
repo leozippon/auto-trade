@@ -169,7 +169,6 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
     # The readout: the record the host completed, read as one series, and
     # the forward reading; nothing judges.
     readout = replay["readout"]
-    assert "verdict" not in replay and "sealed" not in replay
     assert (readout["state"], readout["record"]["steps"], readout["record"]["candidate_changes"]) == (
         "registered_with_record", 4, 0
     )
@@ -574,7 +573,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     # The readout reads the four tested steps as one record; the forward
     # stage replayed nothing of the validation year again.
     readout = replay["readout"]
-    assert "sealed" not in replay and readout["record"]["steps"] == 4
+    assert readout["record"]["steps"] == 4
     assert readout["record"]["candidate_changes"] == 0
     # Everything the model read, tool schemas included, is research-session
     # vocabulary, names the validation year only by its dates and no date

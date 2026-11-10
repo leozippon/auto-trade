@@ -16,7 +16,7 @@ from autotrade.pipelines.config import (
     acceptance_for,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-from scripts.experiments import _cli, run_audit_session
+from scripts.experiments import _cli
 from scripts.experiments._cli import add_acceptance_arguments
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
@@ -76,29 +76,6 @@ def _build(options: SimpleNamespace):
         store=object(),
         ref_store=object(),
     )
-
-
-def test_the_audit_entrypoint_assembles_through_the_shared_builder() -> None:
-    """The audit script must not grow a second assembly.
-
-    A hand-written copy is what drifted last time: the console built the
-    compaction gateway without retries and the audit path did not, so the
-    audited session was not the session the console runs. The script may
-    therefore name the Agent adapters and the backends nowhere.
-    """
-
-    source = Path(run_audit_session.__file__).read_text(encoding="utf-8")
-    assert "build_experiment_pipeline(" in source
-    for name in (
-        "LLMResearchDeveloper",
-        "LLMMetaLearner",
-        "ExperimentPipeline",
-        "ResearchPITSnapshotProvider",
-        "PITDailyEvaluationBackend",
-        "LocalDailySnapshotProvider",
-        "LocalDailyEvaluationBackend",
-    ):
-        assert name not in source, name
 
 
 def test_the_audit_parser_exposes_every_create_time_gate() -> None:

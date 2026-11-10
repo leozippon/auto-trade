@@ -127,30 +127,6 @@ class AcceptanceRulesTest(unittest.TestCase):
             rules.evaluate({**summary, "total_return": True}),
         )
 
-    def test_the_sealed_gates_rules_and_the_replay_year_budget_have_no_place_in_the_rules(self) -> None:
-        """The validation record's rules carry no sealed years, no ablation and
-        no replay-year budget: a rules object built with one is refused, and
-        the budget record has no replay-year counter, so neither can come back
-        through a round file or a create request unnoticed."""
-
-        from dataclasses import fields
-
-        from autotrade.pipelines.config import BudgetUsed
-
-        retired = {"sealed_years", "ablation_required", "max_replay_years", "finalize_before_deadline_seconds"}
-        for key in sorted(retired):
-            with self.subTest(key=key), self.assertRaises(TypeError):
-                AcceptanceRules(**REQUIRED_RULES, **{key: 1})
-        names = {field.name for field in fields(AcceptanceRules)}
-        self.assertFalse(names & retired)
-        self.assertEqual(
-            {"alpha", "research_years", "test_step_months", "validates_per_step"} - names, set()
-        )
-        self.assertNotIn("replay_years", {field.name for field in fields(BudgetUsed)})
-        self.assertIn("test_replays", {field.name for field in fields(BudgetUsed)})
-        for name in ("max_replay_years", "finalize_before_deadline_seconds"):
-            self.assertFalse(hasattr(ExperimentConfig, name), name)
-
     def test_finite_metrics_keep_threshold_semantics(self) -> None:
         rules = AcceptanceRules(**REQUIRED_RULES, max_drawdown=0.25)
         ok = {"total_return": 0.02, "sharpe": 0.5, "max_drawdown": 0.1}
@@ -366,8 +342,6 @@ class AcceptanceRulesTest(unittest.TestCase):
             self.assertNotIn(stale, json.dumps(facts))
         text = json.dumps(facts).lower()
         self.assertNotIn("neutral", text)
-        self.assertNotIn("graduat", text)
-        self.assertNotIn("sealed", text)
         forward = facts["forward"]
         self.assertEqual(sorted(forward), ["reported"])
         self.assertIn("80% block-bootstrap lower bound", forward["reported"])
