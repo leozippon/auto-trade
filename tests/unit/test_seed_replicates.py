@@ -173,13 +173,16 @@ class SeedDeveloper:
             directory = self.store.root.parent / "candidates" / f"candidate_{number}"
             directory.mkdir(parents=True)
             (directory / "main.py").write_text(source, encoding="utf-8")
-            typed, _fingerprint = self.store.create_revision(directory)
+            typed, fingerprint = self.store.create_revision(directory)
             replayed = research_span(request.years, span, research_years=request.research_years)
             validation = self.evaluator.evaluate(
                 replayed.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
             )
             steps.append(
-                StepResult(f"research_step_{number}", typed.revision_id, validation, span=replayed.label)
+                StepResult(
+                    f"research_step_{number}", typed.revision_id, validation, span=replayed.label,
+                    fingerprint=fingerprint,
+                )
             )
         if self.outcome != "completed":
             return ResearchSessionResult(

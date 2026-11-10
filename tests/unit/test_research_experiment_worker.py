@@ -122,8 +122,11 @@ def test_an_experiment_runs_research_completes_the_record_and_replays_forward_an
         "deadline", "deterministic_baseline_replay_no_agent_improvement"
     )
     assert research_row["registration"]["passed"] is True
-    assert [step["span"] for step in research_row["steps"]] == ["full", "full"]
-    assert research_row["nominated_step_id"] == research_row["steps"][-1]["step_id"]
+    [step] = research_row["steps"]
+    assert step["span"] == "full" and research_row["nominated_step_id"] == step["step_id"]
+    assert step["fingerprint"] == json.loads(
+        (experiment / "artifacts/strategy/revisions" / step["revision_id"] / "manifest.json").read_text(encoding="utf-8")
+    )["fingerprint"]
     assert [(row["step"], row["test_horizon"], row["source"]) for row in tests] == [
         (1, "20230930", "host_completion"),
         (2, "20231231", "host_completion"),

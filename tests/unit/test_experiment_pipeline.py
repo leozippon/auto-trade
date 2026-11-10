@@ -229,7 +229,7 @@ class Developer:
             source = self.store.root.parent / "candidates" / f"{request.run_id}_{number}"
             source.mkdir(parents=True)
             (source / "main.py").write_text(f"{MAIN}# alpha={alpha}\n", encoding="utf-8")
-            typed, _fingerprint = self.store.create_revision(source)
+            typed, fingerprint = self.store.create_revision(source)
             validation = self.evaluator.evaluate(
                 request.full_span.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
             )
@@ -240,6 +240,7 @@ class Developer:
                     validation,
                     span=request.full_span.label,
                     control=number in extra.get("controls", ()),
+                    fingerprint=fingerprint,
                 )
             )
         # Like the real developer: the Validations earlier attempts recorded
@@ -510,7 +511,7 @@ def _interrupted_attempt(
     source = pipeline.config.experiment_dir.parent / "candidates" / "earlier"
     source.mkdir(parents=True)
     (source / "main.py").write_text(f"{MAIN}# alpha=0.0011\n", encoding="utf-8")
-    typed, _fingerprint = pipeline.artifacts.create_revision(source)
+    typed, fingerprint = pipeline.artifacts.create_revision(source)
     validation = pipeline.evaluator.evaluate(
         pipeline.developer.requests[0].validation.request(typed, schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE)
         if pipeline.developer.requests
@@ -528,7 +529,7 @@ def _interrupted_attempt(
     )
     record_step_sidecar(
         pipeline.config.experiment_dir,
-        StepResult(node_id, typed.revision_id, validation, span="full"),
+        StepResult(node_id, typed.revision_id, validation, span="full", fingerprint=fingerprint),
     )
     return node_id
 
@@ -1199,7 +1200,7 @@ def test_a_step_row_refuses_a_missing_style_sidecar(tmp_path: Path):
     the row would silently narrow the registration check's IR dispersion."""
 
     result = EvaluationResult({}, str(tmp_path / "result.json"))
-    step = StepResult("research_step_1", "rev_1", result, span=FULL_SPAN)
+    step = StepResult("research_step_1", "rev_1", result, span=FULL_SPAN, fingerprint="sha256:rev_1")
     with pytest.raises(FileNotFoundError):
         research_step_record(step)
     (tmp_path / STYLE_ARTIFACT_NAME).write_text("{}", encoding="utf-8")

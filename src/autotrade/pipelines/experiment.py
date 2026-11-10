@@ -104,7 +104,6 @@ from .session_resume import (
     REVISIONS_DIR,
     load_recorded_steps,
     resume_state,
-    revision_fingerprint,
 )
 from .skills import (
     ExperimentSkillsStore,
@@ -438,10 +437,7 @@ class ExperimentPipeline:
                     )
                 )
             # Every row the ledger records names the bytes it replayed.
-            step_rows = completed_rows(
-                self.config.experiment_dir,
-                [research_step_record(step) for step in session.steps],
-            )
+            step_rows = [research_step_record(step) for step in session.steps]
             gate: dict[str, object] | None = None
             registered: dict[str, object] | None = None
             experiment_end: dict[str, object] | None = None
@@ -1251,24 +1247,6 @@ def research_step_record(step: StepResult) -> dict[str, object]:
     }
 
 
-def completed_rows(
-    experiment_dir: str | Path, rows: Sequence[Mapping[str, object]]
-) -> list[Mapping[str, object]]:
-    """``rows`` each with the artifact fingerprint the ledger and the
-    registration read of it: the one a row carries, else the one the
-    experiment's revision store recorded for its revision
-    (``session_resume.revision_fingerprint``) -- a Step of the host's
-    deterministic baseline.
-    """
-
-    def completed(row: Mapping[str, object]) -> Mapping[str, object]:
-        if not row.get("fingerprint"):
-            row = {**row, "fingerprint": revision_fingerprint(experiment_dir, str(row["revision_id"]))}
-        return row
-
-    return [completed(row) for row in rows]
-
-
 def check_registration(
     nominee: Mapping[str, object],
     *,
@@ -1310,9 +1288,7 @@ def check_registration(
     except ValueError as exc:
         return {"passed": False, "reasons": [ConditionReason.UNMEASURABLE], "error": str(exc)}
     mandate = registered_mandate(analysis, rules=acceptance)
-    nominee = completed_rows(experiment_dir, [nominee])[0]
-    replicates = completed_rows(experiment_dir, seed_replicates)
-    seeds = _seed_replicates(nominee, replicates, experiment_dir=experiment_dir)
+    seeds = _seed_replicates(nominee, seed_replicates, experiment_dir=experiment_dir)
     reasons = [*mandate["reasons"], *judge(ConditionStage.SEEDS, seeds, {})]
     return {
         "passed": not reasons,
@@ -1801,7 +1777,6 @@ __all__ = [
     "EnvironmentBlockedAttempt",
     "ExperimentPipeline",
     "check_registration",
-    "completed_rows",
     "judged_replay",
     "null_control_seed",
     "one_line_change",

@@ -214,12 +214,12 @@ class LocalDailyEvaluationBackend:
 
 
 class DeterministicBaselineDeveloper:
-    """Replay the template unchanged on the research span and nominate it.
+    """Replay the template unchanged over the research years and test nothing.
 
-    Nothing is modified and nothing is judged: the experiment's one session validates
-    the template twice on the full span (the registration check counts full-span
-    validations, the nominee included, and needs two) and nominates the
-    second replay for the gate.
+    Nothing is modified and nothing is judged: the experiment's one session
+    validates the template once on the full span and ends as a session whose
+    budget ran out before any test, so the host registers that Validation and
+    completes the validation record with it.
     """
 
     def __init__(
@@ -254,30 +254,22 @@ class DeterministicBaselineDeveloper:
             f"baseline_{self.ref_store.get_or_create('session', request.session_key)}__"
             f"{self.ref_store.get_or_create('run', request.run_id)}"
         )
-        steps: list[StepResult] = []
-        for index in (1, 2):
-            typed_revision, _fingerprint = self.artifact_store.create_revision(
-                source, models_path=None
+        revision, fingerprint = self.artifact_store.create_revision(source, models_path=None)
+        validation = self.evaluator.evaluate(
+            request.full_span.request(
+                revision, schedule=self.schedule, broker_profile=self.broker_profile
             )
-            validation = self.evaluator.evaluate(
-                request.full_span.request(
-                    typed_revision, schedule=self.schedule, broker_profile=self.broker_profile
-                )
-            )
-            steps.append(
-                StepResult(
-                    f"{prefix}__valid_{index:03d}",
-                    typed_revision.revision_id,
-                    validation,
-                    span=request.full_span.label,
-                )
-            )
-        # No agent tests anything here: the session ends as one whose budget
-        # ran out before a test, and the host registers the baseline's last
-        # Validation and completes the record with it.
+        )
+        step = StepResult(
+            f"{prefix}__valid_001",
+            revision.revision_id,
+            validation,
+            span=request.full_span.label,
+            fingerprint=fingerprint,
+        )
         return ResearchSessionResult(
             f"deterministic_baseline_{request.run_id}",
-            tuple(steps),
+            (step,),
             "deadline",
             finish_reason="deterministic_baseline_replay_no_agent_improvement",
         )

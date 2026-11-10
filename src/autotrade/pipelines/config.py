@@ -909,11 +909,10 @@ class StepResult:
     control: bool = False
     # The ``validate`` call that recorded it.
     batch_id: str | None = None
-    # The artifact fingerprint of the bytes the revision holds. ``None`` where
-    # the caller did not commit the revision through a session (the host's
-    # deterministic baseline); the ledger row then reads it from the
-    # revision's manifest (``experiment.completed_rows``).
-    fingerprint: str | None = None
+    # The artifact fingerprint of the bytes the revision holds, as
+    # ``create_revision`` returned it: what the ledger row and a seed
+    # replicate's registration compare.
+    fingerprint: str = field(kw_only=True)
 
 
 @dataclass(frozen=True)
