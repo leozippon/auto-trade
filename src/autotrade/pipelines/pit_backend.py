@@ -1674,10 +1674,11 @@ def prebuild_asof_stash(
     # the prebuild. A seed hardlinks these parts into every experiment, so a
     # mode left for the experiment's lock to set would move on the seed's own
     # inodes (2026-11-10: a deploy's verifying rsync found 2,013 parts changed
-    # under it).
+    # under it). Hidden entries are the publish locks, which a resumed
+    # prebuild opens for writing and no seed shares (_hardlink_replay_entry).
     for slot in slots:
         for path in slot.stash_dir.rglob("*"):
-            if path.is_file():
+            if path.is_file() and not path.name.startswith("."):
                 path.chmod(0o444)
     return {
         "stash_dir": str(slots[0].stash_dir),

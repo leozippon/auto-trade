@@ -488,7 +488,8 @@ def test_finished_stash_is_reused_instead_of_replayed(
     # Files read-only, directories writable: what _freeze_seed fakes, and what
     # keeps an experiment's lock from changing a mode on the seed's inodes.
     for path in stash.rglob("*"):
-        assert os.access(path, os.W_OK) is path.is_dir(), path
+        if not path.name.startswith("."):
+            assert os.access(path, os.W_OK) is path.is_dir(), path
 
     def no_replay(*args: object, **kwargs: object) -> object:
         raise AssertionError("a finished stash must not be replayed again")
