@@ -1352,8 +1352,8 @@ def test_worker_reasoning_effort_offers_exactly_the_wire_levels(
 ) -> None:
     """The console enum is exactly what the local Qwen template distinguishes;
     the shared-scale high/max are refused, not resolved."""
+    from autotrade.environment.llm.openai_compatible import REASONING_EFFORTS
     from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-    from autotrade.pipelines.worker import REASONING_EFFORTS
     from autotrade.webui.params_schema import _FIELDS
 
     assert REASONING_EFFORTS == ("low", "medium", "xhigh")

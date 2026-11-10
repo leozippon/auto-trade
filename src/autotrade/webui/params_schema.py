@@ -21,6 +21,7 @@ from autotrade.common.records import read_json_object
 from autotrade.environment.data.contracts import BENCHMARK_INDEXES
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.llm.model_profiles import LLM_KEYS, MODEL_CHOICES
+from autotrade.environment.llm.openai_compatible import REASONING_EFFORTS
 from autotrade.pipelines.config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     MANDATED_DEFAULTS,
@@ -592,7 +593,7 @@ _FIELDS: list[dict[str, object]] = [
         "group": "模型与上下文",
         "label": "推理强度",
         "type": "choice",
-        "choices": ["xhigh", "medium", "low"],
+        "choices": list(reversed(REASONING_EFFORTS)),
         "choice_labels": {"xhigh": "极高", "medium": "中", "low": "低"},
         "help": "启用推理模式时 Agent 主对话与子代理的推理强度；三档即本机 Qwen 模板在线上真正区分的档位。推理只有开关、没有强度档的模型（mimo-v2.6-flash）不使用此项。",
     },

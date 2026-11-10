@@ -38,6 +38,7 @@ from autotrade.environment.llm import (
     effective_max_output_tokens,
     model_profile,
 )
+from autotrade.environment.llm.openai_compatible import REASONING_EFFORTS
 from autotrade.environment.pretrained import pretrained_pin
 from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import (
@@ -107,10 +108,6 @@ from .pit_views_seed import (
 from .research_session import LLMResearchDeveloper
 from .skills import latest_skills_snapshot, resolve_skill_library
 
-# The experiment-level ``reasoning_effort`` offers exactly the levels that are
-# distinct on the wire for the local Qwen profile (its chat template knows
-# low/medium/xhigh; ``high`` was always sent as ``xhigh``).
-REASONING_EFFORTS = ("low", "medium", "xhigh")
 
 @dataclass(frozen=True)
 class LLMWorkerSettings:
