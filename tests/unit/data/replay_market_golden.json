@@ -612,23 +612,7 @@
    "zero_position_days": 0,
    "replay_days": 14
   },
-  "sub_windows": [
-   {
-    "kind": "july_june_year",
-    "label": "202307-202406",
-    "start": "20230821",
-    "end": "20230907",
-    "trade_days": 14,
-    "partial": true,
-    "return": 0.000685,
-    "benchmark_return": null,
-    "excess_return": null,
-    "sharpe": 1.351186,
-    "max_drawdown": 0.001337,
-    "turnover": 0.189256,
-    "trade_count": 6
-   }
-  ],
+  "sub_windows": [],
   "weekly_returns": [
    {
     "week_end": "20230825",

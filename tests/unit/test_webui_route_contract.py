@@ -401,6 +401,7 @@ def test_the_sub_window_columns_the_console_reads_are_the_ones_produced() -> Non
             ),
             (),
             initial=100.0,
+            year_windows=(("20210801", "20220731"),),
         )[0]
     )
     assert read, "the sub-window table reads no row field"

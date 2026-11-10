@@ -27,11 +27,8 @@ _EXIT_ACTIONS = frozenset({"sell"})
 # out in (``pipelines/calendar.py ResearchGeometry.research_years``). One
 # whole-window number cannot separate a persistent edge from one good year, so
 # every result also carries the same metrics per research year of its window.
+# A replay over no research years has no rows.
 RESEARCH_YEAR_KIND = "research_year"
-# A replay over no research years -- the forward and Held-out span, a plain
-# daily file -- has none to report, so its rows fall back to the calendar
-# July-June years of its own window and say that is what they are.
-JULY_JUNE_KIND = "july_june_year"
 # Sub-window figures are read as a table, not compounded further: six decimals
 # keep the block small enough to ride inline in an Agent observation.
 _SUB_WINDOW_DIGITS = 6
@@ -407,11 +404,9 @@ def sub_window_stats(
     both empty and gets the replayed span instead, which reports the end years
     partial unless the replay itself reaches the calendar bounds.
 
-    A replay with no research years to report -- the forward and Held-out span,
-    a plain daily file -- states none, and its rows fall back to the calendar
-    July-June years of its own window, labelled ``july_june_year`` rather than
-    as research years. Those rows are a reading of the replay, not a claim that
-    the window is made of July-June years.
+    A replay over no research years -- the forward and Held-out span, a plain
+    daily file -- states none and gets no rows: its window is not laid out in
+    years, so any yearly cut of it would be invented here.
 
     ``benchmark_return`` / ``excess_return`` stay ``None`` until the
     evaluation backend joins the benchmark series in
@@ -424,18 +419,13 @@ def sub_window_stats(
         (row for row in curve if row.get("trade_date") is not None),
         key=lambda row: str(row["trade_date"]),
     )
-    if not rows:
+    if not rows or not year_windows:
         return []
-    windows = (
-        [_window_bounds(item) for item in year_windows]
-        if year_windows
-        else _july_june_windows(str(rows[0]["trade_date"]), str(rows[-1]["trade_date"]))
-    )
+    windows = [_window_bounds(item) for item in year_windows]
     buckets: list[list[Mapping[str, object]]] = [[] for _ in windows]
     for row in rows:
         buckets[_window_index(str(row["trade_date"]), windows)].append(row)
     traded, exits = _window_order_totals(executions, windows)
-    kind = RESEARCH_YEAR_KIND if year_windows else JULY_JUNE_KIND
     window_start = _window_bound(start, "start") or str(rows[0]["trade_date"])
     window_end = _window_bound(end, "end") or str(rows[-1]["trade_date"])
     out: list[dict[str, object]] = []
@@ -452,7 +442,7 @@ def sub_window_stats(
         partial = window_start > year_start or window_end < year_end
         out.append(
             {
-                "kind": kind,
+                "kind": RESEARCH_YEAR_KIND,
                 "label": f"{year_start[:6]}-{year_end[:6]}",
                 "start": str(block_rows[0]["trade_date"]),
                 "end": str(block_rows[-1]["trade_date"]),
@@ -619,27 +609,6 @@ def _window_bounds(window: tuple[str, str]) -> tuple[str, str]:
             f"a sub-window must be two ordered YYYYMMDD dates, got {window!r}"
         )
     return start, end
-
-
-def _july_year(trade_date: str) -> int:
-    """The calendar year a July-June year starts in."""
-
-    year, month = int(trade_date[:4]), int(trade_date[4:6])
-    return year if month >= 7 else year - 1
-
-
-def _july_june_windows(first_day: str, last_day: str) -> list[tuple[str, str]]:
-    """The calendar July-June years a replay without research years spans.
-
-    The one fallback of :func:`sub_window_stats`, for a replay whose request
-    states no years of its own: its rows are still the July-June calendar
-    blocks of a window nobody stated the geometry of, never research years.
-    """
-
-    return [
-        (f"{year}0701", f"{year + 1}0630")
-        for year in range(_july_year(first_day), _july_year(last_day) + 1)
-    ]
 
 
 def _window_index(day: str, windows: Sequence[tuple[str, str]]) -> int:

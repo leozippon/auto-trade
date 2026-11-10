@@ -35,9 +35,10 @@ from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import ReplaySpan, SnapshotBundle, research_span
 from autotrade.pipelines.local_backend import LocalDailyEvaluationBackend
 
-# Two July-June years, opened at 1000 and closed at 900. The first
-# round-trips to its opening equity (up 10%, back down); the second spikes then
-# falls under it, and its first trading day is not its first calendar day.
+# Two research years laid out from July, opened at 1000 and closed at 900. The
+# first round-trips to its opening equity (up 10%, back down); the second spikes
+# then falls under it, and its first trading day is not its first calendar day.
+_YEARS = (("20210701", "20220630"), ("20220701", "20230630"))
 _CURVE = (
     {"trade_date": "20220601", "initial_equity": 1000.0, "equity": 1100.0, "cash": 0.0},
     {"trade_date": "20220630", "initial_equity": 1000.0, "equity": 1000.0, "cash": 0.0},
@@ -73,16 +74,15 @@ _EXECUTIONS = (
 
 class SubWindowStatsTest(unittest.TestCase):
     def rows(self):
-        return sub_window_stats(_CURVE, _EXECUTIONS, initial=1000.0)
+        return sub_window_stats(_CURVE, _EXECUTIONS, initial=1000.0, year_windows=_YEARS)
 
-    def test_one_row_per_july_june_year_with_its_covered_span(self) -> None:
-        rows = self.rows()
-        self.assertEqual([row["label"] for row in rows], ["202107-202206", "202207-202306"])
-        self.assertEqual(
-            [(row["start"], row["end"], row["trade_days"]) for row in rows],
-            [("20220601", "20220630", 2), ("20220704", "20230630", 2)],
-        )
-        self.assertEqual([row["kind"] for row in rows], ["july_june_year"] * 2)
+    def test_a_replay_over_no_research_years_has_no_rows(self) -> None:
+        """The Forward and Held-out span states no years: it gets no per-year
+        rows rather than calendar blocks nobody laid out."""
+
+        self.assertEqual(sub_window_stats(_CURVE, _EXECUTIONS, initial=1000.0), [])
+        summary = compute_return_stats(ReplayResult(_CURVE, _EXECUTIONS, ("20220601",), ()))
+        self.assertEqual(summary["sub_windows"], [])
 
     def test_a_year_the_window_does_not_span_is_marked_partial(self) -> None:
         rows = self.rows()
@@ -99,7 +99,12 @@ class SubWindowStatsTest(unittest.TestCase):
             order for order in _EXECUTIONS if order["matched_at"] >= "2022-07"
         )
         whole = sub_window_stats(
-            later, executions, initial=1000.0, start="20220701", end="20230630"
+            later,
+            executions,
+            initial=1000.0,
+            start="20220701",
+            end="20230630",
+            year_windows=_YEARS,
         )
         self.assertEqual([row["label"] for row in whole], ["202207-202306"])
         self.assertFalse(whole[0]["partial"])
@@ -107,13 +112,15 @@ class SubWindowStatsTest(unittest.TestCase):
         # covers only part of it.
         for start, end in (("20220801", "20230630"), ("20220701", "20230629")):
             rows = sub_window_stats(
-                later, executions, initial=1000.0, start=start, end=end
+                later, executions, initial=1000.0, start=start, end=end, year_windows=_YEARS
             )
             self.assertTrue(rows[0]["partial"], (start, end))
 
     def test_an_unparseable_requested_window_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be YYYYMMDD"):
-            sub_window_stats(_CURVE, (), initial=1000.0, start="2022-07-01")
+            sub_window_stats(
+                _CURVE, (), initial=1000.0, start="2022-07-01", year_windows=_YEARS
+            )
 
     def test_returns_chain_back_to_the_whole_window_return(self) -> None:
         rows = self.rows()
@@ -125,7 +132,7 @@ class SubWindowStatsTest(unittest.TestCase):
         for row in rows:
             compounded *= 1.0 + float(row["return"])
         whole = compute_return_stats(
-            ReplayResult(_CURVE, _EXECUTIONS, ("20220601",), ())
+            ReplayResult(_CURVE, _EXECUTIONS, ("20220601",), ()), year_windows=_YEARS
         )
         self.assertAlmostEqual(compounded - 1.0, whole["total_return"], places=6)
 
@@ -144,6 +151,7 @@ class SubWindowStatsTest(unittest.TestCase):
             ({"trade_date": "20220104", "initial_equity": 100.0, "equity": 120.0},),
             (),
             initial=100.0,
+            year_windows=_YEARS,
         )
         # One daily return has no dispersion to annualize.
         self.assertEqual(single[0]["sharpe"], 0.0)
@@ -167,13 +175,13 @@ class SubWindowStatsTest(unittest.TestCase):
         )
 
     def test_an_empty_replay_has_no_rows(self) -> None:
-        self.assertEqual(sub_window_stats((), (), initial=1000.0), [])
+        self.assertEqual(sub_window_stats((), (), initial=1000.0, year_windows=_YEARS), [])
 
 
 class SubWindowBenchmarkTest(unittest.TestCase):
     def summary(self) -> dict[str, object]:
         return compute_return_stats(
-            ReplayResult(_CURVE, _EXECUTIONS, ("20220601",), ())
+            ReplayResult(_CURVE, _EXECUTIONS, ("20220601",), ()), year_windows=_YEARS
         )
 
     def test_the_replay_alone_reports_no_benchmark(self) -> None:
@@ -242,6 +250,7 @@ class SubWindowBenchmarkTest(unittest.TestCase):
             ReplayResult(curve, executions, ("20220704",), ()),
             start="20220704",
             end="20230630",
+            year_windows=_YEARS,
         )
         [row] = summary["sub_windows"]
         self.assertEqual(row["label"], "202207-202306")
@@ -250,7 +259,9 @@ class SubWindowBenchmarkTest(unittest.TestCase):
             self.assertAlmostEqual(row[key], summary[key], places=6, msg=key)
 
     def test_the_block_rides_in_the_persisted_replay_record(self) -> None:
-        record = ReplayResult(_CURVE, _EXECUTIONS, ("20220601",), ()).to_record()
+        record = ReplayResult(_CURVE, _EXECUTIONS, ("20220601",), ()).to_record(
+            year_windows=_YEARS
+        )
         self.assertEqual(
             [row["label"] for row in record["stats"]["sub_windows"]],
             ["202107-202206", "202207-202306"],
@@ -475,24 +486,6 @@ class SubWindowResearchYearTest(unittest.TestCase):
         )
         self.assertEqual(len(record["stats"]["sub_windows"]), 10)
         self.assertEqual(record["stats"]["sub_windows"][-1]["label"], "202408-202507")
-
-    def test_explicit_july_june_years_read_as_the_calendar_fallback(self) -> None:
-        """A July-June geometry keeps the rows it always had; only the kind says
-        whether they are research years or a calendar fallback."""
-
-        fallback = sub_window_stats(_CURVE, _EXECUTIONS, initial=1000.0)
-        explicit = sub_window_stats(
-            _CURVE,
-            _EXECUTIONS,
-            initial=1000.0,
-            year_windows=(("20210701", "20220630"), ("20220701", "20230630")),
-        )
-        self.assertEqual(
-            [{key: value for key, value in row.items() if key != "kind"} for row in explicit],
-            [{key: value for key, value in row.items() if key != "kind"} for row in fallback],
-        )
-        self.assertEqual([row["kind"] for row in fallback], ["july_june_year"] * 2)
-        self.assertEqual([row["kind"] for row in explicit], ["research_year"] * 2)
 
     def test_a_day_outside_the_declared_years_is_refused(self) -> None:
         with self.assertRaisesRegex(ValueError, "outside the requested years"):
