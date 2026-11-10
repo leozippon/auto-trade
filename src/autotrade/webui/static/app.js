@@ -2818,13 +2818,17 @@ async function renderDetailPage(experimentId, selectedKey) {
       const raw = fresh.status || {};
       // A state change, a new session or a new run rebuilds the page; stage
       // flips inside one run update the control panel in place (the live
-      // panels poll status themselves).
+      // panels poll status themselves). A Validation or a test step the
+      // session recorded since the page was read (a moved revision) re-reads
+      // the experiment in place.
       if (
         fresh.state !== detail.state ||
         String(raw.session_key || "") !== String(status.session_key || "") ||
         String(raw.run_ref || "") !== String(status.run_ref || "")
       )
         route(true);
+      else if (detailView && fresh.revision !== detailView.detail.revision)
+        await rereadDetail();
       else if (detailView && detailView.barHost)
         detailView.barHost.__follow(fresh);
     } catch {
@@ -4379,19 +4383,27 @@ async function refreshDetail() {
     return;
   }
   try {
-    const detail = await api(
-      `/api/experiments/${encodeURIComponent(detailView.experimentId)}`,
-    );
-    detailView.detail = detail;
-    if (detailView.barHost) {
-      const bar = controlPanel(detail);
-      detailView.barHost.replaceWith(bar);
-      detailView.barHost = bar;
-    }
-    selectStep(detailView.selectedKey);
+    await rereadDetail();
   } catch {
     route();
   }
+}
+
+/* The in-place re-read itself; a failed read leaves the page as it stands. */
+async function rereadDetail() {
+  const view = detailView;
+  const detail = await api(
+    `/api/experiments/${encodeURIComponent(view.experimentId)}`,
+  );
+  // The reader moved to another page while the read was in flight.
+  if (detailView !== view) return;
+  detailView.detail = detail;
+  if (detailView.barHost) {
+    const bar = controlPanel(detail);
+    detailView.barHost.replaceWith(bar);
+    detailView.barHost = bar;
+  }
+  selectStep(detailView.selectedKey);
 }
 
 /* Assemble the session's system prompt (with the draft directive embedded)

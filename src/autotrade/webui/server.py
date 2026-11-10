@@ -343,8 +343,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         if isinstance(raw_status, dict):
             public["status"] = identity.public_status(raw_status)
         # The experiment page polls this route, so the budget bars follow the
-        # live session without a rebuild.
+        # live session without a rebuild, and a new Validation or test step
+        # (a moved revision) makes the page re-read the experiment.
         public["budget_used"] = registry.research_budget_used(directory)
+        public["revision"] = registry.research_revision(directory)
         return public
 
     @app.get("/api/experiments/{experiment_id}/research-depth")

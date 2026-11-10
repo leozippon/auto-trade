@@ -794,6 +794,100 @@ def test_a_page_poll_keeps_one_request_in_flight() -> None:
     assert rest.count("setPollInterval(") == 7
 
 
+def test_the_revision_moves_when_the_session_records_and_only_then(tmp_path: Path) -> None:
+    """A page left open on a running session must learn of a new Validation or
+    test step: the status poll carries a revision that moves on a ledger
+    append and on a step-tree write, equals the detail's while neither
+    happened, and ignores what the poll itself already follows (the status)."""
+
+    directory = build_experiment(tmp_path, "experiment", "research", alive=True)
+    client = TestClient(create_app(tmp_path, tmp_path))
+
+    def revisions() -> tuple[str, str]:
+        return (
+            client.get("/api/experiments/experiment").json()["revision"],
+            client.get("/api/experiments/experiment/status").json()["revision"],
+        )
+
+    first, polled = revisions()
+    assert first == polled
+    status = directory / "hitl/status.json"
+    status.write_text(status.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    assert revisions() == (first, first)
+    refs = AgentRefStore(directory)
+    StepTree(directory / "steps").record_failed_attempt(
+        epoch_id="research",
+        session_ref=refs.get_or_create("session", "research"),
+        run_id=refs.get_or_create("run", "run_research_live"),
+        result_name="valid_001",
+        error="BacktestError",
+    )
+    second, polled = revisions()
+    assert second == polled != first
+    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
+        {
+            "record_type": "attempt_failed",
+            "experiment_id": "experiment",
+            "epoch_id": "research",
+            "fold_id": "research",
+            "run_id": "run_research_live",
+            "session_key": "research",
+            "phase": "research",
+            "error": "OSError: host lost",
+        }
+    )
+    third, polled = revisions()
+    assert third == polled and third not in (first, second)
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_a_moved_revision_rereads_the_experiment_in_place() -> None:
+    """The status poll re-reads the experiment when its revision moved: the
+    page takes the fresh detail and redraws the control panel and the selected
+    step. A read that fails leaves the page as it stands for the next poll,
+    and one that returns after the reader left touches nothing."""
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    poll = script.split("async function renderDetailPage(", 1)[1].split("}, 4000);", 1)[0]
+    assert "fresh.revision !== detailView.detail.revision" in poll and "await rereadDetail();" in poll
+    harness = "\n".join(
+        [
+            # ``_fn`` starts at ``function``.
+            "async " + _fn(script, "rereadDetail"),
+            """
+const drawn = [];
+const controlPanel = (detail) => ({ bar: detail.revision });
+const selectStep = (key) => drawn.push(key);
+const page = () => ({
+  experimentId: "experiment", selectedKey: "research", detail: { revision: "a" },
+  barHost: { replaceWith(bar) { drawn.push(bar); } },
+});
+let detailView = page();
+let api = async () => ({ revision: "b" });
+(async () => {
+  await rereadDetail();
+  const reread = [detailView.detail.revision, detailView.barHost, [...drawn]];
+  api = async () => { throw new Error("409"); };
+  const failed = await rereadDetail().then(() => "read", () => "left as it stands");
+  api = async () => { detailView = page(); return { revision: "c" }; };
+  drawn.length = 0;
+  await rereadDetail();
+  console.log(JSON.stringify({ reread, failed, left: [detailView.detail.revision, drawn] }));
+})();
+""",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == {
+        "reread": ["b", {"bar": "b"}, [{"bar": "b"}, "research"]],
+        "failed": "left as it stands",
+        "left": ["a", []],
+    }
+
+
 def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Path) -> None:
     """The home page polls the listing every few seconds, and nearly all of it
     is ended experiments that change only when their files do. A poll that hands back

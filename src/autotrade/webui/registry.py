@@ -1387,9 +1387,33 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
     }
 
 
+def research_revision(directory: Path) -> str:
+    """A token that moves whenever the experiment records something its page
+    draws: a ledger append (a test step, a failed attempt, a session) or a
+    write of the step tree (a Validation, a dead end, a rollback). The
+    experiment page receives it with the detail and with every status poll, and
+    re-reads the experiment when the two differ, so a page left open on a
+    running session never keeps an old Step tree or validation record."""
+
+    marks: list[str] = []
+    for relative in ("ledgers/experiment_ledger.jsonl", "steps/tree.json"):
+        try:
+            info = (Path(directory) / relative).stat()
+        except OSError:
+            marks.append("")
+        else:
+            marks.append(f"{info.st_size}.{info.st_mtime_ns}")
+    return "|".join(marks)
+
+
 def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
     directory = resolve_experiment_dir(root, experiment_id)
-    detail = {**summarize_experiment(directory), "archived": archive_marker(directory)}
+    detail = {
+        # Taken before anything is read, so a write racing the read re-reads.
+        "revision": research_revision(directory),
+        **summarize_experiment(directory),
+        "archived": archive_marker(directory),
+    }
     if detail.get("state") == ExperimentState.UNREADABLE:
         return {
             **detail,
