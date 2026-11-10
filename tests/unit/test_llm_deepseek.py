@@ -1588,13 +1588,13 @@ def test_conversation_log_redacts_sensitive_dict_keys(tmp_path: Path):
     )
     records = _log_records(tmp_path)
     record = records[-1]
-    assert record["raw_response"]["api_key"] == "[REDACTED]"
-    assert record["raw_response"]["authorization"] == "[REDACTED]"
-    assert record["raw_response"]["nested"]["token"] == "[REDACTED]"
+    assert record["raw_response"]["api_key"] == "[redacted]"
+    assert record["raw_response"]["authorization"] == "[redacted]"
+    assert record["raw_response"]["nested"]["token"] == "[redacted]"
     assert record["raw_response"]["nested"]["total_tokens"] == 12
     assert "redacted" in str(record["response_id"]).lower()
     assert record["usage"]["total_tokens"] == 12
-    assert record["usage"]["[redacted-credential]"] == "[REDACTED]"
+    assert record["usage"]["[redacted-credential]"] == "[redacted]"
     dumped = json.dumps(records)
     for leaked in ("plain-secret", "plain-token", "plain-bearer-token", "usage-secret"):
         assert leaked not in dumped

@@ -40,22 +40,24 @@ SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
         r"\1[redacted]@",
     ),
 )
-SENSITIVE_KEYS = {
-    "api_key",
-    "apikey",
-    "authorization",
-    "access_token",
-    "token",
-    "secret",
-    "password",
-    "hf_token",
-    "http_proxy",
-    "https_proxy",
-    "all_proxy",
-    "no_proxy",
-    "proxy",
-    "proxy_url",
-}
+# Credential keys ``is_sensitive_key`` does not already match by shape (an
+# ``api``+``key``, ``secret`` or ``password`` part, a ``token`` ending),
+# normalized as it reads them; a proxy URL can embed its login. The one list
+# for traces, manifests, ledgers and provider conversation logs alike.
+SENSITIVE_KEYS = frozenset(
+    {
+        "apikey",
+        "authorization",
+        "access_key",
+        "private_key",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+        "proxy",
+        "proxy_url",
+    }
+)
 
 # Everything the Agent session actually writes under ``/mnt/artifacts``. The
 # AgentTrace is not here: it is written straight to the experiment's
@@ -212,11 +214,33 @@ class SandboxPaths:
     # ``agent/output`` or ``agent/models`` directories.
 
 
+def is_sensitive_key(key: str) -> bool:
+    """Whether a mapping key names a credential.
+
+    The key is lower-cased with every run of other characters folded to one
+    underscore, so ``X-Api-Key`` reads as ``x_api_key``. Besides the listed
+    names, a key with both ``api`` and ``key`` parts, a ``secret`` or
+    ``password`` part, or ending in ``token`` (``refresh_token``,
+    ``x-auth-token``) is one. A token count or setting is not: traces carry
+    ``token_threshold`` and ``token_usage`` for the console, and responses
+    ``total_tokens``.
+    """
+
+    normalized = re.sub(r"[^a-z0-9]+", "_", key.lower()).strip("_")
+    parts = set(normalized.split("_"))
+    return (
+        normalized in SENSITIVE_KEYS
+        or {"api", "key"} <= parts
+        or bool(parts & {"secret", "password"})
+        or normalized.endswith("token")
+    )
+
+
 def sanitize_for_log(value: object) -> object:
     """Drop sensitive keys and redact secret-looking strings recursively."""
     if isinstance(value, dict):
         return {
-            str(key): "[redacted]" if str(key).lower() in SENSITIVE_KEYS else sanitize_for_log(item)
+            str(key): "[redacted]" if is_sensitive_key(str(key)) else sanitize_for_log(item)
             for key, item in value.items()
         }
     if isinstance(value, (list, tuple)):

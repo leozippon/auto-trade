@@ -20,6 +20,7 @@ import pytest
 
 from autotrade.common.records import HOST_PATH_PREFIXES, redact_host_paths
 from autotrade.environment.runtime import sanitize_for_log
+from autotrade.environment.trace import AgentTraceWriter, TraceEvent
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -128,3 +129,33 @@ def test_a_sensitive_key_hides_even_a_short_value() -> None:
         "api_key": "[redacted]",
         "note": "risk-controls",
     }
+
+
+def test_a_trace_record_hides_every_credential_key_the_provider_log_hides(
+    tmp_path: Path,
+) -> None:
+    """Traces and provider conversation logs share one key rule. The trace
+    used to pass refresh tokens, private and access keys and ``X-Api-Key``
+    style headers through verbatim; the token fields the console reads stay."""
+
+    writer = AgentTraceWriter(tmp_path / "trace.jsonl", ids={"run_id": "run_x"})
+    writer.emit(
+        TraceEvent.TOOL_CALL,
+        {
+            "arguments": {
+                "refresh_token": "plain-refresh",
+                "private_key": "plain-private",
+                "access_key": "plain-access",
+                "X-Api-Key": "plain-header",
+                "github_token": "plain-github",
+            },
+            "token_threshold": 900,
+            "token_usage": {"total_tokens": 12},
+        },
+    )
+    line = (tmp_path / "trace.jsonl").read_text(encoding="utf-8")
+    assert "plain-" not in line
+    record = json.loads(line)
+    assert set(record["arguments"].values()) == {"[redacted]"}
+    assert record["token_threshold"] == 900
+    assert record["token_usage"] == {"total_tokens": 12}
