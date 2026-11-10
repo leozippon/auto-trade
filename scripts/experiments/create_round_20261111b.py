@@ -4,9 +4,12 @@
 `open_200k_10y_flash_zgca_20261111b` is round 20261111's experiment on the
 instance's one A100, a card no other tenant shares, with `validate` replaying
 three candidates at a time whose strategy containers share the card. It
-repeats `open_200k_10y_flash_zgca_20261109b` on the code and pack that followed
-the 2026-11-10 trace review; `create_round_20261111.py` lists what changed and
-what stayed, and every value here is that round's except the cards.
+repeats `open_200k_10y_flash_zgca_20261109b` on the code that followed the
+2026-11-10 trace review; `create_round_20261111.py` lists what changed and what
+stayed. Every value here is that round's except the cards and two trims that
+state each idea once: the prompt's budget bullet, run-section budget line and
+first message no longer restate that research continues between tests, and
+pack 20261111b drops the direction sentence the prompt already states.
 
 It runs on the instance, whose fill loop creates it once the card is free:
 
@@ -36,7 +39,7 @@ from scripts.experiments._profiles import (
 )
 from scripts.experiments._round import Round
 
-PACK = "configs/workspace_refs/open_200k_20261111"
+PACK = "configs/workspace_refs/open_200k_20261111b"
 FLASH = "DeepSeek-V4.1-Flash"
 
 # The pack states the direction; the directive does not repeat it.
