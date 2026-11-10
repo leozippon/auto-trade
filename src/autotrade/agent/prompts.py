@@ -23,7 +23,7 @@ parameter, limit or returned field means is the tool's description and
 schema, the strategy contract is ``output/README.md``, the run's values are
 the facts JSON, and how to research within that orientation is the Agent's
 own call. The dynamic part is the environment block: the run's dates, steps,
-threshold and validate allowance generated from the run facts
+threshold, validate allowance and session budgets generated from the run facts
 (:func:`build_run_section`), the facts themselves behind an index of their
 keys, then the experiment's direction and the researcher's directive.
 Rendered copies for human audit are exported by ``scripts/dev/export_prompts.py``
@@ -46,7 +46,7 @@ SESSION_PROCESS_SECTION = """\
 - 你能读到的数据止于研究年末，整个会话不变；验证期的数据不挂载，只随每次 `test` 的结果揭开一步。
 - 研究：写候选，用 `validate` 在研究年内回测。方向来自参考工作区（`refs/`）与「环境」里注入的方向。
 - 测试：`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录，测试终点前进一步，`validate` 的次数重新计。
-- 测试期间研究照常：可以改进现有候选，也可以开发全新的策略，在研究年上检验，有更好的就在下一步换上。每一步揭开的区间都是分布外的新证据：`test` 的整段回放从验证期起点算起，新候选在已揭开区间上的表现随之可见，用它持续检验候选的分布外泛化。换候选只花一次回放；已记入记录的条目不改写。
+- 两次 `test` 之间是一段研究：用刚揭开的区间检验候选的分布外泛化（`test` 的整段回放从验证期起点算起，新候选在已揭开区间上的表现随之可见），据此改进现有候选或开发全新的策略，在研究年上检验，让每一步都由当时最好的候选记入。换候选只花一次回放；已记入记录的条目不改写。
 - 结束：最后一步测完会话结束，最后测试的候选定版。会话不能主动结束；预算耗尽时宿主用最后测试的候选跑完剩余的步。
 - 之后：宿主在会话从未见过的数据上运行 Forward 与 Held-out，读数不回到会话；是否进入 Paper 由运营者决定。定版后再没有 Agent 改它，需要随时间调整的部分写进策略自己的 `fit` 与 `REFIT_PERIOD`。\
 """
@@ -54,7 +54,7 @@ SESSION_PROCESS_SECTION = """\
 SESSION_ORIENTATION_SECTION = """\
 # 研究取向
 - 目标是有创新性、有深度的策略，而不是教科书式的风格因子组合：优先探索学习型模型、预训练模型与嵌入、财务与公告标题等多个数据域、自适应重训与组合构建等复杂方法；简单的规则打分只作基线对照，不作为目标。
-- 预算是为深入研究准备的：研究年与验证期都是研究的时间，回放的等待不计入推理时间，不以提前结束为目标。\
+- 预算是为深入研究准备的，规模见「本次运行」：研究年与验证期的每一步都是研究的时间，回放的等待不计入推理时间。预算大半未用就测完最后一步，说明研究做得太浅。\
 """
 
 # The orientation's GPU bullet when the run facts' ``runtime_tools.sandbox_gpus``
@@ -84,7 +84,7 @@ SESSION_READINGS_SECTION = """\
 SESSION_BOUNDARIES_SECTION = """\
 # 不可越过的边界
 这些规则保护研究年末之后数据的隔离与回测的真实；越过任何一条，本实验的证据就不再成立，参考工作区、研究方向与研究者指令都不能放宽它们。
-- 不读取研究年末之后的数据，不从日期、路径、元数据或模型自身的知识推断之后的行情；验证期只通过 `test` 的结果了解。
+- 不读取研究年末之后的数据，不从日期、路径、元数据或你作为语言模型自身的知识推断之后的行情；验证期只通过 `test` 的结果了解。
 - 不使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录，不越过快照范围。
 - 不用研究期收益硬编码具体股票、日期、题材或事件。
 - 不伪造工具结果、回测状态或人工回复。\
@@ -119,7 +119,7 @@ SESSION_STATIC_SECTIONS = (
 )
 PROTOCOL_INSTRUCTION = "\n\n".join(SESSION_STATIC_SECTIONS)
 
-SESSION_DEFAULT_INSTRUCTION = "开始研究。何时开始测试、测试之间研究什么，由你决定。"
+SESSION_DEFAULT_INSTRUCTION = "开始研究。预算覆盖研究年与整个验证期：何时开始测试由你决定，每两次测试之间都继续研究。"
 
 SESSION_DYNAMIC_CONTEXT_HEADER = """\
 # 环境
@@ -203,7 +203,7 @@ def build_resume_instruction(
 
 
 def build_run_section(experiment_facts: Mapping[str, object]) -> str:
-    """This run's data view, years, steps, threshold and validate allowance in words.
+    """This run's data view, years, steps, threshold, validate allowance and budgets in words.
 
     Read off the facts the prompt also carries, so the list and the JSON
     cannot disagree: ``research_geometry`` (``research_period``, ``years``
@@ -213,6 +213,9 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
     (``alpha``, ``threshold_over_one_year``, ``threshold_over_validation_period``) and
     ``budgets.validates_per_step``. Empty for facts whose geometry states no
     test horizon; a geometry that does state one must carry every other key.
+    The session budgets (``budgets.deadline_seconds``, ``max_llm_calls``,
+    ``max_api_spend_usd``) add a closing line with their scale per research
+    interval; a budget the facts do not carry is left out of it.
     """
 
     geometry = experiment_facts.get("research_geometry")
@@ -220,12 +223,13 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
         return ""
     rules = experiment_facts["artifact_contract"]["acceptance_rules"]  # type: ignore[index]
     significance = rules["significance"]
-    allowance = experiment_facts["budgets"]["validates_per_step"]  # type: ignore[index]
+    budgets = experiment_facts["budgets"]
+    allowance = budgets["validates_per_step"]  # type: ignore[index]
     step = STEP_LENGTH_WORDS[str(geometry["step"])]
     research_end = str(geometry["research_period"]).split("..")[1]
     years = len(geometry["years"])  # type: ignore[arg-type]
     tested = int(geometry["steps_tested"])  # type: ignore[call-overload]
-    lines = (
+    lines = [
         "## 本次运行",
         f"- 数据：会话挂载的数据止于研究年末 {research_end}，整个会话都不变；验证期只通过 `test` 的结果揭开。",
         f"- 研究年：{years} 个，{geometry['research_period']}；`validate` 只在研究年内回测。",
@@ -233,8 +237,37 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
         + (f"，测到 {geometry['test_horizon']}。" if tested else "。"),
         f"- 门槛：α = {significance['alpha']}；一年区间约 {significance['threshold_over_one_year']}，整个验证期约 {significance['threshold_over_validation_period']}。",
         f"- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 {allowance} 次。",
-    )
+    ]
+    budget_line = _run_budget_line(budgets, int(geometry["steps"]))  # type: ignore[arg-type, call-overload]
+    if budget_line:
+        lines.append(budget_line)
     return "\n".join(lines)
+
+
+def _run_budget_line(budgets: Mapping[str, object], steps: int) -> str:
+    """The session budgets and their average per research interval (one before
+    each ``test``); empty when the facts carry none of the three."""
+
+    seconds = budgets.get("deadline_seconds")
+    calls = budgets.get("max_llm_calls")
+    spend = budgets.get("max_api_spend_usd")
+    totals: list[str] = []
+    shares: list[str] = []
+    if seconds is not None:
+        totals.append(f"推理时间 {chinese_duration(seconds)}")  # type: ignore[arg-type]
+        # Whole minutes: the per-interval figure is a scale, not a clock.
+        shares.append(f"{chinese_duration(60 * round(seconds / steps / 60))}推理时间")  # type: ignore[operator]
+    if calls is not None:
+        totals.append(f"模型调用 {calls} 次")
+        shares.append(f"{round(calls / steps)} 次模型调用")  # type: ignore[operator]
+    if spend is not None:
+        totals.append(f"API 花费 {spend:g} 美元")
+    if not totals:
+        return ""
+    line = f"- 预算（整个会话共用）：{'、'.join(totals)}"
+    if shares:
+        line += f"；每次 `test` 之前是一段研究，{steps} 段平均每段约 {'、'.join(shares)}"
+    return line + "。"
 
 
 def chinese_duration(seconds: float) -> str:

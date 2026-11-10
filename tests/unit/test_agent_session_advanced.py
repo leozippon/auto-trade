@@ -1368,7 +1368,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
 
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted(tmp_path):
     prompt = build_system_prompt(experiment_facts={})
-    assert "不从日期、路径、元数据或模型自身的知识推断之后的行情" in prompt
+    assert "不从日期、路径、元数据或你作为语言模型自身的知识推断之后的行情" in prompt
     # The shell's foreground cap and its detached-job recipe are the tool's
     # own description, not a second copy in the prompt.
     shell = SandboxShellTool(SafeWorkspace(tmp_path), object())  # type: ignore[arg-type]

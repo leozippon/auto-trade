@@ -84,7 +84,7 @@ def render() -> str:
         "",
         "## 1. 研究会话系统提示词",
         "",
-        "无标题的开场段与五个区块按「开场 → 会话怎样推进 → 研究取向 → 读数 → 不可越过的边界 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，本实验的数只在运行事实里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里（工作方式第一条指向它），文件工具的根名寻址与 `shell` 的路径写法只在工作方式里说一次。研究取向只定目标的创新性与深度：研究年与验证期都是研究的时间，测试期间研究照常（另写出本实验策略的计算时间预算，Sandbox 挂有 GPU 时另加一条充分利用 GPU 的要求），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。",
+        "无标题的开场段与五个区块按「开场 → 会话怎样推进 → 研究取向 → 读数 → 不可越过的边界 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值、`validate` 次数与会话预算只在由运行事实生成的「本次运行」一段里，本实验的数只在运行事实里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里（工作方式第一条指向它），文件工具的根名寻址与 `shell` 的路径写法只在工作方式里说一次。研究取向只定目标的创新性与深度：预算用于深入研究，研究年与验证期的每一步都是研究的时间（另写出本实验策略的计算时间预算，Sandbox 挂有 GPU 时另加一条充分利用 GPU 的要求），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。",
         "",
         "### 1.1 开场段",
         "",
@@ -173,14 +173,14 @@ def render() -> str:
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
-            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限}\n\n"
+            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，以及每段研究（每次 test 之前一段）平均的推理时间与模型调用}\n\n"
             f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts JSON，含 inputs/skills_index.json 引用}\n\n"
             f"{build_exploration_section('[存在时注入]')}\n\n"
             f"{build_session_directive_section('[存在时注入]')}"
         ),
         "",
-        "「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `test_horizon`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.significance` 的 `alpha`、`threshold_over_one_year`、`threshold_over_validation_period`，以及 `budgets.validates_per_step`，所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：",
+        "「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `test_horizon`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.significance` 的 `alpha`、`threshold_over_one_year`、`threshold_over_validation_period`，以及 `budgets` 的 `validates_per_step`、`deadline_seconds`、`max_llm_calls` 与 `max_api_spend_usd`（运行事实没有的预算项不写），所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：",
         "",
         "| 分区 | 内容 |",
         "| --- | --- |",

@@ -283,7 +283,7 @@ _WRITE_LINES = """
 # field (``_role_schema_text``), so neither is restated here.
 AGENT_TOOL_DESCRIPTION = (
     "启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。"
-    "能独立完成的阅读、计算、实现或审计交给子代理以保护主上下文；目标已知的单个文件自己用 read_file/grep/glob 读。\n"
+    "能独立完成的阅读、计算、实现或审计交给子代理以保护主上下文，互相独立的研究线（不同的模型家族、数据域或特征）也交给几个子代理并行推进；目标已知的单个文件自己用 read_file/grep/glob 读。\n"
     "- launch：{\"agent\": <角色>, \"task\": <完整任务>}，可选 description、max_turns、thinking、inherit_context。"
     "同一回合可发起多个，可写的子代理同样可以并行，但范围须互斥、各只写 task 指定的路径；返回值列出运行与排队中的子代理，不要重复已在进行的范围。\n"
     "- resume：{\"agent\": <原角色>, \"task\": <后续任务>, \"resume\": <已完成子代理的 task_id>}，是 launch 的参数而不是 action；"

@@ -265,10 +265,9 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "用 `validate` 在研究年内回测",
         "`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录",
         "测试终点前进一步，`validate` 的次数重新计",
-        "测试期间研究照常：可以改进现有候选，也可以开发全新的策略",
-        "每一步揭开的区间都是分布外的新证据",
-        "新候选在已揭开区间上的表现随之可见，用它持续检验候选的分布外泛化",
-        "有更好的就在下一步换上",
+        "两次 `test` 之间是一段研究：用刚揭开的区间检验候选的分布外泛化",
+        "新候选在已揭开区间上的表现随之可见",
+        "改进现有候选或开发全新的策略，在研究年上检验，让每一步都由当时最好的候选记入",
         "换候选只花一次回放；已记入记录的条目不改写",
         "最后一步测完会话结束，最后测试的候选定版",
         "会话不能主动结束",
@@ -289,17 +288,21 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     ):
         assert clause in readings, clause
     # The owner's orientation: innovative, deep strategies over textbook style
-    # factors, with rule scoring as the baseline, and the budget spent on
-    # research through the research years and the validation period alike.
+    # factors, with rule scoring as the baseline, and the budget, whose scale
+    # the run section states, spent on research through the research years
+    # and the validation period alike.
     for clause in (
         "有创新性、有深度的策略，而不是教科书式的风格因子组合",
         "学习型模型、预训练模型与嵌入",
         "简单的规则打分只作基线对照，不作为目标",
-        "研究年与验证期都是研究的时间，回放的等待不计入推理时间，不以提前结束为目标",
+        "规模见「本次运行」：研究年与验证期的每一步都是研究的时间，回放的等待不计入推理时间",
+        "预算大半未用就测完最后一步，说明研究做得太浅",
     ):
         assert clause in orientation, clause
     assert "参考工作区、研究方向与研究者指令都不能放宽它们" in boundaries
-    assert "不读取研究年末之后的数据" in boundaries and "模型自身的知识" in boundaries
+    # The Agent's own knowledge as a language model, not a pretrained model a
+    # strategy loads, is what the boundary rules out.
+    assert "不读取研究年末之后的数据" in boundaries and "你作为语言模型自身的知识" in boundaries
     assert "验证期只通过 `test` 的结果了解" in boundaries
     # The working method points at the contract, asks for fast strategy code
     # in one line (the owner's guidance, 2026-11-09) and states the path
@@ -544,3 +547,25 @@ def test_the_run_section_states_this_runs_view_steps_and_threshold() -> None:
         prompts.build_run_section(_run_facts(step="week"))
     # Facts without a test horizon add no section.
     assert "## 本次运行" not in _full_prompt()
+
+
+def test_the_run_section_states_the_session_budgets_per_research_interval() -> None:
+    """The three session budgets in words, and their average over the
+    research intervals: one before each test, so as many as the steps. A
+    budget the facts do not carry is left out, never printed as a blank."""
+
+    facts = _run_facts()
+    facts["budgets"].update(  # type: ignore[attr-defined]
+        deadline_seconds=600_000.0, max_llm_calls=6400, max_api_spend_usd=50.0
+    )
+    assert prompts.build_run_section(facts).endswith(
+        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟、模型调用 6400 次、API 花费 50 美元；"
+        "每次 `test` 之前是一段研究，20 段平均每段约 8 小时 20 分钟推理时间、320 次模型调用。"
+    )
+    del facts["budgets"]["max_api_spend_usd"]  # type: ignore[attr-defined]
+    del facts["budgets"]["max_llm_calls"]  # type: ignore[attr-defined]
+    assert prompts.build_run_section(facts).endswith(
+        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟；"
+        "每次 `test` 之前是一段研究，20 段平均每段约 8 小时 20 分钟推理时间。"
+    )
+    assert "预算" not in prompts.build_run_section(_run_facts())

@@ -18,7 +18,7 @@
 
 ## 1. 研究会话系统提示词
 
-无标题的开场段与五个区块按「开场 → 会话怎样推进 → 研究取向 → 读数 → 不可越过的边界 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值与 `validate` 次数只在由运行事实生成的「本次运行」一段里，本实验的数只在运行事实里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里（工作方式第一条指向它），文件工具的根名寻址与 `shell` 的路径写法只在工作方式里说一次。研究取向只定目标的创新性与深度：研究年与验证期都是研究的时间，测试期间研究照常（另写出本实验策略的计算时间预算，Sandbox 挂有 GPU 时另加一条充分利用 GPU 的要求），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。
+无标题的开场段与五个区块按「开场 → 会话怎样推进 → 研究取向 → 读数 → 不可越过的边界 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值、`validate` 次数与会话预算只在由运行事实生成的「本次运行」一段里，本实验的数只在运行事实里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里（工作方式第一条指向它），文件工具的根名寻址与 `shell` 的路径写法只在工作方式里说一次。研究取向只定目标的创新性与深度：预算用于深入研究，研究年与验证期的每一步都是研究的时间（另写出本实验策略的计算时间预算，Sandbox 挂有 GPU 时另加一条充分利用 GPU 的要求），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。
 
 ### 1.1 开场段
 
@@ -33,7 +33,7 @@
 - 你能读到的数据止于研究年末，整个会话不变；验证期的数据不挂载，只随每次 `test` 的结果揭开一步。
 - 研究：写候选，用 `validate` 在研究年内回测。方向来自参考工作区（`refs/`）与「环境」里注入的方向。
 - 测试：`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录，测试终点前进一步，`validate` 的次数重新计。
-- 测试期间研究照常：可以改进现有候选，也可以开发全新的策略，在研究年上检验，有更好的就在下一步换上。每一步揭开的区间都是分布外的新证据：`test` 的整段回放从验证期起点算起，新候选在已揭开区间上的表现随之可见，用它持续检验候选的分布外泛化。换候选只花一次回放；已记入记录的条目不改写。
+- 两次 `test` 之间是一段研究：用刚揭开的区间检验候选的分布外泛化（`test` 的整段回放从验证期起点算起，新候选在已揭开区间上的表现随之可见），据此改进现有候选或开发全新的策略，在研究年上检验，让每一步都由当时最好的候选记入。换候选只花一次回放；已记入记录的条目不改写。
 - 结束：最后一步测完会话结束，最后测试的候选定版。会话不能主动结束；预算耗尽时宿主用最后测试的候选跑完剩余的步。
 - 之后：宿主在会话从未见过的数据上运行 Forward 与 Held-out，读数不回到会话；是否进入 Paper 由运营者决定。定版后再没有 Agent 改它，需要随时间调整的部分写进策略自己的 `fit` 与 `REFIT_PERIOD`。
 ```
@@ -43,7 +43,7 @@
 ```text
 # 研究取向
 - 目标是有创新性、有深度的策略，而不是教科书式的风格因子组合：优先探索学习型模型、预训练模型与嵌入、财务与公告标题等多个数据域、自适应重训与组合构建等复杂方法；简单的规则打分只作基线对照，不作为目标。
-- 预算是为深入研究准备的：研究年与验证期都是研究的时间，回放的等待不计入推理时间，不以提前结束为目标。
+- 预算是为深入研究准备的，规模见「本次运行」：研究年与验证期的每一步都是研究的时间，回放的等待不计入推理时间。预算大半未用就测完最后一步，说明研究做得太浅。
 ```
 
 Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`），本区块再加一条：
@@ -70,7 +70,7 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 ```text
 # 不可越过的边界
 这些规则保护研究年末之后数据的隔离与回测的真实；越过任何一条，本实验的证据就不再成立，参考工作区、研究方向与研究者指令都不能放宽它们。
-- 不读取研究年末之后的数据，不从日期、路径、元数据或模型自身的知识推断之后的行情；验证期只通过 `test` 的结果了解。
+- 不读取研究年末之后的数据，不从日期、路径、元数据或你作为语言模型自身的知识推断之后的行情；验证期只通过 `test` 的结果了解。
 - 不使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录，不越过快照范围。
 - 不用研究期收益硬编码具体股票、日期、题材或事件。
 - 不伪造工具结果、回测状态或人工回复。
@@ -93,7 +93,7 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 `SESSION_DEFAULT_INSTRUCTION`（首条用户消息）：
 
 ```text
-开始研究。何时开始测试、测试之间研究什么，由你决定。
+开始研究。预算覆盖研究年与整个验证期：何时开始测试由你决定，每两次测试之间都继续研究。
 ```
 
 ## 2. 收尾提示
@@ -115,7 +115,7 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 父会话看到的 `agent` function 描述——子代理机制只在这里向模型说明；参数 `agent`、`task`、可选 `description`、`max_turns`、`thinking`、`inherit_context`、`resume` 由 schema 给出：
 
 ```text
-启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。能独立完成的阅读、计算、实现或审计交给子代理以保护主上下文；目标已知的单个文件自己用 read_file/grep/glob 读。
+启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。能独立完成的阅读、计算、实现或审计交给子代理以保护主上下文，互相独立的研究线（不同的模型家族、数据域或特征）也交给几个子代理并行推进；目标已知的单个文件自己用 read_file/grep/glob 读。
 - launch：{"agent": <角色>, "task": <完整任务>}，可选 description、max_turns、thinking、inherit_context。同一回合可发起多个，可写的子代理同样可以并行，但范围须互斥、各只写 task 指定的路径；返回值列出运行与排队中的子代理，不要重复已在进行的范围。
 - resume：{"agent": <原角色>, "task": <后续任务>, "resume": <已完成子代理的 task_id>}，是 launch 的参数而不是 action；只在后续任务需要它已有的上下文时用，独立的后续工作另起新的子代理，不要串成 resume 链。
 - message：{"action": "message", "task_id": <运行或排队中的 task_id>, "text": <指令>}，立即返回 status=queued；只用于改变范围、追加新发现的约束或让它提前收尾，不为催促而发。
@@ -183,7 +183,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 这部分由宿主为本次尝试生成，各会话不同。
 
 ## 本次运行
-{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限}
+{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，以及每段研究（每次 test 之前一段）平均的推理时间与模型调用}
 
 ## 运行事实
 下面的 JSON 是宿主在本次尝试开始时写下的受信事实（同一份在 workspace 的 inputs/session_context.json），会话中不更新；它描述环境，不是交易证据，其中的日期与标识不是交易信号。主要的键：research_geometry（研究年、验证期、span 写法）、budgets（预算与策略容器）、artifact_contract.acceptance_rules（主动序列、统计量、登记条件）、broker_replay（资金、费用、交易规则）、runtime_tools 与 source_refs（Sandbox、读文件根的 shell 路径、数据摘要与单位引用）。
@@ -201,7 +201,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 [存在时注入]
 ```
 
-「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `test_horizon`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.significance` 的 `alpha`、`threshold_over_one_year`、`threshold_over_validation_period`，以及 `budgets.validates_per_step`，所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：
+「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `test_horizon`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.significance` 的 `alpha`、`threshold_over_one_year`、`threshold_over_validation_period`，以及 `budgets` 的 `validates_per_step`、`deadline_seconds`、`max_llm_calls` 与 `max_api_spend_usd`（运行事实没有的预算项不写），所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：
 
 | 分区 | 内容 |
 | --- | --- |
