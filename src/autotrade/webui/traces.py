@@ -274,6 +274,18 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
             blocks.extend(interval.flush())
             blocks.append(_compaction_block(event))
             continue
+        if kind == TraceEvent.TRACE_LIMIT_REACHED:
+            # The writer's last event: the attempt runs on and records nothing more.
+            blocks.extend(interval.flush())
+            blocks.append(
+                _marker_block(
+                    event,
+                    "Trace 已达上限",
+                    f"Trace 文件达到 {_as_int(event.get('max_bytes'))} 字节上限，"
+                    "此后的事件与预算用量不再记录；会话本身仍在继续。",
+                )
+            )
+            continue
         if kind == TraceEvent.CONTEXT_NOTICE:
             blocks.extend(interval.flush())
             blocks.append(

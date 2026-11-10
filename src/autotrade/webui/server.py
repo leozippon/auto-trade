@@ -345,7 +345,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         # The experiment page polls this route, so the budget bars follow the
         # live session without a rebuild, and a new Validation or test step
         # (a moved revision) makes the page re-read the experiment.
-        public["budget_used"] = registry.research_budget_used(directory)
+        public.update(registry.research_budget_state(directory))
         public["revision"] = registry.research_revision(directory)
         return public
 

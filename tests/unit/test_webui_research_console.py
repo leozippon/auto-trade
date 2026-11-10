@@ -639,6 +639,88 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
     assert "没有研究记录" in panel
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_a_trace_at_its_size_cap_says_the_spend_shown_stopped_moving(tmp_path: Path) -> None:
+    """A trace that reached its size cap ends on the writer's marker while the
+    attempt keeps spending, so the last block it carries understates the spend.
+    The listing, the detail and the status poll say that block is frozen, the
+    trace view shows the marker instead of ending silently, and the control
+    panel states it under the budget. Once the session is recorded the ledger's
+    block is the spend and nothing is frozen."""
+
+    directory = build_experiment(tmp_path / "experiments", "deep", "research", alive=True)
+    block = {"inference_seconds": 90000.0, "llm_calls": 4400, "test_replays": 2, "null_controls": 0}
+    trace = directory / "artifacts/traces/run_research_live.jsonl"
+    trace.parent.mkdir(parents=True)
+    trace.write_text(json.dumps({"event_type": "llm_call", "budget_used": block}) + "\n", encoding="utf-8")
+    client = TestClient(create_app(tmp_path, tmp_path / "experiments"))
+
+    def frozen() -> list[object]:
+        return [
+            experiment_listing(tmp_path / "experiments")["experiments"][0]["budget_frozen"],
+            client.get("/api/experiments/deep").json()["budget_frozen"],
+            client.get("/api/experiments/deep/status").json()["budget_frozen"],
+        ]
+
+    assert frozen() == [False, False, False]
+    marker = {"event_type": "trace_limit_reached", "ts": "2026-11-01T00:00:00+00:00", "max_bytes": 33554432}
+    with trace.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(marker) + "\n")
+    assert frozen() == [True, True, True]
+    assert client.get("/api/experiments/deep/status").json()["budget_used"] == block
+    [shown] = client.get("/api/experiments/deep/trace/blocks").json()["blocks"]
+    assert (shown["kind"], shown["label"]) == ("marker", "Trace 已达上限") and "33554432" in shown["text"]
+    ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl").append(
+        {
+            "record_type": "research_session",
+            "experiment_id": "deep",
+            "epoch_id": "research",
+            "fold_id": "research",
+            "run_id": "run_research_live",
+            "session_key": "research",
+            "outcome": "deadline",
+            "finish_reason": "llm_call_budget_exhausted",
+            "steps": [],
+            "experiment_end": {"status": "no_deliverable", "reason": "research budget exhausted"},
+            "budget_used": {**block, "llm_calls": 19200},
+        }
+    )
+    assert frozen() == [False, False, False]
+    assert client.get("/api/experiments/deep/status").json()["budget_used"]["llm_calls"] == 19200
+
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    harness = "\n".join(
+        [
+            """
+const node = (tag) => ({
+  tag, nodeType: 1, style: {}, children: [],
+  append(...nodes) { this.children.push(...nodes); },
+  replaceChildren(...nodes) { this.children = nodes; },
+  addEventListener() {}, setAttribute() {},
+});
+const document = { createElement: node, createTextNode: (text) => ({ nodeType: 3, text }) };
+const controlBar = () => node("div");
+const experimentBadge = () => null, activityNode = () => null, experimentEquityHost = () => null;
+const budgetBars = (used) => (used ? node("bars") : null);
+""",
+            *(_fn(script, name) for name in ("el", "controlPanel")),
+            """
+const text = (item) => item.nodeType === 3 ? item.text : item.children.map(text).join("");
+const panel = controlPanel({ budget_used: { llm_calls: 1 }, budget: {} });
+const before = text(panel);
+panel.__follow({ budget_used: { llm_calls: 1 }, budget_frozen: true });
+console.log(JSON.stringify([before, text(panel)]));
+""",
+        ]
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
+    assert result.returncode == 0, result.stderr
+    before, after = json.loads(result.stdout)
+    assert before == "" and after.startswith("Trace 已达大小上限，此后的用量不再记录")
+
+
 def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_path: Path) -> None:
     """The one curve per experiment starts from the research-period validation of the
     candidate the tiles name — the registered artifact's own once the experiment registered —
