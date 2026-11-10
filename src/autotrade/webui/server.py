@@ -347,6 +347,16 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         public["budget_used"] = registry.research_budget_used(directory)
         return public
 
+    @app.get("/api/experiments/{experiment_id}/research-depth")
+    def get_research_depth(experiment_id: str) -> dict[str, object]:
+        _experiment_dir(experiment_id)
+        try:
+            return registry.research_depth(experiment_root, experiment_id)
+        except (OSError, ValueError) as exc:
+            raise HTTPException(
+                status_code=409, detail="experiment research records are unreadable"
+            ) from exc
+
     @app.get("/api/experiments/{experiment_id}/trace/stats")
     def get_trace_stats(
         experiment_id: str,

@@ -3768,6 +3768,8 @@ function sessionDetailPanel(detail, selectedKey) {
   // sessions have built, the live Trace below it is what is happening in the
   // current one, and the reader's own message box closes the column.
   panel.append(stepTreePanel(detail));
+  // How much research went before each test, and since the last one.
+  panel.append(researchDepthPanel(detail, isCurrent));
   // The validation record so far: every step the ledger holds, as it lands.
   const record = recordPanel(detail);
   if (record) panel.append(record);
@@ -3819,6 +3821,79 @@ function sessionDetailPanel(detail, selectedKey) {
     }
   }
   return panel;
+}
+
+/* The research that preceded each test (webui/registry.py research_depth): one
+   row per step the session tested and one for what followed its last test,
+   each with its wall-clock, the model calls and inference time charged in it,
+   and its counted validate calls and their candidates. A session that tests
+   step after step shows here as rows of one call and no validate. A figure the
+   records do not carry is a dash. `live` re-reads it while the session runs. */
+function researchDepthPanel(detail, live) {
+  const host = el("div", {});
+  const limit = Number((detail.budget || {}).llm_calls);
+  const count = (value) => (Number.isFinite(value) ? String(Math.round(value)) : null);
+  const clock = (value) => (Number.isFinite(value) ? fmtDuration(value) : null);
+  const label = (row, rows) => {
+    if (row.step !== null) return `第 ${row.step} 步之前`;
+    const tested = rows.length > 1;
+    if (row.open) return `${tested ? "末次 test 之后" : "首次 test 之前"}（会话未结束）`;
+    return tested ? "末次 test 之后" : "未曾 test";
+  };
+  const draw = (payload) => {
+    const rows = payload.intervals || [];
+    if (!rows.length) return host.replaceChildren();
+    host.replaceChildren(
+      el(
+        "div",
+        { class: "panel" },
+        panelHead("研究深度", el("span", { class: "meta-line" }, "每次 test 之前做了多少研究")),
+        dataTable(
+          [
+            { label: "区间" },
+            { label: "test 落账" },
+            { label: "间隔", num: true, title: "上一次 test 落账（首行为首次尝试启动）到本次的墙钟时间，含回放等待" },
+            { label: "模型调用", num: true, title: "本区间的模型调用次数，主循环、子代理与压缩合计；悬停看累计" },
+            { label: "推理时间", num: true, title: "本区间计入研究时长预算的推理时间；回放期间不计" },
+            {
+              label: "validate",
+              num: true,
+              title: `本区间计数的 validate 调用（至少一个候选完成回放才计数），每个区间至多 ${payload.validates_per_step} 次`,
+            },
+            { label: "候选", num: true, title: "这些 validate 调用里完成回放的候选数，含对照" },
+          ],
+          rows.map((row) => [
+            label(row, rows),
+            row.ended_at ? fmtTs(row.ended_at) : null,
+            clock(row.wall_seconds),
+            {
+              value: count(row.llm_calls),
+              title:
+                Number.isFinite(row.llm_calls_total) && limit > 0
+                  ? `累计 ${count(row.llm_calls_total)} / ${count(limit)}（${fmtPct(row.llm_calls_total / limit, 1)}）`
+                  : null,
+            },
+            clock(row.inference_seconds),
+            String(row.validates),
+            String(row.candidates),
+          ]),
+          { fit: true },
+        ),
+      ),
+    );
+  };
+  const load = async () => {
+    try {
+      draw(await api(`/api/experiments/${encodeURIComponent(detail.experiment_id)}/research-depth`));
+    } catch (error) {
+      host.replaceChildren(
+        el("div", { class: "panel" }, panelHead("研究深度"), el("div", { class: "hint warn" }, `读取失败：${error.message}`)),
+      );
+    }
+  };
+  load();
+  if (live) liveTimers.push(setPollInterval(load, 15000));
+  return host;
 }
 
 /* Who recorded a step of the validation record. */

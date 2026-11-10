@@ -504,106 +504,144 @@ def _as_text(value: object) -> str:
 
 _STATS_CACHE: dict[str, dict[str, object]] = {}
 _STATS_LOCK = threading.Lock()
+# ``session_tools.TestTool``'s name: the call that records one step of the
+# validation record.
+TEST_TOOL = "test"
+
+
+def _scan(path: Path) -> dict[str, object]:
+    """The trace's running aggregate, extended over the complete lines appended
+    since the last scan. Called with ``_STATS_LOCK`` held."""
+
+    path = Path(path)
+    size = path.stat().st_size
+    key = str(path.resolve())
+    cached = _STATS_CACHE.get(key)
+    if cached is None or size < _as_int(cached.get("offset")):
+        cached = {
+            "offset": 0,
+            "counts": {},
+            "tool_counts": {},
+            "llm_total_tokens": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "last_main_prompt_tokens": 0,
+            "subagent_task_ids": set(),
+            "subagent_ended_ids": set(),
+            "subagent_usage": {},
+            "budget_used": None,
+            "started_at": None,
+            "tests": [],
+        }
+    offset = _as_int(cached.get("offset"))
+    with path.open("rb") as handle:
+        handle.seek(offset)
+        blob = handle.read(size - offset)
+    tail = blob.rfind(b"\n") + 1
+    counts = _as_mapping(cached.get("counts"))
+    tool_counts = _as_mapping(cached.get("tool_counts"))
+    total = _as_int(cached.get("llm_total_tokens"))
+    prompt = _as_int(cached.get("prompt_tokens"))
+    completion = _as_int(cached.get("completion_tokens"))
+    last_main_prompt = _as_int(cached.get("last_main_prompt_tokens"))
+    task_ids = set(_as_str_list(cached.get("subagent_task_ids")))
+    ended_ids = set(_as_str_list(cached.get("subagent_ended_ids")))
+    subagent_usage = {
+        task: _usage_row(_as_mapping(row))
+        for task, row in _as_mapping(cached.get("subagent_usage")).items()
+    }
+    # The session's cumulative spend rides on every budgeted event; the
+    # last block seen is the experiment's usage so far, earlier attempts included.
+    budget_used = cached.get("budget_used")
+    started_at = cached.get("started_at")
+    tests = list(cached.get("tests") or ())  # type: ignore[call-overload]
+    for raw in blob[:tail].splitlines():
+        event = _decode_event(raw)
+        kind = str(event.get("event_type") or "event")
+        counts[kind] = _as_int(counts.get(kind)) + 1
+        if started_at is None:
+            started_at = event.get("ts")
+        if isinstance(event.get("budget_used"), Mapping):
+            budget_used = _as_mapping(event["budget_used"])
+        task_id = _subagent_event_task_id(event)
+        if task_id is not None:
+            task_ids.add(task_id)
+            # A finished task reports authoritative totals; a live one is
+            # summed from the per-turn records seen so far.
+            if _subagent_phase(event) == "ended":
+                ended_ids.add(task_id)
+                totals = _as_mapping(event.get("usage_totals"))
+                if totals:
+                    subagent_usage[task_id] = _usage_row(totals)
+            elif kind == TraceEvent.SUBAGENT_LLM and task_id not in ended_ids:
+                _add_usage(
+                    subagent_usage.setdefault(task_id, _new_usage()),
+                    _as_mapping(event.get("usage")),
+                )
+        if kind == TraceEvent.TOOL_CALL:
+            tool = str(event.get("tool") or "unknown")
+            tool_counts[tool] = _as_int(tool_counts.get(tool)) + 1
+            if tool == TEST_TOOL and isinstance(event.get("budget_used"), Mapping):
+                tests.append({"ts": event.get("ts"), "budget_used": _as_mapping(event["budget_used"])})
+        elif kind == TraceEvent.LLM_CALL:
+            usage = _as_mapping(event.get("usage"))
+            if usage:
+                total += _as_int(usage.get("total_tokens"))
+                prompt += _as_int(usage.get("prompt_tokens"))
+                completion += _as_int(usage.get("completion_tokens"))
+                if _is_main_agent_llm_call(event):
+                    last_main_prompt = _as_int(usage.get("prompt_tokens"))
+    cached = {
+        "offset": offset + tail,
+        "counts": counts,
+        "tool_counts": tool_counts,
+        "llm_total_tokens": total,
+        "prompt_tokens": prompt,
+        "completion_tokens": completion,
+        "last_main_prompt_tokens": last_main_prompt,
+        "subagent_task_ids": task_ids,
+        "subagent_ended_ids": ended_ids,
+        "subagent_usage": subagent_usage,
+        "budget_used": budget_used,
+        "started_at": started_at,
+        "tests": tests,
+    }
+    if len(_STATS_CACHE) >= 32 and key not in _STATS_CACHE:
+        _STATS_CACHE.pop(next(iter(_STATS_CACHE)))
+    _STATS_CACHE[key] = cached
+    return cached
+
+
+def trace_test_marks(path: Path) -> dict[str, object]:
+    """Where one attempt's trace places its tests in its spend: when its first
+    event was written (``started_at``), and for every finished ``test`` call,
+    in order, the event's time and the cumulative ``budget_used`` block it
+    carries (earlier attempts included). A refused test is a call too; the
+    reader matches calls to recorded steps by time."""
+
+    with _STATS_LOCK:
+        cached = _scan(path)
+        return {
+            "started_at": cached["started_at"],
+            "tests": [dict(mark) for mark in cached["tests"]],  # type: ignore[union-attr]
+        }
 
 
 def trace_stats(path: Path) -> dict[str, object]:
     """Incrementally aggregate event/tool/token counts and unique sub-agent tasks."""
 
     with _STATS_LOCK:
-        path = Path(path)
-        size = path.stat().st_size
-        key = str(path.resolve())
-        cached = _STATS_CACHE.get(key)
-        if (
-            cached is None
-            or size < _as_int(cached.get("offset"))
-            or "subagent_task_ids" not in cached
-            or "subagent_ended_ids" not in cached
-            or "subagent_usage" not in cached
-            or "last_main_prompt_tokens" not in cached
-            or "budget_used" not in cached
-        ):
-            cached = {
-                "offset": 0,
-                "counts": {},
-                "tool_counts": {},
-                "llm_total_tokens": 0,
-                "prompt_tokens": 0,
-                "completion_tokens": 0,
-                "last_main_prompt_tokens": 0,
-                "subagent_task_ids": set(),
-                "subagent_ended_ids": set(),
-                "subagent_usage": {},
-                "budget_used": None,
-            }
-        offset = _as_int(cached.get("offset"))
-        with path.open("rb") as handle:
-            handle.seek(offset)
-            blob = handle.read(size - offset)
-        tail = blob.rfind(b"\n") + 1
-        counts = _as_mapping(cached.get("counts"))
-        tool_counts = _as_mapping(cached.get("tool_counts"))
-        total = _as_int(cached.get("llm_total_tokens"))
-        prompt = _as_int(cached.get("prompt_tokens"))
-        completion = _as_int(cached.get("completion_tokens"))
-        last_main_prompt = _as_int(cached.get("last_main_prompt_tokens"))
-        task_ids = set(_as_str_list(cached.get("subagent_task_ids")))
-        ended_ids = set(_as_str_list(cached.get("subagent_ended_ids")))
-        subagent_usage = {
-            task: _usage_row(_as_mapping(row))
-            for task, row in _as_mapping(cached.get("subagent_usage")).items()
-        }
-        # The session's cumulative spend rides on every budgeted event; the
-        # last block seen is the experiment's usage so far, earlier attempts included.
-        budget_used = cached.get("budget_used")
-        for raw in blob[:tail].splitlines():
-            event = _decode_event(raw)
-            kind = str(event.get("event_type") or "event")
-            counts[kind] = _as_int(counts.get(kind)) + 1
-            if isinstance(event.get("budget_used"), Mapping):
-                budget_used = _as_mapping(event["budget_used"])
-            task_id = _subagent_event_task_id(event)
-            if task_id is not None:
-                task_ids.add(task_id)
-                # A finished task reports authoritative totals; a live one is
-                # summed from the per-turn records seen so far.
-                if _subagent_phase(event) == "ended":
-                    ended_ids.add(task_id)
-                    totals = _as_mapping(event.get("usage_totals"))
-                    if totals:
-                        subagent_usage[task_id] = _usage_row(totals)
-                elif kind == TraceEvent.SUBAGENT_LLM and task_id not in ended_ids:
-                    _add_usage(
-                        subagent_usage.setdefault(task_id, _new_usage()),
-                        _as_mapping(event.get("usage")),
-                    )
-            if kind == TraceEvent.TOOL_CALL:
-                tool = str(event.get("tool") or "unknown")
-                tool_counts[tool] = _as_int(tool_counts.get(tool)) + 1
-            elif kind == TraceEvent.LLM_CALL:
-                usage = _as_mapping(event.get("usage"))
-                if usage:
-                    total += _as_int(usage.get("total_tokens"))
-                    prompt += _as_int(usage.get("prompt_tokens"))
-                    completion += _as_int(usage.get("completion_tokens"))
-                    if _is_main_agent_llm_call(event):
-                        last_main_prompt = _as_int(usage.get("prompt_tokens"))
-        cached = {
-            "offset": offset + tail,
-            "counts": counts,
-            "tool_counts": tool_counts,
-            "llm_total_tokens": total,
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "last_main_prompt_tokens": last_main_prompt,
-            "subagent_task_ids": task_ids,
-            "subagent_ended_ids": ended_ids,
-            "subagent_usage": subagent_usage,
-            "budget_used": budget_used,
-        }
-        if len(_STATS_CACHE) >= 32 and key not in _STATS_CACHE:
-            _STATS_CACHE.pop(next(iter(_STATS_CACHE)))
-        _STATS_CACHE[key] = cached
+        cached = _scan(path)
+        counts = _as_mapping(cached["counts"])
+        tool_counts = _as_mapping(cached["tool_counts"])
+        budget_used = cached["budget_used"]
+        total = _as_int(cached["llm_total_tokens"])
+        prompt = _as_int(cached["prompt_tokens"])
+        completion = _as_int(cached["completion_tokens"])
+        last_main_prompt = _as_int(cached["last_main_prompt_tokens"])
+        task_ids = set(_as_str_list(cached["subagent_task_ids"]))
+        ended_ids = set(_as_str_list(cached["subagent_ended_ids"]))
+        subagent_usage = _as_mapping(cached["subagent_usage"])
         return {
             "budget_used": dict(budget_used) if isinstance(budget_used, Mapping) else None,
             "counts": counts,

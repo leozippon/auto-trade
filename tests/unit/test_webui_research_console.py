@@ -790,8 +790,8 @@ def test_a_page_poll_keeps_one_request_in_flight() -> None:
     # server (or is a named poll function) goes through the guard.
     rest = script.replace(helper, "")
     assert re.search(r"setInterval\((?!\(\) =>)", rest) is None
-    # The definition, then the home, status, trace, sub-agent and Paper polls.
-    assert rest.count("setPollInterval(") == 6
+    # The definition, then the home, status, depth, trace, sub-agent and Paper polls.
+    assert rest.count("setPollInterval(") == 7
 
 
 def test_a_poll_holding_the_kept_digest_receives_only_the_live_rows(tmp_path: Path) -> None:

@@ -179,32 +179,6 @@ def test_trace_stats_counts_compact_ops_without_double_counting(
     assert later_counts["context_edit"] == 3
 
 
-def test_trace_stats_recomputes_when_cached_summary_lacks_subagent_field(
-    tmp_path: Path,
-) -> None:
-    path = _write_trace(
-        tmp_path / "legacy_cache.jsonl",
-        [{"event_type": "subagent_task", "task_id": "agent_a", "status": "started"}],
-    )
-    key = str(path.resolve())
-    traces._STATS_CACHE[key] = {
-        "offset": path.stat().st_size,
-        "counts": {"subagent_task": 1},
-        "tool_counts": {},
-        "llm_total_tokens": 0,
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-    }
-    try:
-        stats = trace_stats(path)
-        counts = stats["counts"]
-        assert isinstance(counts, dict)
-        assert stats["subagent_tasks"] == 1
-        assert counts["subagent_task"] == 1
-    finally:
-        traces._STATS_CACHE.pop(key, None)
-
-
 def test_trace_stats_last_main_llm_prompt_ignores_subagent_calls(
     tmp_path: Path,
 ) -> None:

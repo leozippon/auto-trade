@@ -101,7 +101,7 @@ from autotrade.pipelines.verdict import (
 )
 
 from .public_identity import PublicIdentity
-from .traces import resolve_trace_path, trace_stats
+from .traces import resolve_trace_path, trace_stats, trace_test_marks
 
 ACTIVE_STATES = (
     ExperimentState.LAUNCHING,
@@ -244,15 +244,19 @@ def experiment_state(
     return result
 
 
+def _stamp(value: object) -> datetime | None:
+    """An ISO timestamp as the pipeline writes them (a naive one is UTC), or None."""
+    try:
+        then = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return then if then.tzinfo is not None else then.replace(tzinfo=UTC)
+
+
 def _age_seconds(stamp: object) -> float:
     """Age of an ISO timestamp; unparseable stamps read as infinitely old."""
-    try:
-        then = datetime.fromisoformat(str(stamp))
-    except (TypeError, ValueError):
-        return float("inf")
-    if then.tzinfo is None:
-        then = then.replace(tzinfo=UTC)
-    return (datetime.now(UTC) - then).total_seconds()
+    then = _stamp(stamp)
+    return float("inf") if then is None else (datetime.now(UTC) - then).total_seconds()
 
 
 def _created_at(directory: Path, params: Mapping[str, object]) -> str | None:
@@ -569,6 +573,125 @@ def research_budget_used(directory: Path) -> dict[str, object] | None:
     except (OSError, ValueError):
         return None
     return _budget_used(directory, records, experiment_state(directory).get("status"))
+
+
+# The budgets the depth table meters per interval, keyed as ``budget_used``.
+_DEPTH_METERS = ("llm_calls", "inference_seconds")
+
+
+def research_depth(root: Path, experiment_id: str) -> dict[str, object]:
+    """How much research preceded each of the session's tests.
+
+    One interval per step the session itself tested, ending at that step's
+    ledger stamp, then one for what followed its last test: still open while
+    research can continue, absent for a session its last test completed. The
+    steps a host completion wrote are no research and have no interval.
+
+    Each interval states its wall-clock (replays included); the model calls and
+    inference time charged in it, with the cumulative calls at its end; and the
+    counted ``validate`` calls and the candidates they scored. The spend is
+    read off the ``budget_used`` block of the step's own ``test`` call in the
+    attempts' traces, which is cumulative across attempts, and is None where a
+    trace is gone or stopped before the call. The ``validate`` figures are read
+    off the step tree by the rule the session counts its allowance by
+    (``session_tools._validates_since``): the complete Validations created in
+    the interval, and their distinct batch ids. ``validates_per_step`` is that
+    allowance. An experiment that never ran has no interval.
+    """
+
+    directory = resolve_experiment_dir(root, experiment_id)
+    records = read_ledger_records(directory)
+    state = experiment_state(directory)
+    status = as_mapping(state.get("status"))
+    params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
+    session = as_mapping(next(iter(research_records(records)), None))
+    runs = [str(row["run_id"]) for row in records if row.get("epoch_id") == Stage.RESEARCH]
+    if status.get("session_key") == SessionKind.RESEARCH and status.get("run_id"):
+        runs.append(str(status["run_id"]))
+    started_at: datetime | None = None
+    marks: list[tuple[datetime, Mapping[str, object]]] = []
+    for index, run_id in enumerate(dict.fromkeys(runs)):
+        path = resolve_trace_path(directory, run_id)
+        if path is None:
+            continue
+        trace = trace_test_marks(path)
+        if index == 0:
+            started_at = _stamp(trace["started_at"])
+        for mark in trace["tests"]:  # type: ignore[union-attr]
+            at = _stamp(mark["ts"])
+            if at is not None:
+                marks.append((at, as_mapping(mark["budget_used"])))
+    validations = [
+        (created, str(as_mapping(node.get("metadata")).get("batch_id") or ""))
+        for node in StepTree(directory / "steps").nodes()
+        if node.get("complete_validation") is True
+        and (created := _stamp(node.get("created_at"))) is not None
+    ]
+
+    def interval(
+        step: int | None,
+        since: datetime | None,
+        until: datetime | None,
+        before: Mapping[str, object] | None,
+        after: Mapping[str, object] | None,
+    ) -> dict[str, object]:
+        batches = [
+            batch
+            for created, batch in validations
+            if batch and (since is None or created > since) and (until is None or created <= until)
+        ]
+        spent: dict[str, object] = dict.fromkeys(_DEPTH_METERS)
+        if before is not None and after is not None:
+            for meter in _DEPTH_METERS:
+                start, end = finite_number(before.get(meter)), finite_number(after.get(meter))
+                spent[meter] = None if start is None or end is None else end - start
+        return {
+            "step": step,
+            "ended_at": until.isoformat() if until is not None else None,
+            "wall_seconds": (
+                (until - since).total_seconds() if since is not None and until is not None else None
+            ),
+            **spent,
+            "llm_calls_total": finite_number(as_mapping(after).get("llm_calls")),
+            "validates": len(set(batches)),
+            "candidates": len(batches),
+        }
+
+    tests = [
+        row
+        for row in validation_record.test_step_records(records)
+        if row.get("source") == validation_record.SOURCE_TEST
+    ]
+    stamps = [_stamp(row.get("recorded_at")) for row in tests]
+    intervals: list[dict[str, object]] = []
+    since = started_at
+    # Before the first test nothing is spent; a step whose call left no block
+    # leaves the interval after it unmetered too.
+    before: Mapping[str, object] | None = dict.fromkeys(_DEPTH_METERS, 0)
+    for index, row in enumerate(tests):
+        until = stamps[index]
+        following = next((stamp for stamp in stamps[index + 1 :] if stamp is not None), None)
+        # The step's own call: the first finished after its ledger stamp and
+        # before the next step's.
+        after = next(
+            (
+                block
+                for at, block in marks
+                if until is not None and at >= until and (following is None or at < following)
+            ),
+            None,
+        )
+        intervals.append(interval(int(row["step"]), since, until, before, after))  # type: ignore[call-overload]
+        since, before = until, after
+    if session.get("outcome") != "completed" and (runs or tests):
+        alive = bool(state.get("worker_alive")) and not session
+        until = _stamp(session.get("recorded_at")) or (datetime.now(UTC) if alive else None)
+        tail = interval(None, since, until, before, _budget_used(directory, records, status))
+        intervals.append({**tail, "ended_at": session.get("recorded_at"), "open": not session})
+    return {
+        "intervals": intervals,
+        "validates_per_step": acceptance_for(params).validates_per_step,
+    }
 
 
 def _ending_rank(row: Mapping[str, object]) -> int:
