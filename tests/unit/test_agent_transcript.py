@@ -14,7 +14,9 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.agent import AgentSessionConfig, AgentSessionRunner
 from autotrade.environment import trace
+from autotrade.environment.llm import ScriptedLLM
 from autotrade.environment.tools import (
     GrepTool,
     ReadFileTool,
@@ -25,9 +27,13 @@ from autotrade.environment.tools import (
 from autotrade.environment.trace import (
     AgentTraceWriter,
     TraceEvent,
+    TraceLimitReached,
+    agent_trace_path,
     agent_transcript_dir,
     render_transcript_block,
 )
+from autotrade.pipelines.session_resume import resume_state
+from tests.unit.test_agent_session_advanced import DeclaredReadOnlyShell, _shell_turns
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -135,21 +141,60 @@ def test_long_fields_are_clipped_and_the_transcript_rotates_into_readable_parts(
     assert block.count("y") == trace.TRACE_CONTENT_PREVIEW_CHARS
 
 
-def test_the_trace_and_its_transcript_stop_together_at_the_session_cap(tmp_path: Path):
+def _attempt_failed(run_id: str) -> list[dict[str, object]]:
+    return [{"record_type": "attempt_failed", "phase": "research", "run_id": run_id}]
+
+
+def test_a_full_budget_session_keeps_its_whole_trace_and_resumes_from_it(tmp_path: Path):
+    """The cap guards against a runaway writer, never against research: a
+    session that spends the rounds' 19,200-call budget at the highest rate the
+    2026-11 traces measured (about 9 KB per model call, sub-agent calls
+    included) writes every event, and a resume reads its spend off the last
+    one. Scaled down: the cap and the calls by the same factor."""
+
+    scale = 1024
+    calls = -(-19_200 // scale)
+    path = agent_trace_path(tmp_path / "artifacts", "run_full")
+    writer = AgentTraceWriter(
+        path,
+        ids=IDS,
+        transcript_dir=agent_transcript_dir(tmp_path / "artifacts"),
+        max_bytes=trace.TRACE_MAX_BYTES // scale,
+        max_event_bytes=16_000,
+    )
+    for index in range(1, calls + 1):
+        used = {"llm_calls": index * scale, "inference_seconds": float(index)}
+        writer.emit("llm_call", {"call_index": index, "content": "先读数据" * 80, "budget_used": used})
+        writer.emit(
+            "tool_call",
+            {"call_index": index, "tool": "shell", "result": {"stdout": "x" * 7_500}, "budget_used": used},
+        )
+        if index == 1:
+            assert path.stat().st_size >= 9_000, "one call must weigh what the traces measured"
+
+    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert [event["call_index"] for event in events] == [index for index in range(1, calls + 1) for _ in "ab"]
+    resume = resume_state(tmp_path, _attempt_failed("run_full"))
+    assert resume is not None and resume.budget_used.llm_calls == calls * scale
+
+
+def test_a_trace_at_its_cap_ends_on_its_marker_and_stops_the_session(tmp_path: Path):
     """One bounded record: the JSONL stops at ``max_bytes`` with its terminal
-    marker, and the transcript ends on the same marker instead of growing on
-    with events no host reader will ever see."""
+    marker, the transcript ends on the same marker, and the event that
+    crossed the cap and every one after it raise, so the session stops instead
+    of spending on unrecorded. A resume refuses the trace."""
 
     writer = _writer(tmp_path, max_bytes=6_000, max_event_bytes=3_000)
-    for index in range(12):
-        writer.emit("llm_call", {"call_index": index, "content": f"turn {index} " + "x" * 500})
+    with pytest.raises(TraceLimitReached, match="6000-byte cap"):
+        for index in range(12):
+            writer.emit("llm_call", {"call_index": index, "content": f"turn {index} " + "x" * 500})
 
     jsonl = (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8")
     events = [json.loads(line) for line in jsonl.splitlines()]
     assert events[-1]["event_type"] == "trace_limit_reached"
     assert events[-1]["max_bytes"] == 6_000
     recorded = [event["call_index"] for event in events if event["event_type"] == "llm_call"]
-    assert 0 < len(recorded) < 12, "the cap must actually cut this run short"
+    assert recorded == list(range(len(recorded))) and 0 < len(recorded) < 12
 
     parts = sorted((tmp_path / "artifacts" / "transcripts").glob("run_ref_x*.txt"))
     text = "".join(part.read_text(encoding="utf-8") for part in parts)
@@ -157,10 +202,40 @@ def test_the_trace_and_its_transcript_stop_together_at_the_session_cap(tmp_path:
     assert "trace_limit_reached" in text
     assert f"turn {recorded[-1]} " in text
     assert f"turn {recorded[-1] + 1} " not in text
-    # The marker is written once: later events change neither record.
-    writer.emit("session_end", {"status": "ok"})
+    # The marker is written once: a later event raises and changes neither record.
+    with pytest.raises(TraceLimitReached):
+        writer.emit("session_end", {"status": "ok"})
     assert (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8") == jsonl
     assert "".join(part.read_text(encoding="utf-8") for part in parts) == text
+    with pytest.raises(RuntimeError, match="reached its size cap"):
+        resume_state(tmp_path, _attempt_failed("run_raw"))
+
+
+def test_a_session_whose_trace_reaches_the_cap_stops_there(tmp_path: Path):
+    """The writer's refusal is not swallowed into a tool observation: the
+    session's run ends on it, no model call follows, and the trace ends on its
+    one marker."""
+
+    writer = _writer(tmp_path, max_bytes=8_000, max_event_bytes=4_000)
+    llm = ScriptedLLM(_shell_turns(40))
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=40),
+        event_sink=writer.emit,
+    )
+    with pytest.raises(TraceLimitReached):
+        runner.run("inspect")
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert [event["event_type"] for event in events].count("trace_limit_reached") == 1
+    assert events[-1]["event_type"] == "trace_limit_reached"
+    calls = [event for event in events if event["event_type"] == "llm_call"]
+    assert 0 < len(llm.calls) <= len(calls) + 1 < 40
 
 
 def test_the_session_reads_its_transcript_through_the_trace_root(tmp_path: Path):

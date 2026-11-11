@@ -3,9 +3,10 @@
 The trace is the source for the spend: every ``llm_call``/``tool_call``/
 ``session_end``/``session_error`` event of an attempt carries the cumulative
 ``budget_used`` block, and every ``context_compaction`` event carries the
-summary that replaced the older history. An attempt whose trace hit its size
-cap stopped recording before it ended, so what it last wrote is not its spend;
-such a trace is refused rather than resumed from.
+summary that replaced the older history. An attempt whose trace reached its
+size cap — the guard against a runaway writer — stopped there without
+recording the event that crossed it, so what it last wrote need not be its
+spend; such a trace is refused rather than resumed from.
 
 The validations an attempt recorded survive in the experiment's step tree,
 whose nodes carry only opaque ids, plus a host-only sidecar per node holding
@@ -146,9 +147,10 @@ def resume_state(
     counters from the amounts before it), the last successful compaction's
     summary is the checkpoint, and the last event's time is where it stopped.
 
-    A trace that reached ``TRACE_MAX_BYTES`` stopped at its marker while the
-    attempt kept spending, so seeding from it would let the experiment run past its
-    own budget; that is refused here instead.
+    A trace that reached ``TRACE_MAX_BYTES`` ends on its marker without the
+    event that crossed the cap, so its last block can understate the spend and
+    seeding from it could let the experiment run past its own budget; the cap
+    is reached only by a runaway writer, so that is refused here instead.
     """
 
     attempts = [
@@ -170,9 +172,9 @@ def resume_state(
         for event in _trace_events(path):
             if event.get("event_type") == TraceEvent.TRACE_LIMIT_REACHED:
                 raise RuntimeError(
-                    f"attempt trace {run_id} reached its size cap; the spend it "
-                    "records is not what the attempt actually used, so the "
-                    "session cannot resume from it"
+                    f"attempt trace {run_id} reached its size cap, the guard "
+                    "against a runaway writer; it lacks the event that crossed "
+                    "the cap, so the session cannot resume from it"
                 )
             run_ref = str(event.get("run_id") or run_ref)
             used = event.get("budget_used")

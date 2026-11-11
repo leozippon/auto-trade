@@ -17,6 +17,7 @@ from pathlib import Path
 
 from autotrade.common.records import redact_host_paths
 from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
+from autotrade.environment.tools.base import SessionInterrupt
 
 
 class TraceEvent(StrEnum):
@@ -63,7 +64,20 @@ class TraceEvent(StrEnum):
     TRACE_LIMIT_REACHED = "trace_limit_reached"
 
 
-TRACE_MAX_BYTES = 32 * 1024 * 1024
+class TraceLimitReached(SessionInterrupt):
+    """The session's trace reached its size cap: the session stops here
+    instead of spending on with no record, no transcript and no resume.
+
+    A ``SessionInterrupt`` so tool dispatch re-raises it instead of handing
+    it to the Agent as a tool's failure."""
+
+
+# The session cap guards against a runaway writer, not against research. The
+# 2026-11 traces measured 6.7-8.9 KB per model call, sub-agent calls
+# included, so a session that spends those rounds' 19,200-call budget writes
+# about 170 MB; the cap is six times that, about 120,000 calls at the highest
+# rate measured.
+TRACE_MAX_BYTES = 1024 * 1024 * 1024
 TRACE_MAX_EVENT_BYTES = 256 * 1024
 # The Agent-readable transcript beside the JSONL trace: one text block per
 # event, every field clipped to the content preview size, rotated into parts
@@ -193,10 +207,11 @@ class AgentTraceWriter:
     """Bounded, redacted JSONL event stream for one Agent session.
 
     The session cap bounds one record, not two: once the JSONL is full it
-    writes the ``trace_limit_reached`` marker and stops, and the Agent-readable
-    transcript ends on the same marker. A trace that stopped there no longer
-    carries the attempt's own spend, so a resume refuses to seed from it
-    (:func:`autotrade.pipelines.session_resume.resume_state`).
+    writes the ``trace_limit_reached`` marker, the Agent-readable transcript
+    ends on the same marker, and the event that crossed the cap and every one
+    after it raise :class:`TraceLimitReached`, which ends the session. The
+    crossing event is not recorded, so a resume refuses to seed from such a
+    trace (:func:`autotrade.pipelines.session_resume.resume_state`).
     """
 
     def __init__(
@@ -270,17 +285,19 @@ class AgentTraceWriter:
         with self._lock:
             self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             self.path.parent.chmod(0o700)
-            current = self.path.stat().st_size if self.path.exists() else 0
-            if self._full or current + len(encoded) > self.max_bytes:
-                if not self._full:
-                    marker = {
-                        "event_type": str(TraceEvent.TRACE_LIMIT_REACHED),
-                        "ts": utc_now_iso(),
-                        "event_id": new_id("event"),
-                        **self.ids,
-                        "max_bytes": self.max_bytes,
-                    }
-                    raw = (json.dumps(marker, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+            if not self._full:
+                current = self.path.stat().st_size if self.path.exists() else 0
+                marker = {
+                    "event_type": str(TraceEvent.TRACE_LIMIT_REACHED),
+                    "ts": utc_now_iso(),
+                    "event_id": new_id("event"),
+                    **self.ids,
+                    "max_bytes": self.max_bytes,
+                }
+                raw = (json.dumps(marker, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
+                # Every event leaves room for the marker, so a trace that
+                # reached the cap always says so to the resume that refuses it.
+                if current + len(encoded) + len(raw) > self.max_bytes:
                     if current + len(raw) <= self.max_bytes:
                         with self.path.open("ab") as handle:
                             handle.write(raw)
@@ -290,8 +307,12 @@ class AgentTraceWriter:
                     # record of the attempt, not a host half and an Agent half
                     # that stop at different events.
                     self._append_transcript(marker)
-                self._full = True
-                return record
+                    self._full = True
+            if self._full:
+                raise TraceLimitReached(
+                    f"the session trace reached its {self.max_bytes}-byte cap; the session "
+                    "stops here rather than run on unrecorded"
+                )
             with self.path.open("ab") as handle:
                 handle.write(encoded)
                 handle.flush()

@@ -3560,15 +3560,7 @@ function controlPanel(detail) {
       ...[error ? el("div", { class: "hint warn" }, `错误：${error}`) : null, log].filter(Boolean),
     );
     const bars = budgetBars(fresh.budget_used, detail.budget);
-    // The live trace reached its size cap: the worker spends on unrecorded.
-    const frozen = fresh.budget_frozen
-      ? el(
-          "div",
-          { class: "hint warn" },
-          "Trace 已达大小上限，此后的用量不再记录：预算与研究深度停在上限之前的最后读数，会话落账后以账本为准",
-        )
-      : null;
-    budgetHost.replaceChildren(...[bars, frozen].filter(Boolean));
+    budgetHost.replaceChildren(...(bars ? [bars] : []));
   };
   follow(detail);
   panel.__follow = follow;

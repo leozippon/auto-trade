@@ -42,7 +42,6 @@ from autotrade.environment.replay.style import (
     STYLE_SCHEMA_VERSION,
 )
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.trace import TraceEvent
 from autotrade.environment.tools.report_issue import (
     ISSUE_REPORTS_NAME,
     issue_reports_path,
@@ -501,7 +500,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                     (row.get("outcome") for row in research_records(records)), None
                 ),
                 "budget": _budget_totals(params),
-                **_budget_state(directory, records, raw_status),
+                "budget_used": _budget_used(directory, records, raw_status),
                 "verdict": experiment_verdict(records),
                 "ending": ending,
                 "attention": experiment_attention(identity, directory, ending),
@@ -545,50 +544,41 @@ def _budget_totals(params: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _budget_state(
+def _budget_used(
     directory: Path,
     records: Sequence[Mapping[str, object]],
     raw_status: object,
-) -> dict[str, object]:
-    """What the research session has spent (``budget_used``): the ledger's block
-    once it is recorded, else the last block its trace carries (all a session
-    that ended unrecorded, terminated or with its worker lost, leaves), else
-    nothing. ``budget_frozen`` says that last block no longer moves: the trace
-    reached its size cap (``environment.trace.TRACE_MAX_BYTES``), after which
-    the attempt keeps spending and writes no event, so the block understates
-    the spend until the session's ledger record states it."""
+) -> dict[str, object] | None:
+    """What the research session has spent: the ledger's block once it is
+    recorded, else the last block its trace carries (all a session that
+    ended unrecorded, terminated or with its worker lost, leaves), else
+    nothing."""
 
     for record in research_records(records):
         block = record.get("budget_used")
         if isinstance(block, Mapping):
-            return {"budget_used": dict(block), "budget_frozen": False}
+            return dict(block)
     status = as_mapping(raw_status)
+    if status.get("session_key") != SessionKind.RESEARCH:
+        return None
     run_id = status.get("run_id")
-    path = (
-        resolve_trace_path(directory, run_id)
-        if status.get("session_key") == SessionKind.RESEARCH and isinstance(run_id, str)
-        else None
-    )
+    path = resolve_trace_path(directory, run_id) if isinstance(run_id, str) else None
     if path is None:
-        return {"budget_used": None, "budget_frozen": False}
-    stats = trace_stats(path)
-    block = stats.get("budget_used")
-    return {
-        "budget_used": dict(block) if isinstance(block, Mapping) else None,
-        "budget_frozen": bool(as_mapping(stats.get("counts")).get(TraceEvent.TRACE_LIMIT_REACHED)),
-    }
+        return None
+    block = trace_stats(path).get("budget_used")
+    return dict(block) if isinstance(block, Mapping) else None
 
 
-def research_budget_state(directory: Path) -> dict[str, object]:
-    """:func:`_budget_state` for the status poll, which reads no summary. An
+def research_budget_used(directory: Path) -> dict[str, object] | None:
+    """:func:`_budget_used` for the status poll, which reads no summary. An
     unreadable ledger answers nothing here; the listing already flags it."""
 
     directory = Path(directory)
     try:
         records = read_ledger_records(directory)
     except (OSError, ValueError):
-        return {"budget_used": None, "budget_frozen": False}
-    return _budget_state(directory, records, experiment_state(directory).get("status"))
+        return None
+    return _budget_used(directory, records, experiment_state(directory).get("status"))
 
 
 # The budgets the depth table meters per interval, keyed as ``budget_used``.
@@ -702,8 +692,7 @@ def research_depth(root: Path, experiment_id: str) -> dict[str, object]:
     if session.get("outcome") != "completed" and (runs or tests):
         alive = bool(state.get("worker_alive")) and not session
         until = _stamp(session.get("recorded_at")) or (datetime.now(UTC) if alive else None)
-        spent = as_mapping(_budget_state(directory, records, status)["budget_used"]) or None
-        tail = interval(None, since, until, before, spent)
+        tail = interval(None, since, until, before, _budget_used(directory, records, status))
         intervals.append({**tail, "ended_at": session.get("recorded_at"), "open": not session})
     return {
         "intervals": intervals,

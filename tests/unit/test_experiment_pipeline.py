@@ -738,9 +738,9 @@ def test_an_environment_block_ends_the_attempt_and_the_third_ends_the_experiment
 
 
 def test_a_resume_refuses_a_trace_that_stopped_at_its_size_cap(tmp_path: Path):
-    """The trace stops at the cap while the attempt keeps spending, so its last
-    budget block understates the experiment's use; a resume that seeded from it would
-    hand the next attempt budget the experiment no longer has."""
+    """The trace ends at the cap without the event that crossed it, so its last
+    budget block can understate the experiment's use; a resume that seeded from it
+    could hand the next attempt budget the experiment no longer has."""
 
     pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "register", {"nominee": 1})}
