@@ -23,9 +23,9 @@ from fastapi.testclient import TestClient
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.step_tree import StepTree
+from autotrade.pipelines import session_tools
 from autotrade.pipelines.hitl_state import proc_start_ticks
 from autotrade.pipelines.ledger import LEDGER_RECORD_SCHEMA_VERSION
-from autotrade.pipelines import session_tools
 from autotrade.webui import traces
 from autotrade.webui.registry import research_depth
 from autotrade.webui.server import create_app
