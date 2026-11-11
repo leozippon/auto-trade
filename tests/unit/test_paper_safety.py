@@ -20,6 +20,7 @@ from autotrade.paper.engine import (
 from autotrade.paper.storage import read_jsonl
 from autotrade.webui import trading
 from tests.unit.paper_book_fixture import BOOK_SESSIONS
+from tests.unit.test_paper_titles import _ok, _repo
 from tests.unit.test_paper_trading import COUNTER_STRATEGY, PROFILE, _bars, _Data
 from tests.unit.test_paper_verdict import _registered_book, _run_paper, _write_slot
 
@@ -53,6 +54,13 @@ def _setup(tmp_path, monkeypatch, *, losing=False):
         calls.append(path)
         return TrustedStrategyExecutor.from_path(path, state_dir=state_dir, models_dir=models_dir)
 
+    # The decision reads the title job's state under the repository root: a
+    # root of its own, with the real schedule, whose last run landed every
+    # title these sessions read (not the host's scheduler state).
+    repo = _repo(tmp_path)
+    last = BOOK_SESSIONS[-1]
+    _ok(repo, last, f"{last[:4]}-{last[4:6]}-{last[6:]}T15:16:00+00:00")
+    monkeypatch.setattr(cli, "REPO_ROOT", repo)
     monkeypatch.setattr(cli, "load_sse_trading_days", lambda _raw: BOOK_SESSIONS)
     monkeypatch.setattr(cli, "BookPITData", data)
     monkeypatch.setattr(cli, "_executor_on_free_gpus", executor)

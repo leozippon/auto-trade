@@ -1112,6 +1112,7 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
                 "experiment_id": "worker_smoke",
                 "initial_control_mode": "manual",
                 **CREATE_RULES,
+                **NO_SEED,
             }
         )
     assert created["spawned"] is True
