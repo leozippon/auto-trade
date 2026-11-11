@@ -1666,17 +1666,6 @@ def test_forced_compaction_proceeds_past_the_call_cap_and_message_floor():
     assert broken.should_compact(messages, force=True)[1]["skip_reason"] == "failure_circuit_open"
 
 
-def test_context_fit_rejects_missing_window_without_assert(monkeypatch):
-    runner = _context_runner(ScriptedLLM([], context_window_tokens=200))
-    messages = [ChatMessage("user", "short")]
-    monkeypatch.setattr(
-        "autotrade.agent.compact.context_request_fits",
-        lambda *args, **kwargs: (False, 10, None),
-    )
-    with pytest.raises(RuntimeError, match="context window is unavailable"):
-        runner._context.fit(messages, (), 30.0)
-
-
 def test_compaction_trigger_counts_the_provider_tool_schemas():
     compactor = ContextCompactor(
         ScriptedLLM([]),

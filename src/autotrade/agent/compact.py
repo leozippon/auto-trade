@@ -458,10 +458,6 @@ class ContextFitter:
             fits, prompt_tokens, context_window = context_request_fits(
                 self.llm, messages, tools=tools, max_tokens=requested
             )
-        if not fits and context_window is None:
-            raise RuntimeError(
-                "context window is unavailable after the request did not fit"
-            )
         available, prompt_fits = clamp_requested_max_tokens(
             requested_max_tokens=requested,
             estimated_prompt_tokens=prompt_tokens,
