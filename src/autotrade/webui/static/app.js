@@ -5203,8 +5203,6 @@ function subagentTraceHead(payload, detail) {
     );
   if (header.error)
     wrap.append(el("div", { class: "hint warn" }, `错误：${header.error}`));
-  if (payload.truncated_window)
-    wrap.append(el("div", { class: "hint" }, "仅显示当前读取窗口内的记录。"));
   return wrap;
 }
 

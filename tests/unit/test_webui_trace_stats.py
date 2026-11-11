@@ -1670,6 +1670,34 @@ def test_subagent_trace_route_projects_redacts_and_guards(tmp_path: Path) -> Non
     assert "etc" not in bad.text
 
 
+def test_a_trace_longer_than_the_block_window_shows_its_newest_window(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A full-budget trace outgrows the block window. The default read — the
+    live view and a replay's first load — projects the newest window from a
+    line start and says the history before it is cut, so a live view keeps
+    following the session; an explicit window still reads from its offset; and
+    a sub-agent that ran before the window is still found."""
+
+    turns = [{"event_type": "llm_call", "content": f"turn {index:02d} " + "x" * 200} for index in range(40)]
+    path = _write_trace(tmp_path / "long.jsonl", [*_child_events(), *turns])
+    monkeypatch.setattr(traces, "MAX_BLOCK_READ_BYTES", 4_000)
+
+    page = traces.read_trace_blocks(path, writer_alive=False)
+    shown = [block["text"][:7] for block in page["blocks"] if block["kind"] == "agent_output"]
+    assert shown[-1] == "turn 39" and "turn 00" not in shown and "parent " not in shown
+    assert page["history_truncated"] is True
+    assert page["eof"] is True and page["next_offset"] == path.stat().st_size
+
+    head = traces.read_trace_blocks(path, offset=0, max_bytes=4_000, writer_alive=False)
+    assert head["blocks"][0]["text"] == "parent turn" and head["eof"] is False
+
+    child = traces.read_subagent_trace(path, "agent_1")
+    assert child["found"] is True and child["header"]["status"] == "completed"
+    assert [block["kind"] for block in child["blocks"]][:2] == ["agent_output", "tool_group"]
+    assert traces.read_subagent_trace(path, "agent_9")["found"] is False
+
+
 def test_the_running_dock_pins_a_block_per_child_and_opens_its_trace() -> None:
     """A running child is pinned at the bottom edge of the trace box as a
     block reading exactly like its card, and both open the child's own Trace —

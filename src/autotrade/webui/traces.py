@@ -139,12 +139,13 @@ def read_trace_page(
 def read_trace_tail(
     path: Path,
     *,
-    max_events: int,
+    max_events: int | None,
     max_bytes: int = MAX_TAIL_BYTES,
     writer_alive: bool = True,
 ) -> dict[str, object]:
     """Return a bounded tail plus the byte offset where live tailing can resume.
 
+    ``max_events`` None keeps every complete event of the last ``max_bytes``.
     ``writer_alive`` carries the same meaning as in :func:`read_trace_page`: a
     dead writer's unterminated trailing bytes end the read as a marked
     truncation instead of holding the resume offset short of EOF forever.
@@ -167,7 +168,7 @@ def read_trace_tail(
         blob = blob[newline + 1 :]
     complete_bytes = blob.rfind(b"\n") + 1
     lines = blob[:complete_bytes].splitlines(keepends=True)
-    selected = lines[-max(1, int(max_events)) :]
+    selected = lines if max_events is None else lines[-max(1, int(max_events)) :]
     events = [_decode_event(line) for line in selected if line.strip()]
     next_offset = start + complete_bytes
     torn = len(blob) - complete_bytes
@@ -192,15 +193,23 @@ def read_trace_blocks(
 ) -> dict[str, object]:
     """Project a page or tail of raw events into display blocks. JSONL is unchanged.
 
-    A read that reached the end of a trace whose writer is gone marks the
-    calls still open there as interrupted: they will never finish.
+    The default read is the whole trace while it fits the block window, and
+    otherwise its newest window (``history_truncated``): the live view keeps
+    following a session past the window and a replay ends where the session
+    did, while the download keeps the whole record. A read that reached the
+    end of a trace whose writer is gone marks the calls still open there as
+    interrupted: they will never finish.
     """
 
+    size = Path(path).stat().st_size
+    remaining = max(size - max(0, int(offset)), 0)
     if tail_events is not None:
         page = read_trace_tail(path, max_events=tail_events, writer_alive=writer_alive)
+    elif max_bytes is None and not offset and remaining > MAX_BLOCK_READ_BYTES:
+        page = read_trace_tail(
+            path, max_events=None, max_bytes=MAX_BLOCK_READ_BYTES, writer_alive=writer_alive
+        )
     else:
-        size = Path(path).stat().st_size
-        remaining = max(size - max(0, int(offset)), 0)
         window = (remaining or 1) if max_bytes is None else max(1, int(max_bytes))
         window = min(window, MAX_BLOCK_READ_BYTES)
         page = read_trace_page(
@@ -327,14 +336,20 @@ def project_trace_blocks(events: object) -> list[dict[str, object]]:
 
 
 def read_subagent_trace(path: Path, task_id: str) -> dict[str, object]:
-    """Project one sub-agent task's own events out of the parent trace."""
+    """Project one sub-agent task's own events out of the parent trace.
 
-    size = Path(path).stat().st_size
-    page = read_trace_page(path, offset=0, max_bytes=min(size or 1, MAX_BLOCK_READ_BYTES))
-    events = page.get("events")
-    projected = project_subagent_trace(events if isinstance(events, list) else [], task_id)
-    projected["truncated_window"] = not bool(page.get("eof"))
-    return projected
+    The whole trace is scanned line by line and only the complete lines that
+    name the task are decoded, so a child is found wherever it ran, also
+    before the newest window of a trace the block window cannot hold.
+    """
+
+    needle = task_id.encode()
+    events: list[dict[str, object]] = []
+    with Path(path).open("rb") as handle:
+        for raw in handle:
+            if needle in raw and raw.endswith(b"\n"):
+                events.append(_decode_event(raw))
+    return project_subagent_trace(events, task_id)
 
 
 def project_subagent_trace(events: object, task_id: str) -> dict[str, object]:
