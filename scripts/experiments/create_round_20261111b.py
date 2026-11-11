@@ -70,6 +70,8 @@ EXPERIMENTS: dict[str, dict[str, object]] = {
 
 ROUND = Round(
     experiments=EXPERIMENTS,
+    # A `zgca.py run --fill` pass created its experiment on 2026-11-11 at 04:08Z.
+    closed=True,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_TEN_YEAR_CSI1000,
