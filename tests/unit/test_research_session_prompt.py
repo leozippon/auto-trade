@@ -227,7 +227,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     for clause in (
         "你能读到的数据止于研究年末，整个会话不变",
         "验证期的数据不挂载，只随每次 `test` 的结果揭开一步",
-        "用 `validate` 在研究年内回测",
+        "研究：写候选，用 `validate` 回测。",
         "`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录",
         "测试终点前进一步，`validate` 的次数重新计",
         "两次 `test` 之间是一段研究：已揭开的步是样本外读数，`validate` 能在这些步上回放任一候选",
