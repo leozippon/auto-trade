@@ -497,8 +497,10 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     )
     spec = host_manifest["sandbox_spec"]
     assert (spec["gpu_count"], spec["gpu"], spec["gpu_name_filter"]) == (3, "auto", "L20")
-    agent_manifest_text = Path(research_row["run_manifest_ref"]).read_text(encoding="utf-8")
-    assert json.loads(agent_manifest_text)["skill_library"]["sources"] == []
+    agent_manifest = json.loads(Path(research_row["run_manifest_ref"]).read_text(encoding="utf-8"))
+    assert agent_manifest["skill_library"]["sources"] == []
+    # The rules reach the session only as the derived run fact.
+    assert "acceptance_rules" not in agent_manifest and "acceptance_rules" in host_manifest
     assert "skill_library_refused" not in host_manifest
     workspace = options.work_root / options.experiment_id / "research" / "agent" / "workspace"
     assert not (workspace / "memory").exists()

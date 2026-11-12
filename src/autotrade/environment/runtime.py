@@ -453,7 +453,10 @@ def _agent_visible_manifest(
 
     The in-memory and host audit manifest keep host paths and raw identities
     for orchestration; the Agent-visible manifest carries allowlisted keys with
-    every identity projected through the experiment reference store.
+    every identity projected through the experiment reference store. The raw
+    ``acceptance_rules`` record stays host-side: a session reads the rules only
+    as the run fact derived from it (``AcceptanceRules.agent_facts``), which
+    leaves out what is not the session's, such as Paper's kill limits.
     """
 
     record = json.loads(json.dumps(sanitize_for_log(data), ensure_ascii=False, default=str))
@@ -474,7 +477,6 @@ def _agent_visible_manifest(
             "start",
             "experiment",
             "modification_constraints",
-            "acceptance_rules",
             "broker_profile",
             "attempt",
             "record_failed_attempts",

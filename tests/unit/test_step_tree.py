@@ -366,6 +366,10 @@ class SessionFactsTest(unittest.TestCase):
             self.assertEqual(public["backtest_summaries"], [{"mode": "valid", "span": "Y2", "total_return": 0.1}])
             for key in ("research", "start", "experiment", "budgets"):
                 self.assertEqual(public[key], RESEARCH_MANIFEST[key], key)
+            # The raw rules record (Paper's kill limits among it) stays
+            # host-side; the session reads only the run fact derived from it.
+            self.assertNotIn("acceptance_rules", public)
+            self.assertEqual(host["acceptance_rules"], RESEARCH_MANIFEST["acceptance_rules"])
             # The raw session id never crosses, only its opaque ref.
             self.assertTrue(str(public["session_ref"]).startswith("session_ref_"))
             self.assertEqual(host["fold_id"], "research")
