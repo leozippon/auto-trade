@@ -132,7 +132,7 @@ def test_the_geometry_fact_lists_the_research_years_alone() -> None:
     # Two validation years beyond the three research years set the threshold.
     rules = facts["artifact_contract"]["acceptance_rules"]
     assert rules["significance"]["threshold_over_validation_period"] == 1.163
-    assert "- 研究年：3 个，20150701..20180630；" in build_run_section(facts)
+    assert "- 研究年：3 个，20150701..20180630。" in build_run_section(facts)
 
 
 def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
