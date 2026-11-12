@@ -94,8 +94,11 @@ _TRANSCRIPT_HEADER_FIELDS = (
     ("turn", "turn"),
 )
 # Fields the transcript leaves out: the system prompt is the Agent's own
-# context already, and the event ids are host-side bookkeeping.
-_TRANSCRIPT_OMITTED = frozenset({"system_prompt", "event_type", "ts", "event_id"})
+# context already, the event ids are host-side bookkeeping, and a reply's
+# reasoning is recorded for host-side review, not handed back to the Agent.
+_TRANSCRIPT_OMITTED = frozenset(
+    {"system_prompt", "event_type", "ts", "event_id", "reasoning_content"}
+)
 # What an over-sized event keeps. Identity plus these named fields survive
 # verbatim; ``content`` (a model reply) keeps its own preview because the trace
 # views read it back, and everything else — a ``tool_call``'s ``arguments`` and
@@ -140,6 +143,20 @@ def _transcript_target(directory: Path, run_ref: str) -> Path:
         if size < TRANSCRIPT_PART_MAX_BYTES:
             return candidate
         part += 1
+
+
+def trace_reasoning(text: str | None) -> dict[str, str]:
+    """A model call event's ``reasoning_content``: the reasoning text the
+    provider returned, cut at the content preview size with the cut marked so
+    one long chain of thought cannot push the event past
+    ``TRACE_MAX_EVENT_BYTES``; no field when the provider returned none."""
+
+    if not text or not text.strip():
+        return {}
+    if len(text) > TRACE_CONTENT_PREVIEW_CHARS:
+        omitted = len(text) - TRACE_CONTENT_PREVIEW_CHARS
+        text = f"{text[:TRACE_CONTENT_PREVIEW_CHARS]}\n[... {omitted} more characters not recorded]"
+    return {"reasoning_content": text}
 
 
 def _clip_transcript_text(text: str) -> str:

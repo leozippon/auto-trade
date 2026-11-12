@@ -58,7 +58,7 @@ from autotrade.environment.tools.base import (
     is_sequential_tool,
 )
 from autotrade.environment.tools.search import file_lines, trace_read_stub
-from autotrade.environment.trace import TraceEvent
+from autotrade.environment.trace import TraceEvent, trace_reasoning
 
 from .compact import (
     ContextCompactor,
@@ -868,6 +868,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     refused = isinstance(exc, ProviderRefusalError)
                     if malformed:
                         failure["error_type"] = "malformed_tool_call"
+                        failure.update(trace_reasoning(exc.reasoning_content))
                     elif refused:
                         failure["error_type"] = "provider_refusal"
                     self._emit(TraceEvent.SUBAGENT_LLM_ERROR, failure)
@@ -946,6 +947,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         "model": response.model,
                         "usage": dict(response.usage),
                         "content": response.content,
+                        **trace_reasoning(response.reasoning_content),
                         "tool_names": [call.name for call in response.tool_calls],
                         "parent_call_id": parent_call_id,
                     },
@@ -1086,6 +1088,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         "model": response.model,
                         "usage": dict(response.usage),
                         "content": response.content,
+                        **trace_reasoning(response.reasoning_content),
                         "tool_names": [],
                         # The forced finalize is not one of the child's turns;
                         # without this the trace loses the call entirely.

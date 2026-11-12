@@ -15,8 +15,9 @@ from pathlib import Path
 import pytest
 
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner
+from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.environment import trace
-from autotrade.environment.llm import ScriptedLLM
+from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.tools import (
     GrepTool,
     ReadFileTool,
@@ -236,6 +237,54 @@ def test_a_session_whose_trace_reaches_the_cap_stops_there(tmp_path: Path):
     assert events[-1]["event_type"] == "trace_limit_reached"
     calls = [event for event in events if event["event_type"] == "llm_call"]
     assert 0 < len(llm.calls) <= len(calls) + 1 < 40
+
+
+def test_a_replys_reasoning_is_recorded_in_the_host_trace_and_nowhere_else(tmp_path: Path):
+    """Why the model did what it did: the reasoning text a reply carries is
+    recorded on its ``llm_call`` event, redacted like the rest of the event
+    and cut (marked) past the content preview size. A reply that carries none
+    writes no field, and the Agent-readable transcript never shows it."""
+
+    writer = _writer(tmp_path)
+    key = "sk-" + "k" * 24
+    long_reasoning = "长" * (trace.TRACE_CONTENT_PREVIEW_CHARS + 5)
+
+    def turn(index: int, reasoning: str | None) -> ProviderResponse:
+        call = ToolCall(f"s{index}", "shell", {"argv": ["rg", str(index)]})
+        return ProviderResponse(tool_calls=(call,), reasoning_content=reasoning)
+
+    llm = ScriptedLLM(
+        [
+            turn(0, f"换手率偏高，先查成本；示例 key {key}"),
+            turn(1, None),
+            turn(2, "  \n"),
+            turn(3, long_reasoning),
+        ]
+    )
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=4),
+        event_sink=writer.emit,
+    )
+    with pytest.raises(AgentSessionBudgetExhausted):
+        runner.run("inspect")
+
+    events = [
+        json.loads(line)
+        for line in (tmp_path / "artifacts" / "traces" / "run_raw.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    calls = [event for event in events if event["event_type"] == "llm_call"]
+    assert [call["call_index"] for call in calls] == [1, 2, 3, 4]
+    assert calls[0]["reasoning_content"] == "换手率偏高，先查成本；示例 key sk-[redacted]"
+    assert "reasoning_content" not in calls[1] and "reasoning_content" not in calls[2]
+    assert calls[3]["reasoning_content"] == (
+        "长" * trace.TRACE_CONTENT_PREVIEW_CHARS + "\n[... 5 more characters not recorded]"
+    )
+    transcript = (tmp_path / "artifacts" / "transcripts" / "run_ref_x.txt").read_text(encoding="utf-8")
+    assert "换手率偏高" not in transcript and "长长" not in transcript
+    assert "reasoning_content" not in transcript
 
 
 def test_the_session_reads_its_transcript_through_the_trace_root(tmp_path: Path):

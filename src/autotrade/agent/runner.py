@@ -62,7 +62,7 @@ from autotrade.environment.tools.base import (
     is_sequential_tool,
 )
 from autotrade.environment.tools.search import trace_read_stub
-from autotrade.environment.trace import TraceEvent
+from autotrade.environment.trace import TraceEvent, trace_reasoning
 
 from .compact import (
     DEFAULT_COMPACTION_TOKEN_THRESHOLD,
@@ -620,6 +620,7 @@ class AgentSessionRunner:
                     # Countable in an audit: this class costs one turn, not a
                     # repeated generation.
                     failure["error_type"] = "malformed_tool_call"
+                    failure.update(trace_reasoning(exc.reasoning_content))
                 elif isinstance(exc, ProviderRefusalError):
                     failure["error_type"] = "provider_refusal"
                 self._emit(TraceEvent.LLM_CALL, failure)
@@ -718,6 +719,7 @@ class AgentSessionRunner:
                     "model": response.model,
                     "usage": dict(response.usage),
                     "content": response.content,
+                    **trace_reasoning(response.reasoning_content),
                     "tool_names": [call.name for call in response.tool_calls],
                 },
             )
