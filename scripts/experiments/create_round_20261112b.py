@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """The 2026-11-12b round: the main-model comparison's third arm, on the ZGCA A100.
 
-`open_200k_10y_sol_zgca_20261112b` runs round 20261112's experiment on
+`open_200k_10y_sol_zgca_20261112b` runs round 20261113's experiment on
 gpt-6.1-sol, the gpt-6 id priced at a fifth of gpt-6-astra, on the instance's
-one A100, a card no other tenant shares. `create_round_20261112.py` states the
+one A100, a card no other tenant shares. `create_round_20261113.py` states the
 question, what is held equal and what changed since round 20261111b; every
 value here is that round's. This arm differs from the local pair in the main
 model, in its host, and in the code: it was created at commit 4d133fa4, before

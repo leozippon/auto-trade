@@ -27,7 +27,7 @@ REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The queue's round files, filled in this order; separated by spaces. Empty
 # while nothing is queued: the job then exits 0 without creating anything.
-ROUNDS=scripts/experiments/create_round_20261112.py
+ROUNDS=scripts/experiments/create_round_20261113.py
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
 # long, and research experiments end at no particular hour. One run takes seconds per
