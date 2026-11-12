@@ -1,21 +1,24 @@
 #!/usr/bin/env python
-"""The 2026-11-12 round: the main model, paired on this host.
+"""The 2026-11-12 round: `validate` on revealed steps, on two main models.
 
 Two experiments created together that differ only in the main model, each on
 one L20 card: `open_200k_10y_astra_local_20261112` on gpt-6-astra and
 `open_200k_10y_flash_local_20261112` on DeepSeek-V4.1-Flash. Sub-agents and
-compaction stay on Flash in both. The Flash sessions of rounds 20261109 and
-20261111 trained one model family on the CPU, delegated nothing and gave up a
-method after one error; the pair asks whether that narrowness is the main
-model's or the framework's. `create_round_20261112b.py` adds gpt-6.1-sol on the
-ZGCA A100.
+compaction stay on Flash in both.
 
-What every session of those rounds shared, whichever model ran it, is not what
-this round measures: research ends before the first `test`, and the steps are
-then taken with a call or two each (RESEARCH_LESSONS, 2026-11-09 and
-2026-11-12).
+They are the first sessions in which `validate` can replay any candidate over
+the validation steps already tested (`span: "revealed"`). Through round
+20261111 a tested step returned scores for the tested candidate only, and every
+session, on either model and under every prompt, finished its research before
+the first `test` and then took the steps with a call or two each
+(RESEARCH_LESSONS, 2026-11-09 and 2026-11-12). The pair asks two things:
+whether sessions now research between tests, and whether the narrowness of the
+Flash sessions (one model family on the CPU, no delegation, a method dropped
+after one error) is the main model's. `create_round_20261112b.py`, started
+hours earlier on the ZGCA A100 with gpt-6.1-sol on the code before this rule,
+is the baseline for it.
 
-Everything is round 20261111b's — pack `open_200k_20261111b`, the ten-year
+Everything else is round 20261111b's — pack `open_200k_20261111b`, the ten-year
 profile and seed, a CNY 200k account on the main board and ChiNext, seven
 research years, twelve quarterly steps, `validate` replaying three candidates
 at a time, the budgets and strategy limits below — except:
@@ -28,7 +31,8 @@ at a time, the budgets and strategy limits below — except:
   budget and `test` results carry no budget line (neither changed a session,
   and budget use is a quantity to observe, not to hand over as a target); a
   provider's transient errors are retried until the call's deadline; traces
-  record the model's reasoning text.
+  record the model's reasoning text; a failed replay over the validation
+  period reports its class, not the strategy's error text.
 
 It is created on the local console, whose running slots the fill mode checks
 first:

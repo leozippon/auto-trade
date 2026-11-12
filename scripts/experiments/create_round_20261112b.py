@@ -5,8 +5,11 @@
 gpt-6.1-sol, the gpt-6 id priced at a fifth of gpt-6-astra, on the instance's
 one A100, a card no other tenant shares. `create_round_20261112.py` states the
 question, what is held equal and what changed since round 20261111b; every
-value here is that round's, so the three arms differ in the main model and this
-one also in its host.
+value here is that round's. This arm differs from the local pair in the main
+model, in its host, and in the code: it was created at commit 4d133fa4, before
+`validate` took the revealed steps and before failed validation-period replays
+stopped returning the strategy's error text, so it is the pair's baseline for
+that rule.
 
 It runs on the instance, whose fill loop creates it once the card is free:
 
