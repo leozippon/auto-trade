@@ -451,10 +451,6 @@ class HistoricalMinuteSource:
         self._quote_group: pd.DataFrame | None = None
 
     @property
-    def total_rows(self) -> int:
-        return int(self.parquet.metadata.num_rows)
-
-    @property
     def loaded_groups(self) -> int:
         return len(self._loaded)
 
@@ -619,6 +615,11 @@ class _ReplaySpanView:
         return None
 
     def minute_record(self) -> dict[str, int]:
+        """What the replay loaded of its minute sources. Only what it loaded:
+        a source's size covers every slot of the span, and a replay stopped
+        early (a revealed-span validate, whose record the session reads)
+        must not report the days past its end."""
+
         sources = self.minute_sources
         return {
             "minute_row_groups_loaded": sum(source.loaded_groups for source in sources),
@@ -626,7 +627,6 @@ class _ReplaySpanView:
             "minute_max_loaded_partition_rows": max(
                 (source.max_loaded_partition_rows for source in sources), default=0
             ),
-            "minute_total_rows": sum(source.total_rows for source in sources),
         }
 
 

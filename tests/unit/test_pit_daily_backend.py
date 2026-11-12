@@ -257,7 +257,8 @@ def generate_orders(context):
         "universe": 1,
     }
     assert record["pit"]["refresh_calls"] == 2
-    assert record["pit"]["minute_total_rows"] == 2
+    # Only what the replay loaded: a source's size would count days past its end.
+    assert "minute_total_rows" not in record["pit"]
     assert record["pit"]["minute_row_groups_loaded"] == 1
     assert record["pit"]["minute_rows_loaded"] == 1
     assert record["pit"]["minute_max_loaded_partition_rows"] == 1
