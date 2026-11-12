@@ -253,12 +253,12 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         assert clause in readings, clause
     # The owner's orientation: innovative, deep strategies over textbook style
     # factors, with rule scoring as the baseline, and the budget, whose scale
-    # the run section states, planned to be mostly spent on deep research.
+    # the run section states, meant for deep research.
     for clause in (
         "有创新性、有深度的策略，而不是教科书式的风格因子组合",
         "学习型模型、预训练模型与嵌入",
         "简单的规则打分只作基线对照，不作为目标",
-        "规模见「本次运行」，回放的等待不计入推理时间：按用掉其中大部分来规划研究的深度，不以提前结束为目标",
+        "预算是为深入研究准备的，规模见「本次运行」；回放的等待不计入推理时间。",
     ):
         assert clause in orientation, clause
     assert "参考工作区、研究方向与研究者指令都不能放宽它们" in boundaries
@@ -511,23 +511,20 @@ def test_the_run_section_states_this_runs_view_steps_and_threshold() -> None:
     assert "## 本次运行" not in _full_prompt()
 
 
-def test_the_run_section_states_the_session_budgets_per_research_interval() -> None:
-    """The three session budgets in words, and their average over the
-    research intervals: one before each test, so as many as the steps. A
-    budget the facts do not carry is left out, never printed as a blank."""
+def test_the_run_section_states_the_session_budgets() -> None:
+    """The three session budgets in words, totals only. A budget the facts do
+    not carry is left out, never printed as a blank."""
 
     facts = _run_facts()
     facts["budgets"].update(  # type: ignore[attr-defined]
         deadline_seconds=600_000.0, max_llm_calls=6400, max_api_spend_usd=50.0
     )
     assert prompts.build_run_section(facts).endswith(
-        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟、模型调用 6400 次、API 花费 50 美元；"
-        "平均到验证期的 20 步，每步之前约 8 小时 20 分钟推理时间、320 次模型调用。"
+        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟、模型调用 6400 次、API 花费 50 美元。"
     )
     del facts["budgets"]["max_api_spend_usd"]  # type: ignore[attr-defined]
     del facts["budgets"]["max_llm_calls"]  # type: ignore[attr-defined]
     assert prompts.build_run_section(facts).endswith(
-        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟；"
-        "平均到验证期的 20 步，每步之前约 8 小时 20 分钟推理时间。"
+        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟。"
     )
     assert "预算" not in prompts.build_run_section(_run_facts())

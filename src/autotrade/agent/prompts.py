@@ -54,7 +54,7 @@ SESSION_PROCESS_SECTION = """\
 SESSION_ORIENTATION_SECTION = """\
 # 研究取向
 - 目标是有创新性、有深度的策略，而不是教科书式的风格因子组合：优先探索学习型模型、预训练模型与嵌入、财务与公告标题等多个数据域、自适应重训与组合构建等复杂方法；简单的规则打分只作基线对照，不作为目标。
-- 预算是为深入研究准备的，规模见「本次运行」，回放的等待不计入推理时间：按用掉其中大部分来规划研究的深度，不以提前结束为目标。\
+- 预算是为深入研究准备的，规模见「本次运行」；回放的等待不计入推理时间。\
 """
 
 # The orientation's GPU bullet when the run facts' ``runtime_tools.sandbox_gpus``
@@ -238,36 +238,28 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
         f"- 门槛：α = {significance['alpha']}；一年区间约 {significance['threshold_over_one_year']}，整个验证期约 {significance['threshold_over_validation_period']}。",
         f"- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 {allowance} 次。",
     ]
-    budget_line = _run_budget_line(budgets, int(geometry["steps"]))  # type: ignore[arg-type, call-overload]
+    budget_line = _run_budget_line(budgets)  # type: ignore[arg-type]
     if budget_line:
         lines.append(budget_line)
     return "\n".join(lines)
 
 
-def _run_budget_line(budgets: Mapping[str, object], steps: int) -> str:
-    """The session budgets and their average per validation step; empty when
-    the facts carry none of the three."""
+def _run_budget_line(budgets: Mapping[str, object]) -> str:
+    """The session budgets; empty when the facts carry none of the three."""
 
     seconds = budgets.get("deadline_seconds")
     calls = budgets.get("max_llm_calls")
     spend = budgets.get("max_api_spend_usd")
     totals: list[str] = []
-    shares: list[str] = []
     if seconds is not None:
         totals.append(f"推理时间 {chinese_duration(seconds)}")  # type: ignore[arg-type]
-        # Whole minutes: the per-step figure is a scale, not a clock.
-        shares.append(f"{chinese_duration(60 * round(seconds / steps / 60))}推理时间")  # type: ignore[operator]
     if calls is not None:
         totals.append(f"模型调用 {calls} 次")
-        shares.append(f"{round(calls / steps)} 次模型调用")  # type: ignore[operator]
     if spend is not None:
         totals.append(f"API 花费 {spend:g} 美元")
     if not totals:
         return ""
-    line = f"- 预算（整个会话共用）：{'、'.join(totals)}"
-    if shares:
-        line += f"；平均到验证期的 {steps} 步，每步之前约 {'、'.join(shares)}"
-    return line + "。"
+    return f"- 预算（整个会话共用）：{'、'.join(totals)}。"
 
 
 def chinese_duration(seconds: float) -> str:
