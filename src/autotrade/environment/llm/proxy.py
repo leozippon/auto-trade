@@ -249,13 +249,17 @@ class ProviderResponse:
     model: str = ""
     usage: Mapping[str, object] = field(default_factory=dict)
     reasoning_content: str | None = None
+    # The provider's summary of reasoning it keeps to itself (the responses
+    # dialect's ``reasoning.summary``). The trace records it as the reply's
+    # reasoning; it is never replayed, never content and never makes an
+    # otherwise empty reply valid.
+    reasoning_summary: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "usage", _json_object(self.usage))
-        if self.reasoning_content is not None and not isinstance(
-            self.reasoning_content, str
-        ):
-            raise TypeError("reasoning content must be a string")
+        for value in (self.reasoning_content, self.reasoning_summary):
+            if value is not None and not isinstance(value, str):
+                raise TypeError("reasoning content must be a string")
         if not self.content and not self.tool_calls:
             if isinstance(self.reasoning_content, str) and self.reasoning_content.strip():
                 object.__setattr__(self, "content", "")

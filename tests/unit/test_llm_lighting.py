@@ -14,6 +14,8 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.agent import AgentSessionConfig, AgentSessionRunner
+from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.agent.subagent import AGENT_TOOL_SPEC
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_TOKEN_MARGIN,
@@ -41,8 +43,10 @@ from autotrade.environment.llm.lighting import (
 from autotrade.environment.llm.openai_compatible import load_env_value
 from autotrade.environment.llm.pricing import TokenPrices
 from autotrade.environment.time_budget import InferenceTimeBudget
+from autotrade.environment.tools import ToolRegistry
 from autotrade.environment.tools.base import validate_arguments
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
+from tests.unit.test_agent_session_advanced import DeclaredReadOnlyShell
 
 MODEL = "gpt-6-astra"
 GEMINI_MODEL = "gemini-4-argon"
@@ -450,7 +454,8 @@ def test_responses_payload_maps_history_tools_and_reasoning(tmp_path: Path):
     ]
     assert body["tools"] == [FLAT_TOOL]
     assert body["tool_choice"] == "auto"
-    assert body["reasoning"] == {"effort": "xhigh"}
+    # The reasoning stays server-side; its summary is asked for, for the trace.
+    assert body["reasoning"] == {"effort": "xhigh", "summary": "auto"}
     assert body["max_output_tokens"] == 900
     assert body["stream"] is True
     assert not {
@@ -525,6 +530,68 @@ def test_responses_tools_send_optional_parameters_nullable(tmp_path: Path):
     )
     chat.complete([ChatMessage("user", "delegate")], tools=(agent,))
     assert chat_transport.bodies[0]["tools"] == [agent]
+
+
+def test_a_reasoning_summary_is_traced_and_never_sent_back(tmp_path: Path):
+    """The gpt-6 family keeps its reasoning server-side and returns only an
+    encrypted item, plus the summary the request asks for: the summary is
+    the reasoning the trace records for that call; the next request carries
+    no reasoning, exactly as before."""
+
+    call = {**_call_item('{"argv":["rg","x"]}'), "name": "shell"}
+    reasoning = {
+        "id": "rs_1",
+        "type": "reasoning",
+        "encrypted_content": "gAAAA-opaque",
+        "summary": [
+            {"type": "summary_text", "text": "**Checking turnover**\n\nRead the costs first."},
+            {"type": "summary_text", "text": "Then compare the buffers."},
+        ],
+    }
+    first = _sse(
+        {"type": "response.output_item.done", "output_index": 0, "item": reasoning},
+        {"type": "response.output_item.added", "output_index": 1, "item": {**call, "arguments": ""}},
+        {"type": "response.output_item.done", "output_index": 1, "item": call},
+        {
+            "type": "response.completed",
+            "response": {
+                "status": "completed",
+                "model": MODEL,
+                "usage": {"input_tokens": 40, "output_tokens": 30, "total_tokens": 70},
+                "output": [reasoning, call],
+            },
+        },
+    )
+    proxy, transport = _proxy(
+        tmp_path,
+        [first, _responses_json(content="done")],
+        thinking_enabled=True,
+        reasoning_effort="xhigh",
+    )
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = AgentSessionRunner(
+        llm=proxy,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=2),
+        event_sink=lambda event, payload: events.append((event, payload)),
+    )
+    with pytest.raises(AgentSessionBudgetExhausted):
+        runner.run("inspect")
+
+    calls = [payload for event, payload in events if event == "llm_call"]
+    assert calls[0]["reasoning_content"] == (
+        "**Checking turnover**\n\nRead the costs first.\n\nThen compare the buffers."
+    )
+    assert "reasoning_content" not in calls[1]
+    replayed = transport.bodies[1]["input"]
+    assert not [item for item in replayed if item.get("type") == "reasoning"]
+    assert "Checking turnover" not in json.dumps(replayed)
+    assert "gAAAA-opaque" not in json.dumps(replayed)
+    assert [item.get("type") for item in replayed if "type" in item] == [
+        "function_call",
+        "function_call_output",
+    ]
 
 
 def test_thinking_off_omits_reasoning_and_the_clone_keeps_the_dialect(

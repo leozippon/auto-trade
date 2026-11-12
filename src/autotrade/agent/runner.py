@@ -695,7 +695,9 @@ class AgentSessionRunner:
                     "model": response.model,
                     "usage": dict(response.usage),
                     "content": response.content,
-                    **trace_reasoning(response.reasoning_content),
+                    **trace_reasoning(
+                        response.reasoning_content or response.reasoning_summary
+                    ),
                     "tool_names": [call.name for call in response.tool_calls],
                 },
             )

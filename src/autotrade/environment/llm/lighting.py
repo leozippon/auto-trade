@@ -419,8 +419,10 @@ def _responses_body(
         "max_output_tokens": max_output_tokens,
     }
     if config.thinking_enabled and config.reasoning_effort is not None:
-        # The responses tiers include the shared scale's low/medium/xhigh.
-        body["reasoning"] = {"effort": config.reasoning_effort}
+        # The responses tiers include the shared scale's low/medium/xhigh. The
+        # reasoning itself stays server-side; its summary is asked for so the
+        # trace can say why a call was made (``reasoning_summary``).
+        body["reasoning"] = {"effort": config.reasoning_effort, "summary": "auto"}
     if tools:
         body["tools"] = [_responses_tool(tool) for tool in tools]
         body["tool_choice"] = _responses_tool_choice(tool_choice)
@@ -628,10 +630,12 @@ def _responses_provider_response(
         raise _invalid_response()
     text: list[str] = []
     calls: list[ToolCall] = []
+    summary: list[str] = []
     for item in output:
         if not isinstance(item, Mapping):
             raise _invalid_response()
         kind = item.get("type")
+        summary += _reasoning_summary_parts(item)
         if kind == "message":
             parts = item.get("content")
             if not isinstance(parts, list):
@@ -665,6 +669,7 @@ def _responses_provider_response(
             tool_calls=tuple(calls),
             model=str(model),
             usage=_responses_usage(decoded.get("usage")),
+            reasoning_summary="\n\n".join(summary) or None,
         )
     except ValueError as exc:
         raise provider_response_validation_error(exc) from exc
@@ -684,6 +689,7 @@ def _parse_responses_stream(payload: bytes, *, expected_model: str) -> ProviderR
     refusal: list[str] = []
     calls: dict[str, dict[str, str]] = {}
     order: list[str] = []
+    summary: list[str] = []
     terminal: Mapping[str, object] | None = None
     for line in text.splitlines():
         stripped = line.strip()
@@ -711,6 +717,7 @@ def _parse_responses_stream(payload: bytes, *, expected_model: str) -> ProviderR
             _record_function_call(event, calls, order, final=False)
         elif kind == "response.output_item.done":
             _record_function_call(event, calls, order, final=True)
+            summary += _reasoning_summary_parts(event.get("item"))
         elif kind == "response.function_call_arguments.delta":
             record = calls.get(_event_call_key(event, None))
             delta = event.get("delta")
@@ -773,9 +780,26 @@ def _parse_responses_stream(payload: bytes, *, expected_model: str) -> ProviderR
             tool_calls=tuple(built),
             model=model,
             usage=usage,
+            reasoning_summary="\n\n".join(summary) or None,
         )
     except ValueError as exc:
         raise provider_response_validation_error(exc) from exc
+
+
+def _reasoning_summary_parts(item: object) -> list[str]:
+    """The summary texts of one reasoning output item; none for any other
+    item. The encrypted reasoning beside them is never read."""
+
+    if not isinstance(item, Mapping) or item.get("type") != "reasoning":
+        return []
+    parts = item.get("summary")
+    if not isinstance(parts, list):
+        return []
+    return [
+        part["text"]
+        for part in parts
+        if isinstance(part, Mapping) and isinstance(part.get("text"), str) and part["text"].strip()
+    ]
 
 
 def _event_call_key(event: Mapping[str, object], item: object) -> str:
