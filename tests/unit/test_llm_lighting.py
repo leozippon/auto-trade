@@ -130,6 +130,7 @@ def _proxy(
             fallback_api_key=gateway.fallback_api_key,
             fallback_key_env=gateway.fallback_key_env,
             transport=transport,
+            sleep=lambda _seconds: None,
         ),
         transport,
     )
@@ -615,7 +616,7 @@ def test_responses_non_stream_parses_a_message_and_a_function_call(tmp_path: Pat
 
 def test_truncated_streamed_call_is_rejected_without_a_retry(tmp_path: Path):
     cut = _streamed_call('{"symbol": "600519')
-    proxy, transport = _proxy(tmp_path, [cut], max_retries=2)
+    proxy, transport = _proxy(tmp_path, [cut])
 
     with pytest.raises(MalformedToolCallError, match="malformed tool call") as caught:
         proxy.complete([ChatMessage("user", "quote")], tools=TOOLS)
@@ -689,7 +690,7 @@ def test_refusal_reply_is_never_an_answer(tmp_path: Path):
             },
         },
     )
-    proxy, transport = _proxy(tmp_path, [refusal], max_retries=2)
+    proxy, transport = _proxy(tmp_path, [refusal])
 
     with pytest.raises(Exception, match="refused the request") as caught:
         proxy.complete([ChatMessage("user", "summarize")], tools=TOOLS)
@@ -724,7 +725,7 @@ def test_streamed_reply_cut_by_the_content_filter_is_a_refusal(tmp_path: Path):
             },
         },
     )
-    proxy, transport = _proxy(tmp_path, [filtered], max_retries=2)
+    proxy, transport = _proxy(tmp_path, [filtered])
 
     with pytest.raises(ProviderRefusalError, match="refused the request"):
         proxy.complete([ChatMessage("user", "summarize")], tools=TOOLS)
@@ -758,14 +759,12 @@ def test_a_stream_cut_before_its_terminal_event_is_retried(tmp_path: Path, cut: 
             },
         ),
     }[cut]
-    proxy, _transport = _proxy(tmp_path, [fragment], max_retries=0)
+    proxy, _transport = _proxy(tmp_path, [fragment], retry_transient=False)
     with pytest.raises(LLMProxyError, match="cut off") as caught:
         proxy.complete([ChatMessage("user", "quote")], tools=TOOLS)
     assert caught.value.retryable is True
 
-    proxy, transport = _proxy(
-        tmp_path, [fragment, _streamed_call()], max_retries=1, retry_backoff_seconds=0
-    )
+    proxy, transport = _proxy(tmp_path, [fragment, _streamed_call()])
     response = proxy.complete([ChatMessage("user", "quote")], tools=TOOLS)
     assert response.tool_calls[0].arguments == {"symbol": "600519.SH"}
     assert len(transport.bodies) == 2
@@ -795,8 +794,6 @@ def test_a_chat_stream_without_a_finish_reason_is_cut_off_and_retried(tmp_path: 
         tmp_path,
         [cut, finished],
         model=RELAY_DEEPSEEK_MODEL,
-        max_retries=1,
-        retry_backoff_seconds=0,
     )
 
     response = proxy.complete([ChatMessage("user", "quote")], tools=TOOLS)
@@ -885,6 +882,27 @@ def test_quota_exhausted_400_also_switches_to_the_alternate_key(tmp_path: Path):
         ],
     )
 
+    assert proxy.complete([ChatMessage("user", "hi")]).content == "done"
+    assert _authorization(transport) == ["Bearer relay-primary", "Bearer relay-alt"]
+
+
+def test_an_exhausted_key_answering_429_switches_at_once(tmp_path: Path):
+    """A 429 is transient and waited out on the same key, unless its message
+    names the account state: that key stays exhausted, so the call moves to
+    the alternate key at once instead of retrying until its deadline."""
+
+    rate_limited = LLMProxyError(
+        "provider HTTP error 429: too many requests", retryable=True, status_code=429
+    )
+    exhausted = LLMProxyError(
+        "provider HTTP error 429: 用户额度不足", retryable=True, status_code=429
+    )
+    done = _responses_json(content="done")
+    proxy, transport = _proxy(tmp_path, [rate_limited, done])
+    assert proxy.complete([ChatMessage("user", "hi")]).content == "done"
+    assert _authorization(transport) == ["Bearer relay-primary", "Bearer relay-primary"]
+
+    proxy, transport = _proxy(tmp_path, [exhausted, done])
     assert proxy.complete([ChatMessage("user", "hi")]).content == "done"
     assert _authorization(transport) == ["Bearer relay-primary", "Bearer relay-alt"]
 
@@ -996,9 +1014,7 @@ def test_without_the_alternate_key_a_rejected_primary_is_not_retried(tmp_path: P
 def test_other_failures_never_move_to_the_alternate_key(
     tmp_path: Path, failure: LLMProxyError
 ):
-    proxy, transport = _proxy(
-        tmp_path, [failure, failure], max_retries=1, retry_backoff_seconds=0
-    )
+    proxy, transport = _proxy(tmp_path, [failure, failure], retry_transient=False)
 
     with pytest.raises(LLMProxyError):
         proxy.complete([ChatMessage("user", "hi")])

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+import autotrade.environment.llm.openai_compatible as openai_compatible_module
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_TOKEN_MARGIN,
     LOCAL_QWEN_MODEL,
@@ -29,6 +30,7 @@ from autotrade.environment.llm import (
     malformed_tool_call_messages,
     model_profile,
 )
+from autotrade.environment.llm.openai_compatible import RETRY_BACKOFF_CAP_SECONDS
 
 
 def make_config(**kwargs) -> OpenAICompatibleConfig:
@@ -307,7 +309,7 @@ def test_config_rejects_unsupported_values():
         ({"api_key": ""}, "api_key"),
         ({"base_url": "http://api.deepseek.com"}, "HTTPS"),
         ({"max_tokens": 0}, "positive"),
-        ({"max_retries": -1}, "negative"),
+        ({"retry_backoff_seconds": 0}, "retry_backoff_seconds"),
         ({"temperature": 3.0}, "temperature"),
         ({"reasoning_effort": "turbo"}, "reasoning_effort"),
         ({"user_id": "bad id"}, "user_id"),
@@ -338,7 +340,7 @@ def test_proxy_retries_timeout_and_parses_native_tool_call():
         ]
     )
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=1, retry_backoff_seconds=0, api_key="top-secret"),
+        make_config(api_key="top-secret"),
         transport=transport,
         sleep=lambda _seconds: None,
     )
@@ -356,7 +358,7 @@ def test_proxy_retries_timeout_and_parses_native_tool_call():
 def test_json_fallback_rejects_malformed_tool_call_without_retry(raw_call: object):
     transport = FakeTransport([_response({"content": None, "tool_calls": [raw_call]})])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
     )
 
@@ -622,7 +624,7 @@ def _loopback_proxy(base_url: str, *, timeout: float) -> OpenAICompatibleProxy:
             model=LOCAL_QWEN_MODEL,
             base_url=base_url,
             timeout_seconds=timeout,
-            max_retries=0,
+            retry_transient=False,
             conversation_log_dir=None,
         )
     )
@@ -665,7 +667,7 @@ def test_a_response_cut_off_mid_body_is_a_retryable_failure():
         assert caught.value.retryable is True
     transport = FakeTransport([http.client.IncompleteRead(b"data: {"), _response({"content": "ok"})])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=1, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
         sleep=lambda _seconds: None,
     )
@@ -696,7 +698,6 @@ def test_http_error_redacts_long_credential_before_final_truncation():
                 provider="vllm",
                 model=LOCAL_QWEN_MODEL,
                 base_url=f"{root}/credential-boundary/v1",
-                max_retries=2,
                 conversation_log_dir=None,
             )
         )
@@ -721,7 +722,6 @@ def test_http_error_redacts_long_endpoint_before_final_truncation():
                 provider="vllm",
                 model=LOCAL_QWEN_MODEL,
                 base_url=base_url,
-                max_retries=2,
                 conversation_log_dir=None,
             )
         )
@@ -756,7 +756,6 @@ def test_local_context_preflight_rejects_without_transport_or_retry(tmp_path: Pa
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=32_768,
-            max_retries=2,
             conversation_log_dir=tmp_path,
         ),
         transport=transport,
@@ -904,7 +903,6 @@ def test_gateway_halves_output_when_provider_overflow_is_tautological():
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=262_144,
-            max_retries=0,
             conversation_log_dir=None,
         ),
         transport=transport,
@@ -935,7 +933,6 @@ def test_gateway_keeps_halving_output_on_repeated_tautological_overflow():
             base_url="http://127.0.0.1:8010/v1",
             request_dialect="vllm-qwen",
             context_window_tokens=262_144,
-            max_retries=0,
             conversation_log_dir=None,
         ),
         transport=transport,
@@ -998,12 +995,14 @@ def test_retry_backoff_cannot_start_after_logical_call_budget_is_exhausted():
     proxy = OpenAICompatibleProxy(
         make_config(
             timeout_seconds=0.05,
-            max_retries=2,
             retry_backoff_seconds=0.1,
         ),
         transport=transport,
     )
-    with pytest.raises(LLMProxyError, match="hard deadline exhausted before retry"):
+    with pytest.raises(
+        LLMProxyError,
+        match="hard deadline exhausted before retry; last error: provider HTTP error 503",
+    ):
         proxy.complete([ChatMessage("user", "hello")])
     assert len(transport.requests) == 1
     assert 0 < transport.requests[0][3] <= 0.05
@@ -1021,7 +1020,7 @@ def test_proxy_redacts_key_from_transport_error():
 def test_proxy_rejects_invalid_provider_payload_without_retry():
     transport = FakeTransport([{"choices": []}])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
     )
     with pytest.raises(LLMProxyError, match="invalid response"):
@@ -1035,7 +1034,7 @@ def test_provider_http_5xx_and_429_are_retryable(status_code: int):
         f"provider HTTP error {status_code}", retryable=True, status_code=status_code
     )
     transport = FakeTransport([failure])
-    proxy = OpenAICompatibleProxy(make_config(max_retries=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(retry_transient=False), transport=transport)
     with pytest.raises(LLMProxyError) as caught:
         proxy.complete([ChatMessage("user", "hello")])
     assert caught.value.status_code == status_code
@@ -1047,7 +1046,7 @@ def test_provider_http_500_retries_then_succeeds():
     failure = LLMProxyError("provider HTTP error 500", retryable=True, status_code=500)
     transport = FakeTransport([failure, _response({"content": "ok"})])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=1, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
         sleep=lambda _seconds: None,
     )
@@ -1055,18 +1054,92 @@ def test_provider_http_500_retries_then_succeeds():
     assert len(transport.requests) == 2
 
 
-def test_transient_failures_back_off_exponentially_before_each_retry():
-    failure = LLMProxyError("provider HTTP error 503", retryable=True, status_code=503)
-    transport = FakeTransport([failure, failure, failure, _response({"content": "ok"})])
+def test_a_burst_of_503s_inside_the_deadline_is_waited_out_with_capped_backoff():
+    """The relay's 'system cpu overloaded' burst (2026-11-11): ten quick 503s
+    in a row. Patience is the call's deadline, not a count of attempts, so the
+    call outlasts the burst; the wait doubles from the base and stops at the
+    cap."""
+    failure = LLMProxyError(
+        "provider HTTP error 503: system cpu overloaded", retryable=True, status_code=503
+    )
+    transport = FakeTransport([failure] * 10 + [_response({"content": "ok"})])
     delays: list[float] = []
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=3, retry_backoff_seconds=2.0, timeout_seconds=600),
+        make_config(retry_backoff_seconds=2.0, timeout_seconds=3_600),
         transport=transport,
         sleep=delays.append,
     )
     assert proxy.complete([ChatMessage("user", "hello")]).content == "ok"
-    assert len(transport.requests) == 4
-    assert delays == [2.0, 4.0, 8.0]
+    assert len(transport.requests) == 11
+    assert delays == [2.0, 4.0, 8.0, 16.0, 32.0] + [RETRY_BACKOFF_CAP_SECONDS] * 5
+
+
+class _GatewayClock:
+    """The gateway's clock: every provider attempt and backoff advances it."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    perf_counter = monotonic
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+class _ClockedTransport(FakeTransport):
+    def __init__(self, outcomes, clock: _GatewayClock) -> None:
+        super().__init__(outcomes)
+        self.clock = clock
+
+    def post(self, url, headers, body, timeout):
+        self.clock.now += 0.25  # the relay's observed answer time
+        return super().post(url, headers, body, timeout)
+
+
+@pytest.mark.parametrize(
+    ("failure", "tools", "error_message"),
+    [
+        (
+            LLMProxyError(
+                "provider HTTP error 503: system cpu overloaded",
+                retryable=True,
+                status_code=503,
+            ),
+            (),
+            "provider HTTP error 503: system cpu overloaded",
+        ),
+        *RETRYABLE_PROTOCOL_FAILURES,
+    ],
+)
+def test_transient_failures_that_never_end_fail_at_the_hard_deadline_with_their_cause(
+    failure, tools, error_message, monkeypatch: pytest.MonkeyPatch
+):
+    clock = _GatewayClock()
+    monkeypatch.setattr(openai_compatible_module, "time", clock)
+    transport = _ClockedTransport([failure] * 200, clock)
+    proxy = OpenAICompatibleProxy(
+        make_config(retry_backoff_seconds=2.0, timeout_seconds=3_600),
+        transport=transport,
+        sleep=clock.sleep,
+    )
+
+    with pytest.raises(LLMProxyError) as caught:
+        proxy.complete([ChatMessage("user", "hello")], tools=tools)
+
+    message = str(caught.value)
+    assert message.startswith("provider call hard deadline exhausted before retry")
+    assert message.endswith(f"last error: {error_message}")
+    assert caught.value.retryable is True
+    assert caught.value.status_code == getattr(failure, "status_code", None)
+    # It gave up only when the next wait would cross the deadline.
+    assert 3_600 - RETRY_BACKOFF_CAP_SECONDS < clock.now <= 3_600
+    assert max(clock.sleeps) == RETRY_BACKOFF_CAP_SECONDS
+    assert len(transport.requests) > 50
 
 
 @pytest.mark.parametrize(
@@ -1086,7 +1159,7 @@ def test_a_dropped_connection_is_retried_and_the_call_completes(fault: Exception
     transport = FakeTransport([fault, fault, _response({"content": "ok"})])
     delays: list[float] = []
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=3, retry_backoff_seconds=2.0, timeout_seconds=600),
+        make_config(retry_backoff_seconds=2.0, timeout_seconds=600),
         transport=transport,
         sleep=delays.append,
     )
@@ -1095,7 +1168,7 @@ def test_a_dropped_connection_is_retried_and_the_call_completes(fault: Exception
     assert delays == [2.0, 4.0]
     certificate = ssl.SSLCertVerificationError(1, "certificate verify failed")
     transport = FakeTransport([certificate, _response({"content": "ok"})])
-    proxy = OpenAICompatibleProxy(make_config(max_retries=3, retry_backoff_seconds=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(), transport=transport)
     with pytest.raises(LLMProxyError) as caught:
         proxy.complete([ChatMessage("user", "hello")])
     assert caught.value.retryable is False
@@ -1108,7 +1181,7 @@ def test_context_overflow_shrink_retries_without_backoff():
     )
     delays: list[float] = []
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=3, retry_backoff_seconds=2.0),
+        make_config(retry_backoff_seconds=2.0),
         transport=transport,
         sleep=delays.append,
     )
@@ -1119,12 +1192,14 @@ def test_context_overflow_shrink_retries_without_backoff():
     assert [request[2]["max_tokens"] for request in transport.requests] == [1_200, 600]
 
 
-def test_model_gateway_defaults_to_pi_style_retry_backoff(tmp_path: Path):
+def test_model_gateway_retries_transient_failures_from_a_two_second_backoff(
+    tmp_path: Path,
+):
     path = tmp_path / ".env"
     path.write_text("VLLM_API_KEY=local-secret\n", encoding="utf-8")
     proxy = build_model_gateway(LOCAL_QWEN_MODEL, env_file=path, max_tokens=8_000)
     assert isinstance(proxy, OpenAICompatibleProxy)
-    assert proxy.config.max_retries == 3
+    assert proxy.config.retry_transient is True
     assert proxy.config.retry_backoff_seconds == 2.0
 
 
@@ -1154,7 +1229,7 @@ def test_stream_tool_call_cut_at_max_tokens_is_rejected_once_and_names_the_cause
     transport = FakeTransport([_length_cut_stream('{"path": "a.py", "content": "abc')])
     delays: list[float] = []
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=2.0),
+        make_config(retry_backoff_seconds=2.0),
         transport=transport,
         sleep=delays.append,
     )
@@ -1205,7 +1280,7 @@ def test_stream_malformed_tool_call_is_rejected_once_and_keeps_the_assistant_tex
     )
     delays: list[float] = []
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=3, retry_backoff_seconds=2.0),
+        make_config(retry_backoff_seconds=2.0),
         transport=transport,
         sleep=delays.append,
     )
@@ -1247,7 +1322,7 @@ def test_malformed_tool_call_recovery_replays_the_text_and_asks_for_the_call():
 
 def test_stream_tool_call_complete_at_max_tokens_is_still_delivered():
     transport = FakeTransport([_length_cut_stream('{"path": "a.py", "content": "abc"}')])
-    proxy = OpenAICompatibleProxy(make_config(max_retries=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(), transport=transport)
     result = proxy.complete([ChatMessage("user", "hello")], tools=({"type": "function"},))
     assert [(call.name, call.arguments) for call in result.tool_calls] == [
         ("write_file", {"path": "a.py", "content": "abc"})
@@ -1276,7 +1351,7 @@ def test_json_tool_call_cut_at_max_tokens_is_rejected_without_retry():
     }
     transport = FakeTransport([payload])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0, stream_tool_calls=False),
+        make_config(stream_tool_calls=False),
         transport=transport,
         sleep=lambda _seconds: None,
     )
@@ -1286,16 +1361,20 @@ def test_json_tool_call_cut_at_max_tokens_is_rejected_without_retry():
     assert len(transport.requests) == 1
 
 
-def test_non_retryable_provider_error_stops_after_one_attempt():
-    failure = LLMProxyError("provider HTTP error 401", retryable=False, status_code=401)
-    transport = FakeTransport([failure])
-    proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0), transport=transport
+@pytest.mark.parametrize("status_code", [400, 401])
+def test_non_retryable_provider_error_stops_after_one_attempt(status_code: int):
+    failure = LLMProxyError(
+        f"provider HTTP error {status_code}", retryable=False, status_code=status_code
     )
+    transport = FakeTransport([failure, _response({"content": "never sent"})])
+    delays: list[float] = []
+    proxy = OpenAICompatibleProxy(make_config(), transport=transport, sleep=delays.append)
     with pytest.raises(LLMProxyError) as caught:
         proxy.complete([ChatMessage("user", "hello")])
     assert caught.value.retryable is False
+    assert str(caught.value) == f"provider HTTP error {status_code}"
     assert len(transport.requests) == 1
+    assert delays == []
 
 
 def _log_records(root: Path) -> list[dict[str, object]]:
@@ -1352,7 +1431,7 @@ def test_concurrent_callers_append_whole_conversation_log_records(tmp_path: Path
         [_response({"content": "x" * 20_000}) for _ in range(workers)]
     )
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=0, conversation_log_dir=tmp_path), transport=transport
+        make_config(conversation_log_dir=tmp_path), transport=transport
     )
     prompt = [ChatMessage("user", "y" * 50_000)]
     errors: list[BaseException] = []
@@ -1382,7 +1461,7 @@ def test_failed_call_writes_conversation_log(tmp_path: Path):
         "provider HTTP error 401 for " + fake_secret, retryable=False, status_code=401
     )
     proxy = OpenAICompatibleProxy(
-        make_config(api_key=fake_secret, max_retries=0, conversation_log_dir=tmp_path),
+        make_config(api_key=fake_secret, conversation_log_dir=tmp_path),
         transport=FakeTransport([failure]),
     )
     with pytest.raises(LLMProxyError) as raised:
@@ -1401,7 +1480,7 @@ def test_every_attempt_of_a_retried_call_is_logged_under_one_call_id(tmp_path: P
     failure = LLMProxyError("provider HTTP error 503", retryable=True, status_code=503)
     proxy = OpenAICompatibleProxy(
         make_config(
-            max_retries=1, retry_backoff_seconds=0, conversation_log_dir=tmp_path
+            conversation_log_dir=tmp_path
         ),
         transport=FakeTransport([failure, _response({"content": "ok"})]),
         sleep=lambda _seconds: None,
@@ -1431,7 +1510,6 @@ def test_retryable_protocol_error_succeeds_on_third_attempt(
     transport = FakeTransport([failure, failure, _response({"content": "ok"})])
     proxy = OpenAICompatibleProxy(
         make_config(
-            max_retries=2,
             retry_backoff_seconds=0.25,
             conversation_log_dir=tmp_path,
         ),
@@ -1462,31 +1540,6 @@ def test_retryable_protocol_error_succeeds_on_third_attempt(
     assert len({item["call_id"] for item in records}) == 1
 
 
-@pytest.mark.parametrize(
-    ("failure", "tools", "error_message"), RETRYABLE_PROTOCOL_FAILURES
-)
-def test_retryable_protocol_error_is_explicit_after_three_failures(
-    failure: bytes | dict[str, object],
-    tools: tuple[dict[str, str], ...],
-    error_message: str,
-):
-    transport = FakeTransport([failure, failure, failure])
-    proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0),
-        transport=transport,
-        sleep=lambda _seconds: None,
-    )
-
-    with pytest.raises(LLMProxyError, match=error_message) as caught:
-        proxy.complete(
-            [ChatMessage("user", "hello")],
-            tools=tools,
-        )
-
-    assert caught.value.retryable is True
-    assert len(transport.requests) == 3
-
-
 @pytest.mark.parametrize("invalid_content", [[], False, 0, {}])
 @pytest.mark.parametrize("stream", [False, True])
 def test_invalid_message_content_type_is_not_retried(
@@ -1503,7 +1556,7 @@ def test_invalid_message_content_type_is_not_retried(
         tools = ()
     transport = FakeTransport([failure])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
     )
 
@@ -1526,7 +1579,7 @@ def test_invalid_reasoning_type_is_not_retried(field: str, stream: bool):
         tools = ()
     transport = FakeTransport([failure])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
     )
 
@@ -1540,7 +1593,7 @@ def test_invalid_reasoning_type_is_not_retried(field: str, stream: bool):
 def test_missing_message_content_without_tool_calls_is_not_retried():
     transport = FakeTransport([_response({})])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
     )
 
@@ -1555,7 +1608,7 @@ def test_missing_message_content_without_tool_calls_is_not_retried():
 def test_invalid_stream_structure_is_not_retried(chunk: object):
     transport = FakeTransport([_stream_response(chunk)])
     proxy = OpenAICompatibleProxy(
-        make_config(max_retries=2, retry_backoff_seconds=0),
+        make_config(),
         transport=transport,
     )
 
@@ -1843,7 +1896,7 @@ def test_reasoning_only_response_is_accepted_without_retry() -> None:
     transport = FakeTransport(
         [_response({"content": "", "reasoning_content": "internal plan"})]
     )
-    proxy = OpenAICompatibleProxy(make_config(max_retries=0), transport=transport)
+    proxy = OpenAICompatibleProxy(make_config(), transport=transport)
     parsed = proxy.complete([ChatMessage("user", "hello")])
     assert parsed.content == ""
     assert parsed.reasoning_content == "internal plan"

@@ -143,13 +143,13 @@ def test_an_experiment_created_from_the_command_line_holds_the_consoles_creation
     assert acceptance_for(params("--max-drawdown=0.3")).max_drawdown == 0.3
 
 
-def test_the_compaction_gateway_is_built_without_provider_retries(
+def test_the_one_assembly_builds_every_gateway_by_its_role(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A failed compaction falls through to the emergency fit path by design,
-    so provider retries would only add their full latency to that failure.
-    Every surface that assembles an experiment gets that decision, because
-    there is exactly one assembly."""
+    """The role builder owns each role's settings (the compaction gateway's
+    single attempt among them), and every surface that assembles an
+    experiment asks it for the three roles by name, because there is exactly
+    one assembly."""
 
     roles: list[tuple[str, dict[str, object]]] = []
 
@@ -181,12 +181,7 @@ def test_the_compaction_gateway_is_built_without_provider_retries(
     build = _build(options)
 
     assert build.developer_label == "llm_research_agent"
-    assert dict(roles)["compact"] == {"max_retries": 0}
-    assert [role for role, _kwargs in roles] == [
-        "main",
-        "subagent",
-        "compact",
-    ]
+    assert roles == [("main", {}), ("subagent", {}), ("compact", {})]
 
 
 def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(

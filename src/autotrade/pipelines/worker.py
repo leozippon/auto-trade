@@ -118,7 +118,6 @@ class LLMWorkerSettings:
     subagent_model: str
     compact_model: str
     timeout_seconds: float
-    max_retries: int
     retry_backoff_seconds: float
     temperature: float
     max_response_tokens: int
@@ -170,7 +169,6 @@ class LLMWorkerSettings:
         model: str | None = None,
         max_tokens: int | None = None,
         require_credentials: bool = True,
-        max_retries: int | None = None,
     ) -> LLMProxy:
         selected_model = model or self.model_for(role)
         effective_max_tokens = self.max_tokens_for(
@@ -180,7 +178,9 @@ class LLMWorkerSettings:
             selected_model,
             env_file=self.env_file,
             timeout_seconds=self.timeout_seconds,
-            max_retries=self.max_retries if max_retries is None else max_retries,
+            # A failed compaction falls through to the emergency fit path by
+            # design: it takes one attempt, never the wait for a provider.
+            retry_transient=role != "compact",
             retry_backoff_seconds=self.retry_backoff_seconds,
             max_tokens=effective_max_tokens,
             temperature=self.temperature,
@@ -690,10 +690,8 @@ def build_experiment_pipeline(
     agent = options.developer_mode == "llm" and options.llm is not None
     main_gateway = llm or (options.llm.build_gateway("main") if agent else None)
     subagent_gateway = llm or (options.llm.build_gateway("subagent") if agent else None)
-    # A failed compaction falls through to the emergency fit path by design;
-    # provider retries would only add their full latency to that failure.
     compact_gateway = llm or (
-        options.llm.build_gateway("compact", max_retries=0)
+        options.llm.build_gateway("compact")
         if agent and options.llm.compact_enabled
         else None
     )
@@ -1195,8 +1193,7 @@ def _llm_settings(
             params.get("llm_timeout_seconds", read_param(params, "per_call_timeout_seconds")),
             "llm_timeout_seconds",
         ),
-        max_retries=_nonnegative_int(read_param(params, "llm_max_retries"), "llm_max_retries"),
-        retry_backoff_seconds=_nonnegative_float(
+        retry_backoff_seconds=_positive_float(
             read_param(params, "llm_retry_backoff_seconds"), "llm_retry_backoff_seconds"
         ),
         temperature=_bounded_float(

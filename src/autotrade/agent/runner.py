@@ -40,6 +40,7 @@ from autotrade.environment.llm import (
     CallBudgetExhausted,
     ChatMessage,
     LLMProxy,
+    LLMProxyError,
     MalformedToolCallError,
     ProviderRefusalError,
     ToolCall,
@@ -76,6 +77,7 @@ from .prompts import (
 )
 from .subagent import (
     OUTPUT_TRUNCATED_CONTINUATION,
+    PROVIDER_TRANSIENT_FAILURE_HINT,
     AgentTool,
     SubAgentEngine,
     accumulate_usage,
@@ -673,7 +675,8 @@ class AgentSessionRunner:
                         {"status": "llm_unavailable", "llm_calls": llm_calls}
                     )
                     raise RuntimeError(
-                        "Agent language model unavailable after consecutive failures"
+                        "Agent language model unavailable after consecutive "
+                        f"failures; last error: {safe_error_summary(exc, 240)}"
                     ) from exc
                 if malformed and not malformed_reissue_used:
                     # One re-issue per streak: keep the text that did arrive
@@ -685,7 +688,9 @@ class AgentSessionRunner:
                 observation: dict[str, object] = {
                     "observation": "llm_error",
                     "error": error,
-                    "retry_hint": "Proceed with a different bounded action; do not repeat the same failing request verbatim.",
+                    "retry_hint": PROVIDER_TRANSIENT_FAILURE_HINT
+                    if isinstance(exc, LLMProxyError) and exc.retryable
+                    else "Proceed with a different bounded action; do not repeat the same failing request verbatim.",
                 }
                 messages.append(
                     ChatMessage(

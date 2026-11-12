@@ -1343,8 +1343,9 @@ def test_compaction_gateway_makes_one_attempt(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     settings = load_worker_options(experiment, repo_root=repo).llm
-    assert settings.build_gateway("compact", max_retries=0).config.max_retries == 0
-    assert settings.build_gateway("main").config.max_retries == settings.max_retries
+    assert settings.build_gateway("compact").config.retry_transient is False
+    assert settings.build_gateway("main").config.retry_transient is True
+    assert settings.build_gateway("subagent").config.retry_transient is True
 
 
 def test_worker_reasoning_effort_offers_exactly_the_wire_levels(

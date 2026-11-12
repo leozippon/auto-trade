@@ -23,6 +23,7 @@ from autotrade.agent.prompts import (
     build_system_prompt,
 )
 from autotrade.agent.runner import COMPACT_ADVISORY_FRACTION
+from autotrade.agent.subagent import PROVIDER_TRANSIENT_FAILURE_HINT
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import AgentRefStore
@@ -847,6 +848,62 @@ def test_fold_session_recovers_one_provider_context_overflow_without_blind_repea
     assert next(
         message.tool_call_id for message in llm.calls[2] if message.role == "tool"
     ) == "shell-1"
+
+
+def test_a_provider_outage_is_noted_as_such_and_the_abort_names_its_last_error(
+    tmp_path: Path,
+):
+    """A request error keeps the advice to change the action; a call the
+    gateway gave up on at its deadline was not the request's fault, and the
+    note says so. The third failure in a row ends the session with the last
+    provider error in the message status.json and the console show."""
+
+    finish, _node_id = finish_session_tool(tmp_path)
+    outage = LLMProxyError(
+        "provider call hard deadline exhausted before retry; last error: "
+        "provider HTTP error 503: system cpu overloaded (current: 95.8%, threshold: 90%)",
+        retryable=True,
+        status_code=503,
+    )
+
+    class RequestErrorThenOutage:
+        provider = "vllm"
+        model = LOCAL_QWEN_MODEL
+        context_window_tokens = None
+
+        def __init__(self):
+            self.calls = []
+
+        def complete(self, messages, **kwargs):
+            del kwargs
+            self.calls.append(tuple(messages))
+            if len(self.calls) == 1:
+                raise LLMProxyError(
+                    "provider HTTP error 400: invalid parameter",
+                    retryable=False,
+                    status_code=400,
+                )
+            raise outage
+
+    llm = RequestErrorThenOutage()
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([finish]),
+        system_prompt="daily JSON only",
+        config=AgentSessionConfig(max_llm_calls=6),
+    )
+
+    with pytest.raises(RuntimeError) as caught:
+        runner.run("finish the validated strategy")
+
+    notes = [json.loads(call[-1].content or "{}") for call in llm.calls[1:]]
+    assert [note["observation"] for note in notes] == ["llm_error", "llm_error"]
+    assert "different bounded action" in notes[0]["retry_hint"]
+    assert notes[1]["retry_hint"] == PROVIDER_TRANSIENT_FAILURE_HINT
+    assert str(caught.value) == (
+        "Agent language model unavailable after consecutive failures; last error: "
+        f"LLMProxyError: {outage}"
+    )
 
 
 def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_analysis(

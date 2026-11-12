@@ -86,6 +86,10 @@ _PROVIDER_REFUSAL_ERROR = (
 )
 _HTTP_ERROR_BODY_MAX_BYTES = 64 * 1024
 _RUNTIME_ERROR_MAX_CHARS = 1_025
+# The longest wait between two attempts of one call: transient failures are
+# retried until the call's hard deadline, so the doubling backoff stops here
+# and a long outage is polled once a minute.
+RETRY_BACKOFF_CAP_SECONDS = 60.0
 # The local Qwen service owns sampling in thinking mode; these values are the
 # official non-thinking recommendation and are sent verbatim otherwise.
 _QWEN_NON_THINKING_SAMPLING = {
@@ -287,7 +291,9 @@ class OpenAICompatibleConfig:
     base_url: str
     request_dialect: str = "openai"
     timeout_seconds: float = 60.0
-    max_retries: int = 2
+    # Whether transient failures are retried (until the hard deadline) or
+    # end the call at once.
+    retry_transient: bool = True
     retry_backoff_seconds: float = 1.0
     max_tokens: int = 1200
     max_output_tokens: int | None = None
@@ -325,8 +331,10 @@ class OpenAICompatibleConfig:
             or self.max_output_tokens <= 0
         ):
             raise ValueError("max_output_tokens must be a positive integer or None")
-        if self.max_retries < 0 or self.retry_backoff_seconds < 0:
-            raise ValueError("retry settings cannot be negative")
+        if self.retry_backoff_seconds <= 0:
+            # A zero base would retry a failing provider in a tight loop
+            # until the deadline.
+            raise ValueError("retry_backoff_seconds must be positive")
         if not 0 <= self.temperature <= 2:
             raise ValueError("temperature must be in [0, 2]")
         if (
@@ -373,7 +381,7 @@ class OpenAICompatibleConfig:
             "model": self.model,
             "request_dialect": self.request_dialect,
             "timeout_seconds": self.timeout_seconds,
-            "max_retries": self.max_retries,
+            "retry_transient": self.retry_transient,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
             "thinking_enabled": self.thinking_enabled,
@@ -568,14 +576,13 @@ class OpenAICompatibleProxy:
             "Authorization": f"Bearer {self.config.api_key}",
             "Content-Type": "application/json",
         }
-        attempts = self.config.max_retries + 1
         call_deadline = time.monotonic() + self.config.timeout_seconds
         # One call_id per logical call: every attempt's log records reference
         # it, and the full payload is written once (the first attempt's
         # "started" record); terminal/retry records join via call_id.
         call_id = new_id("call")
         include_next_payload = True
-        network_attempt = 0
+        retry_delay = self.config.retry_backoff_seconds
         shrinks = 0
         post_index = 0
         while True:
@@ -594,7 +601,6 @@ class OpenAICompatibleProxy:
                     completed_at=None,
                     duration_seconds=0.0,
                     attempt=post_index,
-                    max_attempts=attempts,
                     status="started",
                     call_id=call_id,
                     include_payload=include_payload,
@@ -632,7 +638,6 @@ class OpenAICompatibleProxy:
                     started_at=started_at,
                     started_perf=started_perf,
                     attempt=post_index,
-                    max_attempts=attempts,
                     status="error",
                     call_id=call_id,
                     http_status_code=error.status_code,
@@ -655,25 +660,20 @@ class OpenAICompatibleProxy:
                         shrinks += 1
                         include_next_payload = True
                         continue
-                retry_delay = self.config.retry_backoff_seconds * (2**network_attempt)
-                can_retry = error.retryable and network_attempt + 1 < attempts
-                if can_retry and call_deadline - time.monotonic() <= retry_delay:
-                    error = LLMProxyError(
-                        "provider call hard deadline exhausted before retry",
+                if not (self.config.retry_transient and error.retryable):
+                    raise error from None
+                # Patience is the call's deadline, not a count of attempts:
+                # a transient failure is retried, the wait doubling up to the
+                # cap, for as long as the next wait still ends before it.
+                if call_deadline - time.monotonic() <= retry_delay:
+                    raise LLMProxyError(
+                        "provider call hard deadline exhausted before retry; "
+                        f"last error: {error}",
                         retryable=True,
                         status_code=error.status_code,
-                    )
-                    can_retry = False
-                if not can_retry:
-                    raise error from None
-                network_attempt += 1
-                if retry_delay:
-                    self._sleep(retry_delay)
-                if time.monotonic() >= call_deadline:
-                    raise LLMProxyError(
-                        "provider call hard deadline exhausted during retry backoff",
-                        retryable=True,
                     ) from None
+                self._sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, RETRY_BACKOFF_CAP_SECONDS)
                 continue
             self._log_attempt(
                 log_path,
@@ -681,7 +681,6 @@ class OpenAICompatibleProxy:
                 started_at=started_at,
                 started_perf=started_perf,
                 attempt=post_index,
-                max_attempts=attempts,
                 status="ok",
                 call_id=call_id,
                 raw_response=_decoded_response(payload) if not stream else None,

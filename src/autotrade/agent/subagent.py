@@ -29,6 +29,7 @@ from autotrade.environment.llm import (
     CallBudgetExhausted,
     ChatMessage,
     LLMProxy,
+    LLMProxyError,
     MalformedToolCallError,
     ProviderRefusalError,
     ProviderResponse,
@@ -129,6 +130,12 @@ SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
 OUTPUT_TRUNCATED_CONTINUATION = (
     "上一回合的输出在 {limit} token 上限被截断且没有工具调用。"
     "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
+)
+# The llm_error note after a call whose transient provider failures (the
+# retryable class) outlasted the gateway's deadline: the request was not at
+# fault, so the usual advice to change the action does not apply.
+PROVIDER_TRANSIENT_FAILURE_HINT = (
+    "The provider failed transiently; nothing in your request needs to change."
 )
 # The forced final summary came back with no content (a reply that spent its
 # budget on reasoning). The whole child run is not worth discarding over the
@@ -904,7 +911,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
                                 {
                                     "observation": "llm_error",
                                     "error": error,
-                                    "retry_hint": "Continue with a different bounded action.",
+                                    "retry_hint": PROVIDER_TRANSIENT_FAILURE_HINT
+                                    if isinstance(exc, LLMProxyError) and exc.retryable
+                                    else "Continue with a different bounded action.",
                                 },
                                 ensure_ascii=False,
                             ),

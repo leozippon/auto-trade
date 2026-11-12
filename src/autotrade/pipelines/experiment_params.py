@@ -46,7 +46,6 @@ from autotrade.environment.llm.lighting import (
 )
 from autotrade.environment.llm.model_profiles import (
     AGENT_MAX_OUTPUT_TOKENS,
-    DEFAULT_LLM_MAX_RETRIES,
     DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
 )
 from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
@@ -259,7 +258,6 @@ class AgentParams:
     llm_model: str | None = _host()
     # Left out: per_call_timeout_seconds.
     llm_timeout_seconds: float | None = _host()
-    llm_max_retries: int | None = _host(DEFAULT_LLM_MAX_RETRIES)
     llm_retry_backoff_seconds: float | None = _host(DEFAULT_LLM_RETRY_BACKOFF_SECONDS)
     llm_temperature: float | None = _host(0.0)
     llm_max_response_tokens: int | None = _host(AGENT_MAX_OUTPUT_TOKENS)

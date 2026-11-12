@@ -185,7 +185,7 @@ def build_gateway(
     base_url: str,
     env_file: str | Path,
     timeout_seconds: float,
-    max_retries: int,
+    retry_transient: bool,
     retry_backoff_seconds: float,
     max_tokens: int,
     temperature: float,
@@ -213,7 +213,7 @@ def build_gateway(
                 base_url=base_url,
                 request_dialect=profile.request_dialect,
                 timeout_seconds=timeout_seconds,
-                max_retries=max_retries,
+                retry_transient=retry_transient,
                 retry_backoff_seconds=retry_backoff_seconds,
                 max_tokens=max_tokens,
                 max_output_tokens=profile.max_output_tokens,
@@ -282,6 +282,17 @@ class LightingProxy(OpenAICompatibleProxy):
             transport=self._transport,
             sleep=self._sleep,
         )
+
+    def _normalize_error(self, exc: Exception) -> LLMProxyError:
+        """An exhausted key answering 429 is not transient: it is not retried
+        until the deadline, so the key switch below happens at once."""
+
+        error = super()._normalize_error(exc)
+        if error.retryable and is_credential_failure(error):
+            return LLMProxyError(
+                str(error), retryable=False, status_code=error.status_code
+            )
+        return error
 
     def complete(
         self,

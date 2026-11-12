@@ -272,7 +272,7 @@ def test_content_filter_reply_is_a_refusal_never_an_answer(tmp_path: Path):
         _json_response("The request was rejected because it was considered high risk")
     )
     refusal["choices"][0]["finish_reason"] = "content_filter"
-    proxy, transport = _proxy(tmp_path, [json.dumps(refusal).encode()], max_retries=3)
+    proxy, transport = _proxy(tmp_path, [json.dumps(refusal).encode()])
 
     with pytest.raises(ProviderRefusalError, match="considered high risk") as raised:
         proxy.complete([ChatMessage("user", "summarize")])
@@ -288,7 +288,7 @@ def test_provider_overflow_shrinks_the_documented_output_field(tmp_path: Path):
         status_code=400,
     )
     proxy, transport = _proxy(
-        tmp_path, [overflow, _json_response("ok")], max_tokens=32_768, max_retries=0
+        tmp_path, [overflow, _json_response("ok")], max_tokens=32_768
     )
 
     assert proxy.complete([ChatMessage("user", "meta")]).content == "ok"

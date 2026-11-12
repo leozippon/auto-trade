@@ -135,10 +135,10 @@ MIN_CONTEXT_WINDOW_TOKENS = min(
 )
 
 # Transient provider failures (HTTP 429/500/503, transport timeouts, an empty
-# or cut-off stream) are retried with exponential backoff from this base:
-# 2 s, 4 s, 8 s, the same schedule pi uses, inside the logical call deadline.
-# The context-overflow shrink path is not a transient error and never waits.
-DEFAULT_LLM_MAX_RETRIES = 3
+# or cut-off stream) are retried until the logical call's hard deadline, with
+# exponential backoff from this base: 2 s, 4 s, 8 s ... up to
+# ``RETRY_BACKOFF_CAP_SECONDS``. The context-overflow shrink path is not a
+# transient error and never waits.
 DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 2.0
 
 # Completion-token ceiling for the research-session parent conversation and its
@@ -222,7 +222,7 @@ def build_model_gateway(
     *,
     env_file: str | Path = ".env",
     timeout_seconds: float = 600.0,
-    max_retries: int = DEFAULT_LLM_MAX_RETRIES,
+    retry_transient: bool = True,
     retry_backoff_seconds: float = DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
     max_tokens: int = 1_200,
     temperature: float = 0.0,
@@ -270,7 +270,7 @@ def build_model_gateway(
             base_url=base_url,
             env_file=env_file,
             timeout_seconds=timeout_seconds,
-            max_retries=max_retries,
+            retry_transient=retry_transient,
             retry_backoff_seconds=retry_backoff_seconds,
             max_tokens=effective_max_tokens,
             temperature=temperature,
@@ -295,7 +295,7 @@ def build_model_gateway(
                 base_url=base_url,
                 request_dialect=profile.request_dialect,
                 timeout_seconds=timeout_seconds,
-                max_retries=max_retries,
+                retry_transient=retry_transient,
                 retry_backoff_seconds=retry_backoff_seconds,
                 max_tokens=effective_max_tokens,
                 max_output_tokens=profile.max_output_tokens,
@@ -315,7 +315,6 @@ def build_model_gateway(
 __all__ = [
     "AGENT_MAX_OUTPUT_TOKENS",
     "DEEPSEEK_FLASH_MODEL",
-    "DEFAULT_LLM_MAX_RETRIES",
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LLM_KEYS",
     "LOCAL_QWEN_MODEL",
