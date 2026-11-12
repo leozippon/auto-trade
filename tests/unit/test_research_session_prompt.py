@@ -221,17 +221,17 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     assert "AI 首席量化研究官（AI Chief Quantitative Research Officer）" in stable
     # Research on the visible years, whose data view never moves; each test
     # extends the backtest one step, reveals it through its results and
-    # restarts the validate allowance; research goes on between tests; then
-    # the host-run Forward and Held-out stages, then Paper.
+    # restarts the validate allowance; research goes on between tests, with
+    # the revealed steps as out-of-sample readings any candidate can be
+    # replayed over; then the host-run Forward and Held-out stages, then Paper.
     for clause in (
         "你能读到的数据止于研究年末，整个会话不变",
         "验证期的数据不挂载，只随每次 `test` 的结果揭开一步",
         "用 `validate` 在研究年内回测",
         "`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录",
         "测试终点前进一步，`validate` 的次数重新计",
-        "两次 `test` 之间是一段研究：用刚揭开的区间检验候选的分布外泛化",
-        "新候选在已揭开区间上的表现随之可见",
-        "改进现有候选或开发全新的策略，在研究年上检验，让每一步都由当时最好的候选记入",
+        "两次 `test` 之间是一段研究：已揭开的步是样本外读数，`validate` 能在这些步上回放任一候选",
+        "改进现有候选或开发全新的策略，让每一步都由当时最好的候选记入",
         "换候选只花一次回放；已记入记录的条目不改写",
         "最后一步测完会话结束，最后测试的候选定版",
         "会话不能主动结束",
@@ -265,7 +265,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     # The Agent's own knowledge as a language model, not a pretrained model a
     # strategy loads, is what the boundary rules out.
     assert "不读取研究年末之后的数据" in boundaries and "你作为语言模型自身的知识" in boundaries
-    assert "验证期只通过 `test` 的结果了解" in boundaries
+    assert "验证期只通过 `test` 与 `validate` 的结果了解" in boundaries
     # The working method points at the contract, asks for fast strategy code
     # in one line (the owner's guidance, 2026-11-09) and states the path
     # conventions once, for every file tool and the shell.
@@ -486,7 +486,7 @@ def test_the_run_section_states_this_runs_view_steps_and_threshold() -> None:
     assert prompt.index("# 环境") < prompt.index("## 本次运行")
     for clause in (
         "- 数据：会话挂载的数据止于研究年末 20200731，整个会话都不变；验证期只通过 `test` 的结果揭开。",
-        "- 研究年：5 个，20150801..20200731；`validate` 只在研究年内回测。",
+        "- 研究年：5 个，20150801..20200731。",
         "- 验证期：20200801..20250731，共 20 步，每步一个季度；本次尝试开始时已测试 0 步。",
         "- 门槛：α = 0.05；一年区间约 1.645，整个验证期约 0.736。",
         "- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 6 次。",

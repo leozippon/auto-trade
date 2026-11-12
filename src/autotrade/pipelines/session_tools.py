@@ -76,7 +76,7 @@ from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.environment.trace import TraceEvent
 
 from .agent_views import NULL_CONTROL_KEYS, allowed_keys
-from .calendar import FULL_SPAN, yyyymmdd
+from .calendar import FULL_SPAN, REVEALED_SPAN, yyyymmdd
 from .config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MIN_CANDIDATES,
@@ -435,7 +435,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
 
         The session may measure a fit anywhere in the research years, and
         nowhere else: a date past them would replay the validation years,
-        which only ``test`` replays, and a date before them has no slot.
+        which only ``test`` reveals, and a date before them has no slot.
         """
 
         raw = arguments.get("start")
@@ -698,34 +698,57 @@ class SessionValidations:
 
         return session_handles(self.tree, node_ids, session_ref=self.session_ref)
 
-    def span(self, label: object) -> ReplaySpan:
-        """The span ``label`` names, or a schema error naming the valid ones.
+    def span(self, label: object) -> tuple[ReplaySpan, int | None]:
+        """The span ``label`` names and, for the revealed span, the tested
+        steps it covers (None for a research span), or a schema error naming
+        the valid ones.
 
-        A Validation replays inside the research years only: the session's
-        data view ends with them for the whole session, and the validation
-        years are replayed by ``test`` alone, so a span reaching past the
-        research years is refused by name however far the tests have gone.
+        A research span stays inside the research years: the session's data
+        view ends with them for the whole session, so a span reaching past
+        them is refused by name however far the tests have gone. ``revealed``
+        is the validation span as a test replays it -- one fresh book from
+        the validation start -- through the k steps tested so far, the count
+        the validation record holds (``tests``, continued from the ledger on
+        resume); its replay stops at the end of step k (``replay_legs``'
+        ``end_day``), so it is the window the last test replayed and no day
+        past it is replayed. Its label names k (``revealed:k``), so the nodes
+        of one window share a label and those of another do not. Before the
+        first test nothing is revealed, and it is refused.
         """
 
+        text = str(label).strip()
+        if text == REVEALED_SPAN:
+            tested = len(self.tests)
+            if not tested:
+                raise ToolError(
+                    f"span {REVEALED_SPAN} replays the validation steps test has revealed, "
+                    "and no step is tested yet: before the first test validate replays only "
+                    "the research years",
+                    error_type="schema_error",
+                    blocked_target="span",
+                )
+            return replace(self.request.validation, label=f"{REVEALED_SPAN}:{tested}"), tested
         try:
             span = research_span(
-                self.request.years, str(label), research_years=self.rules.research_years
+                self.request.years, text, research_years=self.rules.research_years
             )
         except ValueError as exc:
             raise ToolError(
-                str(exc), error_type="schema_error", blocked_target="span"
+                f"{exc}; or {REVEALED_SPAN}, the validation steps tested so far",
+                error_type="schema_error",
+                blocked_target="span",
             ) from exc
         research = self.request.full_span
         if span.end > research.end:
             raise ToolError(
                 f"span {span.label} ends at {span.end}, past the end of the research years "
-                f"{research.end}: validate replays only the research years "
-                f"({research.start}..{research.end}); the validation years are replayed "
-                "only by test, whose results report them step by step",
+                f"{research.end}: a research span stays inside them "
+                f"({research.start}..{research.end}); the validation years are revealed "
+                f"step by step by test, and span {REVEALED_SPAN} replays the steps tested so far",
                 error_type="schema_error",
                 blocked_target="span",
             )
-        return span
+        return span, None
 
     def registration(
         self,
@@ -1384,6 +1407,7 @@ VALIDATE_ROW_KEYS = (
     "active",
     "book",
     "by_year",
+    "by_step",
     "concentration",
     "resources",
     "same_bytes_as",
@@ -1423,10 +1447,10 @@ class ValidateTool(SessionTimeBudgetAware):
     spec = ToolSpec(
         "validate",
         f"Replay {BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
-        "candidates over one span of the research years in one call; the only way "
-        "to make a node that test can take. span is full (default), one research "
-        "year Yk or contiguous years Yi..Yj, replayed as one continuous book from "
-        "its first year; a span reaching into the validation years is refused. "
+        "candidates over one span in one call; the only way to make a node that "
+        "test can take. span is full (default), one research year Yk or contiguous "
+        "research years Yi..Yj, replayed as one continuous book from its first "
+        "year, or revealed: the steps tested so far, replayed as test replays them. "
         "At most acceptance_rules.validation.validates_per_step counted calls "
         "before the first test and between two tests; a call counts only if one of "
         "its candidates completes its replay.\n\nA candidate's path is a workspace directory laid out "
@@ -1464,8 +1488,9 @@ class ValidateTool(SessionTimeBudgetAware):
                     "maxLength": 20,
                     "description": (
                         "full (default: the research years), one research year "
-                        "Yk, or contiguous research years Yi..Yj. Iterate on "
-                        "years; test takes a full-span validation."
+                        "Yk, contiguous research years Yi..Yj, or revealed (the "
+                        "validation steps tested so far). Iterate on years; test "
+                        "takes a full-span validation."
                     ),
                 },
                 "candidates": {
@@ -1586,7 +1611,7 @@ class ValidateTool(SessionTimeBudgetAware):
                 },
             )
         try:
-            span = self.backtest.span(arguments.get("span", FULL_SPAN))
+            span, revealed = self.backtest.span(arguments.get("span", FULL_SPAN))
             candidates = self._parse(arguments)
             for candidate in candidates:
                 supply_readonly_files(
@@ -1605,10 +1630,14 @@ class ValidateTool(SessionTimeBudgetAware):
         batch_id = uuid.uuid4().hex[:12]
         parent_node_id = self.backtest.tree.current_node_id
         revisions = self._commit(candidates, checks, span)
+        # The revealed span stops where its last tested step ends, as the
+        # test that revealed that step did.
+        end_day = None if revealed is None else self.backtest.steps_plan.horizon_after(revealed)
         outcomes = replay_legs(
             self.backtest.evaluator,
             [self.backtest.validation_request(revision, span) for revision in revisions],
             max_concurrency=self.max_concurrency,
+            end_day=end_day,
         )
         # How many candidates the host, not the strategy, failed: measured
         # nothing, so the row says the candidate may be resent unchanged.
@@ -1698,12 +1727,19 @@ class ValidateTool(SessionTimeBudgetAware):
         rules = self.backtest.rules
         thresholds: list[object] = []
         for row, step in recorded:
-            analysis = result_analysis(step.validation.result_ref)
+            result_ref = step.validation.result_ref
+            analysis = result_analysis(result_ref)
             summary = step.validation.summary
             row["active"] = active_reading(analysis, summary, rules=rules)
             thresholds.append(row["active"].pop("threshold", None))  # type: ignore[attr-defined]
             row["book"] = book_reading(analysis, summary)
-            row.update(year_readings(analysis, summary, self.backtest.request.years))
+            if revealed is None:
+                row.update(year_readings(analysis, summary, self.backtest.request.years))
+            else:
+                # The revealed steps, read as a test reads its candidate.
+                row["by_step"] = step_readings(
+                    *replay_and_analysis(result_ref), self.backtest.steps_plan, through=revealed
+                )
         # One span, one length, one threshold: a row whose regression read a
         # different number of days keeps its own.
         threshold = next((value for value in thresholds if value is not None), None)
@@ -1723,8 +1759,8 @@ class ValidateTool(SessionTimeBudgetAware):
                 "span": {
                     "label": span.label,
                     "start": span.start,
-                    "end": span.end,
-                    "years": span.slots,
+                    "end": end_day or span.end,
+                    **({"years": span.slots} if revealed is None else {"steps": revealed}),
                     "days": first.get("replayed_trade_days"),
                 },
                 "threshold": threshold,
@@ -2302,8 +2338,7 @@ class TestTool(SessionTimeBudgetAware):
         # the record holds with another candidate.
         by_step = [
             {
-                "step": row["step"],
-                **_rounded_row({key: row[key] for key in REPLICATE_STEP_KEYS}),
+                **row,
                 **(
                     {
                         "seed_replicates": [
@@ -2315,7 +2350,7 @@ class TestTool(SessionTimeBudgetAware):
                     else {}
                 ),
             }
-            for index, row in enumerate(step_table(replay, analysis, steps, through=step))
+            for index, row in enumerate(step_readings(replay, analysis, steps, through=step))
         ]
         active = active_reading(analysis, evaluation.summary, rules=backtest.rules)
         # The record's own threshold is the one significance reads.
@@ -2380,9 +2415,10 @@ def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-# What a test reads of each step: a candidate_by_step row and each seed
-# replicate's cell beside it carry the step's active return and return; a
-# record row carries the recorded entry's figures.
+# What a test reads of each step: a candidate_by_step row (and a revealed
+# validate row's by_step) and each seed replicate's cell beside it carry the
+# step's active return and return; a record row carries the recorded entry's
+# figures.
 REPLICATE_STEP_KEYS = ("active_return", "return")
 RECORD_ENTRY_KEYS = ("return", "active_return", "index_return", "max_drawdown", "turnover", "fees")
 # The record's significance test as a test result carries it.
@@ -2398,6 +2434,23 @@ SIGNIFICANCE_KEYS = (
     "days",
     "years",
 )
+
+
+def step_readings(
+    replay: Mapping[str, object],
+    analysis: Mapping[str, object],
+    steps: ValidationSteps,
+    *,
+    through: int,
+) -> list[dict[str, object]]:
+    """A replay from the validation start read over steps 1..``through``
+    (``validation_record.step_table``): each step's active return and return,
+    the rows a test returns as ``candidate_by_step``."""
+
+    return [
+        {"step": row["step"], **_rounded_row({key: row[key] for key in REPLICATE_STEP_KEYS})}
+        for row in step_table(replay, analysis, steps, through=through)
+    ]
 
 
 def _replicate_cell(handle: str, row: Mapping[str, object] | str) -> dict[str, object]:
@@ -2457,7 +2510,7 @@ class NullControlTool(SessionTimeBudgetAware):
         self.blocks: dict[str, dict[str, object]] = {}
         self.spec = ToolSpec(
             self.spec.name,
-            "Rank a complete Validation node of this session against "
+            "Rank a complete research-span Validation node of this session against "
             f"{BASELINE_DRAWS} host replays of its own trade skeleton over its span, "
             "each name replaced by a random one on the same side of the "
             "benchmark_index membership (the float-cap decile without index_weight) "
@@ -2494,6 +2547,21 @@ class NullControlTool(SessionTimeBudgetAware):
                 f"this session; {node_id} is not one",
                 details={"candidates": self.backtest.named(candidates)},
             )
+        try:
+            span = research_span(
+                self.backtest.request.years,
+                step.span,
+                research_years=self.backtest.rules.research_years,
+            )
+        except ValueError as exc:
+            # A revealed-span node: the null control, like registration,
+            # reads a node over the research years.
+            raise ToolError(
+                "run_null_control ranks a node replayed over research years (span full, Yk "
+                f"or Yi..Yj); {self.backtest.named([node_id])[0]} replayed span {step.span}",
+                error_type="schema_error",
+                blocked_target="node_id",
+            ) from exc
         if node_id in self.blocks:
             return ToolResult(True, value=self._report(node_id, self.blocks[node_id], cached=True))
         if self.used >= self.max_calls:
@@ -2506,11 +2574,6 @@ class NullControlTool(SessionTimeBudgetAware):
         runner = getattr(self.backtest.evaluator, "null_control", None)
         if not callable(runner):
             raise ToolError("run_null_control is not available on this evaluation backend")
-        span = research_span(
-            self.backtest.request.years,
-            step.span,
-            research_years=self.backtest.rules.research_years,
-        )
         # The attempt is charged before it runs: the compute is spent either way.
         self.used += 1
         with self.backtest.time_budget.pause():

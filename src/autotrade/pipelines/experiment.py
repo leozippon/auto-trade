@@ -312,10 +312,11 @@ class ExperimentPipeline:
 
         The first ``research_years`` of the experiment's rules are the research years
         (``ResearchGeometry.split_research``). The session's view is the one
-        at their end for the whole session, and the spans a Validation may
-        replay stay inside them (``session_tools.SessionValidations.span``),
+        at their end for the whole session, and a Validation replays inside
+        them or, once tests have revealed steps, the validation span through
+        those steps as a test does (``session_tools.SessionValidations.span``),
         so no row of the validation years reaches a research session: only
-        the tests replay them (:meth:`validation_span`), and only their
+        host replays of :meth:`validation_span` read them, and only their
         results reach the session.
         """
 

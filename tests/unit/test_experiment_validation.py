@@ -255,8 +255,86 @@ def test_validate_is_bounded_per_interval_freed_by_a_test_and_kept_to_the_resear
                 harness.session.call("d", span=span)
             assert refused.value.error_type == "schema_error"
             assert "past the end of the research years 20250630" in str(refused.value)
-            assert "replayed only by test" in str(refused.value)
+            assert "span revealed replays the steps tested so far" in str(refused.value)
         assert len(harness.evaluator.requests) == replays and harness.backtest.validates_in_interval == 1
+
+
+def test_validate_revealed_replays_exactly_the_tested_steps_and_nothing_before_a_test() -> None:
+    """Span revealed is the validation span as a test replays it, through the
+    steps tested so far: refused before the first test, then one fresh book
+    from the validation start stopped at the end of the last tested step --
+    the request the last test made -- read step by step as that test read
+    its candidate. No span names a step past it, and it counts against the
+    interval's allowance like any validate call."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        node = harness.node("a", "1")
+        harness.session.candidate("b", _strategy("2"))
+        replays = len(harness.evaluator.requests)
+        with pytest.raises(ToolError) as refused:
+            harness.session.call("b", span="revealed")
+        assert refused.value.error_type == "schema_error" and "no step is tested yet" in str(refused.value)
+        assert len(harness.evaluator.requests) == replays and harness.backtest.validates_in_interval == 1
+
+        tested = harness.test.invoke({"candidate": node}).value
+        # The tested candidate's own bytes over the revealed span: the test's
+        # request, and the test's reading of it.
+        same = harness.session.call("a", span="revealed").value
+        assert harness.evaluator.requests[-2:] == [("20250701", "20260630", "20250930")] * 2
+        assert same["span"] == {"label": "revealed:1", "start": "20250701", "end": "20250930", "steps": 1, "days": 66}
+        [row] = same["candidates"]
+        assert row["by_step"] == tested["candidate_by_step"] and "by_year" not in row and "concentration" not in row
+        assert (row["active"], row["book"]) == (tested["whole_replay"]["active"], tested["whole_replay"]["book"])
+        assert same["validates_in_step"] == 1
+        dates = set(DATE.findall(json.dumps(same)))
+        assert dates and max(dates) <= "20250930", sorted(dates)[-3:]
+        # Nothing names a later step: there is no step sub-range, and a year
+        # span into the validation year is refused.
+        for span in ("revealed:2", "Y5"):
+            with pytest.raises(ToolError) as refused:
+                harness.session.call("b", span=span)
+            assert refused.value.error_type == "schema_error", span
+        assert harness.backtest.validates_in_interval == 1 and len(harness.evaluator.requests) == replays + 2
+
+        harness.test.invoke({"candidate": node})
+        other = harness.session.call("b", span="revealed").value
+        assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20251231")
+        assert (other["span"]["label"], other["span"]["end"], other["span"]["steps"]) == ("revealed:2", "20251231", 2)
+        assert [step["step"] for step in other["candidates"][0]["by_step"]] == [1, 2]
+        # Counted as any call is, live and as a resumed attempt reads it.
+        assert other["validates_in_step"] == harness.backtest.validates_in_interval == 1
+        since = harness.records()[-1]["recorded_at"]
+        assert session_tools._validates_since(harness.backtest.tree, since) == 1
+
+
+def test_a_revealed_validation_changes_no_record_and_never_registers() -> None:
+    """A revealed-span node is a reading: the validation record, the tested
+    candidate and the test horizon stay as they were, test takes it neither
+    as a candidate nor as a seed replicate, and the null control, which
+    ranks a node over research years, refuses it before charging."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        nominee = harness.seeded("a", 1000)
+        harness.test.invoke({"candidate": nominee})
+        ledger = harness.backtest.ledger.path
+        before = (ledger.read_bytes(), json.dumps(harness.backtest.tests), harness.backtest.test_horizon)
+        harness.session.candidate("b", _seeded(2000))
+        revealed = harness.session.call("b", span="revealed").value["candidates"][0]["node_id"]
+        assert (ledger.read_bytes(), json.dumps(harness.backtest.tests), harness.backtest.test_horizon) == before
+        for arguments, reason in (
+            ({"candidate": revealed}, "registration_needs_full_span_validation"),
+            ({"candidate": nominee, "seed_replicates": [revealed]}, "registration_seed_replicate_invalid"),
+        ):
+            with pytest.raises(ToolError) as refused:
+                harness.test.invoke(arguments)
+            assert refused.value.error_type == "test_registration_refused" and reason in str(refused.value)
+        null_control = session_tools.NullControlTool(harness.backtest, max_calls=1)
+        with pytest.raises(ToolError, match="replayed span revealed:1"):
+            null_control.invoke({"node_id": revealed})
+        assert null_control.used == 0
+        assert (ledger.read_bytes(), json.dumps(harness.backtest.tests), harness.backtest.test_horizon) == before
 
 
 def test_a_validate_call_counts_only_when_a_candidate_completes_its_replay() -> None:

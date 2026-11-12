@@ -873,6 +873,22 @@ VALIDATE_WORKING_COPY = ToolCall(
         ],
     },
 )
+# The working copy over the validation steps tested so far, under a name of
+# its own: the scripted test still names the full-span working-copy node.
+VALIDATE_REVEALED = ToolCall(
+    "revealed",
+    "validate",
+    {
+        "span": "revealed",
+        "candidates": [
+            {
+                "name": "revealed_copy",
+                "hypothesis": "the working copy read over the steps tested so far",
+                "path": "output",
+            }
+        ],
+    },
+)
 
 
 

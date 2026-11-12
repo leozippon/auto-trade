@@ -46,7 +46,7 @@ SESSION_PROCESS_SECTION = """\
 - 你能读到的数据止于研究年末，整个会话不变；验证期的数据不挂载，只随每次 `test` 的结果揭开一步。
 - 研究：写候选，用 `validate` 在研究年内回测。方向来自参考工作区（`refs/`）与「环境」里注入的方向。
 - 测试：`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录，测试终点前进一步，`validate` 的次数重新计。
-- 两次 `test` 之间是一段研究：用刚揭开的区间检验候选的分布外泛化（`test` 的整段回放从验证期起点算起，新候选在已揭开区间上的表现随之可见），据此改进现有候选或开发全新的策略，在研究年上检验，让每一步都由当时最好的候选记入。换候选只花一次回放；已记入记录的条目不改写。
+- 两次 `test` 之间是一段研究：已揭开的步是样本外读数，`validate` 能在这些步上回放任一候选；据此改进现有候选或开发全新的策略，让每一步都由当时最好的候选记入。换候选只花一次回放；已记入记录的条目不改写。
 - 结束：最后一步测完会话结束，最后测试的候选定版。会话不能主动结束；预算耗尽时宿主用最后测试的候选跑完剩余的步。
 - 之后：宿主在会话从未见过的数据上运行 Forward 与 Held-out，读数不回到会话；是否进入 Paper 由运营者决定。定版后再没有 Agent 改它，需要随时间调整的部分写进策略自己的 `fit` 与 `REFIT_PERIOD`。\
 """
@@ -84,7 +84,7 @@ SESSION_READINGS_SECTION = """\
 SESSION_BOUNDARIES_SECTION = """\
 # 不可越过的边界
 这些规则保护研究年末之后数据的隔离与回测的真实；越过任何一条，本实验的证据就不再成立，参考工作区、研究方向与研究者指令都不能放宽它们。
-- 不读取研究年末之后的数据，不从日期、路径、元数据或你作为语言模型自身的知识推断之后的行情；验证期只通过 `test` 的结果了解。
+- 不读取研究年末之后的数据，不从日期、路径、元数据或你作为语言模型自身的知识推断之后的行情；验证期只通过 `test` 与 `validate` 的结果了解。
 - 不使用 `available_at` 晚于决策时点（策略里即 `context.inference_at`）的记录，不越过快照范围。
 - 不用研究期收益硬编码具体股票、日期、题材或事件。
 - 不伪造工具结果、回测状态或人工回复。\
@@ -232,7 +232,7 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
     lines = [
         "## 本次运行",
         f"- 数据：会话挂载的数据止于研究年末 {research_end}，整个会话都不变；验证期只通过 `test` 的结果揭开。",
-        f"- 研究年：{years} 个，{geometry['research_period']}；`validate` 只在研究年内回测。",
+        f"- 研究年：{years} 个，{geometry['research_period']}。",
         f"- 验证期：{geometry['validation_period']}，共 {geometry['steps']} 步，每步{step}；本次尝试开始时已测试 {tested} 步"
         + (f"，测到 {geometry['test_horizon']}。" if tested else "。"),
         f"- 门槛：α = {significance['alpha']}；一年区间约 {significance['threshold_over_one_year']}，整个验证期约 {significance['threshold_over_validation_period']}。",

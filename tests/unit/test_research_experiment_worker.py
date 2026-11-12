@@ -412,9 +412,12 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     the validation start to the new test horizon and records the step, while the
     session's ``/mnt/snapshot`` stays the decision view at the research
     year's end; the last test ends the session with its candidate frozen, and the host
-    runs forward and Held-out. The two snapshot slot mounts stay empty, no
-    replay slot appears anywhere in the session's runtime tree, and the
-    Validations the session replayed never saw a bar past the research year.
+    runs forward and Held-out. Between the first two tests it validates the
+    working copy over the revealed span: the first test's replay window
+    exactly, a node of its own that leaves the record alone. The two
+    snapshot slot mounts stay empty, no replay slot appears anywhere in the
+    session's runtime tree, and the research-span Validations the session
+    replayed never saw a bar past the research year.
     A finished sibling experiment's skills stay out of the session: it mounts
     only its own snapshot of the curated library, of which this checkout has
     none.
@@ -424,6 +427,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     from autotrade.pipelines.hitl_state import ControlState, read_control, write_control
     from tests.unit.test_interactive_worker_local import (
         TEST_WORKING_COPY,
+        VALIDATE_REVEALED,
         VALIDATE_WORKING_COPY,
         _agent_then,
         _NominatingLLM,
@@ -441,7 +445,9 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         [
             *_agent_then(VALIDATE_WORKING_COPY, roles=()),
             ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
-            *(ProviderResponse(tool_calls=(TEST_WORKING_COPY,)) for _step in range(4)),
+            ProviderResponse(tool_calls=(TEST_WORKING_COPY,)),
+            ProviderResponse(tool_calls=(VALIDATE_REVEALED,)),
+            *(ProviderResponse(tool_calls=(TEST_WORKING_COPY,)) for _step in range(3)),
         ]
     )
     result = run_local_interactive_worker(
@@ -557,7 +563,9 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         if path.is_file()
     ]
     assert all(item.get("kind") != "replay_slot" for item in manifests)
-    for step in research_row["steps"]:
+    *research_steps, revealed = research_row["steps"]
+    assert [step["span"] for step in research_row["steps"]] == ["full", "full", "revealed:1"]
+    for step in research_steps:
         replayed = json.loads(Path(step["validation_result_ref"]).read_text(encoding="utf-8"))
         assert all(name.split("_")[1] <= visible_end for name in replayed["pit"]["replay_slots"])
         # The probe: the last bar the strategy was asked to decide on, and the
@@ -572,6 +580,30 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         replayed = json.loads(Path(row["replay"]["result_ref"]).read_text(encoding="utf-8"))
         assert first_validation_day <= replayed["equity_curve"][0]["trade_date"] <= "20230703"
         assert replayed["equity_curve"][-1]["trade_date"] <= row["test_horizon"]
+    # The revealed validate replayed the window of the test before it, day
+    # for day, and decided on no day past that test's horizon; it returned
+    # nothing dated later, and the record above holds the tested node alone.
+    def days(result_ref: str) -> list[str]:
+        record = json.loads(Path(result_ref).read_text(encoding="utf-8"))
+        return [str(row["trade_date"]) for row in record["equity_curve"]]
+
+    assert days(revealed["validation_result_ref"]) == days(tests[0]["replay"]["result_ref"])
+    own = json.loads(Path(revealed["validation_result_ref"]).read_text(encoding="utf-8"))
+    assert max(str(day)[:10].replace("-", "") for day in own["inference_dates"]) <= tests[0]["test_horizon"]
+    [revealed_result] = [
+        message.content for message in llm.calls[-1]["messages"] if "revealed:1" in (message.content or "")
+    ]
+    assert '"by_step"' in revealed_result and '"validates_in_step": 1' in revealed_result
+    assert max(DATE.findall(revealed_result)) == tests[0]["test_horizon"]
+    # The console lists the node by its span and counts its call in the
+    # research before the second step, as the allowance does.
+    from autotrade.webui.registry import experiment_detail, research_depth
+
+    assert '"span": "revealed:1"' in json.dumps(experiment_detail(experiment.parent, experiment.name))
+    depth = research_depth(experiment.parent, experiment.name)["intervals"]
+    assert [(row["step"], row["validates"], row["candidates"]) for row in depth] == [
+        (1, 2, 2), (2, 1, 1), (3, 0, 0), (4, 0, 0)
+    ]
     # The readout reads the four tested steps as one record; the forward
     # stage replayed nothing of the validation year again.
     readout = replay["readout"]
@@ -724,13 +756,15 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     its model: the step it recorded stays in the ledger. The second worker
     start resumes the session at the test horizon that step reached -- on the
     same view at the research year's end, with facts that state the steps
-    tested -- and when its one remaining call is spent the host completes the
-    record from the tested candidate, not from the Validation the resumed
-    attempt added."""
+    tested, and a revealed span that replays the window the first attempt's
+    test replayed -- and when its one remaining call is spent the host
+    completes the record from the tested candidate, not from the Validations
+    the resumed attempt added."""
 
     from autotrade.environment.llm import ProviderResponse
     from tests.unit.test_interactive_worker_local import (
         TEST_WORKING_COPY,
+        VALIDATE_REVEALED,
         VALIDATE_WORKING_COPY,
         _NominatingLLM,
         _NoShellRunner,
@@ -760,7 +794,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     assert failed["record_type"] == "attempt_failed"
     tested_node = tested["candidate"]["step_id"]
 
-    second_llm = _NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))])
+    second_llm = _NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_REVEALED, VALIDATE_WORKING_COPY))])
     result = run_local_interactive_worker(
         load_worker_options(experiment, repo_root=repo),
         llm=second_llm,
@@ -772,6 +806,16 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
         "test_step", "attempt_failed", *(["test_step"] * 3), "research_session", "forward"
     ]
     record = records[-2]
+    # The resumed attempt's frontier is the one the ledger's step left: its
+    # revealed span replayed that test's window, day for day.
+    revealed = record["steps"][1]
+    assert revealed["span"] == "revealed:1"
+
+    def days(result_ref: str) -> list[str]:
+        replayed = json.loads(Path(result_ref).read_text(encoding="utf-8"))
+        return [str(row["trade_date"]) for row in replayed["equity_curve"]]
+
+    assert days(revealed["validation_result_ref"]) == days(tested["replay"]["result_ref"])
     assert (record["attempts"], record["outcome"], record["finish_reason"]) == (
         2, "deadline", "llm_call_budget_exhausted"
     )

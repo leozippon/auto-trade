@@ -109,6 +109,7 @@ from .calendar import (
     DAILY_HISTORY_START,
     FULL_SPAN,
     MACRO_HISTORY_START,
+    REVEALED_SPAN,
     Slot,
     anchor_before,
     months_before,
@@ -1546,8 +1547,10 @@ def research_geometry_record(
         ],
         "spans": (
             f"{FULL_SPAN} (the research years Y1..Y{research_years}), one research year "
-            f"such as Y1, or contiguous research years such as Y1..Y{research_years}; a "
-            "span reaching past the research years is refused"
+            f"such as Y1, contiguous research years such as Y1..Y{research_years}, or "
+            f"{REVEALED_SPAN} (the validation steps tested so far, from the validation "
+            "start to the end of the last tested step; refused before the first test); "
+            "any other span reaching past the research years is refused"
         ),
     }
 

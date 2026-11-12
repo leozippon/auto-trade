@@ -1011,8 +1011,9 @@ class ResearchSessionRequest:
     # Every year of the research geometry in order, one single-slot span each
     # (labels Y1..Yn): the first ``acceptance_rules.research_years`` are the
     # research years and ``full`` (``research_span``) is their span; the rest
-    # are the validation years, which only the tests replay (a Validation
-    # stays inside the research years).
+    # are the validation years, which only the tests reveal (a Validation
+    # stays inside the research years or replays the tested steps as a test
+    # does, ``session_tools.SessionValidations.span``).
     years: tuple[ReplaySpan, ...]
     # Months of history every decision view carries up to its anchor
     # (``ExperimentConfig.window_months``): the view the session reads

@@ -8,7 +8,7 @@
 
 ## 换手
 
-`book.turnover` 是整段回放的买入名义与卖出名义之和除以期初资金，整段累计、不年化：一年换几遍（双边、期初资金口径）用它除以 span 的研究年数，`active.excess_at_cost_stress` 加收的滑点也按它算。要按平均权益算，用 `result_ref` 记录里的 `executions` 与 `equity_curve` 自己重算；几种分母都对不上某个报告值时，先查它是不是期初资金。
+`book.turnover` 是整段回放的买入名义与卖出名义之和除以期初资金，整段累计、不年化：一年换几遍（双边、期初资金口径）用它除以 span 的年数，`active.excess_at_cost_stress` 加收的滑点也按它算。要按平均权益算，用 `result_ref` 记录里的 `executions` 与 `equity_curve` 自己重算；几种分母都对不上某个报告值时，先查它是不是期初资金。
 
 ## 主动、账户与对照组合
 

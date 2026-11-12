@@ -38,9 +38,11 @@ from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 RESEARCH_ANCHOR_TIME = time(23, 59, 59)
 # The span label of a replay over the research years, Y1 through the last of
 # them; and of the validation years as one span, which the tests replay up to
-# their test horizon.
+# their test horizon. ``revealed`` names, in ``validate``, the part of that
+# span the tests have revealed (``session_tools.SessionValidations.span``).
 FULL_SPAN = "full"
 VALIDATION_SPAN = "validation"
+REVEALED_SPAN = "revealed"
 
 
 def yyyymmdd(value: object) -> str:
@@ -329,6 +331,7 @@ __all__ = [
     "FULL_SPAN",
     "GEOMETRY_PARAMETERS",
     "RESEARCH_ANCHOR_TIME",
+    "REVEALED_SPAN",
     "VALIDATION_SPAN",
     "ResearchGeometry",
     "Slot",
