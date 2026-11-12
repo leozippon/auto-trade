@@ -10,13 +10,19 @@ import re
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
 import pytest
 
 from autotrade.common.records import write_json_atomic
-from autotrade.environment.executor import StrategyExecutionError, StrategyRaised
+from autotrade.environment.executor import (
+    StrategyExecutionError,
+    StrategyRaised,
+    StrategyTimedOut,
+    attach_strategy_resources,
+)
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.pipelines import session_tools, validation_record
 from autotrade.pipelines.config import (
@@ -282,7 +288,7 @@ def test_validate_revealed_replays_exactly_the_tested_steps_and_nothing_before_a
         # request, and the test's reading of it.
         same = harness.session.call("a", span="revealed").value
         assert harness.evaluator.requests[-2:] == [("20250701", "20260630", "20250930")] * 2
-        assert same["span"] == {"label": "revealed:1", "start": "20250701", "end": "20250930", "steps": 1, "days": 66}
+        assert same["span"] == {"label": "revealed:1", "start": "20250701", "end": "20250930", "years": 0.25, "steps": 1, "days": 66}
         [row] = same["candidates"]
         assert row["by_step"] == tested["candidate_by_step"] and "by_year" not in row and "concentration" not in row
         assert (row["active"], row["book"]) == (tested["whole_replay"]["active"], tested["whole_replay"]["book"])
@@ -300,7 +306,9 @@ def test_validate_revealed_replays_exactly_the_tested_steps_and_nothing_before_a
         harness.test.invoke({"candidate": node})
         other = harness.session.call("b", span="revealed").value
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20251231")
-        assert (other["span"]["label"], other["span"]["end"], other["span"]["steps"]) == ("revealed:2", "20251231", 2)
+        assert (other["span"]["label"], other["span"]["end"], other["span"]["steps"], other["span"]["years"]) == (
+            "revealed:2", "20251231", 2, 0.5
+        )
         assert [step["step"] for step in other["candidates"][0]["by_step"]] == [1, 2]
         # Counted as any call is, live and as a resumed attempt reads it.
         assert other["validates_in_step"] == harness.backtest.validates_in_interval == 1
@@ -410,39 +418,141 @@ def test_nothing_returned_to_the_agent_dates_past_the_test_horizon() -> None:
         assert [row["step"] for row in result.value["candidate_by_step"]] == [1]
 
 
-def test_a_test_whose_replay_fails_leaves_the_test_horizon_where_it_was() -> None:
+# What a strategy could write into a failure on data the record has not taken:
+# a marker, a number, a day inside the first step, the exception's type and the
+# worker's stderr; the number is also its container reading.
+LEAKS = ("LEAKMARK", "918273645", "20250815", "ValueError", "StrategyRaised", "StrategyTimedOut", "stderr")
+
+
+def _leaky(kind: type[Exception]) -> Exception:
+    error = kind("ValueError: LEAKMARK 918273645.5 on 20250815; worker stderr: LEAKMARK")
+    attach_strategy_resources(error, SimpleNamespace(resource_usage=lambda: {"peak_memory_bytes": 918273645}))
+    return error
+
+
+def _agent_readable(harness: _Harness, *returned: object) -> str:
+    """What the session can read: the tool results as the dispatcher renders
+    them (the transcript copies that rendering), the step tree and the run
+    manifest."""
+
+    parts = [
+        f"{item} {json.dumps(item.to_record())}" if isinstance(item, ToolError) else json.dumps(item, default=str)
+        for item in returned
+    ]
+    parts += [
+        path.read_text(encoding="utf-8", errors="ignore")
+        for path in (*harness.backtest.tree.root.rglob("*"), harness.session.root / "run_manifest.json")
+        if path.is_file()
+    ]
+    return "\n".join(parts)
+
+
+def test_a_failed_test_tells_the_session_its_class_alone() -> None:
+    """A test whose replay fails records nothing and leaves the horizon where
+    it was, and the session reads only the failure's class: the strategy's
+    own message, its type, the day it failed, the worker's stderr and the
+    container readings, all the strategy's to shape on a step not yet
+    recorded, stay with the host, which keeps them whole. A second host
+    failure in a row ends the attempt with a reason as bare, since a resumed
+    attempt reads it."""
+
     with TemporaryDirectory() as tmp:
-        harness = _Harness(
-            Path(tmp),
-            raise_for={
-                "_ = 5": StrategyRaised("KeyError: 'close'"),
-                "_ = 6": StrategyExecutionError("Docker generate_orders failed: timeout"),
-            },
-        )
+        harness = _Harness(Path(tmp), validates_per_step=4)
         good = harness.node("a", "1")
-        harness.session.candidate("s", _strategy("5"))
-        harness.session.candidate("e", _strategy("6"))
-        # The replays raise only on the validation data: the Validations ran.
-        harness.evaluator.raise_for = {}
-        strategy, environment = harness.node("s", "5"), harness.node("e", "6")
+        raised, slow, environment = harness.node("s", "5"), harness.node("t", "7"), harness.node("e", "6")
         harness.evaluator.raise_for = {
-            "_ = 5": StrategyRaised("KeyError: 'close'"),
-            "_ = 6": StrategyExecutionError("Docker generate_orders failed: timeout"),
+            "_ = 5": _leaky(StrategyRaised),
+            "_ = 7": _leaky(StrategyTimedOut),
+            "_ = 6": _leaky(StrategyExecutionError),
         }
-        with pytest.raises(ToolError) as raised:
-            harness.test.invoke({"candidate": strategy})
-        assert raised.value.error_type == "test_replay_failed" and raised.value.details["cause"] == "strategy"
-        assert "test horizon did not move" in str(raised.value)
-        with pytest.raises(ToolError) as failed:
+        returned: list[object] = []
+        for node, cause, sentence in (
+            (raised, "strategy", "The candidate failed on the validation data: its own code raised."),
+            (slow, "environment", "a fit or generate_orders call ran past its clock (cause environment)"),
+        ):
+            with pytest.raises(ToolError) as failed:
+                harness.test.invoke({"candidate": node})
+            assert failed.value.error_type == "test_replay_failed" and failed.value.details == {"cause": cause}
+            assert "test horizon did not move" in str(failed.value) and sentence in str(failed.value)
+            returned.append(failed.value)
+        with pytest.raises(EnvironmentBlocked, match="2 replays failed on the environment") as blocked:
             harness.test.invoke({"candidate": environment})
-        assert failed.value.details["cause"] == "environment" and "resent unchanged" in str(failed.value)
+        returned.append(blocked.value.reason)
         assert harness.records() == [] and harness.backtest.test_horizon == "20250630"
-        assert harness.backtest.test_replays == 2
-        # A second host failure in a row ends the attempt, not the research.
-        with pytest.raises(EnvironmentBlocked, match="2 replays failed on the environment"):
-            harness.test.invoke({"candidate": environment})
+        assert harness.backtest.test_replays == 3
+        readable = _agent_readable(harness, *returned)
+        assert [leak for leak in LEAKS if leak in readable] == []
+        kept = session_tools.validation_period_failures(harness.backtest.experiment_dir)
+        assert [(row["tool"], row["step"], row["leg"], row["cause"]) for row in kept] == [
+            ("test", 1, raised, "strategy"), ("test", 1, slow, "environment"), ("test", 1, environment, "environment")
+        ]
+        assert all("LEAKMARK 918273645.5 on 20250815" in row["error"] for row in kept)
+        assert all(row["resources"] == {"peak_memory_bytes": 918273645} for row in kept)
         # A good candidate still advances.
         assert harness.test.invoke({"candidate": good}).value["step"] == 1
+
+
+def test_a_failed_revealed_validation_tells_the_session_its_class_alone() -> None:
+    """Over the revealed steps a failed candidate is reported as a failed test
+    is: its row, its dead end and its run-manifest line carry its class alone,
+    no readings and no wall clock, and the host keeps the rest. A batch none of
+    whose candidates completed is not counted and leaves the record alone, and
+    a second batch the environment failed whole on the same span ends the
+    attempt, as on any span."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        harness.test.invoke({"candidate": harness.node("a", "1")})
+        harness.session.candidate("s", _strategy("5"))
+        harness.session.candidate("e", _strategy("6"))
+        harness.evaluator.raise_for = {"_ = 5": _leaky(StrategyRaised), "_ = 6": _leaky(StrategyExecutionError)}
+        ledger = harness.backtest.ledger.path
+        before = (ledger.read_bytes(), json.dumps(harness.backtest.tests), harness.backtest.test_horizon)
+        with pytest.raises(ToolError) as mixed:
+            harness.session.call("s", "e", span="revealed")
+        assert mixed.value.error_type == "validation_failed" and "not counted" in str(mixed.value)
+        assert [(row["name"], row["cause"], row["error"]) for row in mixed.value.details["candidates"]] == [
+            ("s", "strategy", "daily Validation failed: its own code raised"),
+            ("e", "environment", "daily Validation failed: the host failed the replay"),
+        ]
+        assert all(set(row) == {"name", "control", "status", "cause", "error"} for row in mixed.value.details["candidates"])
+        with pytest.raises(ToolError) as hosted:
+            harness.session.call("e", span="revealed")
+        with pytest.raises(EnvironmentBlocked, match="span revealed:1: 2 batches") as blocked:
+            harness.session.call("e", span="revealed")
+        assert harness.backtest.validates_in_interval == 0
+        assert (ledger.read_bytes(), json.dumps(harness.backtest.tests), harness.backtest.test_horizon) == before
+        readable = _agent_readable(harness, mixed.value, hosted.value, blocked.value.reason)
+        assert [leak for leak in LEAKS if leak in readable] == []
+        kept = session_tools.validation_period_failures(harness.backtest.experiment_dir)
+        assert [(row["tool"], row["span"], row["candidate"], row["cause"]) for row in kept] == [
+            ("validate", "revealed:1", "s", "strategy"),
+            ("validate", "revealed:1", "e", "environment"),
+            ("validate", "revealed:1", "e", "environment"),
+            ("validate", "revealed:1", "e", "environment"),
+        ]
+        assert all("LEAKMARK 918273645.5 on 20250815" in row["error"] for row in kept)
+
+
+def test_a_revealed_node_carries_what_a_test_returns() -> None:
+    """A revealed node exposes what a test does and nothing day-level: its row
+    has no result_ref and no container readings, the node no attachment and
+    whole-span scalars alone, and so does its run-manifest line. The host
+    keeps the full record."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        harness.test.invoke({"candidate": harness.node("a", "1")})
+        [row] = harness.session.call("a", span="revealed").value["candidates"]
+        assert "result_ref" not in row and "resources" not in row
+        [node] = [item for item in harness.backtest.tree.nodes() if item["node_id"] == row["node_id"]]
+        assert node["attachments"] == {} and not (harness.backtest.tree.root / row["node_id"] / "validation").exists()
+        assert node["metrics"] and all(not isinstance(value, (dict, list)) for value in node["metrics"].values())
+        readable = _agent_readable(harness)
+        # The revealed window is the first step: no day strictly inside it is
+        # anywhere the session reads.
+        assert [day for day in DATE.findall(readable) if "20250701" < day < "20250930"] == []
+        assert Path(harness.backtest.steps[-1].validation.result_ref).is_file()
 
 
 def test_seed_replicates_are_replayed_beside_the_candidate_and_read_step_by_step() -> None:
@@ -510,9 +620,10 @@ def test_seed_replicates_are_replayed_beside_the_candidate_and_read_step_by_step
 
 def test_a_replicate_that_raises_is_a_reading_and_one_the_host_fails_fails_the_step() -> None:
     """A replicate whose own code raises is recorded with its error and the
-    step stands, as forward reads one; a replicate the host failed measured
-    nothing, so the whole step fails as a host failure of the candidate does:
-    nothing is recorded, the horizon stays, and the call may be resent."""
+    step stands, as forward reads one, and the session reads that failure's
+    class alone; a replicate the host failed measured nothing, so the whole
+    step fails as a host failure of the candidate does: nothing is recorded,
+    the horizon stays, and the call may be resent."""
 
     with TemporaryDirectory() as tmp:
         harness = _Harness(Path(tmp))
@@ -524,7 +635,7 @@ def test_a_replicate_that_raises_is_a_reading_and_one_the_host_fails_fails_the_s
             harness.test.invoke({"candidate": nominee, "seed_replicates": [raised, hosted]})
         assert failed.value.error_type == "test_replay_failed"
         assert failed.value.details["cause"] == "environment" and failed.value.details["seed_replicate"] == handle
-        assert f"seed replicate {handle}'s replay" in str(failed.value) and "resent unchanged" in str(failed.value)
+        assert f"Seed replicate {handle} failed" in str(failed.value) and "resent unchanged" in str(failed.value)
         assert harness.records() == [] and harness.backtest.test_horizon == "20250630"
         # It counts toward ending the attempt like the candidate's own host failure.
         with pytest.raises(EnvironmentBlocked, match="2 replays failed on the environment"):
@@ -538,10 +649,12 @@ def test_a_replicate_that_raises_is_a_reading_and_one_the_host_fails_fails_the_s
         error_row, completed = record["replicates"]
         assert (error_row["step_id"], error_row["result_ref"]) == (raised, None) and "entry" not in error_row
         assert "KeyError: 'close'" in error_row["strategy_error"]
+        assert error_row["failure"] == "its own code raised"
         assert completed["step_id"] == hosted and completed["entry"]["end"] == "20250930"
         name = harness.backtest.named([raised])[0]
         [row] = result.value["candidate_by_step"]
-        assert row["seed_replicates"][0] == {"handle": name, "strategy_error": error_row["strategy_error"]}
+        assert row["seed_replicates"][0] == {"handle": name, "strategy_error": "its own code raised"}
+        assert "KeyError" not in json.dumps(result.value)
         assert result.value["record"][0]["seed_replicates"][0] == row["seed_replicates"][0]
         assert harness.backtest.test_replays == 3
 

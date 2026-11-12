@@ -224,8 +224,9 @@ def test_step_record(
     :data:`SOURCE_TEST` or :data:`SOURCE_HOST_COMPLETION`. ``replicates``
     are the named seed replicates replayed beside the candidate, each
     ``step_id``, ``revision_id`` and ``result_ref`` with its own ``entry``
-    over the same window, or ``result_ref`` None and ``strategy_error`` (the
-    error text) when its own code raised; the significance test and the
+    over the same window, or ``result_ref`` None, ``strategy_error`` (the
+    error text, for the host) and ``failure`` (its class, what the session
+    reads) when its own code raised; the significance test and the
     readout read the candidate's entry alone.
     """
 

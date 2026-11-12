@@ -92,7 +92,10 @@ from autotrade.pipelines.ledger import (
 )
 from autotrade.pipelines.research_session import session_role_quotas
 from autotrade.pipelines.session_resume import STEP_SIDECAR_DIR
-from autotrade.pipelines.session_tools import BATCH_FAILURE_ENVIRONMENT
+from autotrade.pipelines.session_tools import (
+    BATCH_FAILURE_ENVIRONMENT,
+    validation_period_failures,
+)
 from autotrade.pipelines.skills import latest_skills_snapshot
 from autotrade.pipelines.verdict import (
     pooled_reading,
@@ -1393,7 +1396,10 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
     the environment failed, and the last one's reason. A failed Validation is no attempt failure and leaves no
     ledger row: its one record is its dead-end node in the step tree (written
     while ``record_failed_attempts`` is on, the default), the same nodes the
-    step-tree view marks failed."""
+    step-tree view marks failed. A failed replay over the validation period
+    (a test leg or a revealed-span candidate) tells the session its class
+    alone; the host keeps its error (``session_tools.validation_period_failures``),
+    counted and shown here for the operator."""
 
     failed = [
         node
@@ -1401,6 +1407,7 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
         if node.get("status") == "failed"
     ]
     last = failed[-1] if failed else None
+    hidden = validation_period_failures(directory)
     return {
         "failed": len(failed),
         "environment": sum(
@@ -1409,6 +1416,10 @@ def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, 
             if as_mapping(node.get("metadata")).get("cause") == BATCH_FAILURE_ENVIRONMENT
         ),
         "last_error": identity.public_text(str(last.get("error") or "")) or None if last else None,
+        "validation_period_failed": len(hidden),
+        "validation_period_last_error": (
+            identity.public_text(str(hidden[-1].get("error") or "")) or None if hidden else None
+        ),
     }
 
 

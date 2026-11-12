@@ -20,6 +20,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from autotrade.common.records import write_json_atomic
+from autotrade.environment.executor import StrategyRaised
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.report_issue import (
@@ -30,6 +31,7 @@ from autotrade.environment.tools.report_issue import (
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.ledger import ExperimentLedger, recorded_path
 from autotrade.pipelines.research_session import session_role_quotas
+from autotrade.pipelines.session_tools import record_validation_period_failure
 from autotrade.webui import registry
 from autotrade.webui.registry import (
     ENDING_STATES,
@@ -1781,6 +1783,8 @@ def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path:
         "failed": 0,
         "environment": 0,
         "last_error": None,
+        "validation_period_failed": 0,
+        "validation_period_last_error": None,
     }
     refs = AgentRefStore(directory)
     tree = StepTree(directory / "steps")
@@ -1797,11 +1801,18 @@ def test_failed_research_validations_are_counted_apart_from_the_replay(tmp_path:
             error=error,
             metadata={"batch_id": "batch_a", "candidate": name, "cause": cause},
         )
+    # A failed test leg tells the session its class alone; the host keeps the
+    # error, which the operator reads here.
+    record_validation_period_failure(
+        directory, StrategyRaised("KeyError: 'close' on 20250815"), tool="test", step=1, candidate="node"
+    )
     detail = experiment_detail(tmp_path, "experiment")
     assert detail["research_validation_failures"] == {
         "failed": 2,
         "environment": 1,
         "last_error": "daily Validation failed: CUDA out of memory: the device was taken",
+        "validation_period_failed": 1,
+        "validation_period_last_error": "StrategyRaised: KeyError: 'close' on 20250815",
     }
     assert detail["replay_attempts"] == {"failed": 0, "last_error": None}
     # The step-tree view marks the same nodes failed.

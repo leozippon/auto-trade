@@ -3255,6 +3255,12 @@ function readoutStagePanel(detail) {
           `${validations.failed} 次${validations.environment ? `（环境 ${validations.environment} 次）` : ""}${validations.last_error ? ` · ${validations.last_error}` : ""}`,
         )
       : null,
+    validations.validation_period_failed
+      ? kvRow(
+          "验证期回放失败",
+          `${validations.validation_period_failed} 次${validations.validation_period_last_error ? ` · ${validations.validation_period_last_error}` : ""}`,
+        )
+      : null,
     attempts.failed
       ? kvRow("回测失败", `${attempts.failed} 次${attempts.last_error ? ` · ${attempts.last_error}` : ""}`)
       : null,

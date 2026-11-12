@@ -176,6 +176,15 @@ class GpuMemoryContention(StrategyExecutionError):
     """
 
 
+class StrategyTimedOut(StrategyExecutionError):
+    """A ``fit`` or ``generate_orders`` call ran past its clock.
+
+    Classed as the environment's like every timeout (a clock lost to host
+    load measures nothing about the strategy), but named, so a reading that
+    may not carry the error text can still say a clock ran out.
+    """
+
+
 def _cause_chain(exc: BaseException) -> Iterator[BaseException]:
     """``exc`` and everything it was raised from, each once.
 
@@ -201,7 +210,13 @@ def raised_by_strategy(exc: BaseException) -> bool:
 def gpu_contended(exc: BaseException) -> bool:
     """Whether ``exc``, or anything it was raised from, is ``GpuMemoryContention``."""
 
-    return any(isinstance(link, GpuMemoryContention) for link in _cause_chain(exc))
+    return caused_by(exc, GpuMemoryContention)
+
+
+def caused_by(exc: BaseException, kind: type[BaseException] | tuple[type[BaseException], ...]) -> bool:
+    """Whether ``exc``, or anything it was raised from, is a ``kind``."""
+
+    return any(isinstance(link, kind) for link in _cause_chain(exc))
 
 
 # Where a failed replay carries its container telemetry. A replay that raises
@@ -699,7 +714,11 @@ class DockerStrategyExecutor:
             # it was told about, so this one failure is its own; every other
             # dead pipe, clock or bad line here measured the host.
             failure = (
-                StrategyMemoryExceeded if isinstance(exc, _WorkerKilled) else StrategyExecutionError
+                StrategyMemoryExceeded
+                if isinstance(exc, _WorkerKilled)
+                else StrategyTimedOut
+                if isinstance(exc, TimeoutError)
+                else StrategyExecutionError
             )
             raise failure(f"Docker {label} failed: {exc}{suffix}") from exc
         except StrategyExecutionError:
@@ -1371,8 +1390,10 @@ __all__ = [
     "StrategyMemoryExceeded",
     "StrategyRaised",
     "StrategyStateExceeded",
+    "StrategyTimedOut",
     "TrustedStrategyExecutor",
     "attach_strategy_resources",
+    "caused_by",
     "discard_strategy_state",
     "raised_by_strategy",
     "strategy_resource_usage",

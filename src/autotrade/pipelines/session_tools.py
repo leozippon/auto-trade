@@ -24,6 +24,7 @@ from autotrade.agent.compact import safe_error_summary
 from autotrade.common.records import (
     read_json_object,
     redact_host_paths,
+    write_json_atomic,
 )
 from autotrade.environment.artifacts import (
     READONLY_FILES,
@@ -33,6 +34,10 @@ from autotrade.environment.artifacts import (
     copy_artifact_snapshot,
 )
 from autotrade.environment.executor import (
+    StrategyMemoryExceeded,
+    StrategyStateExceeded,
+    StrategyTimedOut,
+    caused_by,
     gpu_contended,
     raised_by_strategy,
     strategy_resources_of,
@@ -50,6 +55,7 @@ from autotrade.environment.replay.style import (
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     RunManifest,
+    utc_now_iso,
 )
 from autotrade.environment.sandbox import SandboxConfig, link_copytree
 from autotrade.environment.step_tree import StepTree
@@ -566,6 +572,16 @@ def inline_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
     }
 
 
+def validation_period_stats(summary: Mapping[str, object]) -> dict[str, object]:
+    """What a replay over the validation period leaves where the session can
+    read it (its node and its run-manifest row): the whole-span scalars, the
+    figures a test's ``whole_replay`` is read from. No block: the per-call
+    clocks and container readings, the per-year windows and the rest are
+    finer than a test reports."""
+
+    return {key: value for key, value in summary.items() if not isinstance(value, (dict, list))}
+
+
 def manifest_backtest_stats(summary: Mapping[str, object]) -> dict[str, object]:
     """The metrics one completed Validation contributes to the run manifest.
 
@@ -662,7 +678,8 @@ class SessionValidations:
         """One validation-record step as a test result lists it, as it was
         recorded: its window, the candidate by handle, the entry's figures
         without the daily rows, and, where the step replayed seed replicates,
-        each one's active return and return (or its strategy error)."""
+        each one's active return and return (or its failure's class: the
+        error text stays in the ledger)."""
 
         entry = dict(record["entry"])  # type: ignore[arg-type]
         row = _rounded_row(
@@ -677,7 +694,7 @@ class SessionValidations:
         if replicates:
             names = self.named([str(item["step_id"]) for item in replicates])
             row["seed_replicates"] = [
-                _replicate_cell(name, item.get("entry") or str(item["strategy_error"]))  # type: ignore[arg-type]
+                _replicate_cell(name, item.get("entry") or str(item["failure"]))  # type: ignore[arg-type]
                 for name, item in zip(names, replicates, strict=True)
             ]
         return row
@@ -834,11 +851,15 @@ class SessionValidations:
         result_name: str,
         fingerprint: str,
         metadata: Mapping[str, object] | None = None,
+        validation_period: bool = False,
     ) -> str:
         """Append one completed Validation to the step tree under the current
         position; ``validate`` repositions the tree before each record so
         its candidates are siblings of one parent. ``fingerprint`` is the
-        committed bytes' (:meth:`commit_revision`)."""
+        committed bytes' (:meth:`commit_revision`). A replay over the
+        ``validation_period`` exposes what a test does: its node carries the
+        whole-span figures (:func:`validation_period_stats`) and no record of
+        the replay, which stays with the host sidecar."""
         node_id = self.tree.record_step(
             revision.output_path,
             epoch_id=Stage.RESEARCH,
@@ -852,9 +873,13 @@ class SessionValidations:
             # tree.json is Agent-readable and accumulates one node per
             # Validation for the whole experiment, so it keeps no block that
             # scales with the replay.
-            metrics=inline_backtest_stats(evaluation.summary),
+            metrics=(validation_period_stats if validation_period else inline_backtest_stats)(
+                evaluation.summary
+            ),
             models_root=revision.models_path,
-            attachments={
+            attachments=None
+            if validation_period
+            else {
                 VALIDATION_RESULT_ATTACHMENT: evaluation.result_ref,
                 VALIDATION_DAILY_ATTACHMENT: write_active_daily(evaluation.result_ref),
             },
@@ -1003,6 +1028,61 @@ def _failure_cause(error: BaseException) -> str:
     """Which of the two a failed candidate's replay measured."""
 
     return BATCH_FAILURE_STRATEGY if raised_by_strategy(error) else BATCH_FAILURE_ENVIRONMENT
+
+
+def validation_period_failure(error: BaseException) -> str:
+    """What a failed replay over the validation period tells the session: a
+    fixed sentence for the failure's class, never its own text.
+
+    The exception message, its type, the day it failed, the worker's stderr
+    and the container readings are the strategy's to shape on data of steps
+    the record has not taken, so any of them could carry such a step out.
+    The host keeps them (:func:`record_validation_period_failure`); a replay
+    of the research years reports its error as it is.
+    """
+
+    if caused_by(error, (StrategyMemoryExceeded, StrategyStateExceeded)):
+        return "it exceeded budgets.strategy_memory_bytes or budgets.strategy_state_disk_bytes"
+    if raised_by_strategy(error):
+        return "its own code raised"
+    if caused_by(error, StrategyTimedOut):
+        return "a fit or generate_orders call ran past its clock"
+    return "the host failed the replay"
+
+
+# Host-only, beside the Step sidecars: the detail of every failed replay over
+# the validation period, one file each, which the console shows the operator.
+VALIDATION_PERIOD_FAILURES_DIR = ".host/validation_period_failures"
+
+
+def record_validation_period_failure(
+    experiment_dir: Path, error: BaseException, **identity: object
+) -> None:
+    """Keep the full detail of one failed replay over the validation period
+    where only the host reads it: what ``identity`` names (tool, step or span,
+    candidate), the cause, the error text and the container readings."""
+
+    directory = Path(experiment_dir) / VALIDATION_PERIOD_FAILURES_DIR
+    directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory.mkdir(exist_ok=True, mode=0o700)
+    recorded_at = utc_now_iso()
+    write_json_atomic(
+        directory / f"{recorded_at.replace(':', '')}_{uuid.uuid4().hex[:8]}.json",
+        {
+            "recorded_at": recorded_at,
+            **identity,
+            "cause": _failure_cause(error),
+            "error": _public_error_text(error),
+            "resources": strategy_resources_of(error),
+        },
+    )
+
+
+def validation_period_failures(experiment_dir: Path) -> list[dict[str, object]]:
+    """The failures :func:`record_validation_period_failure` kept, oldest first."""
+
+    directory = Path(experiment_dir) / VALIDATION_PERIOD_FAILURES_DIR
+    return [read_json_object(path) for path in sorted(directory.glob("*.json"))]
 
 
 @dataclass(frozen=True)
@@ -1393,7 +1473,8 @@ def replay_legs(
 
 
 # A validate row's keys in the order the Agent reads them; a failed row has
-# name, control, status, cause, error, wall_seconds and resources.
+# name, control, status, cause, error, wall_seconds and resources (a revealed
+# one the first five, its error a fixed sentence).
 VALIDATE_ROW_KEYS = (
     "name",
     "control",
@@ -1450,7 +1531,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "candidates over one span in one call; the only way to make a node that "
         "test can take. span is full (default), one research year Yk or contiguous "
         "research years Yi..Yj, replayed as one continuous book from its first "
-        "year, or revealed: the steps tested so far, replayed as test replays them. "
+        "year, or revealed: the steps tested so far, replayed and reported as test does. "
         "At most acceptance_rules.validation.validates_per_step counted calls "
         "before the first test and between two tests; a call counts only if one of "
         "its candidates completes its replay.\n\nA candidate's path is a workspace directory laid out "
@@ -1664,8 +1745,10 @@ class ValidateTool(SessionTimeBudgetAware):
                 row: dict[str, object] = {
                     "name": candidate.name,
                     "control": candidate.control,
-                    "wall_seconds": round(replayed.seconds, 1),
                 }
+                if evaluation is not None or revealed is None:
+                    # How long a failed revealed replay ran would date its failure.
+                    row["wall_seconds"] = round(replayed.seconds, 1)
                 metadata = {
                     "batch_id": batch_id,
                     "candidate": candidate.name,
@@ -1674,7 +1757,10 @@ class ValidateTool(SessionTimeBudgetAware):
                     "source_path": candidate.path,
                     "span": span.label,
                 }
-                if evaluation is None:
+                if evaluation is None and revealed is not None:
+                    assert error is not None  # a replay holds one of the two
+                    row.update(self._record_failure(result_name, error, metadata, validation_period=True))
+                elif evaluation is None:
                     assert error is not None  # a replay holds one of the two
                     shared = (
                         [
@@ -1697,6 +1783,7 @@ class ValidateTool(SessionTimeBudgetAware):
                             # commit_revision verified the revision holds these bytes.
                             fingerprint=str(check["fingerprint"]),
                             metadata=metadata,
+                            validation_period=revealed is not None,
                         )
                     )
                     recorded.append((row, self.backtest.steps[-1]))
@@ -1760,7 +1847,11 @@ class ValidateTool(SessionTimeBudgetAware):
                     "label": span.label,
                     "start": span.start,
                     "end": end_day or span.end,
-                    **({"years": span.slots} if revealed is None else {"steps": revealed}),
+                    # The revealed steps' length in years, as a year span states its own.
+                    "years": span.slots
+                    if revealed is None
+                    else revealed * self.backtest.rules.test_step_months / 12,
+                    **({} if revealed is None else {"steps": revealed}),
                     "days": first.get("replayed_trade_days"),
                 },
                 "threshold": threshold,
@@ -2006,6 +2097,7 @@ class ValidateTool(SessionTimeBudgetAware):
         result_name: str,
         fingerprint: str,
         metadata: Mapping[str, object],
+        validation_period: bool = False,
     ) -> dict[str, object]:
         # Recorded before this one: Validations of the same bytes on the same
         # span, in any attempt (a resumed attempt's Steps carry their bytes).
@@ -2020,6 +2112,7 @@ class ValidateTool(SessionTimeBudgetAware):
             result_name=result_name,
             fingerprint=fingerprint,
             metadata=metadata,
+            validation_period=validation_period,
         )
         self.backtest.steps.append(
             recorded_step(node_id, revision.revision_id, evaluation, metadata, fingerprint)
@@ -2031,16 +2124,12 @@ class ValidateTool(SessionTimeBudgetAware):
                 "status": "ok",
                 "complete_validation": True,
                 **{key: metadata[key] for key in _BATCH_MANIFEST_KEYS},
-                **manifest_backtest_stats(evaluation.summary),
+                **(validation_period_stats if validation_period else manifest_backtest_stats)(
+                    evaluation.summary
+                ),
             }
         )
-        public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
-        if not (self.backtest.tree.root / public_result_ref).is_file():
-            raise ToolError(
-                "Validation result attachment is missing for the recorded step: "
-                f"{public_result_ref}"
-            )
-        return {
+        row: dict[str, object] = {
             "status": "ok",
             # The batch's later siblings take later result names, so a handle
             # unambiguous now stays so for the rest of the batch.
@@ -2049,10 +2138,23 @@ class ValidateTool(SessionTimeBudgetAware):
             "revision_id": self.backtest.ref_store.get_or_create(
                 "strategy", revision.revision_id
             ),
-            **resource_reading(evaluation.summary.get("resources")),
             # The random baseline is seeded by the span, so a deterministic
             # strategy repeats these nodes' readings exactly: the same trial.
             **({"same_bytes_as": self.backtest.named(repeated)} if repeated else {}),
+        }
+        if validation_period:
+            # What a test returns of its replay and no more: no record, and
+            # no container readings, which are the strategy's to shape.
+            return row
+        public_result_ref = f"{node_id}/{VALIDATION_RESULT_ATTACHMENT}"
+        if not (self.backtest.tree.root / public_result_ref).is_file():
+            raise ToolError(
+                "Validation result attachment is missing for the recorded step: "
+                f"{public_result_ref}"
+            )
+        return {
+            **row,
+            **resource_reading(evaluation.summary.get("resources")),
             # The node's directory under the ``steps`` root; its
             # active_daily.csv sits beside the record.
             "result_ref": public_result_ref,
@@ -2065,8 +2167,24 @@ class ValidateTool(SessionTimeBudgetAware):
         batch_metadata: Mapping[str, object],
         *,
         shared_gpu: Sequence[str] = (),
+        validation_period: bool = False,
     ) -> dict[str, object]:
-        public_error = _public_validation_error(error)
+        """Record one failed candidate. Over the ``validation_period`` the
+        session reads its fixed sentence alone (:func:`validation_period_failure`)
+        and the host keeps the rest."""
+
+        if validation_period:
+            public_error = f"daily Validation failed: {validation_period_failure(error)}"
+            record_validation_period_failure(
+                self.backtest.experiment_dir,
+                error,
+                tool="validate",
+                span=batch_metadata["span"],
+                candidate=batch_metadata["candidate"],
+                batch_id=batch_metadata["batch_id"],
+            )
+        else:
+            public_error = _public_validation_error(error)
         if shared_gpu:
             # The dead-end node and the manifest keep the note with the error.
             public_error += _shared_gpu_note(shared_gpu)
@@ -2105,19 +2223,20 @@ class ValidateTool(SessionTimeBudgetAware):
             "cause": cause,
             "error": public_error,
         }
-        # The failed row's telemetry comes off the exception — there is no
-        # result to carry it — and lands where a successful row keeps its own:
-        # a fit that ran out of clock or a card that was taken says so here,
-        # measured in the container it actually ran in.
-        row.update(resource_reading(strategy_resources_of(error)))
+        if not validation_period:
+            # The failed row's telemetry comes off the exception — there is no
+            # result to carry it — and lands where a successful row keeps its own:
+            # a fit that ran out of clock or a card that was taken says so here,
+            # measured in the container it actually ran in.
+            row.update(resource_reading(strategy_resources_of(error)))
         return row
 
 
 TEST_DESCRIPTION = (
     "Advance the validation period one step with candidate, a complete full-span "
     "validate node of this session. It must register as "
-    "acceptance_rules.registration defines; otherwise it is refused with the "
-    "reasons and the test horizon stays. seed_replicates may name full-span nodes "
+    "acceptance_rules.registration defines; otherwise it is refused with "
+    "reasons and the horizon stays. seed_replicates may name full-span nodes "
     "whose bytes differ from the candidate's in exactly one integer seed assignment "
     "(e.g. SEED_BASE = 1000 -> 2000); each test naming them replays each beside the "
     "candidate in its own replay slot (budgets.batch_validate_max_concurrency): "
@@ -2128,7 +2247,8 @@ TEST_DESCRIPTION = (
     "that step's entry in the validation record, never rewritten; the horizon "
     "advances and the validate allowance restarts. If the candidate raises or the "
     "host fails a leg, nothing is recorded; a replicate whose own code raises is "
-    "recorded with its strategy_error. It waits for every background sub-agent to "
+    "recorded. Failures report only their class. It waits for every background "
+    "sub-agent to "
     "finish; the last step ends the session with this candidate "
     "registered.\n\nwhole_replay reads this replay as a validate row does. "
     "candidate_by_step is this replay's view of every step so far, beside each "
@@ -2261,28 +2381,34 @@ class TestTool(SessionTimeBudgetAware):
             if failed is not None:
                 index, exc = failed
                 cause = _failure_cause(exc)
-                which = "the replay" if index == 0 else f"seed replicate {names[index - 1]}'s replay"
+                # The step is not recorded, so the session reads the failure's
+                # class alone (the reason, also read by a resumed attempt,
+                # included) and the host keeps its detail.
+                record_validation_period_failure(
+                    backtest.experiment_dir, exc, tool="test", step=step, candidate=node_id,
+                    leg=legs[index].step_id,
+                )
+                failure = validation_period_failure(exc)
                 if cause == BATCH_FAILURE_ENVIRONMENT:
                     self._environment_failed += 1
                     if self._environment_failed >= ENVIRONMENT_BLOCKED_BATCHES:
                         raise EnvironmentBlocked(
                             f"test step {step}: {self._environment_failed} replays failed on the "
-                            f"environment; last error: {_public_error_text(exc)}"
+                            f"environment; last: {failure}"
                         ) from exc
+                which = "The candidate" if index == 0 else f"Seed replicate {names[index - 1]}"
                 raise ToolError(
                     f"test step {step} did not complete; the test horizon did not move. "
+                    f"{which} failed on the validation data: {failure}"
                     + (
-                        "The candidate's own code raised on the validation data: "
+                        "."
                         if cause == BATCH_FAILURE_STRATEGY
-                        else f"The host failed {which} (cause environment), so the same call "
-                        "may be resent unchanged: "
-                    )
-                    + _public_error_text(exc),
+                        else " (cause environment), so the same call may be resent unchanged."
+                    ),
                     error_type="test_replay_failed",
                     details={
                         "cause": cause,
                         **({"seed_replicate": names[index - 1]} if index else {}),
-                        **resource_reading(strategy_resources_of(exc)),
                     },
                 ) from exc
             self._environment_failed = 0
@@ -2291,16 +2417,24 @@ class TestTool(SessionTimeBudgetAware):
             replay, analysis = replay_and_analysis(evaluation.result_ref)
             window = steps.window(step)
             entry = step_entry(replay, analysis, start=window[0], end=window[1])
-            # Each replicate's rows over every step so far, or the error text
-            # its own code raised: a reading, recorded beside the candidate's.
+            # Each replicate's rows over every step so far, or the class of
+            # the failure its own code met: a reading, recorded beside the
+            # candidate's with the error text, which only the host reads.
             replicate_rows: list[list[dict[str, object]] | str] = []
             replicate_records: list[dict[str, object]] = []
             for leg, outcome in zip(legs[1:], outcomes[1:], strict=True):
                 identity = {"step_id": leg.step_id, "revision_id": leg.revision_id}
                 if outcome.evaluation is None:
-                    error = _public_error_text(outcome.error)  # type: ignore[arg-type]
-                    replicate_rows.append(error)
-                    replicate_records.append({**identity, "result_ref": None, "strategy_error": error})
+                    failure = validation_period_failure(outcome.error)  # type: ignore[arg-type]
+                    replicate_rows.append(failure)
+                    replicate_records.append(
+                        {
+                            **identity,
+                            "result_ref": None,
+                            "strategy_error": _public_error_text(outcome.error),  # type: ignore[arg-type]
+                            "failure": failure,
+                        }
+                    )
                     continue
                 leg_replay, leg_analysis = replay_and_analysis(outcome.evaluation.result_ref)
                 replicate_rows.append(step_table(leg_replay, leg_analysis, steps, through=step))
@@ -2455,8 +2589,9 @@ def step_readings(
 
 def _replicate_cell(handle: str, row: Mapping[str, object] | str) -> dict[str, object]:
     """One seed replicate in a step's row: its handle with its own active
-    return and return over the step, or, where ``row`` is the error text its
-    own code raised, that text as ``strategy_error``."""
+    return and return over the step, or, where ``row`` is the class of the
+    failure its own code met (:func:`validation_period_failure`), that
+    sentence as ``strategy_error``."""
 
     if isinstance(row, str):
         return {"handle": handle, "strategy_error": row}
