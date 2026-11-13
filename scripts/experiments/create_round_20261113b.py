@@ -1,22 +1,28 @@
 #!/usr/bin/env python
-"""The 2026-11-13 round: `validate` on revealed steps, on two main models.
+"""The 2026-11-13b round: the revealed steps in every full validation, on two main models.
 
 Two experiments created together that differ only in the main model, each on
-one L20 card: `open_200k_10y_astra_local_20261113` on gpt-6-astra and
-`open_200k_10y_flash_local_20261113` on DeepSeek-V4.1-Flash. Sub-agents and
+one L20 card: `open_200k_10y_astra_local_20261113b` on gpt-6-astra and
+`open_200k_10y_flash_local_20261113b` on DeepSeek-V4.1-Flash. Sub-agents and
 compaction stay on Flash in both.
 
-They are the first sessions in which `validate` can replay any candidate over
-the validation steps already tested (`span: "revealed"`). Through round
-20261111 a tested step returned scores for the tested candidate only, and every
-session, on either model and under every prompt, finished its research before
-the first `test` and then took the steps with a call or two each
-(RESEARCH_LESSONS, 2026-11-09 and 2026-11-12). The pair asks two things:
-whether sessions now research between tests, and whether the narrowness of the
+Through round 20261111 a tested step returned scores for the tested candidate
+only, and every session, on either model and under every prompt, finished its
+research before the first `test` and then took the steps with a call or two
+each (RESEARCH_LESSONS, 2026-11-09 and 2026-11-12). Round 20261113 let
+`validate` replay any candidate over the steps already tested
+(`span: "revealed"`); a host reboot killed its two sessions 4.5 hours in, and
+both had passed `span: "full"` on every call, one of them after its first
+`test`, so neither saw such a reading. This round creates the pair afresh on
+the rule that followed: once a step is tested, a `validate` over the full span
+also reports the candidate over the revealed steps, and the prompt says that
+choosing candidates by those readings is legitimate.
+
+The pair asks two things: whether sessions now research between tests and
+change candidates on out-of-sample readings, and whether the narrowness of the
 Flash sessions (one model family on the CPU, no delegation, a method dropped
-after one error) is the main model's. `create_round_20261112b.py`, started
-a day earlier on the ZGCA A100 with gpt-6.1-sol on the code before this rule,
-is the baseline for it.
+after one error) is the main model's. `create_round_20261112b.py`, running on
+the ZGCA A100 with gpt-6.1-sol on the code before either rule, is the baseline.
 
 Everything else is round 20261111b's — pack `open_200k_20261111b`, the ten-year
 profile and seed, a CNY 200k account on the main board and ChiNext, seven
@@ -37,7 +43,7 @@ at a time, the budgets and strategy limits below — except:
 It is created on the local console, whose running slots the fill mode checks
 first:
 
-    ~/miniconda3/envs/quant/bin/python scripts/experiments/create_round_20261113.py 38888 --fill
+    ~/miniconda3/envs/quant/bin/python scripts/experiments/create_round_20261113b.py 38888 --fill
 
 `--dry-run` with the port contacts no console and creates nothing: it runs the
 console's create-time pre-flight, prints what each experiment sends, and, unless
@@ -89,14 +95,12 @@ def _experiment(model: str) -> dict[str, object]:
 
 
 EXPERIMENTS: dict[str, dict[str, object]] = {
-    "open_200k_10y_astra_local_20261113": _experiment(ASTRA),
-    "open_200k_10y_flash_local_20261113": _experiment(FLASH),
+    "open_200k_10y_astra_local_20261113b": _experiment(ASTRA),
+    "open_200k_10y_flash_local_20261113b": _experiment(FLASH),
 }
 
 ROUND = Round(
     experiments=EXPERIMENTS,
-    # A `--fill` pass created both experiments on 2026-11-12 at 20:55Z.
-    closed=True,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_TEN_YEAR_CSI1000,
