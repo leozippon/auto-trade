@@ -53,12 +53,14 @@ class _WindowEvaluator:
     alone, so the same candidate reads the same on any window that covers the
     day: what makes a record completed by one whole replay equal the record
     of successive tests. ``raise_for`` maps a marker in ``main.py`` to the
-    error its replay raises.
+    error its replay raises; ``validation_raise_for`` does so only for a
+    replay stopped at a horizon, one over the validation period.
     """
 
     def __init__(self, results_root: Path, *, raise_for: dict[str, Exception] | None = None) -> None:
         self.results_root = results_root
         self.raise_for = raise_for or {}
+        self.validation_raise_for: dict[str, Exception] = {}
         self.requests: list[tuple[str, str, str | None]] = []
         # Each replay's source, card and (inference, fit) clocks as it ran.
         self.legs: list[tuple[str, tuple[int, ...] | None, tuple[float, float] | None]] = []
@@ -69,7 +71,7 @@ class _WindowEvaluator:
         self.requests.append((request.start, request.end, end_day))
         clocks = None if self.sandbox is None else (self.sandbox.timeout_seconds, self.sandbox.fit_timeout_seconds)
         self.legs.append((source, request.gpu_devices, clocks))
-        for marker, error in self.raise_for.items():
+        for marker, error in {**self.raise_for, **(self.validation_raise_for if end_day else {})}.items():
             if marker in source:
                 raise error
         seed = int(hashlib.sha256(source.encode()).hexdigest()[:8], 16)
@@ -553,6 +555,152 @@ def test_a_revealed_node_carries_what_a_test_returns() -> None:
         # anywhere the session reads.
         assert [day for day in DATE.findall(readable) if "20250701" < day < "20250930"] == []
         assert Path(harness.backtest.steps[-1].validation.result_ref).is_file()
+
+
+def _node_shape(harness: _Harness, node_id: str) -> tuple[object, ...]:
+    """What a Step node is made of, its ids and values aside."""
+
+    node = next(item for item in harness.backtest.tree.nodes() if item["node_id"] == node_id)
+    return (sorted(node), sorted(node["attachments"]), sorted(node["metadata"]), sorted(node["metrics"]), node["metadata"]["span"])
+
+
+def test_a_full_span_validate_reads_each_candidate_over_the_tested_steps_once_a_step_is_tested() -> None:
+    """Before the first test a full-span call replays the research years
+    alone, as it always did. Once k steps are tested it also replays each
+    completed candidate over them as span revealed does, and the row carries
+    that reading as revealed: what a revealed row and a test of the same bytes
+    read, its own threshold kept, steps 1..k and no later. The node is the
+    full-span node it always was -- same files, same research readings,
+    restorable and testable --, the record and horizon stay, the call counts
+    once, and no day inside the tested steps reaches what the session reads."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp), validates_per_step=6)
+        requests = harness.evaluator.requests
+        harness.session.candidate("a", _strategy("1"))
+        before = harness.session.call("a").value
+        assert requests == [("20210701", "20250630", None)] and "revealed" not in json.dumps(before)
+        first = before["candidates"][0]
+        tested = harness.test.invoke({"candidate": first["node_id"]}).value
+
+        ledger = harness.backtest.ledger.path
+        record = (ledger.read_bytes(), harness.backtest.test_horizon)
+        harness.session.candidate("b", _strategy("2"))
+        requests.clear()
+        after = harness.session.call("a", "b").value
+        # The research replays as before, then each candidate over the tested step.
+        assert requests == [("20210701", "20250630", None)] * 2 + [("20250701", "20260630", "20250930")] * 2
+        assert (ledger.read_bytes(), harness.backtest.test_horizon) == record
+        assert after["validates_in_step"] == harness.backtest.validates_in_interval == 1
+        assert session_tools._validates_since(harness.backtest.tree, harness.records()[-1]["recorded_at"]) == 1
+        assert after["span"] == before["span"] and after["threshold"] == before["threshold"]
+        same, other = after["candidates"]
+        assert {key: same[key] for key in ("active", "book", "by_year")} == {key: first[key] for key in ("active", "book", "by_year")}
+        # The tested bytes read over the step what their test read ...
+        assert list(same["revealed"]) == ["active", "book", "by_step"]
+        assert same["revealed"]["by_step"] == tested["candidate_by_step"]
+        assert same["revealed"]["book"] == tested["whole_replay"]["book"]
+        active = dict(same["revealed"]["active"])
+        threshold = active.pop("threshold")
+        assert active == tested["whole_replay"]["active"]
+        # ... and other bytes what span revealed reads of them.
+        revealed = harness.session.call("b", span="revealed").value
+        [row] = revealed["candidates"]
+        assert other["revealed"] == {
+            "active": {**row["active"], "threshold": revealed["threshold"]},
+            "book": row["book"],
+            "by_step": row["by_step"],
+        }
+        assert threshold == revealed["threshold"] != after["threshold"]
+
+        # The node is a full-span node like one made before the first test.
+        assert _node_shape(harness, other["node_id"]) == _node_shape(harness, first["node_id"])
+        step = next(item for item in harness.backtest.steps if item.step_id == other["node_id"])
+        assert step.span == "full" and json.loads(Path(step.validation.result_ref).read_text())["end"] == "20250630"
+        assert harness.session.rollback.invoke({"node_id": other["node_id"]}).ok
+        assert (harness.session.output / "main.py").read_text(encoding="utf-8") == _strategy("2")
+        assert harness.test.invoke({"candidate": other["node_id"]}).value["candidate"]["node_id"] == other["node_id"]
+
+        # Two steps tested: the reading covers both and stops at the second.
+        harness.session.candidate("c", _strategy("3"))
+        requests.clear()
+        later = harness.session.call("c").value
+        assert requests == [("20210701", "20250630", None), ("20250701", "20260630", "20251231")]
+        assert [item["step"] for item in later["candidates"][0]["revealed"]["by_step"]] == [1, 2]
+        # A year span is what it was.
+        requests.clear()
+        year = harness.session.call("c", span="Y1").value
+        assert requests == [("20210701", "20220630", None)] and "revealed" not in json.dumps(year)
+        readable = _agent_readable(harness, before, after, later, year)
+        assert [day for day in DATE.findall(readable) if "20250701" < day < "20251231" and day != "20250930"] == []
+
+
+def test_a_failed_reading_over_the_tested_steps_reports_its_class_and_leaves_the_node_testable() -> None:
+    """A candidate whose research replay completed and whose replay over the
+    tested steps failed is a full-span node like any other -- recorded,
+    counted, testable -- and its revealed block is the failure's class alone,
+    the host keeping the rest, as for a failed revealed candidate. A candidate
+    whose research replay failed fails as it always did and is not replayed
+    over the steps."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp), raise_for={"_ = 9": StrategyRaised("KeyError: 'close'")})
+        harness.test.invoke({"candidate": harness.node("a", "1")})
+        harness.evaluator.validation_raise_for = {"_ = 5": _leaky(StrategyRaised), "_ = 6": _leaky(StrategyExecutionError)}
+        for name, marker in (("s", "5"), ("e", "6"), ("r", "9"), ("b", "2")):
+            harness.session.candidate(name, _strategy(marker))
+        result = harness.session.call("s", "e")
+        assert result.ok and result.value["failed"] == 0 and result.value["validates_in_step"] == 1
+        raised, hosted = result.value["candidates"]
+        assert raised["revealed"] == {"status": "failed", "cause": "strategy", "error": "its own code raised"}
+        assert hosted["revealed"] == {"status": "failed", "cause": "environment", "error": "the host failed the replay"}
+        readable = _agent_readable(harness, result.value)
+        assert [leak for leak in LEAKS if leak in readable] == []
+        kept = session_tools.validation_period_failures(harness.backtest.experiment_dir)
+        assert [(row["tool"], row["span"], row["candidate"], row["cause"]) for row in kept] == [
+            ("validate", "revealed:1", "s", "strategy"),
+            ("validate", "revealed:1", "e", "environment"),
+        ]
+        assert all("LEAKMARK 918273645.5 on 20250815" in row["error"] for row in kept)
+
+        harness.evaluator.requests.clear()
+        mixed = harness.session.call("r", "b").value
+        research, good = mixed["candidates"]
+        assert research["status"] == "failed" and "KeyError: 'close'" in research["error"] and "revealed" not in research
+        assert "by_step" in good["revealed"]
+        assert [end_day for *_window, end_day in harness.evaluator.requests] == [None, None, "20250930"]
+
+        # The candidates whose reading failed register and test as full-span nodes.
+        harness.evaluator.validation_raise_for = {}
+        for row in (raised, hosted):
+            assert harness.test.invoke({"candidate": row["node_id"]}).value["candidate"]["node_id"] == row["node_id"]
+
+
+def test_the_readings_over_the_tested_steps_replay_after_the_research_replays_at_the_call_width() -> None:
+    """A full-span call replays the research years first, under the width,
+    cards and clocks a call before any test has, and only then its candidates
+    over the tested steps, at the same batch_validate_max_concurrency: a lone
+    candidate's research replay still attaches every card under the base
+    clocks."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp), max_concurrency=2, validates_per_step=6)
+        harness.test.invoke({"candidate": harness.node("a", "1")})
+        cards = SandboxConfig(spec=SandboxSpec(gpu=(1, 4), gpu_count=2))
+        base = (cards.timeout_seconds, cards.fit_timeout_seconds)
+        widened = (2 * cards.timeout_seconds, 2 * cards.fit_timeout_seconds)
+        harness.evaluator.sandbox = cards
+        for name, marker in (("x", "21"), ("y", "22"), ("z", "23")):
+            harness.session.candidate(name, _strategy(marker))
+        legs, requests = harness.evaluator.legs, harness.evaluator.requests
+        legs.clear()
+        requests.clear()
+        assert harness.session.call("x", "y").ok
+        assert [end_day for *_window, end_day in requests] == [None, None, "20250930", "20250930"]
+        assert {(card, clocks) for _source, card, clocks in legs} == {((1,), widened), ((4,), widened)}
+        legs.clear()
+        assert harness.session.call("z").ok
+        assert legs == [(_strategy("23"), None, base)] * 2
 
 
 def test_seed_replicates_are_replayed_beside_the_candidate_and_read_step_by_step() -> None:

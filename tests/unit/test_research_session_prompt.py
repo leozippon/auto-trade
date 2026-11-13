@@ -222,17 +222,20 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
     # Research on the visible years, whose data view never moves; each test
     # extends the backtest one step, reveals it through its results and
     # restarts the validate allowance; research goes on between tests, with
-    # the revealed steps as out-of-sample readings any candidate can be
-    # replayed over; then the host-run Forward and Held-out stages, then Paper.
+    # the revealed steps as out-of-sample readings every full-span validate
+    # reports and selecting on them legitimate; then the host-run Forward and
+    # Held-out stages, then Paper.
     for clause in (
         "你能读到的数据止于研究年末，整个会话不变",
         "验证期的数据不挂载，只随每次 `test` 的结果揭开一步",
         "研究：写候选，用 `validate` 回测。",
         "`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录",
         "测试终点前进一步，`validate` 的次数重新计",
-        "两次 `test` 之间是一段研究：已揭开的步是样本外读数，`validate` 能在这些步上回放任一候选",
+        "两次 `test` 之间是一段研究：已揭开的步是样本外读数，全段 `validate` 的结果附带候选在这些步上的读数",
+        '`span: "revealed"` 只回放这些步',
         "改进现有候选或开发全新的策略，让每一步都由当时最好的候选记入",
-        "换候选只花一次回放；已记入记录的条目不改写",
+        "按这些读数选择、更换候选是正当的：已记入记录的条目不改写，定版后还有 Forward 与 Held-out 检验",
+        "换候选只花一次回放",
         "最后一步测完会话结束，最后测试的候选定版",
         "会话不能主动结束",
         "宿主用最后测试的候选跑完剩余的步",

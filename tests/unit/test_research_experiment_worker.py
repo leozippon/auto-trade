@@ -756,8 +756,9 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     its model: the step it recorded stays in the ledger. The second worker
     start resumes the session at the test horizon that step reached -- on the
     same view at the research year's end, with facts that state the steps
-    tested, and a revealed span that replays the window the first attempt's
-    test replayed -- and when its one remaining call is spent the host
+    tested, and a revealed span, as well as the reading every full-span
+    validate now carries, that replays the window the first attempt's test
+    replayed -- and when its one remaining call is spent the host
     completes the record from the tested candidate, not from the Validations
     the resumed attempt added."""
 
@@ -816,6 +817,18 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
         return [str(row["trade_date"]) for row in replayed["equity_curve"]]
 
     assert days(revealed["validation_result_ref"]) == days(tested["replay"]["result_ref"])
+    # Its full-span validate, span left out, read the working copy over that
+    # step as well, and its node is the full-span node it always was.
+    assert record["steps"][2]["span"] == "full"
+    events = [json.loads(line) for line in Path(record["agent_trace_ref"]).read_text(encoding="utf-8").splitlines()]
+    full = [
+        event["result"]["value"]
+        for event in events
+        if event.get("event_type") == "tool_call" and event.get("tool") == "validate" and "span" not in event["arguments"]
+    ][-1]
+    [row] = full["candidates"]
+    assert row["node_id"] == record["steps"][2]["step_id"]
+    assert [step["step"] for step in row["revealed"]["by_step"]] == [1]
     assert (record["attempts"], record["outcome"], record["finish_reason"]) == (
         2, "deadline", "llm_call_budget_exhausted"
     )

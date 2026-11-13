@@ -1474,7 +1474,8 @@ def replay_legs(
 
 # A validate row's keys in the order the Agent reads them; a failed row has
 # name, control, status, cause, error, wall_seconds and resources (a revealed
-# one the first five, its error a fixed sentence).
+# one the first five, its error a fixed sentence). Once a step is tested, a
+# completed full-span row also carries ``revealed`` (``ValidateTool._read_revealed``).
 VALIDATE_ROW_KEYS = (
     "name",
     "control",
@@ -1490,6 +1491,7 @@ VALIDATE_ROW_KEYS = (
     "by_year",
     "by_step",
     "concentration",
+    "revealed",
     "resources",
     "same_bytes_as",
     "result_ref",
@@ -1513,8 +1515,10 @@ class ValidateTool(SessionTimeBudgetAware):
     """The one Validation tool: candidates as sibling Steps.
 
     Every candidate gets its own ``modification_check``, its own immutable
-    revision, one replay over the batch's span and one Step node. The
-    interval's ``validates_per_step`` allowance rations readings: a call
+    revision, one replay over the batch's span and one Step node; over the
+    full span once a step is tested, also a reading over the tested steps
+    (:meth:`_read_revealed`). The interval's ``validates_per_step``
+    allowance rations readings: a call
     counts once, whatever its width, when at least one of its candidates
     completed its replay and returned a reading, and not at all when none
     did, whatever the cause. The candidates of a call share
@@ -1529,9 +1533,10 @@ class ValidateTool(SessionTimeBudgetAware):
         "validate",
         f"Replay {BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
         "candidates over one span in one call; the only way to make a node that "
-        "test can take. span is full (default), one research year Yk or contiguous "
-        "research years Yi..Yj, replayed as one continuous book from its first "
-        "year, or revealed: the steps tested so far, replayed and reported as test does. "
+        "test can take. A span of years replays as one continuous book from its "
+        "first year. Once a step is tested, a full-span row also carries revealed: "
+        "its candidate over the tested steps, replayed and reported as test does; "
+        "span revealed replays only those steps. "
         "At most acceptance_rules.validation.validates_per_step counted calls "
         "before the first test and between two tests; a call counts only if one of "
         "its candidates completes its replay.\n\nA candidate's path is a workspace directory laid out "
@@ -1568,8 +1573,9 @@ class ValidateTool(SessionTimeBudgetAware):
                     "minLength": 1,
                     "maxLength": 20,
                     "description": (
-                        "full (default: the research years), one research year "
-                        "Yk, contiguous research years Yi..Yj, or revealed (the "
+                        "full (default: the research years, plus a reading on the "
+                        "validation steps tested so far), one research year Yk, "
+                        "contiguous research years Yi..Yj, or revealed (only the "
                         "validation steps tested so far). Iterate on years; test "
                         "takes a full-span validation."
                     ),
@@ -1811,22 +1817,13 @@ class ValidateTool(SessionTimeBudgetAware):
                 error_type="validation_failed",
                 details={"batch_id": batch_id, "candidates": [_validate_row(row) for row in rows]},
             )
-        rules = self.backtest.rules
         thresholds: list[object] = []
         for row, step in recorded:
-            result_ref = step.validation.result_ref
-            analysis = result_analysis(result_ref)
-            summary = step.validation.summary
-            row["active"] = active_reading(analysis, summary, rules=rules)
+            row.update(self._reading(step.validation, revealed))
             thresholds.append(row["active"].pop("threshold", None))  # type: ignore[attr-defined]
-            row["book"] = book_reading(analysis, summary)
-            if revealed is None:
-                row.update(year_readings(analysis, summary, self.backtest.request.years))
-            else:
-                # The revealed steps, read as a test reads its candidate.
-                row["by_step"] = step_readings(
-                    *replay_and_analysis(result_ref), self.backtest.steps_plan, through=revealed
-                )
+        if span.label == FULL_SPAN and self.backtest.tests:
+            # Every full-span node, once a step is tested, read over it too.
+            self._read_revealed(recorded, batch_id)
         # One span, one length, one threshold: a row whose regression read a
         # different number of days keeps its own.
         threshold = next((value for value in thresholds if value is not None), None)
@@ -2230,6 +2227,75 @@ class ValidateTool(SessionTimeBudgetAware):
             # measured in the container it actually ran in.
             row.update(resource_reading(strategy_resources_of(error)))
         return row
+
+    # ---- readings ----
+
+    def _reading(self, evaluation: EvaluationResult, revealed: int | None) -> dict[str, object]:
+        """One completed replay as a row reads it: ``active`` (its
+        ``threshold`` still inside), ``book``, and over research years
+        ``by_year`` with ``concentration`` or, over the ``revealed`` steps,
+        ``by_step``, the steps read as a test reads its candidate."""
+
+        result_ref, summary = evaluation.result_ref, evaluation.summary
+        analysis = result_analysis(result_ref)
+        reading: dict[str, object] = {
+            "active": active_reading(analysis, summary, rules=self.backtest.rules),
+            "book": book_reading(analysis, summary),
+        }
+        if revealed is None:
+            reading.update(year_readings(analysis, summary, self.backtest.request.years))
+        else:
+            reading["by_step"] = step_readings(
+                *replay_and_analysis(result_ref), self.backtest.steps_plan, through=revealed
+            )
+        return reading
+
+    def _read_revealed(
+        self, recorded: Sequence[tuple[dict[str, object], StepResult]], batch_id: str
+    ) -> None:
+        """Each recorded row of a full-span call made once a step is tested
+        gets ``revealed``: its candidate over the tested steps, replayed and
+        read exactly as span revealed replays and reads it
+        (:meth:`SessionValidations.span`), its own threshold kept in
+        ``active``. A replay that fails gives its class alone, as a failed
+        revealed candidate does, and the host keeps the rest.
+
+        A reading only: no node, record or registration reads it, so each
+        node, its testability and the allowance are what its research replay
+        made them. Those replays have all finished, so they ran at the width
+        and clocks they always do; these share the call's replay width.
+        """
+
+        backtest = self.backtest
+        span, tested = backtest.span(REVEALED_SPAN)
+        outcomes = replay_legs(
+            backtest.evaluator,
+            [
+                backtest.validation_request(backtest.artifact_store.revision(step.revision_id), span)
+                for _row, step in recorded
+            ],
+            max_concurrency=self.max_concurrency,
+            end_day=backtest.steps_plan.horizon_after(tested),  # type: ignore[arg-type]
+        )
+        for (row, _step), replayed in zip(recorded, outcomes, strict=True):
+            if replayed.evaluation is not None:
+                row["revealed"] = self._reading(replayed.evaluation, tested)
+                continue
+            error = replayed.error
+            assert error is not None  # a replay holds one of the two
+            record_validation_period_failure(
+                backtest.experiment_dir,
+                error,
+                tool="validate",
+                span=span.label,
+                candidate=row["name"],
+                batch_id=batch_id,
+            )
+            row["revealed"] = {
+                "status": "failed",
+                "cause": _failure_cause(error),
+                "error": validation_period_failure(error),
+            }
 
 
 TEST_DESCRIPTION = (

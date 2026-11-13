@@ -10,6 +10,10 @@
 
 `book.turnover` 是整段回放的买入名义与卖出名义之和除以期初资金，整段累计、不年化：一年换几遍（双边、期初资金口径）用它除以 span 的年数，`active.excess_at_cost_stress` 加收的滑点也按它算。要按平均权益算，用 `result_ref` 记录里的 `executions` 与 `equity_curve` 自己重算；几种分母都对不上某个报告值时，先查它是不是期初资金。
 
+## 已揭开各步的读数
+
+测过步之后，全段 `validate` 完成的行另带 `revealed`：同一候选从验证期起点作为一本新账回放到测试终点，与 `span: "revealed"` 的行、`test` 的 `whole_replay` 与 `candidate_by_step` 同口径，同一份字节读数相同，可逐步对照 `record`。它只有几步长：`revealed.active.threshold` 是这段长度的门槛，远高于研究年的；`revealed.book.turnover` 折年时除以这几步的年数。
+
 ## 主动、账户与对照组合
 
 主动读数赢了对照组合，账户却可能没赢基准：对照组合本身扣费后也会亏（`book.baseline_return`），赢一个亏钱的对照组合不等于账户赚钱。`active.excess` 是主动序列逐日差的年化均值，`book.excess_vs_baseline` 是两条复利收益之差，两者同号居多，但不是同一个数。
