@@ -55,6 +55,7 @@ from autotrade.environment.tools import (
     ToolSpec,
     WriteFileTool,
 )
+from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from tests.unit.terminal_tool import TerminalTool
 
@@ -310,6 +311,56 @@ def test_the_agent_compacts_its_own_context_and_is_pointed_at_the_trace(tmp_path
     assert not any(event == "context_notice" for event, _payload in events)
 
 
+def test_a_summary_over_its_writers_limit_ends_on_a_whole_line_and_says_it_was_cut(
+    tmp_path: Path,
+):
+    """Round 20261113b's second summary stopped mid-item at exactly the limit
+    and read as complete. Over it, the Agent's summary keeps its whole lines
+    within the limit; the compaction model's, stopped at its output budget,
+    loses its unfinished line; both end on a line saying so, and the model is
+    told its budget up front."""
+
+    item = "- 否定 60 日反转：Y2 中性化超额 -1.2%，节点 valid_002。\n"
+    written = item * (COMPACT_SUMMARY_MAX_CHARS // len(item) + 3)
+    finish, node_id = finish_session_tool(tmp_path)
+    llm = ScriptedLLM([*_shell_turns(2), _compact_call(written), _finish_call(node_id)])
+    runner = AgentSessionRunner(
+        llm=llm,
+        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=8),
+    )
+    runner.run("inspect then finish")
+    [payload] = _compaction_payloads(llm.calls[-1]["messages"])
+    kept, notice = payload["summary"].rsplit("\n", 1)
+    assert written.startswith(kept + "\n")
+    assert COMPACT_SUMMARY_MAX_CHARS - len(item) < len(kept) <= COMPACT_SUMMARY_MAX_CHARS
+    assert notice.startswith(f"[Cut here at the {COMPACT_SUMMARY_MAX_CHARS}-character limit")
+
+    compact_llm = ScriptedLLM(
+        [
+            ProviderResponse(
+                content="## 目标\ncontinue\n\n## 下一步\n- finish the v3 sm",
+                usage={"completion_tokens": 500},
+            )
+        ]
+    )
+    compactor = ContextCompactor(
+        compact_llm,
+        ContextCompactionConfig(
+            token_threshold=1, min_messages=5, keep_recent_messages=2, max_response_tokens=500
+        ),
+    )
+    conversation = [ChatMessage("system", "system")]
+    conversation.extend(ChatMessage("user", f"message {index}") for index in range(6))
+    result = compactor.compact(conversation)
+    assert result is not None and result.event["status"] == "ok"
+    *lines, notice = str(result.event["summary"]).splitlines()
+    assert lines == ["## 目标", "continue", "", "## 下一步"]
+    assert notice.startswith("[Cut here at the compaction model's 500-token output limit")
+    assert "## 篇幅上限\n500 个输出 token" in (compact_llm.calls[0]["messages"][1].content or "")
+
+
 def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_path: Path):
     """The runner accepts the interrupted attempt's summary as a preamble and
     the Validations it recorded as finalization candidates."""
@@ -402,6 +453,8 @@ def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_
         if message.role == "user" and "context_notice" in (message.content or "")
     )
     assert observation["observation"] == "context_notice" and "compact(summary=...)" in observation["message"]
+    # The writer is told the limit its summary is cut at.
+    assert f"摘要不超过 {COMPACT_SUMMARY_MAX_CHARS} 字符" in observation["message"]
 
 
 def test_a_runtime_compaction_updates_the_agents_own_summary(tmp_path: Path):

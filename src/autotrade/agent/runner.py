@@ -61,6 +61,7 @@ from autotrade.environment.tools.base import (
     ToolRegistry,
     is_sequential_tool,
 )
+from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.environment.tools.search import trace_read_stub
 from autotrade.environment.trace import TraceEvent, trace_reasoning
 
@@ -70,6 +71,7 @@ from .compact import (
     ContextCompactor,
     ContextFitter,
     compact_with_summary,
+    output_truncated,
     safe_error_summary,
 )
 from .prompts import (
@@ -84,7 +86,6 @@ from .subagent import (
     deliver_subagent_report,
     new_token_totals,
     normalize_subagent_thinking,
-    output_truncated,
     resolve_subagent_max_turns,
     subagent_role,
 )
@@ -1840,7 +1841,8 @@ class AgentSessionRunner:
             "message": (
                 f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}。请在当前这一回合的结果消化完后"
                 "调用 compact(summary=...)：把策略现状、已做的决定与被否定的方向（带读数与节点 id）、"
-                "未完成的线索与 trace 里的定位写进摘要；达到阈值仍未压缩时宿主用压缩模型代劳。"
+                f"未完成的线索与 trace 里的定位写进摘要，摘要不超过 {COMPACT_SUMMARY_MAX_CHARS} 字符"
+                "（超出时只保留上限内的完整行）；达到阈值仍未压缩时宿主用压缩模型代劳。"
             ),
         }
         messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))

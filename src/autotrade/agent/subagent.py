@@ -64,6 +64,7 @@ from .compact import (
     ContextCompactor,
     ContextFitter,
     drop_trailing_unanswered_tool_calls,
+    output_truncated,
     safe_error_summary,
 )
 from .prompts import FILE_PATH_RULE, PATH_RULES_BULLET
@@ -1277,23 +1278,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
     def _emit(self, event: TraceEvent, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
             self.event_sink(event, dict(payload))
-
-
-def output_truncated(usage: object, max_tokens: int) -> bool:
-    """True when a reply used its whole completion budget (finish_reason=length
-    is not surfaced by the transport, so the usage count is the signal).
-
-    Shared with the parent session runner, which imports it from here.
-    """
-
-    if not isinstance(usage, Mapping):
-        return False
-    completion = usage.get("completion_tokens")
-    return (
-        isinstance(completion, (int, float))
-        and not isinstance(completion, bool)
-        and completion >= max_tokens
-    )
 
 
 def new_token_totals() -> dict[str, int]:

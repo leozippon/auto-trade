@@ -49,6 +49,7 @@ from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
 )
+from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.environment.trace import TraceEvent
 
 if TYPE_CHECKING:
@@ -265,6 +266,15 @@ class ContextCompactor(SessionTimeBudgetAware):
                 max_tokens=self.config.max_response_tokens,
             )
             summary_text = _extract_summary_text(response)
+            limit = self.config.max_response_tokens
+            if output_truncated(response.usage, limit):
+                # Stopped at the output budget, its last line unfinished.
+                summary_text = _cut_summary(
+                    summary_text,
+                    len(summary_text) - 1,
+                    f"[Cut here at the compaction model's {limit}-token output "
+                    "limit: the rest of this summary was never written.]",
+                )
         except Exception as exc:  # noqa: BLE001 - compaction failure must not kill a session
             self._consecutive_failures += 1
             event = {
@@ -372,6 +382,8 @@ class ContextCompactor(SessionTimeBudgetAware):
             ChatMessage("system", COMPACT_SYSTEM_PROMPT),
             ChatMessage(
                 "user",
+                f"## 篇幅上限\n{self.config.max_response_tokens} 个输出 token，"
+                "超出的部分会被截掉。\n\n"
                 f"{previous_block}## 此后的新消息（JSON 记录）\n{transcript}",
             ),
         )
@@ -534,6 +546,13 @@ def compact_with_summary(
     text = summary.strip()
     if not text:
         raise ValueError("an Agent compaction needs a non-empty summary")
+    if len(text) > COMPACT_SUMMARY_MAX_CHARS:
+        text = _cut_summary(
+            text,
+            COMPACT_SUMMARY_MAX_CHARS,
+            f"[Cut here at the {COMPACT_SUMMARY_MAX_CHARS}-character limit: the rest "
+            "of this summary is only in the trace, in this compact call's arguments.]",
+        )
     compacted, files = _rebuild(
         messages,
         text,
@@ -552,6 +571,33 @@ def compact_with_summary(
             "summary": text,
             "files": files,
         },
+    )
+
+
+def _cut_summary(text: str, max_chars: int, notice: str) -> str:
+    """``text`` cut back to its last line ending within ``max_chars``, then
+    ``notice``: a summary stopped at its writer's limit must not read as the
+    whole of it."""
+
+    line_end = text.rfind("\n", 0, max_chars + 1)
+    kept = text[:line_end] if line_end > 0 else text[:max_chars]
+    return f"{kept.rstrip()}\n{notice}"
+
+
+def output_truncated(usage: object, max_tokens: int) -> bool:
+    """True when a reply used its whole completion budget (finish_reason=length
+    is not surfaced by the transport, so the usage count is the signal).
+
+    Shared by the session runner, its sub-agents and the runtime compactor.
+    """
+
+    if not isinstance(usage, Mapping):
+        return False
+    completion = usage.get("completion_tokens")
+    return (
+        isinstance(completion, (int, float))
+        and not isinstance(completion, bool)
+        and completion >= max_tokens
     )
 
 

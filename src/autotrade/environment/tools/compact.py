@@ -13,7 +13,9 @@ from collections.abc import Mapping
 from .base import ToolError, ToolResult, ToolSpec
 
 COMPACT_SUMMARY_MIN_CHARS = 200
-COMPACT_SUMMARY_MAX_CHARS = 16_000
+# About 10,000 tokens, the order of what the compaction model may write: at
+# 16,000 a session's own summary of a 221,184-token context ran into the limit.
+COMPACT_SUMMARY_MAX_CHARS = 32_000
 
 
 class CompactTool:
@@ -30,14 +32,19 @@ class CompactTool:
         "the context_notice observation arrives, or at a round boundary once its "
         "results are digested; when the threshold is reached without it, the host "
         f"compacts with a model instead. {COMPACT_SUMMARY_MIN_CHARS}-"
-        f"{COMPACT_SUMMARY_MAX_CHARS} characters.",
+        f"{COMPACT_SUMMARY_MAX_CHARS} characters; a longer summary keeps only its "
+        "whole lines within the limit and ends on a line saying it was cut.",
         {
             "type": "object",
             "properties": {
+                # No schema maxLength: a strict-mode provider enforces it while
+                # decoding and hands back a summary stopped mid-item at exactly
+                # the limit, indistinguishable from a whole one (round
+                # 20261113b). The rebuild cuts an over-long one at a line and
+                # says so (``agent.compact.compact_with_summary``).
                 "summary": {
                     "type": "string",
                     "minLength": COMPACT_SUMMARY_MIN_CHARS,
-                    "maxLength": COMPACT_SUMMARY_MAX_CHARS,
                     "description": (
                         "Your working state, written for yourself: strategy state, "
                         "decisions and rejected directions with numbers and node ids, "
