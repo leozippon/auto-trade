@@ -22,7 +22,6 @@ from datetime import datetime, time
 from pathlib import Path
 
 import pandas as pd
-import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ
@@ -47,7 +46,6 @@ from autotrade.paper.freshness import require_fresh_release
 from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 from autotrade.pipelines.pit_backend import (
-    HistoricalMinuteSource,
     ResearchPITSnapshotProvider,
     _AsOfReadOnlyView,
     _discard_ephemeral_asof,
@@ -55,6 +53,7 @@ from autotrade.pipelines.pit_backend import (
     _require_read_only_tree,
     load_slot_corporate_actions,
     required_release_raw_datasets,
+    slot_minute_source,
 )
 
 PIT_CACHE_NAME = "pit"
@@ -81,15 +80,6 @@ def newest_replay_slot(state_root: str | Path) -> Path | None:
         key=lambda path: (path.name.split("_")[1], path.name),
         default=None,
     )
-
-
-def slot_minute_source(replay_dir: Path, max_row_group_rows: int) -> HistoricalMinuteSource | None:
-    """The exact minute prices of a replay slot, or None when it holds none."""
-
-    path = replay_dir / "intraday_1min.parquet"
-    if not path.exists() or not pq.ParquetFile(path).metadata.num_rows:
-        return None
-    return HistoricalMinuteSource(path, max_row_group_rows=max_row_group_rows)
 
 
 class BookPITData:

@@ -53,13 +53,17 @@ from autotrade.environment.replay.style import (
     slot_benchmark,
     slot_membership,
 )
-from autotrade.pipelines.pit_backend import load_slot_corporate_actions, span_daily
+from autotrade.pipelines.pit_backend import (
+    load_slot_corporate_actions,
+    slot_minute_source,
+    span_daily,
+)
 from autotrade.pipelines.verdict import BOOTSTRAP_BLOCK_DAYS, bootstrap_lower_bound
 
 from .book import VERDICT_LOG_NAME, Book, book_status
 from .engine import PAPER_STATE_NAME, writer_lock
 from .fills import CORRECTIONS_NAME, key_text, mode, parse_key
-from .pit import newest_replay_slot, slot_minute_source
+from .pit import newest_replay_slot
 from .storage import append_jsonl_once, read_jsonl
 
 VERDICT_NAME = "verdict.json"

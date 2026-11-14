@@ -54,7 +54,7 @@ from autotrade.environment.executor import (
     TrustedStrategyExecutor,
     discard_strategy_state,
 )
-from autotrade.environment.replay.engine import StrategyDataView
+from autotrade.environment.replay.engine import ExecutionPriceProvider, StrategyDataView
 from autotrade.environment.replay.null_control import (
     BASELINE_DRAWS,
     NullControlSetupError,
@@ -526,6 +526,34 @@ class HistoricalMinuteSource:
         return self._quote_group
 
 
+def slot_minute_source(replay_dir: Path, max_row_group_rows: int) -> HistoricalMinuteSource | None:
+    """The exact minute prices of a replay slot, or None when it holds none."""
+
+    path = replay_dir / "intraday_1min.parquet"
+    if not path.exists() or not pq.ParquetFile(path).metadata.num_rows:
+        return None
+    return HistoricalMinuteSource(path, max_row_group_rows=max_row_group_rows)
+
+
+def minute_price(sources: Sequence[HistoricalMinuteSource]) -> ExecutionPriceProvider | None:
+    """The price source of a span's minute files, for an order at a minute
+    other than 09:30 and 15:00 (``engine.resolve_execution_price``); None when
+    no slot holds minutes. Slots partition minutes by trade date, so at most
+    one file holds a minute."""
+
+    if not sources:
+        return None
+
+    def price_at(symbol: str, when: datetime) -> float | None:
+        for source in sources:
+            price = source.price_at(symbol, when)
+            if price is not None:
+                return price
+        return None
+
+    return price_at
+
+
 @dataclass(frozen=True)
 class _SpanSlot:
     """One replay slot of a span: its directory, manifest and bound as-of stash.
@@ -571,11 +599,11 @@ class _ReplaySpanView:
             replay = open_slot(self._slots[0])
         with timer.phase("timeview_init"):
             self.minute_sources = tuple(
-                HistoricalMinuteSource(path, max_row_group_rows=max_intraday_row_group_rows)
+                source
                 for slot in self._slots
-                if (path := slot.replay_dir / "intraday_1min.parquet").exists()
-                and pq.ParquetFile(path).metadata.num_rows
+                if (source := slot_minute_source(slot.replay_dir, max_intraday_row_group_rows)) is not None
             )
+            self.execution_price = minute_price(self.minute_sources)
             self.timeview = Timeview(
                 host_dir=host_dir,
                 snapshot_dir=snapshot_dir,
@@ -605,14 +633,6 @@ class _ReplaySpanView:
                     source.append_visible(self.timeview, inference_at)
         with self._timer.phase("timeview_refresh"):
             return self.timeview.refresh(pd.Timestamp(inference_at))
-
-    def price_at(self, symbol: str, when: datetime) -> float | None:
-        # Slots partition minutes by trade date, so at most one file holds it.
-        for source in self.minute_sources:
-            price = source.price_at(symbol, when)
-            if price is not None:
-                return price
-        return None
 
     def minute_record(self) -> dict[str, int]:
         """What the replay loaded of its minute sources. Only what it loaded:
@@ -1052,7 +1072,7 @@ class PITDailyEvaluationBackend:
                 replay = DailyStrategyPipeline(
                     config,
                     context_data=context_data,
-                    execution_price=span.price_at if span.minute_sources else None,
+                    execution_price=span.execution_price,
                     executor_factory=executor_factory,
                 ).run(daily, corporate_actions=corporate_actions)
                 record = replay.to_record(
@@ -1114,7 +1134,7 @@ class PITDailyEvaluationBackend:
                                 benchmark_index=self.benchmark_index,
                             ),
                             baselines=True,
-                            execution_price=span.price_at if span.minute_sources else None,
+                            execution_price=span.execution_price,
                         )
                     except Exception as exc:  # noqa: BLE001 - every random baseline failure is the host's
                         baseline_failure = exc
@@ -1216,10 +1236,11 @@ class PITDailyEvaluationBackend:
         inside them (``replay/null_control.py``). Host-side and read-only: the
         slots are the ones the result was evaluated against, named by the
         host-only record beside it rather than by this process's memory, and
-        only their bars, benchmark, membership and ex-date tables are read, so
-        no snapshot is rebuilt or decoded. The percentile is informational; the
-        random baseline a verdict grades against is the one ``evaluate`` stored with the
-        result.
+        only their bars, minute prices, benchmark, membership and ex-date tables
+        are read, so no snapshot is rebuilt or decoded and a draw meets an order
+        at any minute as the replay's own draws met it. The percentile is
+        informational; the random baseline a verdict grades against is the one
+        ``evaluate`` stored with the result.
         """
 
         result_json = _result_json(result_path)
@@ -1233,6 +1254,14 @@ class PITDailyEvaluationBackend:
             )
             corporate_actions = _span_corporate_actions(
                 replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
+            )
+            # The minute prices the result's own replay met its orders at.
+            execution_price = minute_price(
+                tuple(
+                    source
+                    for path in replay_dirs
+                    if (source := slot_minute_source(path, self.max_intraday_row_group_rows)) is not None
+                )
             )
         except Exception as exc:
             # Everything above is setup: not one draw has been replayed, so the
@@ -1256,6 +1285,7 @@ class PITDailyEvaluationBackend:
             step=step,
             corporate_actions=corporate_actions,
             membership=membership,
+            execution_price=execution_price,
         )
 
     @staticmethod

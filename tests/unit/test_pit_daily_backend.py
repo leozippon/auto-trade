@@ -2405,6 +2405,34 @@ def test_the_random_baseline_a_book_meets_depends_only_on_what_is_replayed(tmp_p
     assert shorter["baseline"]["seed"] == first_experiment["baseline"]["seed"] == BASELINE_SEED
 
 
+def test_a_re_rank_meets_the_minute_prices_its_replay_met(tmp_path: Path) -> None:
+    """Two of the book's fills are priced off the slots' minute files, and so are
+    the draws' copies of them. A re-rank of the stored result (``null_control``)
+    reads the same minute files, so with the replay's own seed it reproduces the
+    stored block; without them each copy would be refused for want of a price."""
+
+    snapshot, slots = _write_span_release(tmp_path)
+    backend = PITDailyEvaluationBackend(
+        tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
+    )
+    request = _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
+    result = backend.evaluate(request)
+    record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+    stored = json.loads((Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
+    assert {row["execute_at"][11:16] for row in record["executions"]} == {"10:00", "15:00"}
+    assert stored["baseline"]["rejects_mean"] == 0.0
+
+    rerank = backend.null_control(
+        result.result_ref,
+        start=request.start,
+        end=request.end,
+        profile=request.broker_profile,
+        schedule=request.schedule,
+        seed=stored["baseline"]["seed"],
+    )
+    assert rerank == stored["baseline"]
+
+
 def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> None:
     """Account, positions, fit state and the as-of view carry across a slot boundary.
 
