@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.common.time import utc_now
 from autotrade.environment.data.contracts import (
     GENERATION_COMMITTED,
@@ -85,7 +85,7 @@ def parse_args() -> argparse.Namespace:
         action="append",
         default=[],
         metavar="JOB",
-        help="Job that must run once --job has finished; repeatable, run in the order given. Each one takes the updater lock on its own and runs forced. Skipped when --job did not succeed.",
+        help="Job that must run once --job has finished; repeatable, run in the order given. Each one takes the updater lock on its own and runs forced. Run even when --job or an earlier follow-up fails; the exit status is the first failure.",
     )
     return parser.parse_args()
 
@@ -655,11 +655,7 @@ def record_job_state(job_name: str, record: dict) -> dict:
     serialized by the updater flock for their work bodies; for the rare
     lock-timeout writer racing the holder, the last completed writer wins
     and the next scheduled run self-heals a stale record."""
-    path = job_state_path(job_name)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    tmp.write_text(json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True), encoding="utf-8")
-    tmp.replace(path)
+    write_json_atomic(job_state_path(job_name), record, default=None)
     return record
 
 

@@ -10,7 +10,12 @@ from collections.abc import AsyncIterator, Mapping
 from pathlib import Path
 
 from autotrade.environment.trace import TraceEvent
-from autotrade.pipelines.hitl_state import read_status, status_pid_alive
+from autotrade.pipelines.hitl_state import (
+    HITL_DIR_NAME,
+    STATUS_NAME,
+    read_status,
+    status_pid_alive,
+)
 
 DEFAULT_PAGE_BYTES = 512 * 1024
 MAX_TAIL_BYTES = 4 * 1024 * 1024
@@ -40,7 +45,7 @@ def resolve_trace_path(experiment_dir: Path, run_id: str | None) -> Path | None:
 
     directory = Path(experiment_dir).resolve()
     if run_id is None:
-        status = read_status(directory / "hitl/status.json")
+        status = read_status(directory / HITL_DIR_NAME / STATUS_NAME)
         value = status.get("run_id")
         run_id = str(value) if isinstance(value, str) and value else None
     if run_id is None or not TRACE_ID.fullmatch(run_id):
@@ -82,7 +87,7 @@ def trace_writer_alive(experiment_dir: Path, run_id: str) -> bool:
     client and a streaming one agree on when a trace can no longer grow.
     """
 
-    status = read_status(Path(experiment_dir) / "hitl/status.json")
+    status = read_status(Path(experiment_dir) / HITL_DIR_NAME / STATUS_NAME)
     current = str(status.get("run_id") or "")
     return status_pid_alive(status) and current in {"", run_id}
 

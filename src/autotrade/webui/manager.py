@@ -36,7 +36,11 @@ from autotrade.pipelines.experiment_params import (
     session_models,
 )
 from autotrade.pipelines.hitl_state import (
+    CONTROL_NAME,
+    HITL_DIR_NAME,
     LIVE_RUN_STATES,
+    PARAMS_NAME,
+    STATUS_NAME,
     WEB_CREATE_DEFAULTS,
     ControlState,
     ExperimentState,
@@ -390,7 +394,7 @@ class ExperimentManager:
             except pretrained.PretrainedStoreError as exc:
                 raise ManagerError(str(exc)) from exc
             _open_ref_store(directory)
-            hitl = directory / "hitl"
+            hitl = directory / HITL_DIR_NAME
             hitl.mkdir(parents=True)
             # Skill library is fixed for the life of the experiment: resolve
             # the curated library once, here, and copy the result in read-only.
@@ -520,7 +524,7 @@ class ExperimentManager:
             name
             for name in running
             if uses_local_model(
-                read_json_object_or_empty(self.experiments_root / name / "hitl/params.json")
+                read_json_object_or_empty(self.experiments_root / name / HITL_DIR_NAME / PARAMS_NAME)
             )
         ]
 
@@ -569,13 +573,13 @@ class ExperimentManager:
                 raise ManagerError(
                     f"experiment {experiment_id!r} is archived: an archived experiment is never run again"
                 )
-            status_path = directory / "hitl/status.json"
+            status_path = directory / HITL_DIR_NAME / STATUS_NAME
             status = read_json_object_or_empty(status_path)
             if _worker_live(status):
                 raise ManagerError(
                     f"experiment {experiment_id!r} already has a live worker"
                 )
-            params = read_json_object_or_empty(directory / "hitl/params.json")
+            params = read_json_object_or_empty(directory / HITL_DIR_NAME / PARAMS_NAME)
             self._require_running_slot(local=uses_local_model(params))
             if not self.worker_script.is_file():
                 raise ManagerError("interactive worker entrypoint is unavailable")
@@ -583,11 +587,11 @@ class ExperimentManager:
             # experiment as it was, and written before the spawn, which reads it.
             gpus = gpu_request(params)
             if gpus:
-                write_gpu_claim(directory / "hitl", self._claimable_gpus(gpus))
+                write_gpu_claim(directory / HITL_DIR_NAME, self._claimable_gpus(gpus))
             # A stop request left behind by a previous run would immediately
             # re-stop the resumed worker; clear it (the session directives are
             # preserved).
-            control_path = directory / "hitl/control.json"
+            control_path = directory / HITL_DIR_NAME / CONTROL_NAME
             with control_lock(control_path):
                 control = read_control(control_path)
                 if control.request == "stop" or control.restart_pending:
@@ -719,7 +723,7 @@ class ExperimentManager:
                 )
             except (KeyError, ValueError) as exc:
                 raise ManagerError(str(exc)) from exc
-            path = directory / "hitl/control.json"
+            path = directory / HITL_DIR_NAME / CONTROL_NAME
             # The two worker-signalling actions wait out a SIGTERM grace, so
             # they must not hold control_lock: an exiting worker still consumes
             # its own session controls under that lock, and blocking it there
@@ -800,7 +804,7 @@ class ExperimentManager:
             )
         try:
             return enqueue_inbox_message(
-                directory / "hitl" / INBOX_NAME,
+                directory / HITL_DIR_NAME / INBOX_NAME,
                 session_key=session_key,
                 text=text,
                 interrupt=interrupt_flag,
@@ -869,7 +873,7 @@ class ExperimentManager:
         docker build) can ignore it for a long time. After a short grace,
         SIGKILL the whole process group (the worker runs with
         start_new_session=True)."""
-        status_path = directory / "hitl/status.json"
+        status_path = directory / HITL_DIR_NAME / STATUS_NAME
         status = read_json_object_or_empty(status_path)
         if not status_pid_alive(status):
             raise ManagerError("no live worker to terminate")
@@ -921,14 +925,14 @@ class ExperimentManager:
         session whole."""
         if at is not None and at not in {"immediate", "session_boundary"}:
             raise ManagerError("restart at must be immediate or session_boundary")
-        status_path = directory / "hitl/status.json"
+        status_path = directory / HITL_DIR_NAME / STATUS_NAME
         status = read_json_object_or_empty(status_path)
         if at == "session_boundary":
             # Only a live worker can consume the flag; without one the
             # researcher would watch a request that never applies.
             if not status_pid_alive(status):
                 raise ManagerError("session_boundary restart requires a live worker")
-            control_path = directory / "hitl/control.json"
+            control_path = directory / HITL_DIR_NAME / CONTROL_NAME
             with control_lock(control_path):
                 control = read_control(control_path)
                 control.restart_pending = True
@@ -984,7 +988,7 @@ class ExperimentManager:
             # worker can leave it corrupt or inaccessible. The lenient reader
             # falls back to the deployment-derived sandbox path and, crucially,
             # never adopts an unreadable file's explicit work_root.
-            params = read_json_object_or_empty(directory / "hitl/params.json")
+            params = read_json_object_or_empty(directory / HITL_DIR_NAME / PARAMS_NAME)
             work_root = params.get("work_root")
             # work_root is the shared sandbox root: the worker runs this
             # experiment under work_root/<experiment_id> (pipelines.worker), and

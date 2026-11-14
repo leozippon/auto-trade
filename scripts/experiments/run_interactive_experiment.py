@@ -41,7 +41,12 @@ REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.runtime import utc_now_iso
-from autotrade.pipelines.hitl_state import ExperimentState, StatusReporter
+from autotrade.pipelines.hitl_state import (
+    HITL_DIR_NAME,
+    STATUS_NAME,
+    ExperimentState,
+    StatusReporter,
+)
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 
 
@@ -83,7 +88,7 @@ def main(argv: list[str] | None = None) -> int:
     signal.signal(signal.SIGTERM, _terminate)
     args = build_parser().parse_args(argv)
     experiment_dir = args.experiment_dir.resolve(strict=True)
-    status_path = experiment_dir / "hitl" / "status.json"
+    status_path = experiment_dir / HITL_DIR_NAME / STATUS_NAME
     bootstrap = StatusReporter(status_path)
     bootstrap.start()
     bootstrap.set(state=ExperimentState.PREPARING, phase="strict_params_and_pit_data")

@@ -10,7 +10,6 @@ import subprocess
 import time
 from pathlib import Path
 
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 # Each block owns its own marker pair, so installing one never touches another.
 BLOCKS = {
@@ -49,7 +48,7 @@ def current_crontab() -> str:
     """The user's crontab; fail fast on anything but a clean read or a genuine
     'no crontab for user'. A permission/IO error treated as an empty table
     would silently wipe every unrelated job on install."""
-    process = subprocess.run(["crontab", "-l"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    process = subprocess.run(["crontab", "-l"], text=True, capture_output=True, check=False)
     if process.returncode == 0:
         return process.stdout
     if "no crontab for" in process.stderr.lower():
@@ -181,7 +180,7 @@ def main() -> int:
             write_private_backup(backup, current)
             print(f"backed up current crontab to {backup}")
         subprocess.run(["crontab", "-"], input=updated, text=True, check=True)
-        installed = subprocess.run(["crontab", "-l"], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        installed = subprocess.run(["crontab", "-l"], text=True, capture_output=True, check=True)
         verify_installed_crontab(
             updated, installed.stdout, begin=begin, end=end, required=not args.remove
         )

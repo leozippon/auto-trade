@@ -37,7 +37,12 @@ from autotrade.environment.llm.model_profiles import model_profile
 from autotrade.paper import fills
 from autotrade.paper.books import delete_book, open_registered_book
 from autotrade.paper.engine import PAPER_STATE_NAME, PaperWriterBusy
-from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME, read_status
+from autotrade.pipelines.hitl_state import (
+    HITL_DIR_NAME,
+    PARAMS_NAME,
+    STATUS_NAME,
+    read_status,
+)
 
 from . import equity, issues, memory, registry, skill_feedback, steps, traces, trading
 from .manager import (
@@ -206,7 +211,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     ) -> tuple[Path, str, str, PublicIdentity]:
         directory, identity = _public_identity(experiment_id)
         if public_ref is None:
-            status = read_status(directory / "hitl/status.json")
+            status = read_status(directory / HITL_DIR_NAME / STATUS_NAME)
             raw_run_id = str(status.get("run_id") or "")
             if not raw_run_id:
                 raise HTTPException(status_code=404, detail="no trace available for this run")
