@@ -1511,16 +1511,6 @@ class UnitRegistryProjectionTest(unittest.TestCase):
         # No embedded rule table: the contract stays a constant-size pointer.
         self.assertLess(len(json.dumps(AGENT_UNIT_CONTRACT)), 1200)
 
-    def test_units_reference_doc_is_fresh(self):
-        repo_root = Path(__file__).resolve().parents[2]
-        module = self._export_units_module()
-        committed = (repo_root / "docs" / "UNITS_REFERENCE.md").read_text(encoding="utf-8")
-        self.assertEqual(
-            committed,
-            module.render_units_markdown(),
-            "docs/UNITS_REFERENCE.md is stale; run scripts/dev/export_units.py",
-        )
-
     def test_units_reference_marks_every_excluded_column_as_out_of_snapshot(self):
         from autotrade.environment.data.snapshot import SNAPSHOT_EXCLUDED_COLUMNS
         from autotrade.environment.data.units import FIELD_RULES

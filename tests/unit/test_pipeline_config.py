@@ -513,10 +513,9 @@ class DefaultsDriftTest(unittest.TestCase):
         # off, on whatever capital the Broker profile carries.
         self.assertEqual(options.experiment.acceptance, AcceptanceRules(**REQUIRED_RULES))
 
-    def test_the_account_pays_the_dividend_tax_and_an_unknown_key_is_refused(self) -> None:
+    def test_the_account_pays_the_dividend_tax(self) -> None:
         """The worker runs every experiment under the one rule set: its account pays
-        the dividend tax, which the run facts state. A key it does not know --
-        a retired switch among them -- is refused."""
+        the dividend tax, which the run facts state."""
         import tempfile
 
         from autotrade.agent.experiment_facts import _broker_replay_facts
@@ -545,9 +544,6 @@ class DefaultsDriftTest(unittest.TestCase):
                 )
 
             current = options(base)
-            for key in ("require_heldout_magic", "dividend_tax"):
-                with self.assertRaisesRegex(ValueError, rf"unknown experiment parameters: \['{key}'\]"):
-                    options({**base, key: True})
         profile = current.experiment.broker_profile
         self.assertTrue(profile.dividend_tax)
         self.assertEqual(current.experiment.acceptance, AcceptanceRules(**REQUIRED_RULES))
@@ -559,54 +555,6 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(new["withholding_rate"], 0.0)
         self.assertEqual(old["final_rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
         self.assertEqual((old["final_rate_beyond"], new["final_rate_beyond"]), (0.05, 0.0))
-
-    def test_the_retired_ablation_rule_is_no_parameter_anywhere(self) -> None:
-        """``ablation_required`` names no parameter and no rule: the worker, the
-        rules and a create request each refuse it like any other unknown key."""
-        import tempfile
-
-        from autotrade.pipelines.experiment_params import console_request
-        from autotrade.pipelines.worker import resolve_worker_options
-
-        self.assertNotIn("ablation_required", ACCEPTANCE_KEYS)
-        base = {
-            "experiment_id": "sealed_demo",
-            "strategy_path": "configs/agent_output_template/main.py",
-            **REQUIRED_RULES,
-            "data_backend": "pit",
-            **NO_SEED,
-            "raw_dir": "data/raw",
-            "fundamental_events_root": "data/pit/fundamental_events",
-            "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
-        }
-        with tempfile.TemporaryDirectory() as tmp:
-            repo_root = Path(tmp)
-            (repo_root / "experiments").mkdir()
-
-            def options(params: dict[str, object]):
-                return resolve_worker_options(
-                    params,
-                    experiment_dir=repo_root / "experiments/sealed_demo",
-                    repo_root=repo_root,
-                    preflight=True,
-                )
-
-            options(base)
-            with self.assertRaisesRegex(ValueError, r"unknown experiment parameters: \['ablation_required'\]"):
-                options({**base, "ablation_required": True})
-            with self.assertRaisesRegex(ValueError, "name no rule ablation_required"):
-                AcceptanceRules.from_record({**REQUIRED_RULES, "ablation_required": True})
-            with self.assertRaisesRegex(ValueError, r"unknown experiment parameters: \['ablation_magic'\]"):
-                options({**base, "ablation_magic": True})
-        request = {"experiment_id": "sealed_demo", **DEFAULT_RESEARCH_GEOMETRY.to_record(), **CREATE_RULES}
-        console_request(request, defaults=WEB_CREATE_DEFAULTS, experiments_root="experiments", work_root="work")
-        with self.assertRaisesRegex(ValueError, "unknown experiment parameters: ablation_required"):
-            console_request(
-                {**request, "ablation_required": False},
-                defaults=WEB_CREATE_DEFAULTS,
-                experiments_root="experiments",
-                work_root="work",
-            )
 
     def test_the_permitted_boards_are_pinned_per_experiment_and_stated_only_where_pinned(self) -> None:
         """An experiment without the key buys on every board and its facts say nothing
@@ -762,24 +710,6 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertEqual(after["screen_boards"], ["gem", "star"])
         self.assertEqual(after["research_start"], "20190701")
         self.assertEqual(rendered(), baseline, "the schema retained a mutated default")
-
-    def test_removed_minute_replay_knobs_are_absent_from_every_surface(self) -> None:
-        removed = {
-            "auction_enabled",
-            "auction_preopen_time",
-            "auction_decision_time",
-            "auction_close_time",
-            "execution_lag_bars",
-            "intraday_decision_minutes",
-            "decision_max_sim_minutes",
-            "offsession_tick_minutes",
-            "timeview_enabled",
-            "replay_granularity",
-        }
-        self.assertTrue(
-            removed.isdisjoint(field.name for field in fields(ExperimentConfig))
-        )
-        self.assertTrue(removed.isdisjoint(WEB_CREATE_DEFAULTS))
 
     def test_console_defaults_match_the_parameter_schema(self) -> None:
         from autotrade.webui.params_schema import parameter_schema

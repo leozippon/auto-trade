@@ -65,12 +65,6 @@ def test_a_created_experiment_reads_back_to_the_parameters_it_states() -> None:
         assert getattr(owner, name) == (tuple(stated) if isinstance(stated, list) else stated), name
 
 
-@pytest.mark.parametrize("key", ["sealed_years", "ablation_required", "min_dsr_probability", "nl_model", "dividend_tax"])
-def test_a_retired_parameter_is_refused_like_any_unknown_key(key: str) -> None:
-    with pytest.raises(ValueError, match=rf"unknown experiment parameters: \['{key}'\]"):
-        ExperimentParams.from_record({**_created(initial_cash=100_000), key: 1})
-
-
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [

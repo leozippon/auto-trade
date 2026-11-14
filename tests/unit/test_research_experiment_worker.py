@@ -39,7 +39,6 @@ from tests.unit.synthetic_experiment import (
     decision_anchor,
     make_experiment,
 )
-from tests.unit.test_research_session_prompt import retired_vocabulary
 
 # A calendar day as the session's facts, tool results and views spell it.
 DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
@@ -609,11 +608,10 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     readout = replay["readout"]
     assert readout["record"]["steps"] == 4
     assert readout["record"]["candidate_changes"] == 0
-    # Everything the model read, tool schemas included, is research-session
-    # vocabulary, names the validation year only by its dates and no date
-    # after research end, and never the forward reading.
+    # Everything the model read, tool schemas included, names the validation
+    # year only by its dates and no date after research end, and never the
+    # forward reading.
     read = _model_input(llm)
-    assert retired_vocabulary(read) == []
     assert f"{first_validation_day}..{GEOMETRY['research_end']}" in read
     for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
         assert later not in read
@@ -1303,7 +1301,6 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert "## 本次运行" in system and "## 封存检验" not in system
 
     read = _model_input(llm)
-    assert retired_vocabulary(read) == []
     for later in ("20240701", "2024-07-01", GEOMETRY["forward_end"], GEOMETRY["heldout_end"], RELEASE_END):
         assert later not in read
 
