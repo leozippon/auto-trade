@@ -42,9 +42,6 @@ from .config import ReplaySpan
 from .ledger import LINK_KEYS, TEST_STEP_RECORD_TYPE, VerdictStatus
 from .verdict import null_p_value, residual_reading
 
-# The columns of one entry's daily rows, in order: the date, the book's return,
-# the random baseline's, and the three factor legs the significance test regresses on.
-DAILY_COLUMNS = ("trade_date", "strategy_return", "baseline_return", *(name for name, _series in FACTOR_SERIES))
 _DAILY_SERIES = ("strategy_daily", "baseline_daily", *(series for _name, series in FACTOR_SERIES))
 # Where a test_step record came from: the session's own test, or the host
 # filling the record after the session.
@@ -106,8 +103,9 @@ def step_entry(
     the window, ``baseline_return`` and ``index_return`` the random baseline's and the
     benchmark's, ``active_return`` is book minus random baseline, ``turnover`` and
     ``fees`` are the window's own fills (``stats.window_activity``,
-    ``stats.window_fees``), and ``daily`` carries the window's rows
-    (:data:`DAILY_COLUMNS`) for the record's significance test. A window the replay
+    ``stats.window_fees``), and ``daily`` carries the window's rows (the date,
+    the book's return, the random baseline's and the three factor legs the
+    significance test regresses on, in that order). A window the replay
     does not cover raises ``ValueError``: an entry is never read off nothing.
     """
 
@@ -335,7 +333,6 @@ def candidate_changes(records: Sequence[Mapping[str, object]]) -> int:
 
 
 __all__ = [
-    "DAILY_COLUMNS",
     "SOURCE_HOST_COMPLETION",
     "SOURCE_TEST",
     "ValidationSteps",

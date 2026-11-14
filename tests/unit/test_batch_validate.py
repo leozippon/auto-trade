@@ -1667,17 +1667,17 @@ class BudgetSpentNoteTest(unittest.TestCase):
 
 
 class BatchValidateContractTest(unittest.TestCase):
-    def test_the_tool_is_sequential_phase_gated_and_in_the_session_set(self) -> None:
+    def test_the_tool_is_sequential_and_in_the_session_set(self) -> None:
         from autotrade.agent.runner import (
-            _PHASE_GATE_TOOLS,
             _SESSION_TOOLS,
+            _VALIDATION_TOOLS,
         )
         from autotrade.environment.tools.base import is_sequential_tool
 
         name = ValidateTool.spec.name
         self.assertTrue(ValidateTool.spec.mutating)
         self.assertTrue(is_sequential_tool(ValidateTool.spec))
-        self.assertIn(name, _PHASE_GATE_TOOLS)
+        self.assertIn(name, _VALIDATION_TOOLS)
         self.assertIn(name, _SESSION_TOOLS)
 
     def test_the_description_states_the_selection_path(self) -> None:

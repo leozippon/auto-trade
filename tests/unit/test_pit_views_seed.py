@@ -1054,27 +1054,6 @@ def test_a_seed_whose_prebuild_did_not_finish_is_refused(
     )
 
 
-def test_a_seed_without_the_bonus_split_is_refused_for_a_taxed_experiment(tmp_path: Path) -> None:
-    """A taxed experiment's Broker refuses the first replay day of a slot whose ex-date
-    table predates ``bonus_per_share``; a seed of such slots is refused when
-    the experiment is created, not at its first Validation."""
-
-    from autotrade.pipelines.pit_views_seed import assert_seed_carries_bonus_split
-
-    seed = tmp_path / "seed"
-    columns = ["ts_code", "ex_date", "cash_per_share", "stock_per_share"]
-    for phase in ("valid", "heldout"):
-        slot = seed / "replay" / phase / "20240701_20250630_20240630T235959+0800"
-        slot.mkdir(parents=True)
-        pd.DataFrame(columns=columns).to_parquet(slot / "corporate_actions.parquet", index=False)
-    with pytest.raises(ValueError, match="predates the bonus-share column") as excinfo:
-        assert_seed_carries_bonus_split(seed)
-    assert "2 replay slot table(s)" in str(excinfo.value)
-    for path in seed.glob("replay/**/corporate_actions.parquet"):
-        pd.DataFrame(columns=[*columns, "bonus_per_share"]).to_parquet(path, index=False)
-    assert_seed_carries_bonus_split(seed)
-
-
 def test_a_seed_whose_views_type_a_column_two_ways_keeps_its_unfinished_marker(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -94,10 +94,14 @@ _LLM_FAILURE_CIRCUIT = 3
 # running. Read at each call site, so a test can shorten it on the module.
 SUBAGENT_TEARDOWN_WAIT_SECONDS = 30.0
 
-# Default wrap-up grace shared with ExperimentConfig.deadline_grace_minutes:
-# the pipeline hands the session a budget of main deadline + grace and the runner
-# reserves the trailing grace for wrap-up. Keep the two defaults aligned.
-DEFAULT_DEADLINE_GRACE_SECONDS = 600.0
+
+def _pipeline_deadline_grace_seconds() -> float:
+    """The pipeline's default wrap-up grace (``ExperimentConfig.deadline_grace_minutes``),
+    imported on use because the pipelines package imports this one."""
+
+    from autotrade.pipelines.config import DEFAULT_DEADLINE_GRACE_MINUTES
+
+    return DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
 
 
 # ``finish_reason`` values of a session that ended because a budget ran out.
@@ -147,14 +151,13 @@ _COMPACT_TOOL = "compact"
 # a long session hears it once per context window.
 COMPACT_ADVISORY_FRACTION = 0.9
 # The tool that produces complete Validation nodes: one per finished candidate.
+# A batch of it runs in order whatever its spec declares, so its rows are
+# recorded before the turn's later calls read the tree.
 _VALIDATION_TOOLS = frozenset({"validate"})
-# A batch runs in order whatever its spec declares, so its rows are recorded
-# before the turn's later calls read the tree.
-_PHASE_GATE_TOOLS = _VALIDATION_TOOLS
 # Host jobs that pause the session clock like a formal backtest take the same
 # writer barrier: the null control is a multi-minute host replay of a recorded
 # result, dispatched in order and never beside a child still writing.
-_WRITER_BARRIER_TOOLS = _PHASE_GATE_TOOLS | frozenset({"run_null_control"})
+_WRITER_BARRIER_TOOLS = _VALIDATION_TOOLS | frozenset({"run_null_control"})
 _SESSION_TOOLS = frozenset(
     {
         "validate",
@@ -274,7 +277,7 @@ class AgentSessionConfig:
     # Trailing wrap-up grace reserved from the end of the handed session
     # budget. The main deadline sits grace seconds before the budget end:
     # reaching it never interrupts the model; exhausting the budget does.
-    deadline_grace_seconds: float = DEFAULT_DEADLINE_GRACE_SECONDS
+    deadline_grace_seconds: float = field(default_factory=_pipeline_deadline_grace_seconds)
     max_llm_calls: int = 200
     deadline_seconds: float = 1_200.0
     # Completion-token safety ceiling shared with the sub-agents; see
@@ -950,7 +953,8 @@ class AgentSessionRunner:
                 f"validate {backtests['validate']} 次、test {backtests['test']} 次、"
                 f"完整 Validation {complete} 个。"
                 + (f"{advice}；" if advice else "")
-                + "预算耗尽时宿主以最近一次 test 的候选补完记录。"
+                + "预算耗尽时宿主以最近一次 test 的候选补完记录，"
+                "还没 test 过时用最后一个满足登记条件的完整研究年候选，没有则不定版。"
             )
             messages.append(
                 ChatMessage("user", json.dumps(payload, ensure_ascii=False))
@@ -1158,7 +1162,7 @@ class AgentSessionRunner:
 
     def _is_parallel_batch(self, calls: tuple[ToolCall, ...]) -> bool:
         return len(calls) > 1 and not any(
-            call.name in _PHASE_GATE_TOOLS
+            call.name in _VALIDATION_TOOLS
             or is_sequential_tool(self.tools.spec(call.name))
             for call in calls
         )

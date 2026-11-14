@@ -89,7 +89,6 @@ from .ledger import (
     RegisteredArtifactRestoreFailed,
     RunMarkers,
     SessionKind,
-    Stage,
     VerdictStatus,
     assert_no_registered_artifact_mutation,
     forward_record,
@@ -158,7 +157,7 @@ def _environment_blocks(records: Sequence[Mapping[str, object]]) -> int:
         1
         for record in records
         if record.get("record_type") == "attempt_failed"
-        and record.get("phase") == Stage.RESEARCH
+        and record.get("phase") == SessionKind.RESEARCH
         and str(record.get("error") or "").startswith(prefix)
     )
 
@@ -391,11 +390,11 @@ class ExperimentPipeline:
         registered_id: str | None = None
         wrote_ledger_record = False
         link = link_head(self.config.experiment_id, SessionKind.RESEARCH, run_id)
-        attempt = {**link, "phase": Stage.RESEARCH}
+        attempt = {**link, "phase": SessionKind.RESEARCH}
         # Evidence for a run that never gets to run its own except branch.
         self.run_markers.begin(attempt)
         try:
-            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.RESEARCH)
+            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=SessionKind.RESEARCH)
             decision, years = self.research_inputs()
             validation = self.validation_span(years)
             tests_before = tuple(test_step_records(records))
@@ -771,7 +770,7 @@ class ExperimentPipeline:
             revision_id,
             artifact_id=artifact_id,
             experiment_id=self.config.experiment_id,
-            epoch_id=Stage.RESEARCH,
+            epoch_id=SessionKind.RESEARCH,
             fold_id=SessionKind.RESEARCH,
             run_id=run_id,
             step_id=step_id,
@@ -812,7 +811,7 @@ class ExperimentPipeline:
         progress = _optional_hook(context.get("progress_hook"), "progress_hook")
         run_id = f"run_{uuid.uuid4().hex}"
         link = link_head(self.config.experiment_id, SessionKind.FORWARD, run_id)
-        attempt = {**link, "phase": Stage.FORWARD}
+        attempt = {**link, "phase": SessionKind.FORWARD}
         head = {"record_type": "forward", **link}
         self.run_markers.begin(attempt)
         wrote_ledger_record = False
@@ -825,7 +824,7 @@ class ExperimentPipeline:
             wrote_ledger_record = True
 
         try:
-            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=Stage.FORWARD)
+            _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=SessionKind.FORWARD)
             record = {
                 **head,
                 **self.replay_registered(
@@ -888,7 +887,7 @@ class ExperimentPipeline:
         forward_bundle = self._prepare_slot(forward)
         heldout_bundle = self._prepare_slot(heldout)
         span = ReplaySpan(
-            label=Stage.FORWARD,
+            label=SessionKind.FORWARD,
             mode=FORWARD_PHASE,
             start=forward.start,
             end=heldout.end,

@@ -46,16 +46,10 @@ from autotrade.environment.runtime import (
 LEDGER_RECORD_SCHEMA_VERSION = 2
 
 
-class Stage(StrEnum):
-    """The stage a record belongs to: the link key ``epoch_id``."""
-
-    RESEARCH = "research"
-    FORWARD = "forward"
-
-
 class SessionKind(StrEnum):
     """The experiment's two planned sessions, the research session and the forward
-    replay: each one's kind and key, which is also its records' ``fold_id``."""
+    replay: each one's kind and key, which is also the stage its records name
+    (``epoch_id``, an attempt's ``phase``) and their ``fold_id``."""
 
     RESEARCH = "research"
     FORWARD = "forward"
@@ -121,7 +115,7 @@ def link_head(experiment_id: str, kind: str, run_id: str) -> dict[str, object]:
     the session's kind (a :class:`SessionKind`) names its stage and its key."""
 
     return {
-        **dict(zip(LINK_KEYS, (experiment_id, Stage(kind), kind, run_id), strict=True)),
+        **dict(zip(LINK_KEYS, (experiment_id, SessionKind(kind), kind, run_id), strict=True)),
         "session_key": kind,
     }
 

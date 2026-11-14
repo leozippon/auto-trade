@@ -783,14 +783,14 @@ class CreatePreflightTest(unittest.TestCase):
         original = worker_module._positive_int
 
         def stricter(value: object, name: str) -> int:
-            if name == "max_research_minutes" and value == WEB_CREATE_DEFAULTS["max_research_minutes"]:
-                raise ValueError("max_research_minutes is temporarily unavailable")
+            if name == "window_months" and value == WEB_CREATE_DEFAULTS["window_months"]:
+                raise ValueError("window_months is temporarily unavailable")
             return original(value, name)
 
         with patch.object(worker_module, "_positive_int", stricter):
-            with self.assertRaisesRegex(ValueError, "max_research_minutes is temporarily unavailable"):
+            with self.assertRaisesRegex(ValueError, "window_months is temporarily unavailable"):
                 worker_module.load_worker_options(directory, repo_root=repository)
-            with self.assertRaisesRegex(ManagerError, "max_research_minutes is temporarily unavailable"):
+            with self.assertRaisesRegex(ManagerError, "window_months is temporarily unavailable"):
                 with patch.object(manager, "start_worker", lambda experiment_id: {"spawned": False}):
                     manager.create_experiment({**payload, "experiment_id": "shared_body_2"})
         self.assertFalse((self.experiments_root / "shared_body_2").exists())

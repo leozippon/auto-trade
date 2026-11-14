@@ -1041,6 +1041,8 @@ def test_worker_params_reject_unknown_keys_and_a_bad_geometry(tmp_path: Path):
         ("forward_end", "20261231", "twelve months after research"),
         ("research_end", 20250630, "research_end must be a string, not int"),
         ("max_research_minutes", 0, "max_research_minutes must be a positive integer"),
+        # A stated null passes the type check; the config refuses it.
+        ("session_max_attempts", None, "session_max_attempts must be a positive integer"),
     ):
         path.write_text(json.dumps({**params, key: value}), encoding="utf-8")
         with pytest.raises(ValueError, match=message):

@@ -101,7 +101,6 @@ from .pit_backend import (
     required_release_raw_datasets,
 )
 from .pit_views_seed import (
-    assert_seed_carries_bonus_split,
     assert_seed_snapshot_config,
     assert_seed_timing_contract,
 )
@@ -418,10 +417,6 @@ def resolve_worker_options(
         if data_backend == "pit"
         else (None, None)
     )
-    # Every experiment's account pays the dividend tax, which reads each replay
-    # slot's bonus shares.
-    if pit_views_seed is not None and pit_views_seed.is_dir():
-        assert_seed_carries_bonus_split(pit_views_seed)
     # A named seed must have been built under this code's refresh nodes and
     # stamps. Checked when an experiment is created, never at a worker start: a
     # running experiment keeps the views it was created on.
@@ -492,22 +487,18 @@ def resolve_worker_options(
         experiments_root=directory.parent,
         geometry=geometry,
         benchmark_index=benchmark_index,
-        window_months=_positive_int(read_param(params, "window_months"), "window_months"),
-        max_null_controls=_nonnegative_int(
-            read_param(params, "max_null_controls"), "max_null_controls"
-        ),
-        # Range-checked by the config itself (1 up to the candidate cap).
-        batch_validate_max_concurrency=_positive_int(
-            read_param(params, "batch_validate_max_concurrency"), "batch_validate_max_concurrency"
-        ),
-        max_llm_calls=_positive_int(read_param(params, "max_llm_calls"), "max_llm_calls"),
+        # The integer budgets and timeouts pass as stated: ``ExperimentParams``
+        # has checked their type, and the config refuses a null and checks
+        # every range. The spend cap, CPUs and Docker sizes are still read
+        # here, into the float or string the config records, a null refused by
+        # name.
+        window_months=read_param(params, "window_months"),
+        max_null_controls=read_param(params, "max_null_controls"),
+        batch_validate_max_concurrency=read_param(params, "batch_validate_max_concurrency"),
+        max_llm_calls=read_param(params, "max_llm_calls"),
         max_api_spend_usd=_positive_float(read_param(params, "max_api_spend_usd"), "max_api_spend_usd"),
-        session_max_attempts=_positive_int(
-            read_param(params, "session_max_attempts"), "session_max_attempts"
-        ),
-        max_research_minutes=_positive_int(
-            read_param(params, "max_research_minutes"), "max_research_minutes"
-        ),
+        session_max_attempts=read_param(params, "session_max_attempts"),
+        max_research_minutes=read_param(params, "max_research_minutes"),
         research_directive=str(read_param_or_default(params, "research_directive")),
         workspace_reference=_optional_workspace_reference(
             read_param(params, "workspace_reference"), repository
@@ -516,15 +507,9 @@ def resolve_worker_options(
         record_failed_attempts=_strict_bool(
             read_param(params, "record_failed_attempts"), "record_failed_attempts"
         ),
-        per_call_timeout_seconds=_positive_int(
-            read_param(params, "per_call_timeout_seconds"), "per_call_timeout_seconds"
-        ),
-        strategy_fit_timeout_seconds=_positive_int(
-            read_param(params, "strategy_fit_timeout_seconds"), "strategy_fit_timeout_seconds"
-        ),
-        strategy_inference_timeout_seconds=_positive_int(
-            read_param(params, "strategy_inference_timeout_seconds"), "strategy_inference_timeout_seconds"
-        ),
+        per_call_timeout_seconds=read_param(params, "per_call_timeout_seconds"),
+        strategy_fit_timeout_seconds=read_param(params, "strategy_fit_timeout_seconds"),
+        strategy_inference_timeout_seconds=read_param(params, "strategy_inference_timeout_seconds"),
         strategy_cpus=_positive_float(read_param(params, "strategy_cpus"), "strategy_cpus"),
         strategy_memory=_memory_limit(read_param(params, "strategy_memory"), "strategy_memory"),
         strategy_state_disk=_memory_limit(

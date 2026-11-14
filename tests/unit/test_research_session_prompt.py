@@ -239,6 +239,7 @@ def test_the_prompt_states_the_research_and_backtesting_process() -> None:
         "最后一步测完会话结束，最后测试的候选定版",
         "会话不能主动结束",
         "宿主用最后测试的候选跑完剩余的步",
+        "还没测试过时用最后一个满足登记条件的完整研究年候选，没有则不定版",
         "运行 Forward 与 Held-out，读数不回到会话",
         "是否进入 Paper 由运营者决定",
         "`fit` 与 `REFIT_PERIOD`",

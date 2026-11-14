@@ -378,14 +378,18 @@ class ExperimentConfigValidationTest(unittest.TestCase):
             Path("/tmp/experiments/exp/ledgers/experiment_ledger.jsonl"),
         )
 
-    def test_positive_int_knobs_reject_zero_negatives_floats_and_booleans(self) -> None:
+    def test_positive_int_knobs_reject_zero_negatives_floats_booleans_and_null(self) -> None:
+        # The worker passes these as params.json states them, null included.
         for name in (
             "session_max_attempts",
             "window_months",
             "max_llm_calls",
             "max_research_minutes",
+            "per_call_timeout_seconds",
+            "strategy_fit_timeout_seconds",
+            "strategy_inference_timeout_seconds",
         ):
-            for value in (0, -1, 1.5, True, math.nan):
+            for value in (0, -1, 1.5, True, math.nan, None):
                 with self.subTest(field=name, value=value):
                     with self.assertRaisesRegex(
                         ValueError, f"{name} must be a positive integer"
@@ -398,7 +402,7 @@ class ExperimentConfigValidationTest(unittest.TestCase):
             "deadline_grace_minutes",
         ):
             self.assertEqual(getattr(make_config(Path("/tmp"), **{name: 0}), name), 0)
-            for value in (-1, 1.5, True, math.inf):
+            for value in (-1, 1.5, True, math.inf, None):
                 with self.subTest(field=name, value=value):
                     with self.assertRaisesRegex(
                         ValueError, f"{name} must be a non-negative integer"
@@ -410,7 +414,7 @@ class ExperimentConfigValidationTest(unittest.TestCase):
         self.assertEqual(getattr(make_config(Path("/tmp")), name), 3)
         for value in (1, BATCH_VALIDATE_MAX_CANDIDATES):
             self.assertEqual(getattr(make_config(Path("/tmp"), **{name: value}), name), value)
-        for value in (0, BATCH_VALIDATE_MAX_CANDIDATES + 1, 2.0, True):
+        for value in (0, BATCH_VALIDATE_MAX_CANDIDATES + 1, 2.0, True, None):
             with self.subTest(value=value), self.assertRaisesRegex(
                 ValueError, f"{name} must be an integer from 1 to {BATCH_VALIDATE_MAX_CANDIDATES}"
             ):

@@ -128,7 +128,7 @@ from .config import (
     StepResult,
     positive_spend_cap,
 )
-from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, Stage, link_head
+from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, SessionKind, link_head
 from .session_tools import (
     EnvironmentBlocked,
     NullControlTool,
@@ -157,29 +157,15 @@ if TYPE_CHECKING:
     from autotrade.environment.llm import ChatMessage, LLMProxy, ProviderResponse
 
 
-_SESSION_CALL_BUDGET_REFERENCE_MAX = 400
-_SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE = 200
-_SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE = 50
 SESSION_LLM_CALL_ROLES = ("main", "subagent", "compact")
 
 
 def session_role_quotas(max_calls: int) -> tuple[int, int]:
-    """Sub-agent cumulative cap and parent-main reserve for one shared call budget."""
+    """Sub-agent cumulative cap and parent-main reserve for one shared call
+    budget: half of it and an eighth of it, rounded down."""
     if max_calls <= 0:
         raise ValueError("max_calls must be positive")
-    subagent_cap = (
-        max_calls
-        * _SESSION_SUBAGENT_CALL_CAP_AT_REFERENCE
-        // _SESSION_CALL_BUDGET_REFERENCE_MAX
-    )
-    parent_reserve = (
-        max_calls
-        * _SESSION_PARENT_MAIN_RESERVE_AT_REFERENCE
-        // _SESSION_CALL_BUDGET_REFERENCE_MAX
-    )
-    if max_calls >= 2:
-        subagent_cap = max(subagent_cap, 1)
-    return subagent_cap, parent_reserve
+    return max_calls // 2, max_calls // 8
 
 
 class SessionCallBudget:
@@ -532,14 +518,12 @@ class LLMResearchDeveloper:
         models_dir = workspace_root / "models"
         inputs_dir = workspace_root / "inputs"
         source = self.baseline_strategy.parent
-        source_models = None
         seeded_readonly = self._seed_working_copy(
             manifest,
             resume=resume,
             output_dir=output_dir,
             models_dir=models_dir,
             source=source,
-            source_models=source_models,
         )
         mounted_memory = self._mount_session_inputs(
             request,
@@ -594,7 +578,6 @@ class LLMResearchDeveloper:
                 output_dir,
                 parent_dir=source,
                 models_dir=models_dir,
-                parent_models_dir=source_models,
                 constraints=request.modification_constraints,
                 readonly_baseline=seeded_readonly,
                 # The host seeded this tree, so the host restores the contract
@@ -626,7 +609,6 @@ class LLMResearchDeveloper:
                 output_dir=output_dir,
                 models_dir=models_dir,
                 source=source,
-                source_models=source_models,
                 seeded_readonly=seeded_readonly,
                 mounted_memory=mounted_memory,
                 session_ref=session_ref,
@@ -665,7 +647,6 @@ class LLMResearchDeveloper:
                 command_runner=command_runner,
                 modification=modification,
                 smoke=smoke,
-                backtest=backtest,
                 shared_budget=shared_budget,
                 time_budget=time_budget,
                 run_ref=run_ref,
@@ -752,10 +733,10 @@ class LLMResearchDeveloper:
             agent_trace_path(self.artifact_store.root.parent, request.run_id),
             ids={
                 "experiment_id": request.experiment_id,
-                "epoch_id": Stage.RESEARCH,
+                "epoch_id": SessionKind.RESEARCH,
                 "session_ref": session_ref,
                 "run_id": run_ref,
-                "session_kind": Stage.RESEARCH,
+                "session_kind": SessionKind.RESEARCH,
             },
             transcript_dir=transcripts,
         )
@@ -803,7 +784,7 @@ class LLMResearchDeveloper:
                 # RunManifest's Agent-visible view and build_experiment_facts
                 # both project ``fold_id`` through the experiment reference store.
                 **link_head(request.experiment_id, request.session_key, request.run_id),
-                "kind": Stage.RESEARCH,
+                "kind": SessionKind.RESEARCH,
                 "llm": {
                     "provider": str(self.llm.provider),
                     "model": str(self.llm.model),
@@ -880,7 +861,6 @@ class LLMResearchDeveloper:
         output_dir: Path,
         models_dir: Path,
         source: Path,
-        source_models: Path | None,
     ) -> dict[str, str]:
         """Seed ``output/`` and ``models/`` on a first attempt, hand them back
         writable on every attempt, and pin the read-only contract files the
@@ -892,7 +872,8 @@ class LLMResearchDeveloper:
             )
         if resume is None:
             copy_artifact(source, output_dir)
-            copy_model_artifacts(source_models, models_dir)
+            # A session starts from an empty ``models/``.
+            copy_model_artifacts(None, models_dir)
             # A reference workspace that ships a runnable starter is what the experiment
             # starts from; the template supplies the contract files it keeps.
             seed_output_from_starter(
@@ -984,7 +965,6 @@ class LLMResearchDeveloper:
         output_dir: Path,
         models_dir: Path,
         source: Path,
-        source_models: Path | None,
         seeded_readonly: dict[str, str],
         mounted_memory: Sequence[MemorySource],
         session_ref: str,
@@ -1019,7 +999,6 @@ class LLMResearchDeveloper:
                 directory,
                 parent_dir=source,
                 models_dir=models_dir,
-                parent_models_dir=source_models,
                 constraints=request.modification_constraints,
                 readonly_baseline=seeded_readonly,
                 # Restored only in the tree the host seeded. A candidate
@@ -1105,7 +1084,6 @@ class LLMResearchDeveloper:
         command_runner: CommandRunner,
         modification: ModificationCheckTool,
         smoke: SmokeBacktestTool,
-        backtest: SessionValidations,
         shared_budget: SessionCallBudget,
         time_budget: InferenceTimeBudget,
         run_ref: str,
@@ -1409,7 +1387,7 @@ class LLMResearchDeveloper:
             )
         install_agent_data_contract(
             local.paths,
-            kind=Stage.RESEARCH,
+            kind=SessionKind.RESEARCH,
             session_ref=self.ref_store.get_or_create("session", request.session_key),
             views={"snapshot": (target, "/mnt/snapshot")},
         )

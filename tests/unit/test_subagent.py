@@ -4282,7 +4282,8 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     # The inference-time notice is the plain fact: used share and minutes left.
     assert delivered[0]["message"] == (
         "推理时间预算已用去 50%，剩余约 750 分钟；至今 smoke_backtest 0 次、validate 0 次、"
-        "test 0 次、完整 Validation 0 个。预算耗尽时宿主以最近一次 test 的候选补完记录。"
+        "test 0 次、完整 Validation 0 个。预算耗尽时宿主以最近一次 test 的候选补完记录，"
+        "还没 test 过时用最后一个满足登记条件的完整研究年候选，没有则不定版。"
     )
     assert "smoke_backtest 1 次" in delivered[1]["message"]
     # The notice reports the budget; it is not a wrap-up cue. A session that read

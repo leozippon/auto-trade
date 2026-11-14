@@ -104,7 +104,7 @@ from .experiment import (
     research_step_record,
     result_analysis,
 )
-from .ledger import ExperimentLedger, Stage, link_head
+from .ledger import ExperimentLedger, SessionKind, link_head
 from .session_resume import record_step_sidecar
 from .skills import assert_skills_absent_from_formal
 from .validation_record import (
@@ -862,7 +862,7 @@ class SessionValidations:
         the replay, which stays with the host sidecar."""
         node_id = self.tree.record_step(
             revision.output_path,
-            epoch_id=Stage.RESEARCH,
+            epoch_id=SessionKind.RESEARCH,
             # The session id is opaqued like every other Agent-visible id.
             session_ref=self.session_ref,
             run_id=self.ref_store.get_or_create("run", self.request.run_id),
@@ -2197,7 +2197,7 @@ class ValidateTool(SessionTimeBudgetAware):
             # record_failed_attempt leaves the tree position alone by design,
             # so a dead end never becomes anybody's parent.
             self.backtest.tree.record_failed_attempt(
-                epoch_id=Stage.RESEARCH,
+                epoch_id=SessionKind.RESEARCH,
                 session_ref=self.backtest.session_ref,
                 run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
                 result_name=result_name,

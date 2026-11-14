@@ -81,7 +81,6 @@ from autotrade.pipelines.ledger import (
     ENVIRONMENT_BLOCKED,
     ExperimentLedger,
     SessionKind,
-    Stage,
     VerdictStatus,
     experiment_verdict,
     forward_record,
@@ -614,7 +613,7 @@ def research_depth(root: Path, experiment_id: str) -> dict[str, object]:
     status = as_mapping(state.get("status"))
     params = read_json_object(directory / HITL_DIR_NAME / PARAMS_NAME, missing_ok=True)
     session = as_mapping(next(iter(research_records(records)), None))
-    runs = [str(row["run_id"]) for row in records if row.get("epoch_id") == Stage.RESEARCH]
+    runs = [str(row["run_id"]) for row in records if row.get("epoch_id") == SessionKind.RESEARCH]
     if status.get("session_key") == SessionKind.RESEARCH and status.get("run_id"):
         runs.append(str(status["run_id"]))
     started_at: datetime | None = None
@@ -1373,7 +1372,7 @@ def _research_attempts(
             "run_ref": identity.run_ref(row["run_id"]),
             "trace": resolve_trace_path(directory, str(row["run_id"])) is not None,
         }
-        for row in _attempt_failures(records, Stage.RESEARCH)
+        for row in _attempt_failures(records, SessionKind.RESEARCH)
     ]
 
 
@@ -1499,7 +1498,7 @@ def experiment_detail(root: Path, experiment_id: str) -> dict[str, object]:
         # the provider phase the replay reads (``FORWARD_PHASE``) -- and a
         # research Validation that failed.
         "research_attempts": _research_attempts(directory, identity, records),
-        "replay_attempts": _failed_attempts(identity, records, Stage.FORWARD),
+        "replay_attempts": _failed_attempts(identity, records, SessionKind.FORWARD),
         "research_validation_failures": _failed_validations(identity, directory),
     }
 

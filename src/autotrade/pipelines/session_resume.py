@@ -33,7 +33,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.trace import TraceEvent, agent_trace_path
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
-from .ledger import Stage, recorded_path
+from .ledger import SessionKind, recorded_path
 
 # Host-only, beside the run markers: never mounted and never Agent-visible.
 STEP_SIDECAR_DIR = ".host/steps"
@@ -133,7 +133,7 @@ def _recorded_nodes(experiment_dir: Path) -> list[Mapping[str, object]]:
     return [
         node
         for node in StepTree(tree_root).nodes()
-        if node.get("epoch_id") == Stage.RESEARCH and node.get("complete_validation")
+        if node.get("epoch_id") == SessionKind.RESEARCH and node.get("complete_validation")
     ]
 
 
@@ -157,7 +157,7 @@ def resume_state(
         record
         for record in records
         if record.get("record_type") == "attempt_failed"
-        and record.get("phase") == Stage.RESEARCH
+        and record.get("phase") == SessionKind.RESEARCH
     ]
     if not attempts:
         return None

@@ -39,6 +39,7 @@ from autotrade.environment.trace import (
     agent_transcript_dir,
 )
 
+from .config import ExperimentConfig
 from .hitl_state import (
     ExperimentState,
     PlannedSession,
@@ -78,7 +79,7 @@ class InteractiveExperimentRunner:
         control_path: str | Path,
         status_path: str | Path,
         ref_store: AgentRefStore | None = None,
-        session_max_attempts: int = 3,
+        session_max_attempts: int = ExperimentConfig.session_max_attempts,
     ) -> None:
         if session_max_attempts <= 0:
             raise ValueError("session_max_attempts must be positive")
