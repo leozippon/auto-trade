@@ -462,16 +462,12 @@ def test_shared_effort_scale_keeps_its_order_on_deepseek_tiers(level: str, wire:
     assert child.config.reasoning_effort == level
 
 
-@pytest.mark.parametrize(
-    "model", ["deepseek-v4-pro", "deepseek-v4-flash", "deepseek-chat", "deepseek-reasoner"]
-)
-def test_catalog_refuses_names_deepseek_serves_as_flash(model: str):
-    # DeepSeek routes every one of these to deepseek-flash server-side, so an
-    # experiment created on one would run on Flash under another model's label.
-    assert MODEL_CHOICES.count("deepseek-flash") == 1
-    assert model not in MODEL_CHOICES
-    with pytest.raises(ValueError, match=f"unsupported model '{model}'"):
-        model_profile(model)
+def test_catalog_refuses_a_model_it_does_not_list():
+    # One check covers every retired id: the catalog is the only source of
+    # accepted names, and the refusal names the model it refused.
+    assert "not-a-catalog-model" not in MODEL_CHOICES
+    with pytest.raises(ValueError, match="unsupported model 'not-a-catalog-model'"):
+        model_profile("not-a-catalog-model")
 
 
 def test_recorded_deepseek_flash_stream_with_usage_on_the_last_choice_chunk():

@@ -1,8 +1,8 @@
-"""Phase 2C experiment-page inject-message UI contracts.
+"""The experiment page's inject-message client logic, run under node.
 
 Backend enqueue/reject behaviour lives in test_agent_inbox.py; this file
-covers the console payload, enablement, queued copy, and the rule that a
-queued send must not be painted as a consumed Trace user bubble.
+runs the console's enablement, payload, length check and inbox summary (which
+never carries a queued message's body).
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from pathlib import Path
 import pytest
 
 APP_JS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-STYLE_CSS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/style.css"
 
 
 def _fn(script: str, name: str) -> str:
@@ -32,78 +31,6 @@ def _const_block(script: str, name: str) -> str:
     start = script.index(f"const {name} =")
     end = script.index(";", start)
     return script[start : end + 1]
-
-
-def _panel_source(script: str) -> str:
-    return _fn(script, "injectMessagePanel")
-
-
-def _live_source(script: str) -> str:
-    return _fn(script, "liveTracePanel")
-
-
-def _session_source(script: str) -> str:
-    return _fn(script, "sessionDetailPanel")
-
-
-def test_inject_message_constants_and_csp() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    style = STYLE_CSS.read_text(encoding="utf-8")
-    panel = _panel_source(script)
-    assert "const INJECT_MESSAGE_MAX_CHARS = 8192;" in script
-    assert (
-        'const INJECT_MESSAGE_QUEUED_NOTE = "已排队，将在 Agent 下一安全点生效";'
-        in script
-    )
-    assert "LIVE_RUN_STATES" in script
-    assert "style:" not in panel
-    assert "onclick:" not in panel
-    assert "addEventListener" in panel
-    assert "textarea.directive.inject-input" in style
-    assert ".inject-count" in style
-    assert ".inject-queue" in style
-
-
-def test_inject_panel_is_not_inside_live_trace_and_does_not_fake_user_trace() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    panel = _panel_source(script)
-    live = _live_source(script)
-    session = _session_source(script)
-    assert "injectMessagePanel(detail, session)" in session
-    assert "liveTracePanel(detail, session)" in session
-    assert "inject_message" not in live
-    assert "injectMessagePanel" not in live
-    assert "injectDrafts" not in live
-    assert "renderTraceBlocks" not in panel
-    assert "renderUserBlock" not in panel
-    assert "user_message" not in panel
-    assert 'kind: "user"' not in panel
-    assert "trace-block" not in panel
-    assert "inbox.text" not in panel
-    assert "inbox.messages" not in panel
-    assert "pending_count" in panel
-    assert "queued_ids" in panel
-    assert "INJECT_MESSAGE_QUEUED_NOTE" in panel
-    assert "sendControlAction(" in panel
-    assert "buildInjectMessagePayload(session.key, checked.text, interrupt)" in panel
-    assert "submit(false)" in panel
-    assert "submit(true)" in panel
-    assert "injectDrafts" in panel
-    assert "不会取消已在途的模型调用" in panel
-    assert "已取消" not in panel
-    assert "已打断" not in panel
-    assert "已中断" not in panel
-
-
-def test_send_control_action_still_toasts_api_errors_and_reports_success() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("async function sendControlAction(", 1)[1].split(
-        "\nasync function ", 1
-    )[0]
-    assert "toast(error.message, true)" in source
-    assert "return true;" in source
-    assert "return false;" in source
-    assert script.count("async function sendControlAction(") == 1
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for JS contract")

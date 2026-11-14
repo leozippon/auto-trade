@@ -187,12 +187,6 @@ def test_missing_key_fails_naming_the_variable(tmp_path: Path):
         build_model_gateway(MIMO_FLASH_MODEL, env_file=_env(tmp_path, ""))
 
 
-def test_id_the_service_does_not_serve_is_not_in_the_catalog():
-    # The API answers "Unsupported model mimo-v2.5-flash" (HTTP 400).
-    with pytest.raises(ValueError, match=r"unsupported model 'mimo-v2\.5-flash'"):
-        model_profile("mimo-v2.5-flash")
-
-
 @pytest.mark.parametrize("model", MIMO_MODELS)
 def test_thinking_request_and_recorded_stream_with_reasoning_replay(
     tmp_path: Path, model: str

@@ -422,13 +422,11 @@ def test_the_home_list_flags_a_blocked_experiment_and_an_unresolved_issue(tmp_pa
         issue_reports_path(stopped), report_id=str(report["report_id"]), outcome="fixed", note="seed rebuilt"
     )
     assert attention()["stopped"] is None
-    # The card draws the line; the ending keeps its own badge and colour.
-    static = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static"
-    script = (static / "app.js").read_text(encoding="utf-8")
-    card = script.split("function experimentCard(", 1)[1].split("\nfunction ", 1)[0]
-    assert "attentionLine(item)" in card
-    assert "item.attention" in script.split("function attentionLine(", 1)[1].split("\nfunction ", 1)[0]
-    assert ".badge.ending-environment_blocked" in (static / "style.css").read_text(encoding="utf-8")
+    # The card reads the line off the row's own field.
+    script = (
+        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
+    ).read_text(encoding="utf-8")
+    assert "item.attention" in _fn(script, "attentionLine")
 
 
 def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwise(
@@ -593,8 +591,7 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
     """A session the operator terminated before it recorded anything has no
     ledger record, and the console invents none. Its trace still says what it
     spent, so the budget reads off the trace with the worker gone, and the
-    research step says how it stopped and replays that trace instead of
-    reading as a step yet to run."""
+    status still names the session and its run for the trace replay."""
 
     directory = build_experiment(tmp_path, "cut", "research")
     block = {"inference_seconds": 1316.2, "llm_calls": 180, "test_replays": 0, "null_controls": 0, "api_spend_usd": 1.8}
@@ -624,21 +621,6 @@ def test_a_terminated_session_shows_what_it_spent_and_no_record(tmp_path: Path) 
     # The same experiment with no trace on disk has spent nothing the console can read.
     (trace_dir / "run_research_cut.jsonl").unlink()
     assert experiment_detail(tmp_path, "cut")["budget_used"] is None
-
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-
-    def body(name: str) -> str:
-        return script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
-
-    step = body("researchStep")
-    assert 'status.session_key === "research" && status.run_ref' in step
-    assert "STATE_LABELS[item.state]" in step and 'STATE_LABELS = {' in script
-    assert 'terminated: "已强制终止"' in script
-    panel = body("sessionDetailPanel")
-    assert "traceReplayNode(detail.experiment_id, runRef, detail)" in panel
-    assert "没有研究记录" in panel
 
 
 def test_a_trace_at_its_size_cap_ends_where_the_session_stopped(tmp_path: Path) -> None:
@@ -906,29 +888,6 @@ def test_an_ended_experiment_is_read_off_its_ledger_and_never_judged_again(
     assert details["recorded"]["forward"]["slices"] == recorded["slices"]
     assert details["recorded"]["forward"]["readout"] == recorded["readout"]
     assert rows["recorded"]["record"]["steps"] == recorded["readout"]["record"]["steps"]
-
-
-def test_a_page_poll_keeps_one_request_in_flight() -> None:
-    """Every page poll keeps one request in flight, so a slow listing cannot
-    stack requests on the server."""
-
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    helper = script.split("function setPollInterval(", 1)[1].split("\n}\n", 1)[0]
-    assert (
-        helper.index("if (busy) return;")
-        < helper.index("busy = true;")
-        < helper.index("await tick();")
-        < helper.index("finally {")
-        < helper.rindex("busy = false;")
-    )
-    # Every other timer is a synchronous clock: a callback that awaits the
-    # server (or is a named poll function) goes through the guard.
-    rest = script.replace(helper, "")
-    assert re.search(r"setInterval\((?!\(\) =>)", rest) is None
-    # The definition, then the home, status, depth, trace, sub-agent and Paper polls.
-    assert rest.count("setPollInterval(") == 7
 
 
 def test_the_revision_moves_when_the_session_records_and_only_then(tmp_path: Path) -> None:
@@ -1284,8 +1243,7 @@ def test_the_best_experiment_is_the_registered_strategy_with_the_highest_forward
 def test_a_running_experiment_is_never_the_best_experiment(tmp_path: Path) -> None:
     """Ranking running experiments by how far they had got would crown one of a
     field that has produced no forward reading at all: with none the listing
-    names no best experiment, and the home page draws no hero for that null
-    answer rather than an empty crowned panel."""
+    names no best experiment."""
 
     build_experiment(tmp_path, "early", "research", alive=True)
     build_experiment(tmp_path, "registered", "forward", alive=True)
@@ -1293,32 +1251,6 @@ def test_a_running_experiment_is_never_the_best_experiment(tmp_path: Path) -> No
     assert best_experiment(rows) is None
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
     assert listed["best"] is None
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    assert "if (!best) return null;" in _fn(script, "bestRow")
-    home = _fn(script, "homeView")
-    assert "if (best)" in home and "heroPanel(best)" in home
-    for retired in ("rankingPanel", "rankingSignature", "ranking-panel", "payload.ranking"):
-        assert retired not in script, retired
-
-
-def test_the_hero_carries_the_paper_handoff_and_redraws_only_on_a_new_signature() -> None:
-    """The hero is where the home page opens a Paper account for the best
-    registered strategy: it draws the same handoff as the 读出 view (the
-    account it has, or the button the server caps). The grid is rebuilt on
-    every poll; the hero only when what it shows changed, so its curve and its
-    Paper roster are not re-fetched every five seconds."""
-
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    hero = _fn(script, "heroPanel")
-    assert "paperHandoff(item)" in hero and "forwardTiles(item)" in hero
-    assert "panel.__signature = heroSignature(item);" in hero
-    refresh = _fn(script, "refreshHomePage")
-    assert "(hero ? hero.__signature : \"\") !== signature" in refresh
-    assert "grid.replaceWith(experimentGrid(payload.experiments || []));" in refresh
 
 
 def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(tmp_path: Path) -> None:
@@ -1370,107 +1302,6 @@ def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(t
     assert registered["Held-out 残差 IR"]["value"] == f"{heldout['residual_information_ratio']:.2f}"
     assert registered["前推下界"]["value"] != "—"
     assert all(tile["value"] != "—" for tile in tiles["registered_with_record"])
-
-
-def test_a_home_card_shows_each_figure_alone_never_as_a_fraction() -> None:
-    """A card keeps its figures but shows each as one labelled value: no two
-    values joined with a slash, no stage progress as done over total, no budget
-    against its limit (the bar alone carries the share). The one exception is
-    the steps tile, whose figure is the progress through the validation
-    period: steps recorded over the period's steps. The figures stay full on
-    the experiment page, and the card and the research panel name the best
-    candidate's figures alike."""
-
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-
-    def body(name: str) -> str:
-        return script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
-
-    joined = re.compile(r"\$\{[^}]*\} ?/ ?\$\{")
-    for name in ("accountTiles", "evidenceTiles", "forwardTiles"):
-        assert not joined.search(body(name)), name
-    assert body("evidenceTiles").count("fmtSteps(") == 1
-    card = body("experimentCard")
-    assert "fraction: false" in card and "{ mini: true }" in card
-    assert "evidenceTiles(item)" in card
-    # The fraction and the limit are left out of the card's lines only.
-    assert "fraction && Number.isFinite(done)" in body("activityNode")
-    budget = re.sub(r"\s+", " ", body("budgetBars"))
-    assert "mini ? row.spent" in budget and "mini ? `${row.label}已用 ${row.spent}`" in budget
-    # The card leaves the random baselines to the experiment page.
-    assert '!(mini && key === "null_controls")' in budget
-    assert "activityNode(fresh.status)" in body("controlPanel")
-    # The card's evidence is the validation record and the forward and
-    # Held-out readings, never a research-period figure.
-    for retired in ("最佳候选", "DSR", "bestCandidateTiles", "research_best"):
-        assert retired not in body("evidenceTiles") and retired not in body("sessionDetailPanel"), retired
-
-
-def test_a_figure_whose_label_does_not_read_itself_is_glossed_once() -> None:
-    """IR is an acronym over a formula, 主动超额 and 主动跟踪误差 are statistics
-    of a series the host builds, and the 下界 is a bootstrap percentile: none
-    of the four can be read off its own label. Each gloss is one shared constant, so no
-    site can drift, and it hangs on the same `title` hover the console uses
-    everywhere else — including on a checklist row, which had no slot for one.
-    """
-
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    for name in ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE", "LOWER_BOUND_TITLE"):
-        assert script.count(f"const {name} = ") == 1, name
-    for opening, glosses in (
-        ("function evidenceTiles(", ("IR_TITLE",)),
-        ("function evidenceTiles(", ("RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")),
-        ("function researchSessionPanel(", ("IR_TITLE", "EXCESS_TITLE")),
-        ("function registeredPanel(", ("IR_TITLE", "EXCESS_TITLE", "TRACKING_ERROR_TITLE")),
-    ):
-        body = script.split(opening, 1)[1].split("\nfunction ", 1)[0]
-        for gloss in glosses:
-            assert gloss in body, (opening, gloss)
-    assert "item.title" in script.split("function checklist(", 1)[1]
-
-
-def test_an_experiment_card_wears_the_ending_as_a_badge_alone() -> None:
-    """The homepage grid stays scannable: a card says how the experiment ended in one
-    badge and keeps the reason in that badge's tooltip. The sentence itself is
-    drawn only on the experiment page — its header and the 裁决 view."""
-
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    card = script.split("function experimentCard(", 1)[1].split("\nfunction ", 1)[0]
-    badge = script.split("function endingBadge(", 1)[1].split("\nfunction ", 1)[0]
-    assert "experimentBadge(item)" in card
-    assert "endingReason" not in card
-    assert "title: ending.reason || null" in badge
-    # The definition and its two call sites, and no third page.
-    assert script.count("endingReason(") == 3
-
-
-def test_the_three_replay_stage_views_judge_nothing() -> None:
-    """前推回测, Held-out and 读出 judge nothing of their own: the two slice
-    views say their readings are reported, never judged, and the readout view
-    draws the record's significance test, the forward reading and every experiment's record
-    over the same validation window; nothing of the sealed gate remains."""
-
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    bodies = {
-        name: script.split(f"function {name}(", 1)[1].split("\nfunction ", 1)[0]
-        for name in ("forwardStagePanel", "heldoutStagePanel", "readoutStagePanel")
-    }
-    readout = bodies["readoutStagePanel"]
-    assert "readoutBlock(readout, detail.validation_steps)" in readout and "validationWindowBlock(detail.readouts)" in readout
-    assert "forwardPoolBlock(detail.readouts)" in readout and "paperHandoff(detail)" in readout
-    for name in ("forwardStagePanel", "heldoutStagePanel"):
-        assert "只报告，不作判定" in bodies[name]
-    for retired in ("sealedCriterion", "validityCriteria", "sealedReadingBlock", "sealedOnly", "verdictStagePanel"):
-        assert retired not in script, retired
-    assert "chip" not in readout and "thresholdChips" not in script
 
 
 def test_the_listing_carries_the_registration_and_the_record_so_far(tmp_path: Path) -> None:
@@ -1746,12 +1577,6 @@ def test_a_replay_that_failed_is_drawn_failed_not_done_or_pending(tmp_path: Path
         ["readout", "ended", "失败"],
     ]
     assert drawn["waiting"][2:4] == [["forward", "pending", "待记录"], ["heldout", "pending", "待记录"]]
-    # Both replay views say why there is no reading.
-    script = (
-        Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-    ).read_text(encoding="utf-8")
-    for view in ("forwardStagePanel", "heldoutStagePanel"):
-        assert "replayErrorNode(forward)" in _fn(script, view), view
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")

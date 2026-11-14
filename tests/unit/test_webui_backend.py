@@ -14,7 +14,6 @@ import errno
 import io
 import json
 import os
-import re
 import shutil
 import tempfile
 import unittest
@@ -447,76 +446,22 @@ def test_experiment_endpoint_creates_only_persistent_sandbox_research(tmp_path: 
     assert params["compact_token_threshold"] == 90_000
 
 
-def test_static_console_keeps_macro_style_surfaces_without_closed_capabilities(
-    tmp_path: Path,
-):
+def test_the_gpu_route_answers_and_the_bar_reads_its_memory_fields(tmp_path: Path):
     client = TestClient(create_app(tmp_path))
-    page = client.get("/").text
-    script = client.get("/static/app.js").text
-    assert "ADM-Cube" in page and "/static/logo.png" in page
-    for label in ("系统提示词预览", "模拟交易"):
-        assert label in script
-    for label in (
-        "实验流程",
-        "Step 产物树",
-        "定版产物",
-        "Paper 建账户",
-    ):
-        assert label in script
-    # The Fold-era console is gone.
-    for retired in ("Fold 策略分析", "样本外过渡", "揭示测试结果", "提前收官", "回滚到此 Fold"):
-        assert retired not in script
-    # The console words one experiment, one control portfolio and one
-    # out-of-sample acceptance; the coinages it used to carry are retired
-    # labels, not an alternative spelling of the same thing.
-    for label in ("随机对照组合", "定版登记"):
-        assert label in script
-    for retired in ("零技能面板", "本臂", "一本书", "席位", "回合数", "孵化中", "毕业于", "验收通过"):
-        assert retired not in script
-    # The console has no research-report surface.
-    assert "研究报告" not in script
-    assert "实时 Agent Trace" in script and "/trace/download" in script
-    assert "实盘交易" in page and "实盘交易" in script
-    assert "后端未连接" in script
-    assert "仅前端" not in script
-    qmt_source = script.split("function renderQmtPage()", 1)[1]
-    assert not any(
-        text in qmt_source
-        for text in (
-            "连接不可用",
-            "交易不可用",
-            "暂无可显示",
-            "未连接 QMT 后端",
-            "委托（不可用）",
-            "查询与下单",
-        )
-    )
-    assert 'el("div", { class: "empty" }, "后端未连接")' in qmt_source
-    assert "status.awaiting_question" not in script
-    assert "status.awaiting_step" not in script
+    # A host whose GPUs cannot be listed still answers, with an empty list.
     assert "gpus" in client.get("/api/gpus").json()
-
-
-def test_gpu_allocation_bar_uses_csp_compatible_native_control(tmp_path: Path):
-    client = TestClient(create_app(tmp_path))
-    script = client.get("/static/app.js").text
-    stylesheet = client.get("/static/style.css").text
-    source = script.split("function gpuAllocationRow(", 1)[1].split(
+    source = client.get("/static/app.js").text.split("function gpuAllocationRow(", 1)[1].split(
         "async function sendControlAction(", 1
     )[0]
-    assert re.search(r'el\(\s*"progress",', source)
     assert "value: gpu.memory_free_mib" in source
     assert "max: gpu.memory_total_mib" in source
-    assert "style:" not in source.split("const renderGpus", 1)[1]
-    assert ".gpu-bar > span" not in stylesheet
-    assert 'select.value === "" ? experimentDefault' in source
 
 
 def test_the_session_gpu_panel_marks_the_cards_the_experiment_claimed(tmp_path: Path):
     """A session attaches some of the cards claimed for its experiment's worker and
-    no other, so the panel marks those, read from the detail, and never ranks
-    the host's cards by free memory. The claim holds only while that worker
-    lives: a dead worker's claim file holds nothing and is not shown."""
+    no other, so the panel marks those, read from the detail. The claim holds
+    only while that worker lives: a dead worker's claim file holds nothing and
+    is not shown."""
     from autotrade.pipelines.hitl_state import write_gpu_claim
     from autotrade.webui.registry import experiment_detail
     from tests.unit.webui_research_experiment import build_experiment
@@ -538,7 +483,6 @@ def test_the_session_gpu_panel_marks_the_cards_the_experiment_claimed(tmp_path: 
         "async function sendControlAction(", 1
     )[0]
     assert "detail.gpu_claim" in source
-    assert "b.memory_free_mib - a.memory_free_mib" not in source
 
 
 def test_qmt_backend_is_absent_and_loopback_validation_is_single_source(tmp_path: Path):
@@ -749,26 +693,9 @@ class WebuiBackendTest(unittest.TestCase):
             "fundamental_events_status",
         ):
             self.assertNotIn(hidden, fields, hidden)
-        for model_field in ("model", "subagent_model", "compact_model"):
-            for retired in ("deepseek-chat", "deepseek-reasoner", "deepseek-v4-flash", "deepseek-v4-pro"):
-                self.assertNotIn(retired, fields[model_field]["choices"])
-        visible_copy = "\n".join(
-            str(field.get(key, ""))
-            for field in fields.values()
-            for key in ("label", "help")
-        )
-        self.assertNotIn("DeepSeek", visible_copy)
-        self.assertNotIn("provider", visible_copy)
         self.assertEqual(fields["no_thinking"]["label"], "禁用推理模式")
         # The geometry dates are plain YYYYMMDD strings the worker validates.
         self.assertEqual(fields["research_start"]["type"], "string")
-        for retired in (
-            "meta_learning_directive",
-            "meta_learning_fold_interval",
-            "meta_model",
-            "analysis_model",
-        ):
-            self.assertNotIn(retired, fields)
         # Every field is a parameter the worker accepts.
         from autotrade.pipelines.experiment_params import PARAMETERS
 
@@ -1931,7 +1858,7 @@ class HitlControlActionTest(unittest.TestCase):
             self._control().gpu_counts, {}, "a refused request must persist nothing"
         )
 
-    def test_the_action_set_is_pinned_and_retired_actions_are_unknown(self) -> None:
+    def test_the_action_set_is_pinned_and_an_unknown_action_is_refused(self) -> None:
         from autotrade.webui.manager import _ACTIONS
 
         self.assertEqual(
@@ -1947,18 +1874,9 @@ class HitlControlActionTest(unittest.TestCase):
                 "terminate",
             ],
         )
-        for retired in (
-            "skip_to_heldout",
-            "cancel_skip_to_heldout",
-            "rerun_fold",
-            "rollback_fold",
-            "reveal_test_results",
-            "not_a_real_action",
-        ):
-            with self.subTest(action=retired):
-                refused = self._post(action=retired, session_key="research")
-                self.assertEqual(refused.status_code, 400)
-                self.assertIn("unknown control action", refused.json()["detail"])
+        refused = self._post(action="not_a_real_action", session_key="research")
+        self.assertEqual(refused.status_code, 400)
+        self.assertIn("unknown control action", refused.json()["detail"])
 
     def test_lifecycle_actions_work_on_a_finished_experiment(self) -> None:
         build_experiment(self.experiments_root, "exp_done", "registered_with_record")

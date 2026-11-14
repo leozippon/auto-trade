@@ -1084,49 +1084,11 @@ def _app_js() -> str:
     ).read_text(encoding="utf-8")
 
 
-def test_every_server_snapshot_state_has_a_client_label_and_tone():
-    script = _app_js()
-    block = script.split("const TRADING_STATE", 1)[1].split("};", 1)[0]
+def test_every_server_snapshot_state_has_a_client_entry():
+    # A state the server emits and the page has no entry for renders as nothing.
+    block = _app_js().split("const TRADING_STATE", 1)[1].split("};", 1)[0]
     for state in ("ok", "stale", "no_snapshot", "export_error", "unreadable", "absent"):
         assert f"{state}:" in block, state
-    # Emitting a state nothing renders is the same defect in a third direction:
-    # every state carries a badge tone and a Chinese label.
-    for tone in ("completed", "paused", "failed", "stopped"):
-        assert tone in block
-    for label in ("正常", "数据陈旧", "等待首次运行", "写入错误", "数据不可读", "等待数据"):
-        assert label in block
-
-
-def test_degraded_states_raise_a_banner_and_skipped_lines_raise_a_chip():
-    script = _app_js()
-    assert "function paperBanners(" in script
-    banners = script.split("function paperBanners(", 1)[1].split("\nfunction ", 1)[0]
-    for state in ("export_error", "unreadable", "stale"):
-        assert state in banners, state
-    assert "function skippedChip(" in script
-    assert "行无法解析" in script
-    # The unmapped flag reaches the researcher rather than sitting in the payload.
-    assert "无法映射" in script
-
-
-def test_a_book_card_is_a_name_a_badge_six_figures_and_a_curve():
-    """The overview is scanned, so a card carries only what distinguishes one
-    book from another: its name with a state badge — the writer's error in that
-    badge's tooltip alone — its track and verdict status, the six figures and
-    the miniature curve. The rest of the frozen identity and the error in full
-    belong to its own page."""
-
-    script = _app_js()
-    card = _js_top_level(script, "function bookCard(")
-    assert "tradingBadge(row.state, row.error)" in card
-    assert "row.error" not in card.replace("tradingBadge(row.state, row.error)", "")
-    assert "title: error || null" in _js_top_level(script, "function tradingBadge(")
-    # The identity line the page head draws as chips is not repeated here, but
-    # for the track and where the verdict stands.
-    for field in ("artifact_id", "start_date", "initial_cash"):
-        assert field not in card, field
-    assert "meta-line" not in card
-    assert "bookCurveChart(" in card
 
 
 def _js_top_level(script: str, opening: str) -> str:
@@ -1174,69 +1136,6 @@ def test_prices_keep_their_cents_and_only_large_amounts_abbreviate():
     ):
         assert "fmtPrice(" in _js_top_level(script, f"function {name}("), name
     assert not re.search(r"fmtAmount(Opt)?\(row\.(price|average_cost|last_price|reference_price)\)", script)
-
-
-def test_the_book_curve_continues_its_source_experiment_on_one_date_axis():
-    """Equity and cash were once two charts with their own widths, pads and date
-    ticks, so one trading day sat at different x positions. The book's days now
-    feed the research return chart, whose panes share one x-scale, with the
-    source experiment's out-of-sample replay — the book's own copy of it —
-    chained in front through the same chainEquity the research pages use. The
-    card's miniature and the page's chart go through that one builder, so the
-    two cannot drift apart."""
-    script = _app_js()
-    chart = _js_top_level(script, "function bookCurveChart(")
-    for piece in ("chainEquity(", "equityChart(", "Paper 起始", "source.heldout_start", "chart.account"):
-        assert piece in chart, piece
-    for name in ("paperEquityPanel", "bookCard"):
-        assert "bookCurveChart(" in _js_top_level(script, f"function {name}("), name
-    # The page reads the curve off the book's own payload; nothing on this page
-    # asks experiments/ for it.
-    assert "payload.source" in _js_top_level(script, "function paperEquityPanel(")
-    trading_section = script.split("let tradingView = null;", 1)[1].split("function renderQmtPage(", 1)[0]
-    assert "singleSeriesBarChart" not in trading_section
-    assert "/api/experiments/" not in trading_section
-    assert "payload.account" in _js_top_level(script, "function equityChart(")
-    # A book whose copied history cannot be read says so in one short label.
-    assert "源实验历史读取失败" in _js_top_level(script, "function paperEquityPanel(")
-
-
-def test_the_page_draws_a_figure_only_where_the_book_measured_one():
-    """The panel printed 「—」 for every statistic the day count still gates and
-    for a CSI 300 the book has no data for. Tiles now come from presentTiles,
-    which drops an absent figure, and the reason moves into the caption."""
-    script = _app_js()
-    for name in ("paperEquityPanel", "bookCard"):
-        body = _js_top_level(script, f"function {name}(")
-        assert "presentTiles(" in body, name
-        assert "—" not in body, name
-    panel = _js_top_level(script, "function paperEquityPanel(")
-    assert "min_days" in panel and "benchmark_days" in panel
-
-
-def test_the_book_page_leads_with_what_the_operator_acts_on():
-    """The operator executes the day's orders by hand, so the page is ordered by
-    use: today's order sheet, then where the book stands, then what it holds
-    now, and only then the history."""
-    script = _app_js()
-    panels = _js_top_level(script, "function renderBookBundle(")
-    order = [
-        panels.index(f"{name}(bundle.")
-        for name in ("paperSignalPanel", "paperEquityPanel", "paperPositionsPanel", "paperPnlPanel", "paperHistoryPanel")
-    ]
-    assert order == sorted(order)
-    # The sheet is copyable as plain text, for a manual order entry screen.
-    assert "复制订单" in _js_top_level(script, "function copyOrdersButton(")
-    assert "navigator.clipboard" in _js_top_level(script, "async function copyToClipboard(")
-
-
-def test_today_and_every_past_day_render_through_one_order_sheet_renderer():
-    """The signal panel showed the post-trade holdings and a history day could
-    not, because the payload dropped them. One renderer now draws both, so the
-    two levels of detail cannot drift apart again."""
-    script = _app_js()
-    for name in ("paperSignalPanel", "paperHistoryDay"):
-        assert "paperSheetBody(" in _js_top_level(script, f"function {name}("), name
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS formatters")

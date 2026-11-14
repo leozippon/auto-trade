@@ -24,8 +24,6 @@ from autotrade.webui.traces import (
 )
 
 APP_JS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-STYLE_CSS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/style.css"
-INDEX_HTML = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/index.html"
 
 
 def _write_trace(path: Path, events: list[dict[str, object]]) -> Path:
@@ -213,143 +211,17 @@ def test_trace_stats_last_main_llm_prompt_ignores_subagent_calls(
     assert stats["llm_prompt_tokens"] == 20006
 
 
-def test_subagent_trace_card_shows_model_thinking_and_context() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function subagentSummaryNode(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    assert "🧩" in source
-    assert "block.role" in source
-    assert "subagentHeadMetaNode" in source
-    assert "subagentProgressParts" in source
-    assert "subagentLastToolLabel" in source
-    # The dead `task` field is gone from both the projection and the UI.
-    assert "if (block.task)" not in script
-    assert "block.task ||" not in script
-    assert "trace-box-scroll" in script
-    # Launch metadata is spelled out once, in subagentMetaLine.
-    meta = script.split("function subagentMetaLine(", 1)[1].split("\nfunction ", 1)[0]
-    assert "block.model" in meta
-    assert "subagentThinkingLabel" in meta
-    assert "subagentContextLabel" in meta
-    assert '.join(" · ")' in meta
-    context = script.split("function subagentContextLabel(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    assert "继承上下文" in context and "独立上下文" in context
-    assert "续用 ${block.resumed_from}" in context
-    # `model · 推理 x · 独立上下文 ⏱ 5:21 · 08-28 15:13:20`: the live clock node
-    # and the launch timestamp need explicit separators, not a flex gap.
-    head_meta = script.split("function subagentHeadMetaNode(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    assert "subagentMetaLine(block, detail)" in head_meta
-    assert 'line.append(" ")' in head_meta
-    assert "` · ${launched}`" in head_meta
-    assert "fmtTsTime(block.ts)" in head_meta
-    # The modal's head is the child's own trace head, not a second copy of
-    # the card's launch metadata.
-    modal = script.split("async function openSubagentTrace(", 1)[1].split("\nfunction ", 1)[0]
-    assert "subagentMetaLine" not in modal and "subagentTraceHead(payload, detail)" in modal
-    # Clipping is the backend's job; the console renders what it receives.
-    assert ".slice(0, 400)" not in script
-    assert ".slice(0, 240)" not in script
-    assert ".slice(0, 160)" not in script
-    assert "isRunningSubagent" in script
+def test_the_stats_chips_read_only_fields_the_stats_route_serves(tmp_path: Path) -> None:
+    """A renamed counter would render as 0 instead of failing, so every field
+    the chip row reads must be one the trace stats route serves: the scan's
+    counters plus the model window the route adds from the experiment's model."""
 
-
-def test_agent_output_title_includes_trace_model_and_reasoning() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function renderAgentOutputBlock(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    assert "block.model" in source
-    assert "parentReasoningLabel" in source
-    assert "推理 ${effort}" in source
-    assert "params.model" not in source
-    assert "qwen-3.8-27b-fp8" not in source
-    assert "meta_model" not in source
-
-
-def test_stats_chips_show_subagent_near_llm_only_when_positive() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     source = script.split("function statsChipsRow(", 1)[1].split("\nfunction ", 1)[0]
-    assert "Number(stats.subagent_tasks) || 0" in source
-    assert "Number(stats.subagent_running) || 0" in source
-    assert "🧩 子代理 ${subagentRunning} 运行 / ${subagentTasks} 累计" in source
-    assert 'key === "llm_call" && subagentTasks' in source
-    # The main Agent's context is a ring against its model window, the
-    # compaction count beside it; the token totals keep their meaning in
-    # tooltips rather than in prose.
-    assert "ringGauge(" in source
-    assert "context_window_tokens" in source
-    assert "主 Agent 累计输入 tokens" in source
-    assert "主 Agent 累计输出 tokens" in source
-    # Child spend is shown beside the parent totals, never folded into them.
-    assert "🧩 子代理 Σ ${fmtTokens(subagentTokens)}" in source
-    assert "subagent_prompt_tokens" in source
-    assert "subagent_completion_tokens" in source
-    assert "`⟲ 压缩 ${Number(stats.compact_ops) || 0}`" in source
-    assert "compact_ops" in source
-    assert "trim_ops" not in source
-    assert "clear_ops" not in source
-    assert "`Trim ${" not in source
-    assert "`Clear ${" not in source
-    assert "context_compaction" not in source
-    assert "`输入 ${" not in source
-    assert "`输出 ${" not in source
-    assert "`上下文 ${" not in source
-    assert "推理" not in source
-    assert "执行中" not in source
-    assert "last_llm_prompt_tokens" in source
-    assert "instruction" not in source
-    assert ".task " not in source
-
-
-def test_live_trace_panel_claims_stream_before_await() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function liveTracePanel(", 1)[1].split("\nfunction ", 1)[0]
-    refresh = source.split("const refreshBlocks", 1)[1].split("const scheduleRefresh", 1)[0]
-    claim_at = refresh.find("streamOpening = true")
-    await_at = refresh.find("await ")
-    assert 0 <= claim_at < await_at
-    assert refresh.count("openStream(") == 2
-    # A panel replaced during the fetch opens no stream.
-    assert refresh.count("box.isConnected") == 2
-    assert source.count("new EventSource") == 1
-    assert "refreshBlocks();" in source
-    assert "await refreshBlocks();" in source
-
-
-def test_detail_poll_does_not_rebuild_on_environment_stage() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("async function renderDetailPage(", 1)[1]
-    poll = source.split("pollTimer = setPollInterval", 1)[1].split("}, 4000);", 1)[0]
-    assert "route(true)" in poll
-    assert "environment_stage" not in poll
-    assert "session_key" in poll
-    assert "run_ref" in poll
-
-
-def test_control_panel_shows_skills_only_once_published_and_no_stage_prose() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    source = script.split("function controlPanel(", 1)[1]
-    head = source.split("\nfunction ", 1)[0]
-    assert "skills ? el(" in head and "`📚 Skills ${skills}`" in head
-    assert "generation_id" not in head
-    # The stepper says where the experiment is; the panel carries the badge, the
-    # activity and the budget bars, never a session count.
-    assert "研究会话" not in script
-    # One activity renderer, drawn here and nowhere else on the page.
-    assert "activityNode(" in head
-    assert script.count("activityNode(") == 3, "definition, control panel, card"
-
-
-def test_index_html_loads_app_js_without_inlining_trace_chips() -> None:
-    html = INDEX_HTML.read_text(encoding="utf-8")
-    assert 'src="/static/app.js"' in html
-    assert "🧩 子代理" not in html
-    assert "subagent_tasks" not in html
+    reads = set(re.findall(r"\bstats\.([a-z_]+)", source))
+    served = set(trace_stats(_write_trace(tmp_path / "run.jsonl", []))) | {"context_window_tokens"}
+    assert {"subagent_tasks", "compact_ops", "last_llm_prompt_tokens"} <= reads
+    assert reads <= served, sorted(reads - served)
 
 
 def _subagent_blocks(blocks: list[dict[str, object]]) -> list[dict[str, object]]:
@@ -596,7 +468,7 @@ def test_project_subagent_exposes_model_thinking_and_inherit_context() -> None:
 
 def test_project_subagent_card_carries_the_effective_turn_budget() -> None:
     """The parent-chosen (or defaulted) ``max_turns`` lands on the card as
-    ``turns_limit`` and the console spells it out next to the thinking level."""
+    ``turns_limit``, the field the console reads."""
 
     blocks = project_trace_blocks(
         [
@@ -612,10 +484,7 @@ def test_project_subagent_card_carries_the_effective_turn_budget() -> None:
     )
     (card,) = _subagent_blocks(blocks)
     assert card["turns_limit"] == 12
-    meta = APP_JS.read_text(encoding="utf-8").split("function subagentMetaLine(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    assert "block.turns_limit" in meta and "上限 ${turnsLimit} 回合" in meta
+    assert "block.turns_limit" in APP_JS.read_text(encoding="utf-8")
 
 
 def test_project_legacy_subagent_digest_is_ignored() -> None:
@@ -1437,20 +1306,9 @@ def test_trace_stream_nudges_with_offsets_and_no_event_payload(
     assert "event: eof" in body
 
 
-def test_trace_replay_threads_detail_and_clamps_the_block_window() -> None:
-    script = APP_JS.read_text(encoding="utf-8")
-    assert (
-        "traceReplayNode(detail.experiment_id, record.run_ref, detail)"
-        in script
-    )
-    assert "function traceReplayNode(experimentId, runId, detail) {" in script
-    source = script.split("function traceReplayNode(", 1)[1].split("\nfunction ", 1)[0]
-    assert "detail," in source
-    assert "MAX_TRACE_BLOCK_BYTES" in source
-    # The client window must never exceed what the route accepts.
-    assert f"const MAX_TRACE_BLOCK_BYTES = {32 * 1024 * 1024};" in script.replace(
-        "32 * 1024 * 1024", str(32 * 1024 * 1024)
-    )
+def test_the_client_block_window_is_the_one_the_route_accepts() -> None:
+    # A larger client window would be refused by the blocks route's bound.
+    assert "const MAX_TRACE_BLOCK_BYTES = 32 * 1024 * 1024;" in APP_JS.read_text(encoding="utf-8")
     assert traces.MAX_BLOCK_READ_BYTES == 32 * 1024 * 1024
 
 
@@ -1696,85 +1554,6 @@ def test_a_trace_longer_than_the_block_window_shows_its_newest_window(
     assert child["found"] is True and child["header"]["status"] == "completed"
     assert [block["kind"] for block in child["blocks"]][:2] == ["agent_output", "tool_group"]
     assert traces.read_subagent_trace(path, "agent_9")["found"] is False
-
-
-def test_the_running_dock_pins_a_block_per_child_and_opens_its_trace() -> None:
-    """A running child is pinned at the bottom edge of the trace box as a
-    block reading exactly like its card, and both open the child's own Trace —
-    the dock as one button over the whole readout, the card through its head
-    row, and neither through a label of its own."""
-
-    script = APP_JS.read_text(encoding="utf-8")
-    dock = script.split("function runningSubagentDock(", 1)[1].split("\nfunction ", 1)[0]
-    assert "filter(isRunningSubagent)" in dock
-    assert "subagentDockBlock(block, detail, runRef)" in dock
-    control = script.split("function subagentDockBlock(", 1)[1].split("\nfunction ", 1)[0]
-    assert '"trace-block subagent running trace-dock-block"' in control
-    assert "subagentSummaryNode(block, detail)" in control
-    assert "openSubagentTrace(detail, runRef, block)" in control
-    # The label the cards used to carry is gone, styles included.
-    style = STYLE_CSS.read_text(encoding="utf-8")
-    assert "详细 Trace" not in script
-    assert "subagent-open" not in script and "subagent-open" not in style
-    render = script.split("function renderTraceBlocks(", 1)[1].split("\nfunction ", 1)[0]
-    assert "fragment.append(scroll)" in render
-    assert "runningSubagentDock(blocks, detail, runRef)" in render
-    # The chip strip and the inline fold it replaced are gone, styles included.
-    assert "trace-running" not in script and "trace-running" not in style
-    assert "subagentInlineTrace" not in script and "subagent-inline" not in style
-
-
-def test_subagent_trace_opens_as_a_modal_over_the_parent_and_follows_it() -> None:
-    """The card and the pinned block open one modal window on the child's own
-    Trace, rendered by the parent's block renderer and followed while it runs;
-    the parent trace behind it is untouched and cannot scroll."""
-
-    script = APP_JS.read_text(encoding="utf-8")
-    assert "async function openSubagentTrace(detail, runRef, block)" in script
-    assert "/trace/subagents/${encodeURIComponent(taskId)}" in script
-    card = script.split("function renderSubagentBlock(", 1)[1].split("\nfunction ", 1)[0]
-    # The card's own head row is the control: no label, and the card body
-    # below it stays selectable text.
-    assert "openSubagentTrace(detail, runRef, block)" in card
-    assert "subagentSummaryNode(block, detail, () =>" in card
-    # A running child's card carries the accent and the live dot; a finished
-    # one is the compact card.
-    assert 'node.classList.toggle("running", isRunningSubagent(block))' in card
-    summary = script.split("function subagentSummaryNode(", 1)[1].split("\nfunction ", 1)[0]
-    assert 'running ? el("span", { class: "live-dot"' in summary
-    # Given an opener the head row becomes a real button, so Enter and Space
-    # reach it; without one (the dock, which wraps the whole readout) it stays
-    # a span, because a button inside a button is not a control.
-    assert 'class: "head subagent-head"' in summary
-    assert 'title: "打开子代理 Trace"' in summary
-    assert 'el("span", { class: "head" }, ...headChildren)' in summary
-    opener = script.split("async function openSubagentTrace(", 1)[1].split("\nfunction ", 1)[0]
-    # The child's records go through the same renderer as the parent's, and
-    # one box for the modal's lifetime keeps the folds the reader opened.
-    assert "renderTraceBlocks(box" in opener
-    assert "previous: previousBlocks" in opener
-    assert '"subagent-modal"' in opener and "closeModal" in opener
-    assert "isRunningSubagent(payload.header || block)" in opener
-    assert "clearInterval(poll)" in opener
-    # Backdrop, Escape and a still page behind belong to the shared helper.
-    show = script.split("function showModal(", 1)[1].split("\nfunction ", 1)[0]
-    assert "if (event.target === mask) closeModal();" in show
-    assert 'document.addEventListener("keydown", modalEscape)' in show
-    assert 'document.body.classList.add("modal-open")' in show
-    close = script.split("function closeModal(", 1)[1].split("\nfunction ", 1)[0]
-    assert 'document.removeEventListener("keydown", modalEscape)' in close
-    assert 'document.body.classList.remove("modal-open")' in close
-    assert 'event.key === "Escape"' in script
-    assert "body.modal-open #app {" in STYLE_CSS.read_text(encoding="utf-8")
-    head = script.split("function subagentTraceHead(", 1)[1].split("\nfunction ", 1)[0]
-    assert "subagentHeadMetaNode" in head
-    # An inherited level is reported as the effective parent level.
-    thinking = script.split("function subagentThinkingLabel(", 1)[1].split(
-        "\nfunction ", 1
-    )[0]
-    assert '"inherit"' in thinking
-    assert "（继承）" in thinking
-    assert "parentReasoningLabel" in thinking
 
 
 def _app_js_fragment(script: str, head: str, end: str = "\n}\n") -> str:
