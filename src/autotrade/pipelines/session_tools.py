@@ -2135,8 +2135,9 @@ class ValidateTool(SessionTimeBudgetAware):
             "revision_id": self.backtest.ref_store.get_or_create(
                 "strategy", revision.revision_id
             ),
-            # The random baseline is seeded by the span, so a deterministic
-            # strategy repeats these nodes' readings exactly: the same trial.
+            # The random baseline draws by the trades alone (one seed for every
+            # replay), so a deterministic strategy repeats these nodes'
+            # readings exactly: the same trial.
             **({"same_bytes_as": self.backtest.named(repeated)} if repeated else {}),
         }
         if validation_period:

@@ -47,6 +47,7 @@ CIRC_MV = {**{name: 1.0e9 for name in SMALL}, **{name: 5.0e10 for name in LARGE}
 BENCHMARK = {day: 0.001 for day in DAYS}
 # The random baseline draws only on the boards a profile pins.
 PROFILE = BrokerProfile(permitted_boards=("main", "gem"))
+DAYS_ISO = tuple(f"{day[:4]}-{day[4:6]}-{day[6:]}" for day in DAYS)
 
 
 def _sample_null_orders(skeleton, frame: pd.DataFrame, seed: int, draw: int) -> dict[str, list[dict]]:
@@ -636,6 +637,43 @@ def test_a_draws_daily_return_is_its_pnl_over_the_candidates_previous_close():
     assert [value for _day, value in block["baseline_draw_sd"]] == pytest.approx([0.0] * 3, abs=1e-12)
     assert block["null_excess_mean"] == pytest.approx(np.prod(1 + np.asarray(expected)) - 1, abs=1e-6)
     assert block["observed_excess"] == pytest.approx(0.06, abs=1e-6)
+
+
+def test_the_same_trips_meet_the_same_names_in_a_shorter_replay():
+    """A replay cut short of another meets, on every day the two share, the
+    same draws: the same names, fills and composite, read on the same
+    capital, so both replays grade the round trips they share alike. (A trip
+    still open at the shorter replay's end is the exception: its pool skips
+    the exit-day filter, so it may draw another name.)"""
+
+    script = {
+        DAYS[1]: (("000001.SZ", "buy", 1000, "09:30"),),
+        DAYS[3]: (("600001.SH", "buy", 500, "09:30"),),
+        DAYS[5]: (("000001.SZ", "sell", 1000, "15:00"),),
+        DAYS[9]: (("600001.SH", "sell", 500, "15:00"),),
+        DAYS[14]: (("000002.SZ", "buy", 800, "09:30"),),
+    }
+    schedule = StrategySchedule("day", "08:30")
+
+    def replay(days: int) -> tuple[dict, list[tuple[BrokerProfile, ReplayResult]]]:
+        frame = _frame()[lambda rows: rows["trade_date"].isin(DAYS[:days])]
+        result = run_daily_replay(daily=frame, strategy=_script_strategy(script), schedule=schedule, profile=PROFILE)
+        with pytest.MonkeyPatch.context() as patch:
+            runs = _spy_draws(patch)
+            block = run_null_control(
+                result, frame, BENCHMARK, PROFILE, schedule, k=4, seed=17, step=(DAYS[0], DAYS[11]), baselines=True
+            )
+        return block, runs
+
+    short, short_runs = replay(12)
+    long, long_runs = replay(20)
+
+    assert (short["round_trips"], long["round_trips"]) == (2, 3)
+    assert short["baseline_daily"] == long["baseline_daily"][:12]
+    assert short["baseline_draw_sd"] == long["baseline_draw_sd"][:12]
+    assert short["step"] == long["step"]
+    for (_short_profile, short_run), (_long_profile, long_run) in zip(short_runs, long_runs, strict=True):
+        assert short_run.executions == tuple(row for row in long_run.executions if row["matched_at"] < DAYS_ISO[12])
 
 
 def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():

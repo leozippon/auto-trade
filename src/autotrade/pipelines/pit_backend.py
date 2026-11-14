@@ -768,21 +768,22 @@ def _span_corporate_actions(
     return pd.concat(filled, ignore_index=True)
 
 
-def baseline_seed(start: str, end: str) -> int:
-    """The random baseline's seed for a replay of ``start``..``end``.
-
-    The draws a random baseline makes are a function of this seed and of what was
-    replayed: the book's own trade skeleton (entry, exit and money per round
-    trip), the matching pool (the benchmark's membership, what a trip's money
-    can buy) and the slot's bars. Nothing naming the experiment, the revision or the
-    session enters, so identical trades on one span meet the identical random baseline
-    in every experiment -- paired experiments and lineage follow-ups read the same number --
-    and neither a resubmission nor a byte change that leaves the trades alone
-    can re-roll it; an experiment's candidates and controls on a span share draws.
-    This makes a book's random baseline noise reproducible, not smaller.
-    """
-
-    return null_control_seed(f"{start}:{end}", "panel")
+# The random baseline's seed, one for every replay. The draws a random baseline
+# makes are a function of this seed and of what was replayed: the book's own
+# trade skeleton (entry, exit and money per round trip), the matching pool (the
+# benchmark's membership, what a trip's money can buy) and the slot's bars.
+# Nothing naming the experiment, the revision, the session or the span enters,
+# so identical trades meet the identical names in every replay, whatever its
+# start and end -- a test step reads the same active return in a replay of
+# any length, paired experiments and lineage follow-ups read the same number --
+# and neither a resubmission nor a byte change that leaves the trades alone
+# can re-roll it. This makes a book's random baseline noise reproducible, not
+# smaller. One residual remains: a round trip still open at a replay's end has
+# no exit date, so its pool skips the exit-day filter
+# (``null_control._candidate_pool``) and may draw another name than the same
+# trip closed in a longer replay (at most 0.4 pp on a last step in the
+# 2026-11-15 measurement).
+BASELINE_SEED = null_control_seed("replay", "panel")
 
 
 # The date columns an as-of domain is read by, in the order a range is stated.
@@ -1106,7 +1107,7 @@ class PITDailyEvaluationBackend:
                             slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index),
                             request.broker_profile,
                             request.schedule,
-                            seed=baseline_seed(replay_start, replay_end),
+                            seed=BASELINE_SEED,
                             corporate_actions=corporate_actions,
                             membership=slot_membership(
                                 (snapshot_dir, *replay_dirs),
@@ -1984,6 +1985,7 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
 
 
 __all__ = [
+    "BASELINE_SEED",
     "REPLAY_SLOTS_SIDECAR",
     "REPLAY_SOURCE_LABEL",
     "HistoricalMinuteSource",

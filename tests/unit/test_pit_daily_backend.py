@@ -41,6 +41,7 @@ from autotrade.pipelines.config import (
     SnapshotBundle,
 )
 from autotrade.pipelines.pit_backend import (
+    BASELINE_SEED,
     REPLAY_SLOTS_SIDECAR,
     REPLAY_SOURCE_LABEL,
     HistoricalMinuteSource,
@@ -49,7 +50,6 @@ from autotrade.pipelines.pit_backend import (
     _asof_stash_dir,
     _AsOfReadOnlyView,
     _bind_asof_stash_contract,
-    baseline_seed,
     prebuild_asof_stash,
 )
 
@@ -660,8 +660,8 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
 
     assert without_clock(bare) == without_clock(record)
 
-    # The random baseline is seeded by the replayed span alone, never by the revision
-    # or the experiment: the same book resubmitted as a new revision meets the
+    # The random baseline has one seed for every replay, never the revision's
+    # or the experiment's: the same book resubmitted as a new revision meets the
     # identical random baseline, so a resubmission cannot re-roll it, and so does the
     # same book replayed by another experiment's backend, so paired experiments read one
     # number for one book.
@@ -670,7 +670,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
             (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
         )
 
-    assert style["baseline"]["seed"] == baseline_seed("20240102", "20240103")
+    assert style["baseline"]["seed"] == BASELINE_SEED
     resubmitted = baselines_of(
         backend.evaluate(
             dataclasses.replace(
@@ -2378,9 +2378,10 @@ def test_a_span_refuses_a_slot_whose_anchor_has_no_decision_universe(tmp_path: P
 
 def test_the_random_baseline_a_book_meets_depends_only_on_what_is_replayed(tmp_path: Path) -> None:
     """Two experiments that validate the same bytes on the same span read one active
-    IR: the random baseline is seeded by the replayed span alone, so each experiment's backend
-    draws the identical random baseline for the identical book, while the same book on
-    another span draws from another seed."""
+    IR, and a replay of that book cut shorter draws with the same seed: the random
+    baseline's seed names neither the experiment nor the span, so identical trades
+    meet identical names in every replay (``test_null_control``: the same trips in
+    a shorter replay)."""
 
     snapshot, slots = _write_span_release(tmp_path)
     revision = _span_revision(tmp_path)
@@ -2400,10 +2401,8 @@ def test_the_random_baseline_a_book_meets_depends_only_on_what_is_replayed(tmp_p
     assert first_experiment["baseline"] == second_experiment["baseline"]
     assert first_experiment["baseline_daily"] == second_experiment["baseline_daily"]
     assert first_experiment["baseline_draw_sd"] == second_experiment["baseline_draw_sd"]
-    assert first_experiment["baseline"]["seed"] == baseline_seed("20240101", "20240105")
     shorter = sidecar(tmp_path / "first_experiment" / "results_a", slots["a"])
-    assert shorter["baseline"]["seed"] == baseline_seed("20240101", "20240103")
-    assert shorter["baseline"]["seed"] != first_experiment["baseline"]["seed"]
+    assert shorter["baseline"]["seed"] == first_experiment["baseline"]["seed"] == BASELINE_SEED
 
 
 def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> None:
