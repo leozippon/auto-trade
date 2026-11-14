@@ -26,6 +26,10 @@ BOARD_PREFIXES: dict[str, tuple[str, ...]] = {
     "bj": (),
 }
 BOARDS: tuple[str, ...] = tuple(BOARD_PREFIXES)
+# The boards whose declarations take any size from a minimum on, by that
+# minimum: STAR from 200 shares, the BSE from 100. Every other board, and a
+# code listed on none, declares whole lots of ``LOT_SIZE``.
+ANY_SIZE_MINIMUM: dict[str, int] = {"star": STAR_MIN_LOT_SIZE, "bj": LOT_SIZE}
 
 
 def board_of(symbol: str) -> str | None:
@@ -37,32 +41,19 @@ def board_of(symbol: str) -> str | None:
     return next((board for board, prefixes in BOARD_PREFIXES.items() if code.startswith(prefixes)), None)
 
 
-def is_star_market(symbol: str) -> bool:
-    code = str(symbol).upper()
-    return code.endswith(".SH") and code[:3] in {"688", "689"}
-
-
-def is_bse_market(symbol: str) -> bool:
-    return str(symbol).upper().endswith(".BJ")
-
-
 def validate_buy_lot(quantity: int, symbol: str = "") -> None:
-    """Board-aware buy declaration ladder.
+    """Board-aware buy declaration ladder (``ANY_SIZE_MINIMUM``).
 
-    STAR (688/689.SH) declares at least 200 shares then 1-share increments; the
+    STAR (688/689) declares at least 200 shares then 1-share increments; the
     BSE declares at least 100 shares then 1-share increments; every other board
     declares whole 100-share lots.
     """
-    if is_star_market(symbol):
-        if quantity < STAR_MIN_LOT_SIZE:
-            raise ValueError(f"buy quantity must be at least {STAR_MIN_LOT_SIZE} shares")
-        return
-    if is_bse_market(symbol):
-        if quantity < LOT_SIZE:
-            raise ValueError(f"buy quantity must be at least {LOT_SIZE} shares")
-        return
-    if quantity % LOT_SIZE:
-        raise ValueError(f"buy quantity must be a multiple of {LOT_SIZE}")
+    minimum = ANY_SIZE_MINIMUM.get(board_of(symbol))
+    if minimum is None:
+        if quantity % LOT_SIZE:
+            raise ValueError(f"buy quantity must be a multiple of {LOT_SIZE}")
+    elif quantity < minimum:
+        raise ValueError(f"buy quantity must be at least {minimum} shares")
 
 
 def reduce_amount_reject(shares: int, sellable: int, symbol: str) -> str | None:
@@ -73,10 +64,9 @@ def reduce_amount_reject(shares: int, sellable: int, symbol: str) -> str | None:
     legitimately create odd positions, so reduces cannot reuse the strict buy
     ladder. STAR/BSE positions below their minimum declaration are likewise
     exitable only in full."""
-    if is_star_market(symbol):
-        return None if shares >= STAR_MIN_LOT_SIZE or shares == sellable else "amount_below_lot_size"
-    if is_bse_market(symbol):
-        return None if shares >= LOT_SIZE or shares == sellable else "amount_below_lot_size"
+    minimum = ANY_SIZE_MINIMUM.get(board_of(symbol))
+    if minimum is not None:
+        return None if shares >= minimum or shares == sellable else "amount_below_lot_size"
     if shares % LOT_SIZE == 0:
         return None
     odd = sellable % LOT_SIZE

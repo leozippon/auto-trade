@@ -500,29 +500,25 @@ class DailyBroker:
 
         A profile without the dividend tax keeps no ledger; with it, every held
         name's lots must add up to its quantity and no other name may have any.
-        Legacy zero-income lots are unambiguous. Nonzero legacy income must be
-        classified offline using its actual distributions, never today's date
-        or even acquisition alone: ex-date settlement does not enforce record-
-        date entitlement and can credit a pre-acquisition record date.
+        Every lot states its income under both rules. A ledger without them
+        must be classified offline using its actual distributions, never
+        today's date or even acquisition alone: ex-date settlement does not
+        enforce record-date entitlement and can credit a pre-acquisition
+        record date.
         """
 
         lots: dict[str, list[Lot]] = {}
         for symbol, rows in records.items():
             restored = []
             for row in rows:
-                complete = "dividend_income_new" in row and "dividend_income_old" in row
-                legacy_zero = (
-                    "dividend_income_new" not in row and "dividend_income_old" not in row
-                    and row.get("dividend_income") == 0.0
-                )
-                if not complete and not legacy_zero:
+                if "dividend_income_new" not in row or "dividend_income_old" not in row:
                     raise ValueError(
                         "unclassified dividend tax ledger: checkpoint needs explicit dividend_income_new "
                         "and dividend_income_old; verify historical income provenance before an offline conversion"
                     )
                 quantity = row["quantity"]
-                new = row["dividend_income_new"] if complete else 0.0
-                old = row["dividend_income_old"] if complete else 0.0
+                new = row["dividend_income_new"]
+                old = row["dividend_income_old"]
                 if isinstance(quantity, bool) or not isinstance(quantity, int):
                     raise ValueError("invalid quantity in lot ledger")
                 if (isinstance(new, bool) or not isinstance(new, (int, float))

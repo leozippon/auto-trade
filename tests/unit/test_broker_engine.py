@@ -31,8 +31,6 @@ from autotrade.environment.broker_core import (
     STAMP_DUTY_CUTOVER,
     STAR_MIN_LOT_SIZE,
     board_of,
-    is_bse_market,
-    is_star_market,
     reduce_amount_reject,
     validate_buy_lot,
 )
@@ -372,13 +370,6 @@ class ExecutionSessionTest(unittest.TestCase):
 
 
 class BuyLotLadderTest(unittest.TestCase):
-    def test_board_detection(self) -> None:
-        self.assertTrue(is_star_market("688001.SH"))
-        self.assertTrue(is_star_market("689009.SH"))
-        self.assertFalse(is_star_market("600000.SH"))
-        self.assertTrue(is_bse_market("830000.BJ"))
-        self.assertFalse(is_bse_market("000001.SZ"))
-
     def test_main_board_requires_whole_lots(self) -> None:
         validate_buy_lot(200, "000001.SZ")
         with self.assertRaisesRegex(ValueError, f"multiple of {LOT_SIZE}"):

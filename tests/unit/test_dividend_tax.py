@@ -500,7 +500,7 @@ def test_taxable_distributions_need_one_real_record_date():
     DailyMarketData(frame, event.assign(cash_per_share=0.0, bonus_per_share=0.0, record_date=""))
 
 
-def test_lot_records_preserve_both_tax_bases_and_refuse_unknown_nonzero_legacy_income():
+def test_lot_records_preserve_both_tax_bases_and_refuse_a_single_legacy_income():
     broker = DailyBroker(TAXED)
     broker.positions[SYMBOL] = Position(SYMBOL, 1000, 1000, 10.0, 10.0)
     broker.lots[SYMBOL] = [Lot(1000, "20150820", 200.0, 100.0)]
@@ -513,11 +513,9 @@ def test_lot_records_preserve_both_tax_bases_and_refuse_unknown_nonzero_legacy_i
     assert restored._release_lots(SYMBOL, 500) == pytest.approx(27.5)
     [lot] = restored.lots[SYMBOL]
     assert (lot.quantity, lot.dividend_income_new, lot.dividend_income_old) == (500, 100.0, 50.0)
-    for acquired in ("20150820", "20260105"):
+    for acquired, income in (("20150820", 100.0), ("20260105", 100.0), ("20150820", 0.0)):
         with pytest.raises(ValueError, match="unclassified dividend tax ledger"):
-            restored.restore_lots({SYMBOL: [{"quantity": 1000, "acquired": acquired, "dividend_income": 100.0}]})
-    restored.restore_lots({SYMBOL: [{"quantity": 1000, "acquired": "20150820", "dividend_income": 0.0}]})
-    assert restored.lots[SYMBOL] == [Lot(1000, "20150820")]
+            restored.restore_lots({SYMBOL: [{"quantity": 1000, "acquired": acquired, "dividend_income": income}]})
 
 
 def test_acquisition_after_cutover_does_not_prove_income_is_new_rule():

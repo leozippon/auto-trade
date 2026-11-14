@@ -40,6 +40,7 @@ from autotrade.common.records import (
 )
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.snapshot import load_snapshot_manifest
+from autotrade.environment.replay.engine import ExecutionPriceProvider
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
@@ -52,13 +53,13 @@ from autotrade.environment.replay.style import (
     slot_benchmark,
     slot_membership,
 )
-from autotrade.pipelines.pit_backend import _span_daily, load_slot_corporate_actions
+from autotrade.pipelines.pit_backend import load_slot_corporate_actions, span_daily
 from autotrade.pipelines.verdict import BOOTSTRAP_BLOCK_DAYS, bootstrap_lower_bound
 
 from .book import VERDICT_LOG_NAME, Book, book_status
 from .engine import PAPER_STATE_NAME, writer_lock
 from .fills import CORRECTIONS_NAME, key_text, mode, parse_key
-from .pit import newest_replay_slot
+from .pit import newest_replay_slot, slot_minute_source
 from .storage import append_jsonl_once, read_jsonl
 
 VERDICT_NAME = "verdict.json"
@@ -84,15 +85,17 @@ def paper_reading(book: Book) -> dict[str, object]:
     # The decision view beside the slot holds the index sections dated before
     # the book's first session, which its first round trips are matched on.
     decision = (slot.parents[2] / "decision" / slot.name.split("_", 2)[2]).resolve(strict=True)
+    minutes = slot_minute_source(slot, book.max_intraday_row_group_rows)
     return evidence_reading(
         book,
         equity,
         executions,
-        _span_daily([slot], first, last),
+        span_daily([slot], first, last),
         slot_benchmark(slot, benchmark_index=book.benchmark_index),
         corporate_actions=load_slot_corporate_actions(slot, load_snapshot_manifest(slot)),
         membership=slot_membership((decision, slot), benchmark_index=book.benchmark_index),
         previous=previous,
+        execution_price=None if minutes is None else minutes.price_at,
     )
 
 
@@ -106,12 +109,15 @@ def evidence_reading(
     corporate_actions: pd.DataFrame | None = None,
     membership: Mapping[str, Collection[str]] | None = None,
     previous: Mapping[str, object] | None = None,
+    execution_price: ExecutionPriceProvider | None = None,
 ) -> dict[str, object]:
     """The reading of ``equity`` (the book's settled days, in order) and its
     fills against ``frame``'s bars of exactly those days.
 
     ``previous`` is the last reading: a checkpoint it already checked is never
     checked again, though the random baseline drawn on a longer window differs.
+    ``execution_price`` is the slot's minute prices: the random baseline meets
+    a fill at a minute other than 09:30 and 15:00 at that minute's price.
     """
 
     rules = book.verdict_rules
@@ -155,6 +161,7 @@ def evidence_reading(
         corporate_actions=corporate_actions,
         membership=membership,
         baselines=True,
+        execution_price=execution_price,
     )
     account = daily_returns_from_curve(curve)
     zero_skill = {str(day): float(value) for day, value in baselines["baseline_daily"]}
@@ -305,29 +312,39 @@ def _corrected(
     ledger: Mapping[str, Mapping[str, Mapping[str, object]]],
 ) -> list[dict[str, object]]:
     """``executions`` with the fills of each corrected ``(session, key)`` replaced,
-    where its first row stood, by the one fill the ledger's outcome holds."""
+    where its first row stood, by the one fill the ledger's outcome holds, under
+    the order session and limit price that row names (none for a key the
+    journal never held)."""
 
+    keyed = [(_identity(row), row) for row in executions]
     held: dict[tuple[str, str], list[dict[str, object]]] = {}
     for session, key in corrected:
         outcome = ledger[session][key]["real"]
         clock, action, symbol = parse_key(key)
         at = datetime.strptime(f"{session} {clock}", "%Y%m%d %H:%M").replace(tzinfo=CN_TZ).isoformat()
+        named = next((row for identity, row in keyed if identity == (session, key)), {})
         held[(session, key)] = [
             {
                 "kind": "execution", "symbol": symbol, "action": action, "quantity": int(outcome["quantity"]),
                 "price": float(outcome["price"]), "execute_at": at, "matched_at": at, "status": "filled",
+                **{field: named[field] for field in ("session", "limit_price") if field in named},
             }
         ] if outcome["quantity"] else []
     result: list[dict[str, object]] = []
-    for row in executions:
-        at = datetime.fromisoformat(str(row["execute_at"])).astimezone(CN_TZ)
-        identity = (at.strftime("%Y%m%d"), key_text(at.strftime("%H:%M"), str(row["action"]), str(row["symbol"])))
+    for identity, row in keyed:
         if identity in held:
             result += held.pop(identity)
         elif identity not in corrected:
             result.append(dict(row))
     # A key the session's journal never held (a trade recorded only later).
     return result + [row for rows in held.values() for row in rows]
+
+
+def _identity(row: Mapping[str, object]) -> tuple[str, str]:
+    """A journal row's ``(session, key)``."""
+
+    at = datetime.fromisoformat(str(row["execute_at"])).astimezone(CN_TZ)
+    return at.strftime("%Y%m%d"), key_text(at.strftime("%H:%M"), str(row["action"]), str(row["symbol"]))
 
 
 def _stored_transition(root: Path) -> dict[str, object]:

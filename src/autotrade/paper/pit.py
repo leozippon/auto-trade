@@ -83,6 +83,15 @@ def newest_replay_slot(state_root: str | Path) -> Path | None:
     )
 
 
+def slot_minute_source(replay_dir: Path, max_row_group_rows: int) -> HistoricalMinuteSource | None:
+    """The exact minute prices of a replay slot, or None when it holds none."""
+
+    path = replay_dir / "intraday_1min.parquet"
+    if not path.exists() or not pq.ParquetFile(path).metadata.num_rows:
+        return None
+    return HistoricalMinuteSource(path, max_row_group_rows=max_row_group_rows)
+
+
 class BookPITData:
     def __init__(
         self,
@@ -160,12 +169,7 @@ class BookPITData:
             _remove_tree(runtime)
         runtime.mkdir(parents=True)
         self.asof_dir = runtime / "asof"
-        minute_path = replay_dir / "intraday_1min.parquet"
-        self.minute_source = (
-            HistoricalMinuteSource(minute_path, max_row_group_rows=max_intraday_row_group_rows)
-            if minute_path.exists() and pq.ParquetFile(minute_path).metadata.num_rows
-            else None
-        )
+        self.minute_source = slot_minute_source(replay_dir, max_intraday_row_group_rows)
         self.timeview = Timeview(
             host_dir=self.asof_dir,
             snapshot_dir=self.snapshot_dir,

@@ -40,13 +40,13 @@ from autotrade.environment.broker import (
     ex_date_shares,
 )
 from autotrade.environment.broker_core import (
+    ANY_SIZE_MINIMUM,
     LOT_SIZE,
-    STAR_MIN_LOT_SIZE,
     board_of,
 )
 from autotrade.environment.strategy import StrategyContext, StrategySchedule
 
-from .engine import run_daily_replay
+from .engine import ExecutionPriceProvider, run_daily_replay
 from .market import DailyMarketData, date_text
 from .stats import ReplayResult, total_return_from_curve
 from .style import daily_returns_from_curve
@@ -212,6 +212,7 @@ def run_null_control(
     corporate_actions: pd.DataFrame | None = None,
     membership: Mapping[str, Collection[str]] | None = None,
     baselines: bool = False,
+    execution_price: ExecutionPriceProvider | None = None,
 ) -> dict[str, object]:
     """Replay ``k`` random-name copies of ``result``'s skeleton and rank it.
 
@@ -239,6 +240,10 @@ def run_null_control(
     is their equal-weight mean per trading day and ``baseline_draw_sd`` the
     cross-draw standard deviation. A result that never filled a trade has an
     idle cash account as its zero-skill copy, so its random baseline is zero every day.
+
+    ``execution_price`` is the price source the result's own replay met its
+    orders at a minute other than 09:30 and 15:00 with
+    (``engine.resolve_execution_price``); every draw meets them through it too.
     """
 
     if k < 1:
@@ -307,6 +312,7 @@ def run_null_control(
             strategy=_scripted_strategy(orders),
             schedule=null_schedule,
             profile=profile,
+            execution_price=execution_price,
         )
         excesses.append(total_return_from_curve(run.equity_curve) - window_benchmark)
         rejects.append(sum(1 for record in run.executions if record["status"] != "filled"))
@@ -421,11 +427,13 @@ class _Universe:
         # candidate on that day at all.
         rows = rows[np.isfinite(rows["open"]) & (rows["open"] > 0)]
         symbols = rows["symbol"].unique()
-        # ``board`` sets a buy's lot ladder; ``listed_on`` is the board in the
-        # vocabulary an account's permission names.
-        boards = {symbol: _board(symbol) for symbol in symbols}
+        # ``listed_on`` is the board in the vocabulary an account's permission
+        # names; ``any_size`` the fewest shares a buy declares on a board that
+        # takes any size from there on (``broker_core.ANY_SIZE_MINIMUM``), 0 on
+        # one that declares whole lots.
         listed_on = {symbol: board_of(symbol) for symbol in symbols}
-        rows = rows.assign(board=rows["symbol"].map(boards), listed_on=rows["symbol"].map(listed_on))
+        any_size = {symbol: ANY_SIZE_MINIMUM.get(board, 0) for symbol, board in listed_on.items()}
+        rows = rows.assign(listed_on=rows["symbol"].map(listed_on), any_size=rows["symbol"].map(any_size))
         self._days = {
             date: group.set_index("symbol")
             for date, group in rows.groupby("trade_date", sort=False)
@@ -578,13 +586,17 @@ def _candidate_pool(
         inside = entry.index.isin(constituents)
         names = entry.index[inside == (trip.symbol in constituents)]
     if trip.exit_date is not None:
+        # A known, accepted look-ahead: only names with a bar on the exit date
+        # stay, which drops 1.1 % of a pool on average (7.7 % at most, in
+        # 2015-16) and partly mirrors the candidate's own exits, made on its
+        # names' tradable days.
         names = names.intersection(universe.day(trip.exit_date).index)
     if permitted_boards is not None:
         names = names[entry.loc[names, "listed_on"].isin(permitted_boards).to_numpy()]
     names = names.drop(trip.symbol, errors="ignore")
     bars = entry.loc[names]
     shares = np.floor_divide(trip.notional, bars["open"].to_numpy()).astype(int)
-    quantities = _lot_quantities(shares, bars["board"].to_numpy())
+    quantities = _lot_quantities(shares, bars["any_size"].to_numpy())
     return tuple(
         (symbol, int(quantity))
         for symbol, quantity in zip(names.tolist(), quantities, strict=True)
@@ -635,7 +647,7 @@ def _orders_from_pools(
         shares = sellable(trip, symbol, quantity)
         if (
             shares % LOT_SIZE
-            and _board(symbol) == _MAIN
+            and board_of(symbol) not in ANY_SIZE_MINIMUM
             and any(
                 other is not trip
                 and other.entry_at < trip.exit_at
@@ -695,27 +707,16 @@ def _queue(
     orders.setdefault(when.strftime("%Y%m%d"), []).append(order)
 
 
-_STAR, _BSE, _MAIN = "star", "bj", "main"
-
-
-def _board(symbol: str) -> str:
-    """The lot ladder a buy of ``symbol`` declares on: STAR's and the BSE's own,
-    whole lots on every other board (and on a code listed on none)."""
-
-    board = board_of(symbol)
-    return board if board in (_STAR, _BSE) else _MAIN
-
-
-def _lot_quantities(shares: np.ndarray, boards: np.ndarray) -> np.ndarray:
-    """``shares`` rounded down to what each name's board lets a buy declare.
-
-    STAR takes any size from 200 shares and BSE any size from 100; every other
-    board takes whole lots of 100. Zero where not one declaration fits.
+def _lot_quantities(shares: np.ndarray, any_size: np.ndarray) -> np.ndarray:
+    """``shares`` rounded down to what a buy of each name may declare
+    (``broker_core.validate_buy_lot``): any size from ``any_size`` shares on
+    where that is set, whole lots where it is 0. Zero where not one
+    declaration fits.
     """
 
-    declared = np.where(boards == _MAIN, shares - shares % LOT_SIZE, shares)
-    minimum = np.where(boards == _STAR, STAR_MIN_LOT_SIZE, LOT_SIZE)
-    return np.where(shares >= minimum, declared, 0)
+    whole = any_size == 0
+    declared = np.where(whole, shares - shares % LOT_SIZE, shares)
+    return np.where(shares >= np.where(whole, LOT_SIZE, any_size), declared, 0)
 
 
 def _scripted_strategy(

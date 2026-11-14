@@ -890,3 +890,33 @@ def test_a_replacement_meets_the_market_in_its_originals_session_and_limit():
         profile=BrokerProfile(),
     )
     assert [(row["session"], row["status"]) for row in run.executions] == [("intraday", "filled"), ("close", "filled")]
+
+
+def test_the_draws_meet_an_order_at_any_minute_through_the_results_own_price_source():
+    """An order without a session at a minute other than 09:30 and 15:00 is
+    priced only by the replay's minute source (``engine.resolve_execution_price``):
+    the draws meet their copies of it through the same source, or every one of
+    them is rejected for want of a price."""
+
+    frame = _frame()
+    opens = frame.set_index(["ts_code", "trade_date"])["open"]
+    script = {DAYS[2]: "buy", DAYS[9]: "sell"}
+
+    def minute_price(symbol: str, when: datetime) -> float:
+        return float(opens[symbol, when.strftime("%Y%m%d")])
+
+    def strategy(context):
+        day = context.inference_at.strftime("%Y%m%d")
+        if day not in script:
+            return []
+        return [{"symbol": "000001.SZ", "action": script[day], "quantity": 1000, "execute_at": _at(day, "10:00").isoformat()}]
+
+    schedule = StrategySchedule("day", "08:30")
+    result = run_daily_replay(
+        daily=frame, strategy=strategy, schedule=schedule, profile=BrokerProfile(), execution_price=minute_price
+    )
+    assert [row["status"] for row in result.executions] == ["filled", "filled"]
+    arguments = (result, frame, BENCHMARK, BrokerProfile(), schedule)
+    assert run_null_control(*arguments, k=3, seed=5, execution_price=minute_price)["rejects_mean"] == 0.0
+    # Without it each draw's buy finds no price and its exit nothing to sell.
+    assert run_null_control(*arguments, k=3, seed=5)["rejects_mean"] == 2.0

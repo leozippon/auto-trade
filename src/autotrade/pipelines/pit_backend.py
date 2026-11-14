@@ -737,7 +737,7 @@ def _bind_span_stashes(
     )
 
 
-def _span_daily(replay_dirs: Sequence[Path], start: str, end: str) -> pd.DataFrame:
+def span_daily(replay_dirs: Sequence[Path], start: str, end: str) -> pd.DataFrame:
     """The bars of ``start..end`` across a span, read from each slot's ``daily.parquet``.
 
     The Broker and ``context.bars`` need the whole span's bars from the first
@@ -943,7 +943,7 @@ class PITDailyEvaluationBackend:
         models_dir = _revision_models_dir(request.revision.models_path)
         keep_result_dir = False
         with timer.phase("replay_frames"):
-            daily = _span_daily(replay_dirs, request.start, request.end)
+            daily = span_daily(replay_dirs, request.start, request.end)
             # Broker-side ex-date truth only: it is not a Timeview domain and
             # never reaches the strategy.
             corporate_actions = _span_corporate_actions(replay_dirs, replay_manifests)
@@ -1113,6 +1113,7 @@ class PITDailyEvaluationBackend:
                                 benchmark_index=self.benchmark_index,
                             ),
                             baselines=True,
+                            execution_price=span.price_at if span.minute_sources else None,
                         )
                     except Exception as exc:  # noqa: BLE001 - every random baseline failure is the host's
                         baseline_failure = exc
@@ -1224,7 +1225,7 @@ class PITDailyEvaluationBackend:
         try:
             decision_dir, replay_dirs = _result_replay_slots(result_json)
             record = read_json_object(result_json)
-            daily = _span_daily(replay_dirs, start, end)
+            daily = span_daily(replay_dirs, start, end)
             benchmark = slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index)
             membership = slot_membership(
                 (decision_dir, *replay_dirs), benchmark_index=self.benchmark_index
@@ -1629,7 +1630,7 @@ def prebuild_asof_stash(
             "seconds": round(perf_counter() - started, 1),
             "reused": True,
         }
-    daily = _span_daily(replay_dirs, start, end)
+    daily = span_daily(replay_dirs, start, end)
     if daily.empty:
         raise ValueError(f"PIT daily replay is empty for {start}..{end}")
     # The replay engine's own decision points: one per trading day of the

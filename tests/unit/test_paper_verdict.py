@@ -241,6 +241,25 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     assert reading["plain"]["mean"] is not None
 
 
+def test_a_corrected_fill_keeps_the_session_and_limit_price_its_order_named():
+    """The random baseline replays a fill in its order's session and at its
+    limit price (``null_control.trade_skeleton``), so a corrected fill keeps
+    both from the journal row it replaces; a trade recorded only later named
+    neither."""
+
+    at = "2026-01-05T10:00:00+08:00"
+    journal = [{
+        "kind": "execution", "symbol": B, "action": "buy", "quantity": 300, "price": 15.0, "execute_at": at,
+        "matched_at": at, "status": "filled", "session": "intraday", "limit_price": 15.0,
+    }]
+    keys = (f"10:00 buy {B}", f"10:30 buy {A}")
+    ledger = {"20260105": {key: {"real": {"quantity": 200, "price": 14.9}} for key in keys}}
+    corrected = paper_verdict._corrected(journal, {("20260105", key) for key in keys}, ledger)
+    assert [(row["symbol"], row["quantity"], row.get("session"), row.get("limit_price")) for row in corrected] == [
+        (B, 200, "intraday", 15.0), (A, 200, None, None)
+    ]
+
+
 def _run_paper():
     spec = importlib.util.spec_from_file_location("run_paper", REPO_ROOT / "scripts/paper/run_paper.py")
     module = importlib.util.module_from_spec(spec)
