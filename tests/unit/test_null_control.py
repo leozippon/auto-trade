@@ -9,23 +9,27 @@ the benchmark's membership takes the decile's place.
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import replace
 from datetime import datetime
 
 import numpy as np
 import pandas as pd
 import pytest
 
-from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker import BrokerProfile, default_permitted_boards
+from autotrade.environment.broker_core import board_of
 from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.null_control import (
     BASELINE_DRAWS,
     MATCHED_DECILE,
     MATCHED_MEMBERSHIP,
+    UNCONSTRAINED_CASH,
     NullControlSetupError,
     RoundTrip,
     _candidate_pool,
     _distribution,
+    _draw_profile,
     _Membership,
     _orders_from_pools,
     _scripted_strategy,
@@ -41,6 +45,8 @@ SMALL = ("000001.SZ", "000002.SZ", "000003.SZ")
 LARGE = ("600001.SH", "600002.SH")
 CIRC_MV = {**{name: 1.0e9 for name in SMALL}, **{name: 5.0e10 for name in LARGE}}
 BENCHMARK = {day: 0.001 for day in DAYS}
+# The random baseline draws only on the boards a profile pins.
+PROFILE = BrokerProfile(permitted_boards=("main", "gem"))
 
 
 def _sample_null_orders(skeleton, frame: pd.DataFrame, seed: int, draw: int) -> dict[str, list[dict]]:
@@ -109,7 +115,7 @@ def _observed_result():
         daily=_frame(),
         strategy=strategy,
         schedule=StrategySchedule("day", "08:30"),
-        profile=BrokerProfile(),
+        profile=PROFILE,
     )
 
 
@@ -296,7 +302,7 @@ def _board_draws(permitted_boards, draws: int, seed: int) -> list[list[tuple[str
     return result
 
 
-def test_the_random_baseline_draws_only_on_the_boards_the_account_may_buy():
+def test_the_random_baseline_draws_only_on_the_boards_the_account_may_buy(monkeypatch):
     drawn = {symbol for draw in _board_draws(("main", "gem"), 200, 1) for symbol, _action, _quantity in draw}
     assert drawn == {"000001.SZ", "000002.SZ", "600001.SH", "300001.SZ", "300002.SZ"}
     # Without the restriction the same pool reaches STAR and Beijing names.
@@ -320,11 +326,31 @@ def test_the_random_baseline_draws_only_on_the_boards_the_account_may_buy():
     observed = run_daily_replay(
         daily=_board_frame(), strategy=strategy, schedule=StrategySchedule("day", "08:30"), profile=profile
     )
+    runs = _spy_draws(monkeypatch)
     block = run_null_control(
         observed, _board_frame(), BENCHMARK, profile, StrategySchedule("day", "08:30"), k=20, seed=5
     )
     assert block["rejects_mean"] == 0.0
     assert block["dropped_trips_mean"] == 0.0
+
+    # A draw's account opens with more than any board's asset threshold, yet
+    # buys only where the candidate's own account could: its boards are the
+    # profile's, never derived from its balance.
+    assert default_permitted_boards(UNCONSTRAINED_CASH) == ("main", "gem", "star", "bj")
+    assert {(draw.initial_cash, draw.permitted_boards) for draw, _run in runs} == {
+        (UNCONSTRAINED_CASH, ("main", "gem"))
+    }
+    bought = {row["symbol"] for _draw, run in runs for row in run.executions if row["action"] == "buy"}
+    assert {board_of(symbol) for symbol in bought} == {"main", "gem"}
+    with pytest.raises(NullControlSetupError, match="pins none"):
+        run_null_control(
+            observed, _board_frame(), BENCHMARK, replace(profile, permitted_boards=None),
+            StrategySchedule("day", "08:30"), k=1, seed=5,
+        )
+    # A single-name cap is a weight of the opening balance, so a draw's stays
+    # the candidate's CNY cap.
+    capped = _draw_profile(replace(profile, max_single_name_weight=0.1))
+    assert capped.max_single_name_weight * capped.initial_cash == pytest.approx(0.1 * profile.initial_cash)
 
 
 def test_the_draws_are_pinned_to_the_seed_the_draw_and_the_trip():
@@ -456,12 +482,160 @@ def test_identical_trades_meet_the_identical_random_baseline():
     """Two replays of one script are two results with one trade list, so
     their random baselines agree to the last digit."""
 
-    arguments = (_frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"))
+    arguments = (_frame(), BENCHMARK, PROFILE, StrategySchedule("day", "08:30"))
     first = run_null_control(_observed_result(), *arguments, seed=17, baselines=True)
     second = run_null_control(_observed_result(), *arguments, seed=17, baselines=True)
 
     assert first["k"] == BASELINE_DRAWS
     assert first == second
+
+
+def _spy_draws(monkeypatch) -> list[tuple[BrokerProfile, ReplayResult]]:
+    """Every draw ``run_null_control`` replays, with the profile it ran under."""
+
+    runs: list[tuple[BrokerProfile, ReplayResult]] = []
+
+    def spy(**kwargs):
+        run = run_daily_replay(**kwargs)
+        runs.append((kwargs["profile"], run))
+        return run
+
+    monkeypatch.setattr("autotrade.environment.replay.null_control.run_daily_replay", spy)
+    return runs
+
+
+def _script_strategy(script):
+    """A strategy that sends ``script[day]``'s ``(symbol, action, quantity, clock)`` orders."""
+
+    def strategy(context):
+        day = context.inference_at.strftime("%Y%m%d")
+        return [
+            {"symbol": symbol, "action": action, "quantity": quantity, "execute_at": _at(day, clock).isoformat()}
+            for symbol, action, quantity, clock in script.get(day, ())
+        ]
+
+    return strategy
+
+
+def _growth_frame() -> pd.DataFrame:
+    """Six names in one size bucket over 16 days: 000001.SZ climbs from 10 to
+    64 by DAYS[9] and holds there, the others stay flat at 10 to 14."""
+
+    rows = []
+    for offset, day in enumerate(DAYS[:16]):
+        for index, symbol in enumerate(f"00000{number}.SZ" for number in range(1, 7)):
+            if index == 0:
+                price, previous = 10.0 + 6.0 * min(offset, 9), 10.0 + 6.0 * min(max(offset - 1, 0), 9)
+            else:
+                price = previous = 9.0 + index
+            rows.append(
+                {
+                    "ts_code": symbol,
+                    "trade_date": day,
+                    "open": price,
+                    "close": price,
+                    "pre_close": previous,
+                    "up_limit": price * 1.5,
+                    "down_limit": price * 0.5,
+                    "is_suspended": False,
+                    "circ_mv": 1.0e9,
+                }
+            )
+    return pd.DataFrame(rows)
+
+
+def test_a_draw_holds_every_trip_of_a_candidate_that_outgrew_its_opening_cash(monkeypatch):
+    """The defect this replaces: each draw was a CNY 200k account of its own
+    while its trips kept the candidate's CNY, so once the candidate's equity
+    pulled away a draw's buys were refused for cash. A draw now trades on the
+    candidate's capital: a candidate that grew six-fold and then deploys a
+    million meets draws that hold every one of its trips."""
+
+    frame = _growth_frame()
+    profile = BrokerProfile(initial_cash=200_000, permitted_boards=("main", "gem"))
+    script = {
+        DAYS[0]: (("000001.SZ", "buy", 19_000, "09:30"),),
+        DAYS[9]: (("000001.SZ", "sell", 19_000, "15:00"),),
+        DAYS[10]: tuple((symbol, "buy", 30_000, "09:30") for symbol in ("000002.SZ", "000003.SZ", "000004.SZ")),
+        DAYS[15]: tuple((symbol, "sell", 30_000, "15:00") for symbol in ("000002.SZ", "000003.SZ", "000004.SZ")),
+    }
+    schedule = StrategySchedule("day", "08:30")
+    result = run_daily_replay(daily=frame, strategy=_script_strategy(script), schedule=schedule, profile=profile)
+    assert all(row["status"] == "filled" for row in result.executions)
+    assert result.equity_curve[9]["equity"] > 6 * profile.initial_cash
+
+    runs = _spy_draws(monkeypatch)
+    block = run_null_control(result, frame, BENCHMARK, profile, schedule, k=5, seed=11)
+
+    assert (block["round_trips"], block["rejects_mean"], block["dropped_trips_mean"]) == (4, 0.0, 0.0)
+    assert len(runs) == 5
+    for _draw, run in runs:
+        assert all(row["status"] == "filled" for row in run.executions)
+        assert sum(row["action"] == "buy" for row in run.executions) == 4
+        assert run.equity_curve[-1]["positions"] == {}
+    # The same orders in an account of the candidate's opening cash, as each
+    # draw used to be, are refused for cash.
+    skeleton, _unpaired = trade_skeleton(result.executions)
+    universe = _Universe(frame)
+    pools = [_candidate_pool(trip, universe, None, profile.permitted_boards) for trip in skeleton]
+    orders, _dropped = _orders_from_pools(skeleton, pools, 11, 0, _sellable(universe, frame), universe.carried_limit)
+    own_account = run_daily_replay(
+        daily=frame, strategy=_scripted_strategy(orders), schedule=StrategySchedule("year", "08:30"), profile=profile
+    )
+    assert any(row["reason"] == "insufficient_cash" for row in own_account.executions)
+
+
+def test_a_draws_daily_return_is_its_pnl_over_the_candidates_previous_close():
+    """Worked by hand, without costs: the candidate buys 1 000 of 600001.SH
+    at 10 and sells at the third close; its only replacement, 600002.SH, takes
+    the same 10 000 CNY as 500 shares at 20, closes 21 and 22 and is sold at
+    19. Each draw earns +500, +500 and -1 500 CNY on those days, read on the
+    candidate's equity at the previous close: 100 000, 102 000 and 105 000 --
+    not on what an account of the draw's own would hold (100 500, 101 000)."""
+
+    prices = {  # (open, close) per day; each day's pre_close is the last close.
+        "600001.SH": ((10.0, 12.0), (12.0, 15.0), (15.0, 16.0)),
+        "600002.SH": ((20.0, 21.0), (21.0, 22.0), (22.0, 19.0)),
+    }
+    frame = pd.DataFrame(
+        {
+            "ts_code": symbol,
+            "trade_date": day,
+            "open": opening,
+            "close": closing,
+            "pre_close": bars[offset - 1][1] if offset else opening,
+            "up_limit": 100.0,
+            "down_limit": 1.0,
+            "is_suspended": False,
+            "circ_mv": 5.0e10,
+        }
+        for symbol, bars in prices.items()
+        for offset, (day, (opening, closing)) in enumerate(zip(DAYS[:3], bars, strict=True))
+    )
+    free = BrokerProfile(
+        initial_cash=100_000,
+        commission_bps=0.0,
+        min_commission_cny=0.0,
+        transfer_fee_bps=0.0,
+        stamp_duty_sell_bps_before_cutover=0.0,
+        stamp_duty_sell_bps_from_cutover=0.0,
+        slippage_bps=0.0,
+        permitted_boards=("main",),
+    )
+    script = {DAYS[0]: (("600001.SH", "buy", 1000, "09:30"),), DAYS[2]: (("600001.SH", "sell", 1000, "15:00"),)}
+    schedule = StrategySchedule("day", "08:30")
+    result = run_daily_replay(daily=frame, strategy=_script_strategy(script), schedule=schedule, profile=free)
+    assert [row["equity"] for row in result.equity_curve] == [102_000.0, 105_000.0, 106_000.0]
+
+    flat = {day: 0.0 for day in DAYS[:3]}
+    block = run_null_control(result, frame, flat, free, schedule, k=2, seed=1, baselines=True)
+
+    expected = [500 / 100_000, 500 / 102_000, -1_500 / 105_000]
+    assert [day for day, _value in block["baseline_daily"]] == list(DAYS[:3])
+    assert [value for _day, value in block["baseline_daily"]] == pytest.approx(expected, abs=1e-12)
+    assert [value for _day, value in block["baseline_draw_sd"]] == pytest.approx([0.0] * 3, abs=1e-12)
+    assert block["null_excess_mean"] == pytest.approx(np.prod(1 + np.asarray(expected)) - 1, abs=1e-6)
+    assert block["observed_excess"] == pytest.approx(0.06, abs=1e-6)
 
 
 def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
@@ -492,7 +666,7 @@ def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
         daily=_frame(),
         strategy=strategy,
         schedule=StrategySchedule("day", "08:30"),
-        profile=BrokerProfile(),
+        profile=PROFILE,
     )
     skeleton, _unpaired = trade_skeleton(result.executions)
     assert [trip.quantity for trip in skeleton] == [900, 100]
@@ -501,7 +675,7 @@ def test_a_round_trip_too_small_to_buy_a_lot_is_counted_not_hidden():
         result,
         _frame(),
         BENCHMARK,
-        BrokerProfile(),
+        PROFILE,
         StrategySchedule("day", "08:30"),
         k=3,
         seed=17,
@@ -586,7 +760,7 @@ def test_a_mounted_membership_that_misses_the_span_fails_before_any_draw():
         _observed_result(),
         _frame(),
         BENCHMARK,
-        BrokerProfile(),
+        PROFILE,
         StrategySchedule("day", "08:30"),
     )
 
@@ -620,7 +794,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
         result,
         frame,
         BENCHMARK,
-        BrokerProfile(),
+        PROFILE,
         StrategySchedule("day", "08:30"),
         k=3,
         seed=17,
@@ -642,7 +816,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
 
     assert (
         run_null_control(
-            result, frame, BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"),
+            result, frame, BENCHMARK, PROFILE, StrategySchedule("day", "08:30"),
             k=3, seed=17,
         )
         == block
@@ -652,7 +826,7 @@ def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
         result,
         frame,
         BENCHMARK,
-        BrokerProfile(),
+        PROFILE,
         StrategySchedule("day", "08:30"),
         k=3,
         seed=17,
@@ -685,7 +859,7 @@ def test_the_random_baseline_is_the_draws_mean_daily_return_and_leaves_the_resul
     frame = _frame()
     result = _observed_result()
     before = (result.equity_curve, result.executions)
-    arguments = (result, frame, BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"))
+    arguments = (result, frame, BENCHMARK, PROFILE, StrategySchedule("day", "08:30"))
 
     block = run_null_control(
         *arguments, k=4, seed=17, membership={"20251231": set(SMALL)}, baselines=True
@@ -720,7 +894,7 @@ def test_run_null_control_rejects_a_frame_from_another_window():
             result,
             _frame()[lambda frame: frame["trade_date"] != DAYS[5]],
             BENCHMARK,
-            BrokerProfile(),
+            PROFILE,
             StrategySchedule("day", "08:30"),
             k=1,
             seed=1,
@@ -749,7 +923,7 @@ def test_a_result_with_no_filled_trade_has_no_null_and_runs_no_replay(monkeypatc
         pending_orders=(),
     )
     block = run_null_control(
-        result, _frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"), k=500, seed=3
+        result, _frame(), BENCHMARK, PROFILE, StrategySchedule("day", "08:30"), k=500, seed=3
     )
     assert block == {
         "status": "unavailable",
@@ -761,7 +935,7 @@ def test_a_result_with_no_filled_trade_has_no_null_and_runs_no_replay(monkeypatc
     }
     # The zero-skill copy of a book that never traded is an idle cash account.
     idle = run_null_control(
-        result, _frame(), BENCHMARK, BrokerProfile(), StrategySchedule("day", "08:30"),
+        result, _frame(), BENCHMARK, PROFILE, StrategySchedule("day", "08:30"),
         seed=3, baselines=True,
     )
     assert idle["baseline_daily"] == [[day, 0.0] for day in DAYS]
@@ -823,7 +997,7 @@ def test_a_null_exit_sells_the_bonus_shares_its_replacement_earned():
             daily=frame,
             strategy=_scripted_strategy(orders),
             schedule=StrategySchedule("year", "08:30"),
-            profile=BrokerProfile(),
+            profile=PROFILE,
         )
 
     single = [RoundTrip("000001.SZ", 100, 13.0, _at(DAYS[2], "09:30"), _at(DAYS[8], "15:00"))]
@@ -887,7 +1061,7 @@ def test_a_replacement_meets_the_market_in_its_originals_session_and_limit():
         daily=frame,
         strategy=_scripted_strategy(orders),
         schedule=StrategySchedule("year", "08:00"),
-        profile=BrokerProfile(),
+        profile=PROFILE,
     )
     assert [(row["session"], row["status"]) for row in run.executions] == [("intraday", "filled"), ("close", "filled")]
 
@@ -913,10 +1087,10 @@ def test_the_draws_meet_an_order_at_any_minute_through_the_results_own_price_sou
 
     schedule = StrategySchedule("day", "08:30")
     result = run_daily_replay(
-        daily=frame, strategy=strategy, schedule=schedule, profile=BrokerProfile(), execution_price=minute_price
+        daily=frame, strategy=strategy, schedule=schedule, profile=PROFILE, execution_price=minute_price
     )
     assert [row["status"] for row in result.executions] == ["filled", "filled"]
-    arguments = (result, frame, BENCHMARK, BrokerProfile(), schedule)
+    arguments = (result, frame, BENCHMARK, PROFILE, schedule)
     assert run_null_control(*arguments, k=3, seed=5, execution_price=minute_price)["rejects_mean"] == 0.0
     # Without it each draw's buy finds no price and its exit nothing to sell.
     assert run_null_control(*arguments, k=3, seed=5)["rejects_mean"] == 2.0

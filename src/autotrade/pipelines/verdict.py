@@ -498,7 +498,8 @@ def _compounded(series: object, start: str, end: str) -> float | None:
 def baseline_return(analysis: Mapping[str, object]) -> float | None:
     """What the random-baseline composite itself earned over the sidecar's
     span, after its own costs: the return of the random-name copies of the
-    book's trade skeleton. ``None`` on a sidecar without a random baseline."""
+    book's trade skeleton on the book's own capital. ``None`` on a sidecar
+    without a random baseline."""
 
     return _compounded(analysis.get("baseline_daily"), "", "")
 

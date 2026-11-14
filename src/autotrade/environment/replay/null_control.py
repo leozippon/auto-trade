@@ -4,9 +4,24 @@ The question: is a window's excess return due to WHICH names the strategy
 picked, or only to its timing, sizing and exposure? The null keeps the trade
 skeleton — the same entry and exit instants, the same money per round trip —
 and replaces every name with a random one the same money could have bought on
-the same side of the benchmark's membership, then replays the script through
-the same Broker. If the observed excess sits inside the null distribution, the
-name selection carried no information the timing did not already carry.
+the same side of the benchmark's membership, then replays the script under
+the same Broker rules. If the observed excess sits inside the null
+distribution, the name selection carried no information the timing did not
+already carry.
+
+A draw is matched to the candidate's capital. It replays the candidate's
+round trips in the candidate's own CNY, in an account that is never short of
+cash (``UNCONSTRAINED_CASH``), and its daily return is its day's PnL over the
+candidate's equity at the previous close (the opening capital on the first
+day), the same quotient the candidate's own daily return is of its own PnL.
+So however far the candidate's equity moves from where it opened, no draw
+drops a round trip for want of cash, and each holds its trips at the
+candidate's exposure and costs. Board permission and affordability stay the candidate's: a replacement comes
+only from the boards the profile pins and only where one lot fits the trip's
+own money, and a single-name cap stays the candidate's CNY cap
+(``_draw_profile``). Every figure derived from the draws -- the composite,
+its cross-draw spread, each draw's whole-window and step excess -- is read
+off that one series (``_capital_returns``).
 
 The draws' equal-weight mean daily return is the random-baseline composite:
 what the account earns in the candidate's own shape — its review calendar, its
@@ -27,7 +42,7 @@ import hashlib
 import math
 from bisect import bisect_left
 from collections.abc import Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 
 import numpy as np
@@ -48,12 +63,12 @@ from autotrade.environment.strategy import StrategyContext, StrategySchedule
 
 from .engine import ExecutionPriceProvider, run_daily_replay
 from .market import DailyMarketData, date_text
-from .stats import ReplayResult, total_return_from_curve
-from .style import daily_returns_from_curve
+from .stats import ReplayResult, compounded_return
 
 # Draws of one null control. Twenty put the composite's standard error at
-# 1.4-3.2 pp/yr against the 4-11 pp/yr active returns it is subtracted from,
-# at a twenty-fifth of what a percentile-grade 500 would cost on every replay.
+# 0.8-2.2 pp/yr within one year (seven books, 2026-11-15) against the 4-11
+# pp/yr active returns it is subtracted from, at a twenty-fifth of what a
+# percentile-grade 500 would cost on every replay.
 BASELINE_DRAWS = 20
 # How a replacement name is drawn: uniformly among the entry day's names that
 # one board lot of this round trip's own money can buy and that sit on the
@@ -67,6 +82,12 @@ BASELINE_DRAWS = 20
 # that differs in that trip's replacements alone.
 MATCHED_MEMBERSHIP = "index_membership+affordability"
 MATCHED_DECILE = "circ_mv_decile+affordability"
+# The cash a draw's account opens with. Orders of the candidate's own size
+# never come near it, so no draw is refused for cash (one that is fails the
+# whole call); the balance enters no figure, as a draw's return is read off
+# its day's PnL. Small enough that the account's equity still resolves a
+# tenth of a fen.
+UNCONSTRAINED_CASH = 1.0e12
 _DECILES = 10
 _DIGITS = 6
 
@@ -75,8 +96,9 @@ class NullControlSetupError(RuntimeError):
     """The null control could not be set up, so it drew and measured nothing.
 
     Raised strictly before the first draw: the result's replay slots could not
-    be resolved, the tables they hold could not be read, or the benchmark
-    membership they mount has no section before a round trip's entry. A caller that
+    be resolved, the tables they hold could not be read, the benchmark
+    membership they mount has no section before a round trip's entry, or the
+    Broker profile pins no boards (``_draw_profile``). A caller that
     charges a budget for the host compute a null control spends gives that
     charge back on this error, because none of it was spent.
     """
@@ -238,7 +260,8 @@ def run_null_control(
 
     ``baselines`` adds the draws' daily return series to the block: ``baseline_daily``
     is their equal-weight mean per trading day and ``baseline_draw_sd`` the
-    cross-draw standard deviation. A result that never filled a trade has an
+    cross-draw standard deviation, each draw's return its day's PnL over the
+    result's equity at the previous close. A result that never filled a trade has an
     idle cash account as its zero-skill copy, so its random baseline is zero every day.
 
     ``execution_price`` is the price source the result's own replay met its
@@ -268,22 +291,27 @@ def run_null_control(
             "excess_percentile": None,
         }
         if baselines:
-            returns = daily_returns_from_curve(result.equity_curve)
-            idle["baseline_daily"] = [[date, 0.0] for date, _value in returns]
-            idle["baseline_draw_sd"] = [[date, 0.0] for date, _value in returns]
+            idle["baseline_daily"] = [[date, 0.0] for date in dates]
+            idle["baseline_draw_sd"] = [[date, 0.0] for date in dates]
         return idle
+    draw_profile = _draw_profile(profile)
+    capital = _previous_closes(result.equity_curve)
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe, members, profile.permitted_boards) for trip in skeleton]
 
     window_benchmark = _benchmark_return(dates, benchmark)
-    observed = total_return_from_curve(result.equity_curve) - window_benchmark
+    observed_returns = _capital_returns(result.equity_curve, capital)
+    observed = compounded_return(observed_returns) - window_benchmark
     bounds = None if step is None else _step_bounds(step)
     if bounds is not None:
         start, end = bounds
+        in_step = np.asarray([start <= date <= end for date in dates])
+        if not in_step.any():
+            raise ValueError(f"step window {start}..{end} contains no replayed trading day")
         step_benchmark = _benchmark_return(
             [date for date in dates if start <= date <= end], benchmark
         )
-        observed_step = _sub_window_return(result.equity_curve, start, end) - step_benchmark
+        observed_step = compounded_return(observed_returns[in_step]) - step_benchmark
 
     # The draw is fixed before the replay starts, so the null needs exactly one
     # decision point. Keeping the replayed strategy's own cadence would rebuild
@@ -294,7 +322,7 @@ def run_null_control(
     step_excesses: list[float] = []
     rejects: list[int] = []
     dropped: list[int] = []
-    series: list[list[tuple[str, float]]] = []
+    series: list[np.ndarray] = []
     for draw in range(k):
         orders, dropped_trips = _orders_from_pools(
             skeleton,
@@ -311,23 +339,29 @@ def run_null_control(
             daily=market,
             strategy=_scripted_strategy(orders),
             schedule=null_schedule,
-            profile=profile,
+            profile=draw_profile,
             execution_price=execution_price,
         )
-        excesses.append(total_return_from_curve(run.equity_curve) - window_benchmark)
-        rejects.append(sum(1 for record in run.executions if record["status"] != "filled"))
-        if baselines:
-            series.append(daily_returns_from_curve(run.equity_curve))
-        if bounds is not None:
-            step_excesses.append(
-                _sub_window_return(run.equity_curve, start, end) - step_benchmark
+        refused = [record for record in run.executions if record["status"] != "filled"]
+        if any(record["reason"] == "insufficient_cash" for record in refused):
+            raise RuntimeError(
+                f"draw {draw} was refused an order for cash in an account opened with "
+                f"{UNCONSTRAINED_CASH:,.0f} CNY"
             )
+        returns = _capital_returns(run.equity_curve, capital)
+        series.append(returns)
+        excesses.append(compounded_return(returns) - window_benchmark)
+        rejects.append(len(refused))
+        if bounds is not None:
+            step_excesses.append(compounded_return(returns[in_step]) - step_benchmark)
 
     block: dict[str, object] = {
         "k": k,
         "seed": seed,
         "matched": matched,
         **_distribution(observed, excesses),
+        # Orders a draw's Broker refused: a limit lock, a suspension, a name
+        # without a bar, never cash.
         "rejects_mean": round(sum(rejects) / k, 3),
         "round_trips": len(skeleton),
         # Round trips no draw could deploy: not one matched name had a board
@@ -346,18 +380,60 @@ def run_null_control(
             **_distribution(observed_step, step_excesses),
         }
     if baselines:
-        days = [date for date, _value in series[0]]
-        if any([date for date, _value in draw] != days for draw in series):
-            raise ValueError("null draws cover different trading days")
-        values = np.asarray([[value for _date, value in draw] for draw in series])
-        spread = values.std(axis=0, ddof=1) if k > 1 else np.zeros(len(days))
+        values = np.vstack(series)
+        spread = values.std(axis=0, ddof=1) if k > 1 else np.zeros(len(dates))
         block["baseline_daily"] = [
-            [date, float(value)] for date, value in zip(days, values.mean(axis=0), strict=True)
+            [date, float(value)] for date, value in zip(dates, values.mean(axis=0), strict=True)
         ]
         block["baseline_draw_sd"] = [
-            [date, float(value)] for date, value in zip(days, spread, strict=True)
+            [date, float(value)] for date, value in zip(dates, spread, strict=True)
         ]
     return block
+
+
+def _draw_profile(profile: BrokerProfile) -> BrokerProfile:
+    """The candidate's Broker profile for a draw: the opening balance alone
+    changes, to one that is never short of cash.
+
+    The boards are the ones the candidate's profile pins, so a profile that
+    pins none is refused: a draw may buy only where the candidate's own
+    account could, never where its balance would qualify. A single-name cap
+    is a weight of the opening balance (``DailyBroker._single_name_cap_reject``),
+    so it is rescaled to stay the candidate's CNY cap.
+    """
+
+    if profile.permitted_boards is None:
+        raise NullControlSetupError(
+            "the random baseline draws only on the boards the candidate's account may buy "
+            "on, and its Broker profile pins none (BrokerProfile.permitted_boards)"
+        )
+    weight = profile.max_single_name_weight
+    return replace(
+        profile,
+        initial_cash=UNCONSTRAINED_CASH,
+        max_single_name_weight=(
+            None if weight is None else weight * profile.initial_cash / UNCONSTRAINED_CASH
+        ),
+    )
+
+
+def _previous_closes(curve: Sequence[Mapping[str, object]]) -> np.ndarray:
+    """The candidate's equity at each day's previous close, its opening
+    capital on the first: the capital every draw's daily PnL is read on."""
+
+    equity = [float(row["equity"]) for row in curve]
+    capital = np.asarray([float(curve[0]["initial_equity"]), *equity[:-1]])
+    if not (np.isfinite(capital).all() and (capital > 0).all()):
+        raise ValueError("the result's equity curve is not positive and finite on every day")
+    return capital
+
+
+def _capital_returns(curve: Sequence[Mapping[str, object]], capital: np.ndarray) -> np.ndarray:
+    """A replay's daily PnL over ``capital`` (``_previous_closes``): a draw's
+    daily return, and the candidate's own when ``curve`` is the candidate's."""
+
+    equity = np.asarray([float(row["equity"]) for row in curve])
+    return np.diff(equity, prepend=float(curve[0]["initial_equity"])) / capital
 
 
 class _Membership:
@@ -664,8 +740,8 @@ def _orders_from_pools(
             exit_limit = carried_limit(trip.exit_limit, trip.symbol, symbol, str(trip.exit_date))
             _queue(orders, symbol, "sell", shares, trip.exit_at, trip.exit_session, exit_limit)
     for day in orders.values():
-        # Exits before entries at one instant, so a cash-bound null is not
-        # rejected for money its own sales are about to release.
+        # Exits before entries at one instant, so an entry meets the holdings
+        # that instant's sales leave: a holdings or single-name cap reads them.
         day.sort(key=lambda order: (str(order["execute_at"]), order["action"] == "buy"))
     return orders, dropped
 
@@ -754,26 +830,6 @@ def _distribution(observed: float, values: Sequence[float]) -> dict[str, object]
     }
 
 
-def _sub_window_return(
-    curve: Sequence[Mapping[str, object]], start: str, end: str
-) -> float:
-    """Equity return over ``start..end``, based on the last close before it."""
-
-    base: float | None = None
-    final: float | None = None
-    for row in curve:
-        date = str(row["trade_date"])
-        if date < start:
-            base = float(row["equity"])
-        elif date <= end:
-            final = float(row["equity"])
-    if final is None:
-        raise ValueError(f"step window {start}..{end} contains no replayed trading day")
-    if base is None:
-        base = float(curve[0]["initial_equity"])
-    return final / base - 1.0
-
-
 def _benchmark_return(dates: Sequence[str], benchmark: Mapping[str, float]) -> float:
     total = 1.0
     for date in dates:
@@ -798,6 +854,7 @@ __all__ = [
     "BASELINE_DRAWS",
     "MATCHED_DECILE",
     "MATCHED_MEMBERSHIP",
+    "UNCONSTRAINED_CASH",
     "NullControlSetupError",
     "RandomBaselineError",
     "RoundTrip",

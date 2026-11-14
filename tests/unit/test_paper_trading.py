@@ -30,7 +30,9 @@ from tests.unit.fixtures_sandbox import docker_available
 
 SESSIONS = ("20260105", "20260106", "20260107", "20260108", "20260109", "20260112")
 SYMBOL = "000001.SZ"
-PROFILE = BrokerProfile(initial_cash=100_000.0, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0)
+PROFILE = BrokerProfile(
+    initial_cash=100_000.0, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0, permitted_boards=("main", "gem")
+)
 
 # A module-level decision counter, the way a registered strategy may pace its
 # rebalance: it buys on the first call of a worker and sells on the third.

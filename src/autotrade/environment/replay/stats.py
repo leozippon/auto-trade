@@ -99,9 +99,8 @@ def total_return_from_curve(curve: Sequence[Mapping[str, object]]) -> float:
     """Whole-window return of one equity curve against day 0's initial equity.
 
     The single definition of the number: ``compute_return_stats`` reports it,
-    and callers that need only this one figure (the style sidecar, the null
-    control's per-draw ranking) read it here instead of building the whole
-    projection to discard everything else.
+    and callers that need only this one figure (the style sidecar) read it
+    here instead of building the whole projection to discard everything else.
     """
     if not curve:
         return 0.0

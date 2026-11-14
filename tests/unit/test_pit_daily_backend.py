@@ -55,6 +55,10 @@ from autotrade.pipelines.pit_backend import (
 
 from .fixtures_sandbox import docker_available
 
+# The boards every profile below pins: the random baseline draws only on a
+# profile's own boards.
+BOARDS = ("main", "gem")
+
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
 def test_real_sandbox_daily_evaluation_reads_parquet_with_default_limits(
@@ -126,7 +130,7 @@ def generate_orders(context):
             "20240102",
             "20240103",
             StrategySchedule("day", "08:30"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
 
@@ -224,7 +228,7 @@ def generate_orders(context):
             "20240102",
             "20240103",
             StrategySchedule("day", "09:28"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
     record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
@@ -371,7 +375,7 @@ def generate_orders(context):
             "20240201",
             "20240202",
             StrategySchedule("month", "08:30"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
 
@@ -456,7 +460,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
             "20240102",
             "20240103",
             StrategySchedule("day", "09:28"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
 
@@ -603,7 +607,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
         "20240102",
         "20240103",
         StrategySchedule("day", "09:28"),
-        BrokerProfile(initial_cash=100_000),
+        BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
     )
     backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     result = backend.evaluate(request)
@@ -714,7 +718,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     null_control_call = {
         "start": "20240102",
         "end": "20240103",
-        "profile": BrokerProfile(initial_cash=100_000),
+        "profile": BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         "schedule": StrategySchedule("day", "09:28"),
         "seed": 1,
         "k": 1,
@@ -744,7 +748,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     # predates the bonus-share column, so the taxed replay is refused until the
     # slot is rebuilt rather than treating every share leg as tax-free.
     taxed = dataclasses.replace(
-        request, broker_profile=BrokerProfile(initial_cash=100_000, dividend_tax=True)
+        request, broker_profile=BrokerProfile(initial_cash=100_000, dividend_tax=True, permitted_boards=BOARDS)
     )
     with pytest.raises(ValueError, match="bonus_per_share"):
         PITDailyEvaluationBackend(tmp_path / "results_taxed_stale", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
@@ -1240,7 +1244,7 @@ def test_evaluation_rejects_replay_from_another_phase(tmp_path: Path) -> None:
         "20240102",
         "20240103",
         StrategySchedule("day", "08:30"),
-        BrokerProfile(initial_cash=100_000),
+        BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
     )
     with pytest.raises(ValueError, match="mode does not match"):
         PITDailyEvaluationBackend._validate_bundle(request, snapshot, (replay,))
@@ -1907,7 +1911,7 @@ def generate_orders(context):
                 "20240102",
                 "20240103",
                 StrategySchedule("day", "09:28"),
-                BrokerProfile(initial_cash=100_000),
+                BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
             ),
             max_days=max_days,
             start_day=start_day,
@@ -2278,7 +2282,7 @@ def _span_request(snapshot: Path, *replay_dirs: Path, revision: Path) -> Evaluat
         manifests[0]["period_start"],
         manifests[-1]["period_end"],
         _SPAN_SCHEDULE,
-        BrokerProfile(initial_cash=1_000_000),
+        BrokerProfile(initial_cash=1_000_000, permitted_boards=BOARDS),
         continuation=tuple(str(path) for path in rest),
     )
 

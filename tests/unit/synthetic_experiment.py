@@ -274,6 +274,9 @@ def make_experiment(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 "subagent_model": LOCAL_QWEN_MODEL,
                 "compact_model": LOCAL_QWEN_MODEL,
                 "initial_cash": 1_000_000,
+                # The boards creation stamps on this capital
+                # (``broker.default_permitted_boards``).
+                "permitted_boards": ["main", "gem", "star", "bj"],
                 # No tracking_error_cap: a one-name book cannot track CSI 300,
                 # and the capital buys no mandate of its own.
                 "include_fundamentals": False,
