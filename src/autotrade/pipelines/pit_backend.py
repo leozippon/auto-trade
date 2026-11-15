@@ -73,6 +73,7 @@ from autotrade.environment.replay.style import (
     replay_style_analysis,
     slot_benchmark,
     slot_membership,
+    warmup_bars,
     write_style_rollup,
 )
 from autotrade.environment.replay.timeview import ReplayRows, Timeview
@@ -657,6 +658,15 @@ def _slot_anchor(manifest: Mapping[str, object]) -> datetime:
     return anchor
 
 
+def _successor(manifest: Mapping[str, object]) -> tuple[str, datetime]:
+    """The first day and the anchor of the slot that continues this one."""
+
+    last_day = datetime.strptime(str(manifest.get("period_end")), "%Y%m%d").replace(tzinfo=CN_TZ)
+    return (last_day + timedelta(days=1)).strftime("%Y%m%d"), last_day.replace(
+        hour=23, minute=59, second=59
+    )
+
+
 def _require_continuous_slots(
     replay_dirs: Sequence[Path], manifests: Sequence[Mapping[str, object]]
 ) -> None:
@@ -673,9 +683,7 @@ def _require_continuous_slots(
 
     for index in range(1, len(manifests)):
         previous, current = manifests[index - 1], manifests[index]
-        last_day = datetime.strptime(str(previous.get("period_end")), "%Y%m%d").replace(tzinfo=CN_TZ)
-        start = (last_day + timedelta(days=1)).strftime("%Y%m%d")
-        anchor = last_day.replace(hour=23, minute=59, second=59)
+        start, anchor = _successor(previous)
         if (
             str(current.get("period_start")) != start
             or _optional_cn_datetime(current.get("available_from")) != anchor
@@ -689,6 +697,41 @@ def _require_continuous_slots(
         raise ValueError(
             "a replay span needs an unscreened universe: each slot screens at its own anchor"
         )
+
+
+def _preceding_bars(first_dir: Path, first: Mapping[str, object]) -> pd.DataFrame | None:
+    """The bars of the last trading days before a span (``style.warmup_bars``),
+    from the slot its first slot continues, or None where none is held.
+
+    The factor legs sort on values through the previous trading day, the
+    turnover leg on a twenty-day mean, so without these days a span's legs
+    have no value on its first days. Every phase view is a hardlink of the
+    cache's unphased store beside the phase directories
+    (``ResearchPITSnapshotProvider._replay_source``), which therefore holds
+    every slot the cache has built or been seeded with, whatever phase read
+    it: the forward replay's first slot continues the last validation year's.
+    The slot taken (the longest, if several) is one the first slot continues
+    as ``_require_continuous_slots`` requires of a span's slots, so its rows
+    are the ones a longer span reads. A span opening on the first slot the
+    cache holds finds none. The bars reach the factor legs alone: the Broker
+    and ``context.bars`` read the span's own.
+    """
+
+    start, anchor = str(first.get("period_start")), _slot_anchor(first)
+    preceding = min(
+        (
+            path
+            # A slot this one continues ends on the day of its anchor.
+            for path in first_dir.parent.parent.glob(f"*_{anchor:%Y%m%d}_*")
+            if path.is_dir()
+            and not path.name.startswith(".")
+            and _successor(load_snapshot_manifest(path)) == (start, anchor)
+        ),
+        default=None,
+    )
+    if preceding is None:
+        return None
+    return warmup_bars(pd.read_parquet(preceding / "daily.parquet"))
 
 
 def _universe_screened(manifest: Mapping[str, object]) -> bool:
@@ -965,6 +1008,8 @@ class PITDailyEvaluationBackend:
         keep_result_dir = False
         with timer.phase("replay_frames"):
             daily = span_daily(replay_dirs, request.start, request.end)
+            # Read by the factor legs alone (style.replay_style_analysis).
+            warmup = _preceding_bars(replay_dirs[0], replay_manifests[0])
             # Broker-side ex-date truth only: it is not a Timeview domain and
             # never reaches the strategy.
             corporate_actions = _span_corporate_actions(replay_dirs, replay_manifests)
@@ -976,7 +1021,15 @@ class PITDailyEvaluationBackend:
                 trade_days = replay_window(
                     span_days, start=start_day, max_days=max_days, end=end_day
                 )
-                daily = daily[_trade_date_keys(daily).isin(set(trade_days))].copy()
+                keys = _trade_date_keys(daily)
+                if trade_days and trade_days[0] != span_days[0]:
+                    # A window opening inside the span: the legs' days before
+                    # it are the span's own.
+                    inside = daily[keys < trade_days[0]]
+                    warmup = warmup_bars(
+                        inside if warmup is None else pd.concat([warmup, inside], ignore_index=True)
+                    )
+                daily = daily[keys.isin(set(trade_days))].copy()
                 # A truncated replay must not claim it covered the whole span.
                 if trade_days:
                     replay_start, replay_end = trade_days[0], trade_days[-1]
@@ -1160,6 +1213,7 @@ class PITDailyEvaluationBackend:
                     baselines=baselines,
                     benchmark_index=self.benchmark_index,
                     permitted_boards=request.broker_profile.permitted_boards,
+                    warmup=warmup,
                 )
             summary = record.get("stats")
             if not isinstance(summary, dict):

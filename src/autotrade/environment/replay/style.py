@@ -9,7 +9,8 @@ Agent actually saw):
 - holdings: the replay result's end-of-day position snapshots;
 - cross-sectional style ranks: the replay slot's ``daily.parquet``;
 - size, value and turnover legs: the same bars, of the names on the boards the
-  account may buy on (:func:`_factor_legs`);
+  account may buy on, sorted where the view cache holds them on the trading
+  days just before the replay (:func:`_factor_legs`);
 - benchmark: the experiment's ``benchmark_index`` rows of ``index_daily`` inside
   the replay slot's ``macro.parquet``;
 - SW L1 industry: each replay slot's as-of ``universe.parquet``, the vintage
@@ -28,8 +29,9 @@ is (``stats.plain_statistics``), which is what ``pipelines/verdict.py``
 grades.
 
 Everything degrades to None/empty blocks when inputs are missing —
-attribution is advisory and must never fail a backtest. The one refusal is a
-Broker profile that pins no boards, which the random baseline refuses too.
+attribution is advisory and must never fail a backtest. It refuses only what
+it cannot read truthfully: a Broker profile that pins no boards (the random
+baseline refuses it too) and a warm-up that is not wholly before the replay.
 """
 
 from __future__ import annotations
@@ -80,13 +82,12 @@ STYLE_SCHEMA_VERSION = 4
 READABLE_STYLE_SCHEMA_VERSIONS = frozenset({3, STYLE_SCHEMA_VERSION})
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 # The size, value and turnover legs of the factor regression: daily spreads of
-# the replay slot's own bars, over the names of the boards the account may buy
-# on, equal-weighted inside each leg, the legs formed on the previous trading
+# the replay's own bars, over the names of the boards the account may buy on,
+# equal-weighted inside each leg, the legs formed on the previous trading
 # day's value -- small minus big float cap, high minus low book-to-price
 # (1 / pb, names with pb <= 0 left out), and low minus high turnover: a name's
-# mean daily turnover rate over the slot's last ``_TURNOVER_DAYS`` trading
-# days, read where at least ``_TURNOVER_MIN_DAYS`` of them carry one, so the
-# leg begins on the slot's eleventh day. The
+# mean daily turnover rate over the last ``_TURNOVER_DAYS`` trading days, read
+# where at least ``_TURNOVER_MIN_DAYS`` of them carry one. The
 # audited edge read as a small-cap / low-beta tilt rather than proven alpha,
 # and a raw excess return cannot tell those apart; the measured rankers'
 # residual then read mostly as low turnover, and the lowest-turnover decile
@@ -379,8 +380,19 @@ def _turnover_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
     }
 
 
+def warmup_bars(bars: pd.DataFrame) -> pd.DataFrame:
+    """The rows of ``bars`` on its last ``_TURNOVER_DAYS`` trading days: all
+    that the factor legs read of the days before a replay's first day, the
+    longest window a leg sorts on (:func:`replay_style_analysis` ``warmup``)."""
+
+    dates = bars["trade_date"].map({value: date_text(value) for value in bars["trade_date"].unique()})
+    return bars[dates.isin(sorted(set(dates))[-_TURNOVER_DAYS:])]
+
+
 def _factor_legs(
-    replay_daily: pd.DataFrame, permitted_boards: Collection[str] | None
+    replay_daily: pd.DataFrame,
+    warmup: pd.DataFrame | None,
+    permitted_boards: Collection[str] | None,
 ) -> dict[str, dict[str, float]]:
     """The size, value and turnover legs of the replay's days, by their
     :data:`FACTOR_SERIES` series name.
@@ -391,6 +403,13 @@ def _factor_legs(
     Beijing-exchange micro-cap the account cannot buy would otherwise sit in
     the small-cap and turnover tails. A profile that pins no boards is
     refused, as the random baseline refuses it, never read on every board.
+
+    ``warmup`` is the bars of the trading days just before the replay's first
+    day (:func:`warmup_bars`), or None where the source holds none -- a
+    replay opening on the first slot the view cache holds, whose size and
+    value legs then begin on its second day and turnover leg once
+    ``_TURNOVER_MIN_DAYS`` of its own days stand behind the mean. It is read
+    only to sort: every leg value is a day of ``replay_daily``.
     """
 
     if permitted_boards is None:
@@ -398,14 +417,20 @@ def _factor_legs(
             "the factor legs are formed on the boards the account may buy on, and its "
             "Broker profile pins none (BrokerProfile.permitted_boards)"
         )
+    first = min(date_text(value) for value in replay_daily["trade_date"].unique())
     frame = replay_daily
+    if warmup is not None and not warmup.empty:
+        late = max(date_text(value) for value in warmup["trade_date"].unique())
+        if late >= first:
+            raise ValueError(f"the legs' warm-up holds {late}, not before the replay's first day {first}")
+        frame = pd.concat([warmup, replay_daily], ignore_index=True)
     symbol = _symbol_column(frame)
     if symbol in frame.columns:
         codes = frame[symbol].astype(str)
         boards = codes.map({code: board_of(code) for code in codes.unique()})
         frame = frame[boards.isin(set(permitted_boards)).to_numpy()]
     return {
-        series: leg(frame)
+        series: {date: value for date, value in leg(frame).items() if date >= first}
         for series, leg in (
             ("size_factor_daily", _size_factor),
             ("value_factor_daily", _value_factor),
@@ -629,6 +654,7 @@ def replay_style_analysis(
     baselines: Mapping[str, object] | None = None,
     benchmark_index: str,
     permitted_boards: Collection[str] | None,
+    warmup: pd.DataFrame | None = None,
 ) -> dict[str, object]:
     """Compute one result sidecar from the just-finished daily replay.
 
@@ -644,8 +670,10 @@ def replay_style_analysis(
     are stored beside the strategy's, and the active series (strategy minus
     composite), the series the verdict grades, is read as it is. A truncated
     smoke replay passes none.
-    ``permitted_boards`` is the boards the account may buy on: the factor
-    legs are formed on their names (:func:`_factor_legs`).
+    ``permitted_boards`` is the boards the account may buy on and ``warmup``
+    the bars before the replay's first day: the factor legs are formed on the
+    one and sort on the other (:func:`_factor_legs`), and nothing else here
+    reads ``warmup``.
     """
 
     label = benchmark_index_label(benchmark_index)
@@ -653,7 +681,7 @@ def replay_style_analysis(
     method = regression_method(benchmark_index)
     strategy = daily_returns_from_curve(replay.equity_curve)
     benchmark = slot_benchmark(replay_dir, benchmark_index=benchmark_index)
-    legs = {"benchmark_daily": benchmark, **_factor_legs(replay_daily, permitted_boards)}
+    legs = {"benchmark_daily": benchmark, **_factor_legs(replay_daily, warmup, permitted_boards)}
     factors = {"method": method, **_factor_regression(strategy, legs)}
     covered = [benchmark[date] for date, _value in strategy if date in benchmark]
     baseline_blocks: dict[str, object] = {}
@@ -858,6 +886,7 @@ __all__ = [
     "slot_benchmark",
     "slot_membership",
     "stored_factor_series",
+    "warmup_bars",
     "window_plain_excess",
     "write_style_rollup",
 ]

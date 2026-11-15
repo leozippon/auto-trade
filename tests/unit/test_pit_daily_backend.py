@@ -2504,6 +2504,60 @@ def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> N
     assert len(style[0]["benchmark_daily"]) == 4
 
 
+def test_the_bars_before_a_span_reach_the_factor_legs_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A span whose first slot continues a slot the cache's unphased store
+    holds hands that slot's last trading days to the factor legs, and to
+    nothing else: the Broker and the strategy replay the same bars with and
+    without them. A span opening on the first slot the cache holds has none,
+    and a window opening inside the span also gets the span's own days
+    before it."""
+
+    snapshot, slots = _write_span_release(tmp_path)
+    request = _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
+    warmups: list[pd.DataFrame | None] = []
+    real = pit_backend.replay_style_analysis
+
+    def recording(*args: object, **kwargs: object) -> dict[str, object]:
+        warmups.append(kwargs["warmup"])  # type: ignore[arg-type]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pit_backend, "replay_style_analysis", recording)
+
+    def replay(name: str, **window: str) -> dict[str, object]:
+        result = PITDailyEvaluationBackend(
+            tmp_path / name, execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
+        ).evaluate(request, **window)
+        return json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+
+    first = replay("results_first")
+    # The slot that slot "a" continues, as the provider's store keeps it.
+    preceding = slots["a"].parent.parent / "20231201_20231231_20231130T235959+0800"
+    preceding.mkdir()
+    _span_frames(("20231229",))["daily"].to_parquet(preceding / "daily.parquet", index=False)
+    (preceding / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": "replay_slot",
+                "label": REPLAY_SOURCE_LABEL,
+                "period_start": "20231201",
+                "period_end": "20231231",
+                "available_from": "2023-11-30T23:59:59+08:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    continued = replay("results_continued")
+    replay("results_late", start_day="20240103")
+
+    assert warmups[0] is None
+    assert set(warmups[1]["trade_date"]) == {"20231229"}
+    assert set(warmups[2]["trade_date"]) == {"20231229", "20240102"}
+    for key in ("equity_curve", "executions", "corporate_actions", "inference_dates", "pending_orders"):
+        assert first[key] == continued[key], key
+
+
 def _append_macro(path: Path, rows: list[dict[str, object]]) -> None:
     frame = pd.read_parquet(path)
     pd.concat([frame, pd.DataFrame(rows)], ignore_index=True).to_parquet(path, index=False)

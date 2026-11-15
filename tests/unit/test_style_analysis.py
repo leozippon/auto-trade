@@ -23,6 +23,7 @@ from autotrade.environment.replay.style import (
     daily_returns_from_curve,
     replay_style_analysis,
     slot_benchmark,
+    warmup_bars,
     write_style_rollup,
 )
 from autotrade.pipelines.session_tools import book_reading
@@ -442,8 +443,9 @@ def test_the_factor_regression_reads_the_market_and_size_loadings(tmp_path: Path
     )
     block = analysis["factor_regression"]
     assert block["available"] is True
-    # The legs are formed on the prior day's values and the turnover leg on a
-    # mean of at least ten days, so the regression runs from the window's
+    # With no bars before the window (a replay opening on the first slot the
+    # cache holds) the legs, formed on the prior day's values and the turnover
+    # leg on a mean of at least ten days, start the regression on its
     # eleventh day.
     assert block["n_days"] == len(days) - 10
     loadings = [name for name, _series in FACTOR_SERIES]
@@ -594,9 +596,10 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
         permitted_boards=BOARDS,
     )
 
-    # The published factor series is the raw decimal spread, not a percent. It
-    # starts on the second day: the legs are formed on the prior day's cap;
-    # the turnover leg starts once a mean of ten days stands behind it.
+    # The published factor series is the raw decimal spread, not a percent.
+    # With no bars before the window it starts on the second day, the legs
+    # formed on the prior day's cap, and the turnover leg once a mean of ten
+    # days stands behind it.
     assert analysis["size_factor_daily"][0] == [days[1], pytest.approx(smb[1])]
     assert analysis["value_factor_daily"][0] == [days[1], pytest.approx(hml[1])]
     assert analysis["turnover_factor_daily"][0] == [days[10], pytest.approx(lmh[10 % len(lmh)])]
@@ -697,7 +700,7 @@ def test_value_legs_are_formed_on_the_prior_days_book_to_price():
 
 def test_turnover_legs_sort_on_the_prior_days_twenty_day_mean():
     """Low minus high turnover: each name sorted on its mean turnover rate
-    over the slot's last twenty trading days through the previous day, read
+    over the last twenty trading days through the previous day, read
     only where at least ten of those days carry its rate, the 30 % tails
     equal-weighted. Here rates 1..40 put slots 0..11 in the low leg; on the
     window's twelfth day slot 0 churns 1,000 and gains 50 %. Sorted on its
@@ -757,6 +760,60 @@ def _leg_panel(days: list[str], codes: list[str], seed: int) -> pd.DataFrame:
 _PERMITTED = [f"{slot:06d}.SZ" for slot in range(30)] + [f"3000{slot:02d}.SZ" for slot in range(10)]
 
 
+def test_a_warm_up_gives_every_leg_its_value_from_the_replays_first_day(tmp_path: Path):
+    """A replay whose source holds the trading days before it sorts its first
+    days on them, so each leg reads on the replay's first day what a longer
+    replay covering both periods reads on that day. They are read only to
+    sort: no leg value is emitted for them, and bars on or after the replay's
+    first day are refused as a warm-up. With none (a replay opening on the
+    first slot the cache holds) the size and value legs begin on the second
+    day and the turnover leg on the eleventh."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=45)]
+    panel = _leg_panel(days, _PERMITTED, seed=11)
+    before, span = days[:25], days[25:]
+    own = panel[panel["trade_date"].isin(span)]
+    warmup = warmup_bars(panel[panel["trade_date"].isin(before)])
+    # Only what the longest window reads is kept.
+    assert sorted(set(warmup["trade_date"])) == before[-20:]
+
+    longer = _factor_legs(panel, None, BOARDS)
+    warm = _factor_legs(own, warmup, BOARDS)
+    cold = _factor_legs(own, None, BOARDS)
+    for series, leg in warm.items():
+        assert sorted(leg) == span, series
+        assert leg == {day: value for day, value in longer[series].items() if day >= span[0]}, series
+    assert min(cold["size_factor_daily"]) == min(cold["value_factor_daily"]) == span[1]
+    assert min(cold["turnover_factor_daily"]) == span[10]
+
+    with pytest.raises(ValueError, match="not before the replay's first day"):
+        _factor_legs(own, panel[panel["trade_date"].isin(days[20:26])], BOARDS)
+
+    # The sidecar regresses on every day of the replay.
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    pd.DataFrame(
+        {
+            "dataset": "index_daily",
+            "ts_code": BENCHMARK_TS_CODE,
+            "trade_date": span,
+            "pct_chg": np.random.default_rng(5).normal(0.0, 1.0, len(span)),
+        }
+    ).to_parquet(replay_dir / "macro.parquet", index=False)
+    analysis = replay_style_analysis(
+        _replay(span),
+        own,
+        replay_dir=replay_dir,
+        universes=(),
+        mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
+        warmup=warmup,
+    )
+    assert analysis["factor_regression"]["n_days"] == len(span)
+    assert analysis["turnover_factor_daily"][0][0] == span[0]
+
+
 def test_the_legs_are_formed_on_the_boards_the_account_may_buy_on():
     """Beijing-exchange and STAR names the account cannot buy -- micro-caps
     with extreme moves here -- leave the size, value and turnover legs as they
@@ -770,8 +827,8 @@ def test_the_legs_are_formed_on_the_boards_the_account_may_buy_on():
     ).assign(circ_mv=1.0, pb=50.0, turnover_rate=40.0, pct_chg=0.3)
     mixed = pd.concat([permitted, foreign], ignore_index=True).sample(frac=1, random_state=2)
 
-    assert _factor_legs(mixed, BOARDS) == _factor_legs(permitted, BOARDS)
-    assert _factor_legs(mixed, ("main", "gem", "star", "bj")) != _factor_legs(permitted, BOARDS)
+    assert _factor_legs(mixed, None, BOARDS) == _factor_legs(permitted, None, BOARDS)
+    assert _factor_legs(mixed, None, ("main", "gem", "star", "bj")) != _factor_legs(permitted, None, BOARDS)
     with pytest.raises(ValueError, match="permitted_boards"):
         replay_style_analysis(
             _replay(days),
