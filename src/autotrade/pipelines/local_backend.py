@@ -25,6 +25,7 @@ from autotrade.environment.replay.stats import (
 from autotrade.environment.replay.style import (
     benchmark_summary_block,
     replay_style_analysis,
+    warmup_bars,
     write_style_rollup,
 )
 from autotrade.environment.runtime import utc_now_iso
@@ -187,6 +188,11 @@ class LocalDailyEvaluationBackend:
                 universes=(),
                 mode=request.mode,
                 benchmark_index=self.benchmark_index,
+                permitted_boards=request.broker_profile.permitted_boards,
+                # The file's days before the replay, read by the factor legs alone.
+                warmup=warmup_bars(
+                    self._daily[self._daily["trade_date"] < frame["trade_date"].min()]
+                ),
             )
         summary = record.get("stats")
         if not isinstance(summary, dict):

@@ -35,6 +35,7 @@ UNTAXED = BrokerProfile(
     stamp_duty_sell_bps_before_cutover=0.0,
     stamp_duty_sell_bps_from_cutover=0.0,
     slippage_bps=0.0,
+    permitted_boards=("main",),
 )
 TAXED = replace(UNTAXED, dividend_tax=True)
 

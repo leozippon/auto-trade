@@ -107,9 +107,11 @@ def _market() -> tuple[pd.DataFrame, pd.DataFrame]:
                     "pre_close": pre_close,
                     "pct_chg": round(close / pre_close - 1.0, 6),
                     "circ_mv": base_cap * close / 10.0,
-                    # Book-to-price spread over the names, independent of
-                    # size, so the slot's value leg is a real spread.
+                    # Book-to-price and turnover spreads over the names,
+                    # independent of size and of each other, so the slot's
+                    # value and turnover legs are real spreads.
                     "pb": (1.0 + (index * 7) % len(SYMBOLS) / 10.0) * close / 10.0,
+                    "turnover_rate": 0.01 * (1.0 + (index * 11) % len(SYMBOLS) / 10.0),
                     "up_limit": round(pre_close * 1.1, 2),
                     "down_limit": round(pre_close * 0.9, 2),
                     "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T17:30:00+08:00",
@@ -274,6 +276,9 @@ def make_experiment(tmp_path: Path, **params: object) -> tuple[Path, Path]:
                 "subagent_model": LOCAL_QWEN_MODEL,
                 "compact_model": LOCAL_QWEN_MODEL,
                 "initial_cash": 1_000_000,
+                # The boards creation stamps on this capital
+                # (``broker.default_permitted_boards``).
+                "permitted_boards": ["main", "gem", "star", "bj"],
                 # No tracking_error_cap: a one-name book cannot track CSI 300,
                 # and the capital buys no mandate of its own.
                 "include_fundamentals": False,

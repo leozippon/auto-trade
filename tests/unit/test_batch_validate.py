@@ -19,6 +19,7 @@ import math
 import threading
 import unittest
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -46,7 +47,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import active_analysis
+from autotrade.environment.replay.style import FACTOR_SERIES, active_analysis
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
@@ -87,6 +88,7 @@ from autotrade.pipelines.session_tools import (
     SessionValidations,
     ValidateTool,
     leg_cards,
+    recent_reading,
     year_readings,
 )
 from autotrade.pipelines.verdict import (
@@ -328,6 +330,10 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
         "value_factor_daily": [
             [day, float(value)]
             for day, value in zip(days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days)))
+        ],
+        "turnover_factor_daily": [
+            [day, float(value)]
+            for day, value in zip(days, np.random.default_rng(seed + 20_000).normal(0.0, 0.003, len(days)))
         ],
         "baseline_daily": [[day, float(value)] for day, value in zip(days, baselines)],
     }
@@ -1256,16 +1262,21 @@ class BatchValidateRunTest(unittest.TestCase):
                     list(row),
                     [
                         "name", "control", "status", "handle", "node_id", "revision_id",
-                        "wall_seconds", "active", "book", "by_year", "concentration", "result_ref",
+                        "wall_seconds", "active", "book", "by_year", "concentration", "recent",
+                        "result_ref",
                     ],
                 )
                 self.assertEqual(
                     list(row["active"]),
                     [
                         "excess", "information_ratio", "residual_information_ratio", "residual_excess",
-                        "tracking_error", "max_drawdown", "market_beta", "size_beta", "value_beta",
+                        "tracking_error", "max_drawdown", *(name for name, _series in FACTOR_SERIES),
                         "excess_at_cost_stress",
                     ],
+                )
+                self.assertEqual(
+                    list(row["recent"]),
+                    ["span", "residual_information_ratio", "residual_excess", "threshold"],
                 )
                 self.assertEqual(
                     list(row["book"]),
@@ -1281,7 +1292,9 @@ class BatchValidateRunTest(unittest.TestCase):
                     list(row["by_year"][0]),
                     ["label", "active_excess", "excess_vs_benchmark", "return", "benchmark_return", "sharpe"],
                 )
-                flat = json.dumps(row)
+                # The batch states the span's threshold once; the last two
+                # years' own rides in recent.
+                flat = json.dumps({key: value for key, value in row.items() if key != "recent"})
                 for echoed in ("hypothesis", "earns a positive", "candidates/", "threshold", "ts_code", "note"):
                     self.assertNotIn(echoed, flat)
                 record = json.loads((session.tree.root / row["result_ref"]).read_text(encoding="utf-8"))
@@ -1297,9 +1310,10 @@ class BatchValidateRunTest(unittest.TestCase):
         self,
     ) -> None:
         """A row reads the sealed gate's statistic over its own span -- the
-        residual IR and the three betas of the active series -- and the batch
+        residual IR and the betas of the active series -- and the batch
         states the threshold for that span's length once; nothing passes or
-        fails."""
+        fails. A full-span row also reads the same statistic over its last two
+        research years alone, with their own threshold; no other span does."""
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             for name, marker, span in (("full", "333", "full"), ("year", "4", "Y2")):
@@ -1312,8 +1326,27 @@ class BatchValidateRunTest(unittest.TestCase):
                 )
                 expected = residual_reading(sidecar, alpha=REQUIRED_RULES["alpha"])
                 active = row["active"]
-                for key in ("residual_information_ratio", "residual_excess", "market_beta", "size_beta", "value_beta"):
+                for key in ("residual_information_ratio", "residual_excess", *(name for name, _series in FACTOR_SERIES)):
                     self.assertAlmostEqual(active[key], expected[key], places=6, msg=key)
+                if span == "full":
+                    years = session.backtest.request.full_span.year_windows
+                    self.assertEqual(len(years), 4)
+                    last_two = residual_reading(
+                        sidecar, start=years[2][0], end=years[3][1], alpha=REQUIRED_RULES["alpha"]
+                    )
+                    self.assertEqual(row["recent"]["span"], "Y3..Y4")
+                    for key in ("residual_information_ratio", "residual_excess", "threshold"):
+                        self.assertAlmostEqual(row["recent"][key], last_two[key], places=6, msg=key)
+                    self.assertNotAlmostEqual(row["recent"]["threshold"], value["threshold"], places=3)
+                    # Fewer than three research years leave no "last two" beside the span.
+                    two_years = replace(
+                        session.backtest.request.full_span, year_windows=years[:2]
+                    )
+                    self.assertEqual(
+                        recent_reading(sidecar, two_years, rules=session.backtest.rules), {}
+                    )
+                else:
+                    self.assertNotIn("recent", row)
                 self.assertAlmostEqual(value["threshold"], expected["threshold"], places=6)
                 graded = graded_statistics(sidecar)
                 self.assertAlmostEqual(active["excess"], graded["plain_excess"], places=6)
@@ -1582,7 +1615,7 @@ class DailySeriesTest(unittest.TestCase):
                 )
             # The full-span candidate: the file reproduces the active
             # drawdown the verdict holds to its limit, and the residual
-            # reading off the series and the three legs beside it.
+            # reading off the series and the factor legs beside it.
             [edge] = [row for row in full["candidates"] if row["name"] == "edge"]
             frame = pd.read_csv(session.tree.root / Path(edge["result_ref"]).parent / "active_daily.csv")
             sidecar = json.loads(
@@ -1592,10 +1625,13 @@ class DailySeriesTest(unittest.TestCase):
             drawdown = _max_slice_drawdown(active_analysis(sidecar), "", "")
             self.assertGreater(drawdown, 0.0)
             self.assertAlmostEqual(frame["active_drawdown"].max(), drawdown, delta=1e-9)
-            legs = frame[["benchmark_return", "size_factor_return", "value_factor_return"]].dropna()
+            columns = {
+                name: series.removesuffix("_daily") + "_return" for name, series in FACTOR_SERIES
+            }
+            legs = frame[list(columns.values())].dropna()
             kept = frame.loc[legs.index, "active_return"]
             reading = residual_statistics(
-                kept, legs["benchmark_return"], legs["size_factor_return"], legs["value_factor_return"],
+                kept, {name: legs[column] for name, column in columns.items()},
                 alpha=REQUIRED_RULES["alpha"],
             )
             self.assertAlmostEqual(
@@ -1700,7 +1736,7 @@ class BatchValidateContractTest(unittest.TestCase):
         from autotrade.pipelines.session_tools import SmokeBacktestTool, TestTool
 
         limits = (
-            (ValidateTool.spec, 2_250),
+            (ValidateTool.spec, 2_400),
             (TestTool.spec, 1_500),
             (SmokeBacktestTool.spec, 900),
             (NullControlTool(SimpleNamespace(), max_calls=12).spec, 700),  # type: ignore[arg-type]

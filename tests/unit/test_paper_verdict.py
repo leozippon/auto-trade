@@ -12,6 +12,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay.null_control import (
     MATCHED_MEMBERSHIP,
     run_null_control,
@@ -164,6 +165,59 @@ def test_a_terminal_status_is_never_left(tmp_path: Path):
     assert _read(confirmed, [0.001, -0.6, 0.001])["status"] == "confirmed"
 
 
+def test_the_paper_baseline_reads_each_draw_on_the_accounts_own_capital(tmp_path: Path):
+    """The Paper verdict grades against the research random baseline
+    (``null_control``): each draw's daily PnL over the Paper account's own
+    equity at the previous close. Worked by hand without costs, as the replay's
+    is in ``test_null_control``: the account buys 1 000 of 600001.SH at 10 and
+    sells at the third close (equity 102 000, 105 000, 106 000 from 100 000);
+    every draw holds 500 of 600001.SH's only replacement, 600002.SH, bought at
+    20 and closing 21, 22 and sold at 19, so it earns +500, +500, -1 500 CNY on
+    100 000, 102 000 and 105 000 of the account's capital."""
+
+    dates = _days(3)
+    prices = {
+        "600001.SH": ((10.0, 12.0), (12.0, 15.0), (15.0, 16.0)),
+        "600002.SH": ((20.0, 21.0), (21.0, 22.0), (22.0, 19.0)),
+    }
+    frame = pd.DataFrame(
+        {
+            "symbol": symbol, "trade_date": day, "open": opening, "close": closing,
+            "pre_close": bars[offset - 1][1] if offset else opening, "up_limit": 100.0, "down_limit": 1.0,
+            "is_suspended": False, "circ_mv": 5.0e10,
+        }
+        for symbol, bars in prices.items()
+        for offset, (day, (opening, closing)) in enumerate(zip(dates, bars, strict=True))
+    )
+    free = BrokerProfile(
+        initial_cash=100_000, commission_bps=0.0, min_commission_cny=0.0, transfer_fee_bps=0.0,
+        stamp_duty_sell_bps_before_cutover=0.0, stamp_duty_sell_bps_from_cutover=0.0, slippage_bps=0.0,
+        permitted_boards=("main",),
+    )
+    book = replace(_statistical(_registered_book(tmp_path)), profile=free)
+    equity = [102_000.0, 105_000.0, 106_000.0]
+    fills = [
+        {"symbol": "600001.SH", "action": action, "quantity": 1000, "price": price, "status": "filled",
+         "execute_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T{clock}:00+08:00",
+         "matched_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T{clock}:00+08:00"}
+        for action, price, day, clock in (("buy", 10.0, dates[0], "09:30"), ("sell", 16.0, dates[2], "15:00"))
+    ]
+
+    reading = evidence_reading(
+        book,
+        [{"trade_date": day, "equity": value} for day, value in zip(dates, equity, strict=True)],
+        fills,
+        frame,
+        {day: 0.0 for day in dates},
+    )
+
+    account = np.asarray(equity) / np.asarray([100_000.0, *equity[:-1]]) - 1
+    baseline = np.asarray([500 / 100_000, 500 / 102_000, -1_500 / 105_000])
+    assert reading["baseline"]["round_trips"] == 1 and reading["baseline"]["dropped_trips_mean"] == 0.0
+    assert reading["account_return"] == pytest.approx(0.06)
+    assert reading["plain"]["mean"] == pytest.approx((account - baseline).mean() * 244, abs=1e-9)
+
+
 def _write_slot(root: Path, benchmark: str, index_pct: dict[str, float]) -> None:
     """The replay slot a Paper run leaves (``paper/pit.py``) over the
     reconcile fixture's bars, with its decision view beside it: the index's
@@ -208,7 +262,10 @@ def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_
     assert real.journal("corrections.jsonl") and [
         row["quantity"] for row in real.journal("executions_20260105.jsonl") if row["status"] == "filled"
     ] == [300]
-    book = replace(_registered_book(tmp_path), root=real.root, profile=RECONCILE_PROFILE)
+    # A book's profile pins its boards (``paper.book``), as the random baseline requires.
+    book = replace(
+        _registered_book(tmp_path), root=real.root, profile=replace(RECONCILE_PROFILE, permitted_boards=("main", "gem"))
+    )
     with pytest.raises(FileNotFoundError, match="no replay slot"):
         paper_reading(book)
 

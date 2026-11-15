@@ -54,7 +54,7 @@ from autotrade.environment.executor import (
     TrustedStrategyExecutor,
     discard_strategy_state,
 )
-from autotrade.environment.replay.engine import StrategyDataView
+from autotrade.environment.replay.engine import ExecutionPriceProvider, StrategyDataView
 from autotrade.environment.replay.null_control import (
     BASELINE_DRAWS,
     NullControlSetupError,
@@ -73,6 +73,7 @@ from autotrade.environment.replay.style import (
     replay_style_analysis,
     slot_benchmark,
     slot_membership,
+    warmup_bars,
     write_style_rollup,
 )
 from autotrade.environment.replay.timeview import ReplayRows, Timeview
@@ -526,6 +527,34 @@ class HistoricalMinuteSource:
         return self._quote_group
 
 
+def slot_minute_source(replay_dir: Path, max_row_group_rows: int) -> HistoricalMinuteSource | None:
+    """The exact minute prices of a replay slot, or None when it holds none."""
+
+    path = replay_dir / "intraday_1min.parquet"
+    if not path.exists() or not pq.ParquetFile(path).metadata.num_rows:
+        return None
+    return HistoricalMinuteSource(path, max_row_group_rows=max_row_group_rows)
+
+
+def minute_price(sources: Sequence[HistoricalMinuteSource]) -> ExecutionPriceProvider | None:
+    """The price source of a span's minute files, for an order at a minute
+    other than 09:30 and 15:00 (``engine.resolve_execution_price``); None when
+    no slot holds minutes. Slots partition minutes by trade date, so at most
+    one file holds a minute."""
+
+    if not sources:
+        return None
+
+    def price_at(symbol: str, when: datetime) -> float | None:
+        for source in sources:
+            price = source.price_at(symbol, when)
+            if price is not None:
+                return price
+        return None
+
+    return price_at
+
+
 @dataclass(frozen=True)
 class _SpanSlot:
     """One replay slot of a span: its directory, manifest and bound as-of stash.
@@ -571,11 +600,11 @@ class _ReplaySpanView:
             replay = open_slot(self._slots[0])
         with timer.phase("timeview_init"):
             self.minute_sources = tuple(
-                HistoricalMinuteSource(path, max_row_group_rows=max_intraday_row_group_rows)
+                source
                 for slot in self._slots
-                if (path := slot.replay_dir / "intraday_1min.parquet").exists()
-                and pq.ParquetFile(path).metadata.num_rows
+                if (source := slot_minute_source(slot.replay_dir, max_intraday_row_group_rows)) is not None
             )
+            self.execution_price = minute_price(self.minute_sources)
             self.timeview = Timeview(
                 host_dir=host_dir,
                 snapshot_dir=snapshot_dir,
@@ -606,14 +635,6 @@ class _ReplaySpanView:
         with self._timer.phase("timeview_refresh"):
             return self.timeview.refresh(pd.Timestamp(inference_at))
 
-    def price_at(self, symbol: str, when: datetime) -> float | None:
-        # Slots partition minutes by trade date, so at most one file holds it.
-        for source in self.minute_sources:
-            price = source.price_at(symbol, when)
-            if price is not None:
-                return price
-        return None
-
     def minute_record(self) -> dict[str, int]:
         """What the replay loaded of its minute sources. Only what it loaded:
         a source's size covers every slot of the span, and a replay stopped
@@ -637,6 +658,15 @@ def _slot_anchor(manifest: Mapping[str, object]) -> datetime:
     return anchor
 
 
+def _successor(manifest: Mapping[str, object]) -> tuple[str, datetime]:
+    """The first day and the anchor of the slot that continues this one."""
+
+    last_day = datetime.strptime(str(manifest.get("period_end")), "%Y%m%d").replace(tzinfo=CN_TZ)
+    return (last_day + timedelta(days=1)).strftime("%Y%m%d"), last_day.replace(
+        hour=23, minute=59, second=59
+    )
+
+
 def _require_continuous_slots(
     replay_dirs: Sequence[Path], manifests: Sequence[Mapping[str, object]]
 ) -> None:
@@ -653,9 +683,7 @@ def _require_continuous_slots(
 
     for index in range(1, len(manifests)):
         previous, current = manifests[index - 1], manifests[index]
-        last_day = datetime.strptime(str(previous.get("period_end")), "%Y%m%d").replace(tzinfo=CN_TZ)
-        start = (last_day + timedelta(days=1)).strftime("%Y%m%d")
-        anchor = last_day.replace(hour=23, minute=59, second=59)
+        start, anchor = _successor(previous)
         if (
             str(current.get("period_start")) != start
             or _optional_cn_datetime(current.get("available_from")) != anchor
@@ -669,6 +697,41 @@ def _require_continuous_slots(
         raise ValueError(
             "a replay span needs an unscreened universe: each slot screens at its own anchor"
         )
+
+
+def _preceding_bars(first_dir: Path, first: Mapping[str, object]) -> pd.DataFrame | None:
+    """The bars of the last trading days before a span (``style.warmup_bars``),
+    from the slot its first slot continues, or None where none is held.
+
+    The factor legs sort on values through the previous trading day, the
+    turnover leg on a twenty-day mean, so without these days a span's legs
+    have no value on its first days. Every phase view is a hardlink of the
+    cache's unphased store beside the phase directories
+    (``ResearchPITSnapshotProvider._replay_source``), which therefore holds
+    every slot the cache has built or been seeded with, whatever phase read
+    it: the forward replay's first slot continues the last validation year's.
+    The slot taken (the longest, if several) is one the first slot continues
+    as ``_require_continuous_slots`` requires of a span's slots, so its rows
+    are the ones a longer span reads. A span opening on the first slot the
+    cache holds finds none. The bars reach the factor legs alone: the Broker
+    and ``context.bars`` read the span's own.
+    """
+
+    start, anchor = str(first.get("period_start")), _slot_anchor(first)
+    preceding = min(
+        (
+            path
+            # A slot this one continues ends on the day of its anchor.
+            for path in first_dir.parent.parent.glob(f"*_{anchor:%Y%m%d}_*")
+            if path.is_dir()
+            and not path.name.startswith(".")
+            and _successor(load_snapshot_manifest(path)) == (start, anchor)
+        ),
+        default=None,
+    )
+    if preceding is None:
+        return None
+    return warmup_bars(pd.read_parquet(preceding / "daily.parquet"))
 
 
 def _universe_screened(manifest: Mapping[str, object]) -> bool:
@@ -768,21 +831,22 @@ def _span_corporate_actions(
     return pd.concat(filled, ignore_index=True)
 
 
-def baseline_seed(start: str, end: str) -> int:
-    """The random baseline's seed for a replay of ``start``..``end``.
-
-    The draws a random baseline makes are a function of this seed and of what was
-    replayed: the book's own trade skeleton (entry, exit and money per round
-    trip), the matching pool (the benchmark's membership, what a trip's money
-    can buy) and the slot's bars. Nothing naming the experiment, the revision or the
-    session enters, so identical trades on one span meet the identical random baseline
-    in every experiment -- paired experiments and lineage follow-ups read the same number --
-    and neither a resubmission nor a byte change that leaves the trades alone
-    can re-roll it; an experiment's candidates and controls on a span share draws.
-    This makes a book's random baseline noise reproducible, not smaller.
-    """
-
-    return null_control_seed(f"{start}:{end}", "panel")
+# The random baseline's seed, one for every replay. The draws a random baseline
+# makes are a function of this seed and of what was replayed: the book's own
+# trade skeleton (entry, exit and money per round trip), the matching pool (the
+# benchmark's membership, what a trip's money can buy) and the slot's bars.
+# Nothing naming the experiment, the revision, the session or the span enters,
+# so identical trades meet the identical names in every replay, whatever its
+# start and end -- a test step reads the same active return in a replay of
+# any length, paired experiments and lineage follow-ups read the same number --
+# and neither a resubmission nor a byte change that leaves the trades alone
+# can re-roll it. This makes a book's random baseline noise reproducible, not
+# smaller. One residual remains: a round trip still open at a replay's end has
+# no exit date, so its pool skips the exit-day filter
+# (``null_control._candidate_pool``) and may draw another name than the same
+# trip closed in a longer replay (at most 0.4 pp on a last step in the
+# 2026-11-15 measurement).
+BASELINE_SEED = null_control_seed("replay", "panel")
 
 
 # The date columns an as-of domain is read by, in the order a range is stated.
@@ -944,6 +1008,8 @@ class PITDailyEvaluationBackend:
         keep_result_dir = False
         with timer.phase("replay_frames"):
             daily = span_daily(replay_dirs, request.start, request.end)
+            # Read by the factor legs alone (style.replay_style_analysis).
+            warmup = _preceding_bars(replay_dirs[0], replay_manifests[0])
             # Broker-side ex-date truth only: it is not a Timeview domain and
             # never reaches the strategy.
             corporate_actions = _span_corporate_actions(replay_dirs, replay_manifests)
@@ -955,7 +1021,15 @@ class PITDailyEvaluationBackend:
                 trade_days = replay_window(
                     span_days, start=start_day, max_days=max_days, end=end_day
                 )
-                daily = daily[_trade_date_keys(daily).isin(set(trade_days))].copy()
+                keys = _trade_date_keys(daily)
+                if trade_days and trade_days[0] != span_days[0]:
+                    # A window opening inside the span: the legs' days before
+                    # it are the span's own.
+                    inside = daily[keys < trade_days[0]]
+                    warmup = warmup_bars(
+                        inside if warmup is None else pd.concat([warmup, inside], ignore_index=True)
+                    )
+                daily = daily[keys.isin(set(trade_days))].copy()
                 # A truncated replay must not claim it covered the whole span.
                 if trade_days:
                     replay_start, replay_end = trade_days[0], trade_days[-1]
@@ -1051,7 +1125,7 @@ class PITDailyEvaluationBackend:
                 replay = DailyStrategyPipeline(
                     config,
                     context_data=context_data,
-                    execution_price=span.price_at if span.minute_sources else None,
+                    execution_price=span.execution_price,
                     executor_factory=executor_factory,
                 ).run(daily, corporate_actions=corporate_actions)
                 record = replay.to_record(
@@ -1106,14 +1180,14 @@ class PITDailyEvaluationBackend:
                             slot_benchmark(replay_dirs, benchmark_index=self.benchmark_index),
                             request.broker_profile,
                             request.schedule,
-                            seed=baseline_seed(replay_start, replay_end),
+                            seed=BASELINE_SEED,
                             corporate_actions=corporate_actions,
                             membership=slot_membership(
                                 (snapshot_dir, *replay_dirs),
                                 benchmark_index=self.benchmark_index,
                             ),
                             baselines=True,
-                            execution_price=span.price_at if span.minute_sources else None,
+                            execution_price=span.execution_price,
                         )
                     except Exception as exc:  # noqa: BLE001 - every random baseline failure is the host's
                         baseline_failure = exc
@@ -1138,6 +1212,8 @@ class PITDailyEvaluationBackend:
                     mode=request.mode,
                     baselines=baselines,
                     benchmark_index=self.benchmark_index,
+                    permitted_boards=request.broker_profile.permitted_boards,
+                    warmup=warmup,
                 )
             summary = record.get("stats")
             if not isinstance(summary, dict):
@@ -1215,10 +1291,11 @@ class PITDailyEvaluationBackend:
         inside them (``replay/null_control.py``). Host-side and read-only: the
         slots are the ones the result was evaluated against, named by the
         host-only record beside it rather than by this process's memory, and
-        only their bars, benchmark, membership and ex-date tables are read, so
-        no snapshot is rebuilt or decoded. The percentile is informational; the
-        random baseline a verdict grades against is the one ``evaluate`` stored with the
-        result.
+        only their bars, minute prices, benchmark, membership and ex-date tables
+        are read, so no snapshot is rebuilt or decoded and a draw meets an order
+        at any minute as the replay's own draws met it. The percentile is
+        informational; the random baseline a verdict grades against is the one
+        ``evaluate`` stored with the result.
         """
 
         result_json = _result_json(result_path)
@@ -1232,6 +1309,14 @@ class PITDailyEvaluationBackend:
             )
             corporate_actions = _span_corporate_actions(
                 replay_dirs, [load_snapshot_manifest(path) for path in replay_dirs]
+            )
+            # The minute prices the result's own replay met its orders at.
+            execution_price = minute_price(
+                tuple(
+                    source
+                    for path in replay_dirs
+                    if (source := slot_minute_source(path, self.max_intraday_row_group_rows)) is not None
+                )
             )
         except Exception as exc:
             # Everything above is setup: not one draw has been replayed, so the
@@ -1255,6 +1340,7 @@ class PITDailyEvaluationBackend:
             step=step,
             corporate_actions=corporate_actions,
             membership=membership,
+            execution_price=execution_price,
         )
 
     @staticmethod
@@ -1984,6 +2070,7 @@ def _exclusive_lock(path: Path) -> Iterator[None]:
 
 
 __all__ = [
+    "BASELINE_SEED",
     "REPLAY_SLOTS_SIDECAR",
     "REPLAY_SOURCE_LABEL",
     "HistoricalMinuteSource",

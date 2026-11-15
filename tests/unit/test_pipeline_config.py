@@ -298,7 +298,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("active.information_ratio", facts["graded_series"])
         statistic = facts["significance"]
         self.assertIn("intercept times sqrt(244) over the residual standard deviation", statistic["statistic"])
-        self.assertIn("the size leg and the value leg", statistic["statistic"])
+        self.assertIn("the size leg, the value leg and the low-turnover leg", statistic["statistic"])
         self.assertIn("z(1 - alpha) / sqrt(years)", statistic["threshold"])
         self.assertEqual(statistic["alpha"], 0.05)
         self.assertEqual(statistic["threshold_over_one_year"], 1.645)

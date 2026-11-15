@@ -31,13 +31,21 @@ const OUTCOME_LABELS = {
 // words it the same way on the card, the page header, the process list, the
 // 读出 view and the best-experiment panel. A registered strategy with its record
 // is worded by whether that record passed (`record.passed`, registry.record_passed)
-// rather than by its stored state (endingKey).
+// rather than by its stored state (endingKey): the label names what it reads,
+// the record against its threshold, and nothing else.
 const ENDING_LABELS = {
-  passed: "通过",
-  failed: "未通过",
+  passed: "记录过门槛",
+  failed: "记录未过门槛",
   budget_exhausted: "预算耗尽",
   environment_blocked: "环境阻断",
   broken: "失败",
+};
+// The factor legs a record label was read on (`record.legs`, registry.record_legs):
+// stored records are never re-scored, so a three-leg label can sit beside a
+// four-leg one; the badge's tooltip says which.
+const RECORD_LEGS = {
+  3: "三腿读数（市场、规模、价值）",
+  4: "四腿读数（市场、规模、价值、低换手）",
 };
 // Where a Paper account's verdict stands (paper/verdict.py): the status as
 // [badge state, label], and the reason a terminal row or an unmeasured reading
@@ -79,7 +87,7 @@ const REASON_LABELS = {
 const EXCESS_TITLE = "主动序列（账户日收益 − 随机对照组合日收益，不做回归）的年化均值";
 const TRACKING_ERROR_TITLE = "主动序列日收益的年化标准差";
 const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
-const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值三条因子腿回归的残差 IR；门槛 z(1−α)/√年数";
+const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值与低换手因子腿回归的残差 IR（低换手腿 2026-11-15 加入，此前存下的读数只有前三条）；门槛 z(1−α)/√年数";
 const P_VALUE_TITLE = "零技能原假设下读到至少这么高的残差 IR 的单侧概率；只报告，不作判定";
 // The holder's money, which no active figure is: the account's own return
 // after every cost minus the benchmark index's price return over the same days.
@@ -1890,8 +1898,8 @@ async function renderHomePage() {
   }, 5000);
 }
 
-/* The server names a best experiment only when a registered strategy has its
-   forward reading, so the hero is absent until one has. */
+/* The server names a best experiment only when a registered strategy's
+   forward lower bound is above zero. */
 function bestRow(payload) {
   const best = payload.best;
   if (!best) return null;
@@ -1902,11 +1910,25 @@ function bestRow(payload) {
   );
 }
 
+/* The best-experiment panel: the strategy the server named or, when it named
+   none, one plain line saying so; nothing before the first experiment. */
+function bestPanel(payload) {
+  const best = bestRow(payload);
+  if (best) return heroPanel(best);
+  if (!(payload.experiments || []).length) return null;
+  const panel = el(
+    "div",
+    { class: "panel", id: "hero-panel" },
+    el("div", { class: "hint" }, "没有一个定版策略的前推主动超额下界大于零。"),
+  );
+  panel.__signature = "";
+  return panel;
+}
+
 function homeView(payload) {
   const container = el("div", { id: "home" });
-  const best = bestRow(payload);
-  if (best)
-    container.append(heroPanel(best), el("div", { class: "section-gap" }));
+  const panel = bestPanel(payload);
+  if (panel) container.append(panel, el("div", { class: "section-gap" }));
   const rows = payload.experiments || [];
   container.append(
     listHead(payload),
@@ -2010,13 +2032,16 @@ function endingLabel(item) {
   return ENDING_LABELS[key] || key;
 }
 
-/* The ending as one badge; null while the experiment can still run. */
+/* The ending as one badge; null while the experiment can still run. A record
+   label's tooltip also names the legs it was read on. */
 function endingBadge(item) {
   const ending = item.ending;
   if (!ending || !ending.state) return null;
+  const key = endingKey(item);
+  const legs = key === "passed" || key === "failed" ? RECORD_LEGS[(item.record || {}).legs] : null;
   return el(
     "span",
-    { class: `badge ending-${endingKey(item)}`, title: ending.reason || null },
+    { class: `badge ending-${key}`, title: [ending.reason, legs].filter(Boolean).join("；") || null },
     endingLabel(item),
   );
 }
@@ -2107,7 +2132,7 @@ function evidenceTiles(item) {
       value: heldout.residual_information_ratio,
       fmt: fmtSharpe,
       signed: true,
-      title: "Held-out 段主动序列对市场、规模、价值三条因子腿回归的残差 IR；只报告，不作判定",
+      title: "Held-out 段主动序列对市场、规模、价值与低换手因子腿回归的残差 IR（此前存下的读数只有前三条）；只报告，不作判定",
     },
   ];
   return statTilesRow(
@@ -2244,7 +2269,7 @@ function experimentCard(item, { archived = false } = {}) {
 }
 
 /* The best experiment (`registry.best_experiment`): the registered strategy
-   whose readout states the highest forward lower bound, with its badge, its
+   whose readout states the highest forward lower bound above zero, with its badge, its
    Forward and Held-out tiles, its curve, and the Paper handoff the 读出 view
    offers -- the account it has, or a button that opens one within the cap the
    server enforces. Only an experiment the server named reaches here. */
@@ -2258,7 +2283,7 @@ function heroPanel(item) {
       el(
         "h3",
         { class: "hero-title" },
-        el("span", { "aria-hidden": "true", title: "最佳实验：前推主动超额下界最高的定版策略" }, "🏆"),
+        el("span", { "aria-hidden": "true", title: "最佳实验：前推主动超额下界大于零且最高的定版策略" }, "🏆"),
         experimentName(item.experiment_id),
       ),
       experimentBadge(item),
@@ -2948,7 +2973,7 @@ const SLICE_ROWS = [
   ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
   ["days", "交易日", String],
   ["information_ratio", "主动 IR", fmtSharpe, true, IR_TITLE],
-  ["residual_information_ratio", "残差 IR（三因子）", fmtSharpe, true],
+  ["residual_information_ratio", "残差 IR（因子腿）", fmtSharpe, true],
   ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true, LOWER_BOUND_TITLE],
   ["max_drawdown", "最大回撤", fmtPct],
   ["active_max_drawdown", "主动回撤", fmtPct],
@@ -3291,7 +3316,7 @@ function readoutStagePanel(detail) {
 function readoutRule(t) {
   return (
     `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；` +
-    `整段记录的残差 IR 不低于门槛（约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）写作通过，否则未通过，只是读法，不把关任何事`
+    `整段记录的残差 IR 不低于门槛（约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}，只是读法，不把关任何事`
   );
 }
 
@@ -6037,7 +6062,7 @@ function subWindowSection(title, rows) {
   );
 }
 
-/* Barra-lite style validation card: benchmark alpha/beta regression + holdings
+/* Barra-lite style validation card: the strategy's own factor loadings + holdings
    style tilts (signed percentile deviation, [-1,1]) + SW industry weights. */
 function styleCard(expId, result) {
   const host = el(
@@ -6062,16 +6087,23 @@ function styleCard(expId, result) {
         );
         return;
       }
-      const reg = payload.benchmark_regression || {};
+      // The strategy's own loadings, as its sidecar's factor regression
+      // recorded them: a result stored before the turnover leg has none on
+      // it, and its tile is left out rather than shown empty.
+      const reg = payload.factor_regression || {};
       const style = payload.style || {};
       const tiles = presentTiles([
         {
           // The experiment's own benchmark, as its sidecar recorded it.
-          label: `β（vs ${payload.benchmark?.label || "基准"}）`,
-          value: reg.beta,
+          label: `市场 β（vs ${payload.benchmark?.label || "基准"}）`,
+          value: reg.market_beta,
           fmt: fmtSharpe,
+          title: reg.method || null,
         },
-        { label: "年化 α", value: reg.alpha_annualized, fmt: fmtPct, signed: true },
+        { label: "规模载荷", value: reg.size_beta, fmt: fmtSharpe, signed: true, title: "正为偏小盘" },
+        { label: "价值载荷", value: reg.value_beta, fmt: fmtSharpe, signed: true, title: "正为偏低估值" },
+        { label: "低换手载荷", value: reg.turnover_beta, fmt: fmtSharpe, signed: true, title: "正为偏低换手" },
+        { label: "残差跟踪误差", value: reg.tracking_error, fmt: fmtPct },
         { label: "R²", value: reg.r2, fmt: fmtSharpe },
         { label: "样本天数", value: reg.n_days, fmt: String },
       ]);
@@ -6080,7 +6112,7 @@ function styleCard(expId, result) {
         host.append(
           chipsRow([
             chip(
-              `基准回归 · ${STYLE_REASON_LABELS[reg.reason] || "不可算"}`,
+              `因子回归 · ${STYLE_REASON_LABELS[reg.reason] || "不可算"}`,
               STYLE_REASON_TITLES[reg.reason] || null,
             ),
           ]),
@@ -6149,17 +6181,17 @@ function styleCard(expId, result) {
 /* Why a style figure is absent, as a label on the chip and the full reason
    in its tooltip (environment/replay/style.py). */
 const STYLE_REASON_LABELS = {
-  benchmark_unavailable: "无同窗基准指数",
+  factors_unavailable: "无同窗基准或因子腿",
   insufficient_overlapping_days: "重叠交易日不足 8 天",
-  benchmark_variance_zero: "基准指数无波动",
+  factors_collinear: "因子腿共线",
   style_columns_unavailable: "缺市值 / PB / 换手截面",
   no_holdings: "无持仓",
   no_valued_holdings: "持仓无收盘价",
 };
 const STYLE_REASON_TITLES = {
-  benchmark_unavailable: "回放槽中没有可用的基准指数同窗数据，基准回归为空",
-  insufficient_overlapping_days: "与基准指数重叠的交易日不足 8 天，β、α 与 R² 不计算",
-  benchmark_variance_zero: "同窗基准指数收益没有可回归的波动，β、α 与 R² 不计算",
+  factors_unavailable: "回放槽中没有基准指数或因子腿的同窗数据，因子回归为空",
+  insufficient_overlapping_days: "同时有基准与各因子腿的交易日不足 8 天，载荷与 R² 不计算",
+  factors_collinear: "这些交易日上因子腿共线，载荷与 R² 不计算",
   style_columns_unavailable: "回放槽缺少市值、PB 或换手截面，风格暴露为空",
   no_holdings: "该回测没有持仓，风格暴露为空",
   no_valued_holdings: "该回测的持仓没有可用收盘价，风格暴露为空",

@@ -24,9 +24,11 @@ from autotrade.environment.executor import raised_by_strategy
 from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import (
+    BASELINE_DRAWS,
     NullControlSetupError,
     RandomBaselineError,
 )
+from autotrade.environment.replay.style import STYLE_SCHEMA_VERSION
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
@@ -41,6 +43,7 @@ from autotrade.pipelines.config import (
     SnapshotBundle,
 )
 from autotrade.pipelines.pit_backend import (
+    BASELINE_SEED,
     REPLAY_SLOTS_SIDECAR,
     REPLAY_SOURCE_LABEL,
     HistoricalMinuteSource,
@@ -49,11 +52,14 @@ from autotrade.pipelines.pit_backend import (
     _asof_stash_dir,
     _AsOfReadOnlyView,
     _bind_asof_stash_contract,
-    baseline_seed,
     prebuild_asof_stash,
 )
 
 from .fixtures_sandbox import docker_available
+
+# The boards every profile below pins: the random baseline draws only on a
+# profile's own boards.
+BOARDS = ("main", "gem")
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
@@ -126,7 +132,7 @@ def generate_orders(context):
             "20240102",
             "20240103",
             StrategySchedule("day", "08:30"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
 
@@ -224,15 +230,15 @@ def generate_orders(context):
             "20240102",
             "20240103",
             StrategySchedule("day", "09:28"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
     record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
     style = json.loads(
         (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    assert style["schema_version"] == 3 and style["mode"] == "valid"
-    assert style["benchmark_regression"]["reason"] == "benchmark_unavailable"
+    assert style["schema_version"] == STYLE_SCHEMA_VERSION and style["mode"] == "valid"
+    assert style["factor_regression"]["reason"] == "factors_unavailable"
     assert style["style"]["reason"] == "style_columns_unavailable"
     assert len(record["inference_dates"]) == 2
     first, second = record["pending_orders"]
@@ -371,7 +377,7 @@ def generate_orders(context):
             "20240201",
             "20240202",
             StrategySchedule("month", "08:30"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
 
@@ -456,7 +462,7 @@ def test_evaluation_summary_carries_the_whole_agent_visible_field_set(
             "20240102",
             "20240103",
             StrategySchedule("day", "09:28"),
-            BrokerProfile(initial_cash=100_000),
+            BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         )
     )
 
@@ -603,7 +609,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
         "20240102",
         "20240103",
         StrategySchedule("day", "09:28"),
-        BrokerProfile(initial_cash=100_000),
+        BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
     )
     backend = PITDailyEvaluationBackend(tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX)
     result = backend.evaluate(request)
@@ -621,13 +627,13 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert "corporate_actions" not in record["pit"]["asof_domains"]
 
     # A formal replay carries the random baseline the verdict grades it
-    # against: twenty draws of its own skeleton, the one other name standing
+    # against: BASELINE_DRAWS draws of its own skeleton, the one other name standing
     # in, matched on the float-cap decile because this slot mounts no
     # index_weight. The smoke window below is not a Validation and has none.
     style = json.loads(
         (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    assert style["baseline"]["k"] == 20 and style["baseline"]["round_trips"] == 1
+    assert style["baseline"]["k"] == BASELINE_DRAWS and style["baseline"]["round_trips"] == 1
     assert style["baseline"]["matched"] == "circ_mv_decile+affordability"
     assert style["baseline"]["dropped_trips_mean"] == 0.0
     assert [day for day, _value in style["baseline_daily"]] == ["20240102", "20240103"]
@@ -656,8 +662,8 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
 
     assert without_clock(bare) == without_clock(record)
 
-    # The random baseline is seeded by the replayed span alone, never by the revision
-    # or the experiment: the same book resubmitted as a new revision meets the
+    # The random baseline has one seed for every replay, never the revision's
+    # or the experiment's: the same book resubmitted as a new revision meets the
     # identical random baseline, so a resubmission cannot re-roll it, and so does the
     # same book replayed by another experiment's backend, so paired experiments read one
     # number for one book.
@@ -666,7 +672,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
             (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
         )
 
-    assert style["baseline"]["seed"] == baseline_seed("20240102", "20240103")
+    assert style["baseline"]["seed"] == BASELINE_SEED
     resubmitted = baselines_of(
         backend.evaluate(
             dataclasses.replace(
@@ -714,7 +720,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     null_control_call = {
         "start": "20240102",
         "end": "20240103",
-        "profile": BrokerProfile(initial_cash=100_000),
+        "profile": BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         "schedule": StrategySchedule("day", "09:28"),
         "seed": 1,
         "k": 1,
@@ -744,7 +750,7 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     # predates the bonus-share column, so the taxed replay is refused until the
     # slot is rebuilt rather than treating every share leg as tax-free.
     taxed = dataclasses.replace(
-        request, broker_profile=BrokerProfile(initial_cash=100_000, dividend_tax=True)
+        request, broker_profile=BrokerProfile(initial_cash=100_000, dividend_tax=True, permitted_boards=BOARDS)
     )
     with pytest.raises(ValueError, match="bonus_per_share"):
         PITDailyEvaluationBackend(tmp_path / "results_taxed_stale", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX).evaluate(
@@ -1240,7 +1246,7 @@ def test_evaluation_rejects_replay_from_another_phase(tmp_path: Path) -> None:
         "20240102",
         "20240103",
         StrategySchedule("day", "08:30"),
-        BrokerProfile(initial_cash=100_000),
+        BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
     )
     with pytest.raises(ValueError, match="mode does not match"):
         PITDailyEvaluationBackend._validate_bundle(request, snapshot, (replay,))
@@ -1907,7 +1913,7 @@ def generate_orders(context):
                 "20240102",
                 "20240103",
                 StrategySchedule("day", "09:28"),
-                BrokerProfile(initial_cash=100_000),
+                BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
             ),
             max_days=max_days,
             start_day=start_day,
@@ -2278,7 +2284,7 @@ def _span_request(snapshot: Path, *replay_dirs: Path, revision: Path) -> Evaluat
         manifests[0]["period_start"],
         manifests[-1]["period_end"],
         _SPAN_SCHEDULE,
-        BrokerProfile(initial_cash=1_000_000),
+        BrokerProfile(initial_cash=1_000_000, permitted_boards=BOARDS),
         continuation=tuple(str(path) for path in rest),
     )
 
@@ -2374,9 +2380,10 @@ def test_a_span_refuses_a_slot_whose_anchor_has_no_decision_universe(tmp_path: P
 
 def test_the_random_baseline_a_book_meets_depends_only_on_what_is_replayed(tmp_path: Path) -> None:
     """Two experiments that validate the same bytes on the same span read one active
-    IR: the random baseline is seeded by the replayed span alone, so each experiment's backend
-    draws the identical random baseline for the identical book, while the same book on
-    another span draws from another seed."""
+    IR, and a replay of that book cut shorter draws with the same seed: the random
+    baseline's seed names neither the experiment nor the span, so identical trades
+    meet identical names in every replay (``test_null_control``: the same trips in
+    a shorter replay)."""
 
     snapshot, slots = _write_span_release(tmp_path)
     revision = _span_revision(tmp_path)
@@ -2396,10 +2403,36 @@ def test_the_random_baseline_a_book_meets_depends_only_on_what_is_replayed(tmp_p
     assert first_experiment["baseline"] == second_experiment["baseline"]
     assert first_experiment["baseline_daily"] == second_experiment["baseline_daily"]
     assert first_experiment["baseline_draw_sd"] == second_experiment["baseline_draw_sd"]
-    assert first_experiment["baseline"]["seed"] == baseline_seed("20240101", "20240105")
     shorter = sidecar(tmp_path / "first_experiment" / "results_a", slots["a"])
-    assert shorter["baseline"]["seed"] == baseline_seed("20240101", "20240103")
-    assert shorter["baseline"]["seed"] != first_experiment["baseline"]["seed"]
+    assert shorter["baseline"]["seed"] == first_experiment["baseline"]["seed"] == BASELINE_SEED
+
+
+def test_a_re_rank_meets_the_minute_prices_its_replay_met(tmp_path: Path) -> None:
+    """Two of the book's fills are priced off the slots' minute files, and so are
+    the draws' copies of them. A re-rank of the stored result (``null_control``)
+    reads the same minute files, so with the replay's own seed it reproduces the
+    stored block; without them each copy would be refused for want of a price."""
+
+    snapshot, slots = _write_span_release(tmp_path)
+    backend = PITDailyEvaluationBackend(
+        tmp_path / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
+    )
+    request = _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
+    result = backend.evaluate(request)
+    record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+    stored = json.loads((Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8"))
+    assert {row["execute_at"][11:16] for row in record["executions"]} == {"10:00", "15:00"}
+    assert stored["baseline"]["rejects_mean"] == 0.0
+
+    rerank = backend.null_control(
+        result.result_ref,
+        start=request.start,
+        end=request.end,
+        profile=request.broker_profile,
+        schedule=request.schedule,
+        seed=stored["baseline"]["seed"],
+    )
+    assert rerank == stored["baseline"]
 
 
 def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> None:
@@ -2469,6 +2502,60 @@ def test_a_span_of_slots_is_one_book_equal_to_one_long_slot(tmp_path: Path) -> N
     ]
     assert style[0]["benchmark_daily"] == style[1]["benchmark_daily"]
     assert len(style[0]["benchmark_daily"]) == 4
+
+
+def test_the_bars_before_a_span_reach_the_factor_legs_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A span whose first slot continues a slot the cache's unphased store
+    holds hands that slot's last trading days to the factor legs, and to
+    nothing else: the Broker and the strategy replay the same bars with and
+    without them. A span opening on the first slot the cache holds has none,
+    and a window opening inside the span also gets the span's own days
+    before it."""
+
+    snapshot, slots = _write_span_release(tmp_path)
+    request = _span_request(snapshot, slots["a"], slots["b"], revision=_span_revision(tmp_path))
+    warmups: list[pd.DataFrame | None] = []
+    real = pit_backend.replay_style_analysis
+
+    def recording(*args: object, **kwargs: object) -> dict[str, object]:
+        warmups.append(kwargs["warmup"])  # type: ignore[arg-type]
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(pit_backend, "replay_style_analysis", recording)
+
+    def replay(name: str, **window: str) -> dict[str, object]:
+        result = PITDailyEvaluationBackend(
+            tmp_path / name, execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
+        ).evaluate(request, **window)
+        return json.loads(Path(result.result_ref).read_text(encoding="utf-8"))
+
+    first = replay("results_first")
+    # The slot that slot "a" continues, as the provider's store keeps it.
+    preceding = slots["a"].parent.parent / "20231201_20231231_20231130T235959+0800"
+    preceding.mkdir()
+    _span_frames(("20231229",))["daily"].to_parquet(preceding / "daily.parquet", index=False)
+    (preceding / "manifest.json").write_text(
+        json.dumps(
+            {
+                "kind": "replay_slot",
+                "label": REPLAY_SOURCE_LABEL,
+                "period_start": "20231201",
+                "period_end": "20231231",
+                "available_from": "2023-11-30T23:59:59+08:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    continued = replay("results_continued")
+    replay("results_late", start_day="20240103")
+
+    assert warmups[0] is None
+    assert set(warmups[1]["trade_date"]) == {"20231229"}
+    assert set(warmups[2]["trade_date"]) == {"20231229", "20240102"}
+    for key in ("equity_curve", "executions", "corporate_actions", "inference_dates", "pending_orders"):
+        assert first[key] == continued[key], key
 
 
 def _append_macro(path: Path, rows: list[dict[str, object]]) -> None:

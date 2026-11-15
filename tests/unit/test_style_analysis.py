@@ -9,31 +9,48 @@ import pyarrow as pa
 import pytest
 
 from autotrade.environment.data.contracts import benchmark_index_label
-from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, ReplayResult
+from autotrade.environment.replay.stats import ReplayResult
 from autotrade.environment.replay.style import (
     BENCHMARK_TS_CODE,
-    _benchmark_regression,
+    FACTOR_SERIES,
+    STYLE_SCHEMA_VERSION,
+    _factor_legs,
     _factor_regression,
     _size_factor,
+    _turnover_factor,
     _value_factor,
     benchmark_summary_block,
     daily_returns_from_curve,
     replay_style_analysis,
     slot_benchmark,
+    warmup_bars,
     write_style_rollup,
 )
 from autotrade.pipelines.session_tools import book_reading
 
+# The boards the account may buy on: a current experiment's.
+BOARDS = ("main", "gem")
 # Forty names make a cross-section, ordered by float cap (slot 0 smallest).
 # Twelve are cheap and twelve dear on book-to-price, each set split evenly
 # between the small and the big size legs and between the slots below and
 # above 20, so the size and the value spreads move independently of each other.
 CHEAP = frozenset({0, 1, 2, 12, 13, 14, 20, 21, 22, 28, 29, 30})
 DEAR = frozenset({3, 4, 5, 15, 16, 17, 23, 24, 25, 31, 32, 33})
+# Twelve churn little and twelve much. The quiet names sit six in each size
+# leg and in neither value set; the busy ones sit six below slot 20 and six
+# above it and in neither the cheap set nor the size legs' moves, so a move of
+# the quiet names alone is the turnover spread and leaves the size and value
+# spreads as they were.
+QUIET = frozenset({6, 7, 8, 9, 10, 11, 34, 35, 36, 37, 38, 39})
+BUSY = frozenset({3, 4, 15, 16, 18, 19, 23, 24, 26, 27, 31, 32})
 
 
 def _pb(slot: int) -> float:
     return 0.5 if slot in CHEAP else 4.0 if slot in DEAR else 1.0
+
+
+def _turnover(slot: int) -> float:
+    return 0.005 if slot in QUIET else 0.05 if slot in BUSY else 0.02
 
 
 def _replay(days: list[str], *, with_holdings: bool = True) -> ReplayResult:
@@ -103,12 +120,14 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
         universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
-    assert payload["schema_version"] == 3 and payload["mode"] == "valid"
-    assert payload["benchmark_regression"]["available"] is True
-    assert payload["benchmark_regression"]["n_days"] == 10
-    assert payload["benchmark_regression"]["beta"] == 2.0
+    assert payload["schema_version"] == STYLE_SCHEMA_VERSION and payload["mode"] == "valid"
+    # The slot's own index rows, compounded over the replayed days.
+    expected = float(np.prod([1.0 + (-0.0025 if index % 2 == 0 else 0.005) for index in range(10)]) - 1.0)
+    assert payload["compact"]["benchmark_return"] == round(expected, 6)
+    assert "benchmark_regression" not in payload
     assert payload["style"]["available"] is True
     assert payload["style"]["days"] == 10
     assert payload["style"]["tilts"]["size"] == -0.5
@@ -117,7 +136,7 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
     target = write_style_rollup(tmp_path / "result", payload)
     written = json.loads(target.read_text(encoding="utf-8"))
     assert target.name == "style_analysis.json"
-    assert written["compact"]["beta"] == 2.0
+    assert written["compact"]["benchmark_return"] == round(expected, 6)
 
 
 def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_path: Path):
@@ -168,6 +187,7 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
         universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
     # The share of the largest industry, averaged over decision days — the same
@@ -218,6 +238,7 @@ def test_a_span_classifies_each_day_under_its_own_slots_universe_vintage(tmp_pat
         universes=[(days[0], first / "universe.parquet"), (days[4], second / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )["style"]
 
     # Four days wholly 电子, six wholly 计算机; nothing falls to 未分类.
@@ -247,18 +268,14 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         universes=[(days[0], tmp_path / "missing-decision-snapshot" / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
-    regression = payload["benchmark_regression"]
-    assert regression == {
-        "available": False,
-        "reason": "insufficient_overlapping_days",
-        "n_days": 2,
-        "benchmark_return": -1e-06,
-        "beta": None,
-        "alpha_annualized": None,
-        "r2": None,
-    }
+    regression = payload["factor_regression"]
+    assert (regression["available"], regression["reason"], regression["n_days"]) == (
+        False, "factors_unavailable", 0,
+    )
+    assert payload["compact"]["benchmark_return"] == -1e-06
     style = payload["style"]
     assert style["available"] is False
     assert style["reason"] == "no_holdings"
@@ -271,8 +288,9 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
-    assert no_columns["benchmark_regression"]["reason"] == "benchmark_unavailable"
+    assert no_columns["compact"]["benchmark_return"] is None
     assert no_columns["style"]["reason"] == "style_columns_unavailable"
 
 
@@ -290,34 +308,6 @@ def test_daily_returns_chain_from_the_initial_equity():
     assert daily_returns_from_curve(
         [{"trade_date": "20220104", "initial_equity": 0.0, "equity": float("nan")}]
     ) == []
-
-
-def test_benchmark_regression_math_and_degenerate_inputs():
-    strategy = [(f"202201{day:02d}", 0.02 * ((-1) ** day)) for day in range(1, 11)]
-    bench = {date: value / 2 for date, value in strategy}
-    regression = _benchmark_regression(strategy, bench)
-    assert regression["available"] is True
-    assert regression["beta"] == 2.0
-    assert regression["r2"] == 1.0
-    assert regression["n_days"] == 10
-    assert regression["alpha_annualized"] == round(0.0 * TRADING_DAYS_PER_YEAR, 4)
-
-    # Fewer overlapping days than the regression minimum: reported, not guessed.
-    short = _benchmark_regression(strategy[:3], bench)
-    assert short["available"] is False
-    assert short["reason"] == "insufficient_overlapping_days"
-    assert short["beta"] is None
-
-    # No overlap at all is a different, named reason.
-    none = _benchmark_regression(strategy, {})
-    assert none["reason"] == "benchmark_unavailable"
-    assert none["n_days"] == 0
-    assert none["benchmark_return"] is None
-
-    # A flat benchmark has no variance to regress against.
-    flat = _benchmark_regression(strategy, {date: 0.0 for date, _ in strategy})
-    assert flat["available"] is False
-    assert flat["reason"] == "benchmark_variance_zero"
 
 
 def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
@@ -345,6 +335,7 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
         universes=(),
         mode="heldout",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     block = benchmark_summary_block(analysis)
     assert block is not None
@@ -357,11 +348,12 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
 def test_benchmark_block_is_absent_when_the_slot_has_no_benchmark(tmp_path: Path):
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=6)]
     analysis = replay_style_analysis(
-        _replay(days), _daily(days), replay_dir=None, universes=(), mode="valid", benchmark_index=BENCHMARK_TS_CODE
+        _replay(days), _daily(days), replay_dir=None, universes=(), mode="valid", benchmark_index=BENCHMARK_TS_CODE, permitted_boards=BOARDS
     )
     # No fabricated zero: a slot without index rows carries no benchmark at all,
     # and the report keeps reporting missing coverage truthfully.
-    assert analysis["benchmark_regression"]["reason"] == "benchmark_unavailable"
+    assert analysis["compact"]["benchmark_return"] is None
+    assert analysis["factor_regression"]["reason"] == "factors_unavailable"
     assert benchmark_summary_block(analysis) is None
 
 
@@ -393,7 +385,7 @@ def test_a_slot_benchmark_read_error_surfaces_instead_of_reading_as_no_benchmark
 
 
 def _regression_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFrame]:
-    """A replay slot whose cross-section has a real small-minus-big spread."""
+    """A replay slot whose cross-section has real size, value and turnover spreads."""
     replay_dir = tmp_path / "replay"
     replay_dir.mkdir()
     pd.DataFrame(
@@ -419,14 +411,16 @@ def _regression_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFr
                     "close": 10.0,
                     "circ_mv": 100.0 * (slot + 1),
                     "pb": _pb(slot),
-                    "turnover_rate": 1.0,
+                    "turnover_rate": _turnover(slot),
                     # daily.parquet stores pct_chg as a decimal fraction:
                     # +0.6% / -0.4%, not 0.6 / -0.4. The size spread runs on
-                    # another period than the market's and the cheap names
-                    # add a value spread on a third, so no two legs are
+                    # another period than the market's, the cheap names add
+                    # a value spread on a third and the quiet names a
+                    # turnover spread on a fourth, so no two legs are
                     # collinear.
                     "pct_chg": (0.006 if slot < 20 else -0.004) * (1.0, 1.0, -1.0, 0.5)[index % 4]
-                    + ((0.002, -0.001, 0.0005)[index % 3] if slot in CHEAP else 0.0),
+                    + ((0.002, -0.001, 0.0005)[index % 3] if slot in CHEAP else 0.0)
+                    + ((0.003, -0.002, 0.001, 0.0, -0.001)[index % 5] if slot in QUIET else 0.0),
                 }
             )
     return replay_dir, pd.DataFrame(rows)
@@ -445,27 +439,27 @@ def test_the_factor_regression_reads_the_market_and_size_loadings(tmp_path: Path
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     block = analysis["factor_regression"]
     assert block["available"] is True
-    # The size legs are formed on the prior day's cap, so the window's first
-    # day has no factor and the regression runs on the remaining days.
-    assert block["n_days"] == len(days) - 1
-    assert block["market_beta"] is not None
-    assert block["size_beta"] is not None
-    assert block["value_beta"] is not None
-    assert set(block) == {
-        "method", "available", "reason", "n_days", "tracking_error",
-        "market_beta", "size_beta", "value_beta", "r2",
-    }
+    # With no bars before the window (a replay opening on the first slot the
+    # cache holds) the legs, formed on the prior day's values and the turnover
+    # leg on a mean of at least ten days, start the regression on its
+    # eleventh day.
+    assert block["n_days"] == len(days) - 10
+    loadings = [name for name, _series in FACTOR_SERIES]
+    assert loadings == ["market_beta", "size_beta", "value_beta", "turnover_beta"]
+    assert all(isinstance(block[name], float) for name in loadings)
+    assert set(block) == {"method", "available", "reason", "n_days", "tracking_error", "r2", *loadings}
     # The method is stated with the numbers, not left to the reader.
     assert "沪深300" in block["method"] and "244" in block["method"]
-    assert "前一交易日" in block["method"]
-    assert analysis["size_factor_daily"] and analysis["value_factor_daily"]
+    assert "前一交易日" in block["method"] and "20 个交易日" in block["method"]
+    assert all(analysis[series] for _name, series in FACTOR_SERIES)
     compact = benchmark_summary_block(analysis)
-    assert (
-        compact["market_beta"], compact["size_beta"], compact["value_beta"], compact["tracking_error"]
-    ) == (block["market_beta"], block["size_beta"], block["value_beta"], block["tracking_error"])
+    assert {name: compact[name] for name in [*loadings, "tracking_error"]} == {
+        name: block[name] for name in [*loadings, "tracking_error"]
+    }
 
 
 def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
@@ -486,6 +480,7 @@ def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
     size_beta = analysis["factor_regression"]["size_beta"]
@@ -506,6 +501,7 @@ def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     assert unmeasured["factor_regression"]["size_beta"] is None
     unmeasured_block = benchmark_summary_block(unmeasured)
@@ -519,14 +515,15 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     load, on the same scale as the strategy and benchmark returns; the size
     factor used to be divided by 100 again, which left ``size_beta`` inflated
     100x (live windows reported 36-91 for what is really 0.36-0.91). Daily
-    returns are built here as ``alpha + 0.8 * market + 0.5 * smb + 0.3 * hml``
-    exactly, so every coefficient is known in advance.
+    returns are built here as ``alpha + 0.8 * market + 0.5 * smb + 0.3 * hml
+    + 0.2 * lmh`` exactly, so every coefficient is known in advance.
     """
-    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=24)]
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=30)]
     market_percent = [0.5, -0.3, 0.8, -0.6, 0.2, -0.1]
-    # Different periods, so market, size and value are not collinear.
+    # Different periods, so no two legs are collinear.
     smb = [0.004, -0.002, -0.003, 0.001]
     hml = [0.002, -0.001, 0.003, -0.002, 0.0005]
+    lmh = [0.003, -0.001, 0.002, -0.004, 0.001, 0.0005, -0.002]
     alpha_daily = 0.0002
 
     replay_dir = tmp_path / "replay"
@@ -547,7 +544,8 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     # 40 names ordered by circ_mv: the small 30% all move by the day's spread
     # and the big 30% do not, so small-minus-big is exactly ``smb``; the cheap
     # names alone also move by the value spread, so high-minus-low
-    # book-to-price is exactly ``hml``.
+    # book-to-price is exactly ``hml``; the quiet names alone move by the
+    # turnover spread, so low-minus-high turnover is exactly ``lmh``.
     daily = pd.DataFrame(
         [
             {
@@ -556,9 +554,10 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
                 "close": 10.0,
                 "circ_mv": 100.0 * (slot + 1),
                 "pb": _pb(slot),
-                "turnover_rate": 1.0,
+                "turnover_rate": _turnover(slot),
                 "pct_chg": (smb[index % len(smb)] if slot < 20 else 0.0)
-                + (hml[index % len(hml)] if slot in CHEAP else 0.0),
+                + (hml[index % len(hml)] if slot in CHEAP else 0.0)
+                + (lmh[index % len(lmh)] if slot in QUIET else 0.0),
             }
             for index, day in enumerate(days)
             for slot in range(40)
@@ -570,7 +569,12 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     for index, day in enumerate(days):
         market = market_percent[index % len(market_percent)] / 100.0
         equity *= (
-            1.0 + alpha_daily + 0.8 * market + 0.5 * smb[index % len(smb)] + 0.3 * hml[index % len(hml)]
+            1.0
+            + alpha_daily
+            + 0.8 * market
+            + 0.5 * smb[index % len(smb)]
+            + 0.3 * hml[index % len(hml)]
+            + 0.2 * lmh[index % len(lmh)]
         )
         curve.append(
             {
@@ -589,18 +593,23 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
-    # The published factor series is the raw decimal spread, not a percent. It
-    # starts on the second day: the legs are formed on the prior day's cap.
+    # The published factor series is the raw decimal spread, not a percent.
+    # With no bars before the window it starts on the second day, the legs
+    # formed on the prior day's cap, and the turnover leg once a mean of ten
+    # days stands behind it.
     assert analysis["size_factor_daily"][0] == [days[1], pytest.approx(smb[1])]
     assert analysis["value_factor_daily"][0] == [days[1], pytest.approx(hml[1])]
+    assert analysis["turnover_factor_daily"][0] == [days[10], pytest.approx(lmh[10 % len(lmh)])]
 
     block = analysis["factor_regression"]
-    assert block["available"] is True and block["n_days"] == len(days) - 1
+    assert block["available"] is True and block["n_days"] == len(days) - 10
     assert block["market_beta"] == 0.8
     assert block["size_beta"] == 0.5
     assert block["value_beta"] == 0.3
+    assert block["turnover_beta"] == 0.2
     assert block["r2"] == 1.0
     assert block["tracking_error"] == 0.0
 
@@ -611,8 +620,15 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
     benchmark = {str(date): float(value) for date, value in analysis["benchmark_daily"]}
     size = {str(date): float(value) for date, value in analysis["size_factor_daily"]}
     value = {str(date): float(item) for date, item in analysis["value_factor_daily"]}
+    turnover = {str(date): float(item) for date, item in analysis["turnover_factor_daily"]}
     rescaled = _factor_regression(
-        strategy, benchmark, {k: v / 100.0 for k, v in size.items()}, value
+        strategy,
+        {
+            "benchmark_daily": benchmark,
+            "size_factor_daily": {k: v / 100.0 for k, v in size.items()},
+            "value_factor_daily": value,
+            "turnover_factor_daily": turnover,
+        },
     )
     assert rescaled["size_beta"] == pytest.approx(50.0)
     assert rescaled["market_beta"] == block["market_beta"]
@@ -682,6 +698,149 @@ def test_value_legs_are_formed_on_the_prior_days_book_to_price():
     assert _value_factor(pd.DataFrame([*kept, *loss]))["20240103"] == pytest.approx(0.5 / 12)
 
 
+def test_turnover_legs_sort_on_the_prior_days_twenty_day_mean():
+    """Low minus high turnover: each name sorted on its mean turnover rate
+    over the last twenty trading days through the previous day, read
+    only where at least ten of those days carry its rate, the 30 % tails
+    equal-weighted. Here rates 1..40 put slots 0..11 in the low leg; on the
+    window's twelfth day slot 0 churns 1,000 and gains 50 %. Sorted on its
+    mean through the day before it stays in the low leg and low minus high
+    reads +0.5/12; on the same day's mean it would have joined the high leg
+    and read -0.5/12."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=12)]
+    rows = [
+        {
+            "ts_code": f"{slot:06d}.SZ",
+            "trade_date": day,
+            "turnover_rate": 1_000.0 if (index, slot) == (11, 0) else slot + 1.0,
+            "pct_chg": 0.5 if (index, slot) == (11, 0) else 0.0,
+        }
+        for index, day in enumerate(days)
+        for slot in range(40)
+    ]
+    factor = _turnover_factor(pd.DataFrame(rows))
+    # The first mean of ten days is through day 10 of the window, read on day 11.
+    assert list(factor) == days[10:]
+    assert factor[days[10]] == 0.0
+    assert factor[days[11]] == pytest.approx(0.5 / 12)
+    # A name listed on the sixth day has six rates by the eleventh and sits
+    # out the twelfth however low it churns and however far it moves.
+    listed = [
+        {"ts_code": "301999.SZ", "trade_date": day, "turnover_rate": 0.001, "pct_chg": 3.0 if index == 11 else 0.0}
+        for index, day in enumerate(days)
+        if index >= 5
+    ]
+    assert _turnover_factor(pd.DataFrame([*rows, *listed])) == factor
+    # The legs do not depend on how the slot's rows happen to be stored.
+    shuffled = pd.DataFrame(rows).sample(frac=1, random_state=3).reset_index(drop=True)
+    assert _turnover_factor(shuffled) == factor
+
+
+def _leg_panel(days: list[str], codes: list[str], seed: int) -> pd.DataFrame:
+    """Daily bars of ``codes`` whose caps, book-to-price, turnover and returns
+    all move from day to day, so every leg sorts afresh each day."""
+
+    rng = np.random.default_rng(seed)
+    shape = (len(days), len(codes))
+    return pd.DataFrame(
+        {
+            "trade_date": np.repeat(days, len(codes)),
+            "ts_code": np.tile(codes, len(days)),
+            "close": 10.0,
+            "circ_mv": rng.lognormal(8.0, 1.0, shape).ravel(),
+            "pb": rng.normal(2.0, 1.5, shape).ravel(),
+            "turnover_rate": rng.lognormal(0.0, 1.0, shape).ravel(),
+            "pct_chg": rng.normal(0.0, 0.02, shape).ravel(),
+        }
+    )
+
+
+# Thirty main-board and ten ChiNext names: the boards a current account may buy on.
+_PERMITTED = [f"{slot:06d}.SZ" for slot in range(30)] + [f"3000{slot:02d}.SZ" for slot in range(10)]
+
+
+def test_a_warm_up_gives_every_leg_its_value_from_the_replays_first_day(tmp_path: Path):
+    """A replay whose source holds the trading days before it sorts its first
+    days on them, so each leg reads on the replay's first day what a longer
+    replay covering both periods reads on that day. They are read only to
+    sort: no leg value is emitted for them, and bars on or after the replay's
+    first day are refused as a warm-up. With none (a replay opening on the
+    first slot the cache holds) the size and value legs begin on the second
+    day and the turnover leg on the eleventh."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=45)]
+    panel = _leg_panel(days, _PERMITTED, seed=11)
+    before, span = days[:25], days[25:]
+    own = panel[panel["trade_date"].isin(span)]
+    warmup = warmup_bars(panel[panel["trade_date"].isin(before)])
+    # Only what the longest window reads is kept.
+    assert sorted(set(warmup["trade_date"])) == before[-20:]
+
+    longer = _factor_legs(panel, None, BOARDS)
+    warm = _factor_legs(own, warmup, BOARDS)
+    cold = _factor_legs(own, None, BOARDS)
+    for series, leg in warm.items():
+        assert sorted(leg) == span, series
+        assert leg == {day: value for day, value in longer[series].items() if day >= span[0]}, series
+    assert min(cold["size_factor_daily"]) == min(cold["value_factor_daily"]) == span[1]
+    assert min(cold["turnover_factor_daily"]) == span[10]
+
+    with pytest.raises(ValueError, match="not before the replay's first day"):
+        _factor_legs(own, panel[panel["trade_date"].isin(days[20:26])], BOARDS)
+
+    # The sidecar regresses on every day of the replay.
+    replay_dir = tmp_path / "replay"
+    replay_dir.mkdir()
+    pd.DataFrame(
+        {
+            "dataset": "index_daily",
+            "ts_code": BENCHMARK_TS_CODE,
+            "trade_date": span,
+            "pct_chg": np.random.default_rng(5).normal(0.0, 1.0, len(span)),
+        }
+    ).to_parquet(replay_dir / "macro.parquet", index=False)
+    analysis = replay_style_analysis(
+        _replay(span),
+        own,
+        replay_dir=replay_dir,
+        universes=(),
+        mode="valid",
+        benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
+        warmup=warmup,
+    )
+    assert analysis["factor_regression"]["n_days"] == len(span)
+    assert analysis["turnover_factor_daily"][0][0] == span[0]
+
+
+def test_the_legs_are_formed_on_the_boards_the_account_may_buy_on():
+    """Beijing-exchange and STAR names the account cannot buy -- micro-caps
+    with extreme moves here -- leave the size, value and turnover legs as they
+    are without them; read on every board they would move them. A profile
+    that pins no boards is refused rather than read on every board."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=15)]
+    permitted = _leg_panel(days, _PERMITTED, seed=3)
+    foreign = _leg_panel(
+        days, [f"8300{slot:02d}.BJ" for slot in range(12)] + [f"6880{slot:02d}.SH" for slot in range(12)], seed=4
+    ).assign(circ_mv=1.0, pb=50.0, turnover_rate=40.0, pct_chg=0.3)
+    mixed = pd.concat([permitted, foreign], ignore_index=True).sample(frac=1, random_state=2)
+
+    assert _factor_legs(mixed, None, BOARDS) == _factor_legs(permitted, None, BOARDS)
+    assert _factor_legs(mixed, None, ("main", "gem", "star", "bj")) != _factor_legs(permitted, None, BOARDS)
+    with pytest.raises(ValueError, match="permitted_boards"):
+        replay_style_analysis(
+            _replay(days),
+            mixed,
+            replay_dir=None,
+            universes=(),
+            mode="valid",
+            benchmark_index=BENCHMARK_TS_CODE,
+            permitted_boards=None,
+        )
+
+
 @pytest.mark.parametrize("exposure", [0.0, 0.2])
 def test_cash_and_a_constant_low_beta_book_load_on_the_market_alone(exposure: float):
     """A book that only scales the market loads on it by its exposure and on
@@ -692,13 +851,21 @@ def test_cash_and_a_constant_low_beta_book_load_on_the_market_alone(exposure: fl
     market = {day: (-0.012, 0.004, -0.006)[i % 3] for i, day in enumerate(dates)}
     size = {day: (0.005, -0.003, 0.002, -0.002)[i % 4] for i, day in enumerate(dates)}
     value = {day: (0.002, -0.004, 0.001, 0.003, -0.002)[i % 5] for i, day in enumerate(dates)}
+    turnover = {day: (0.003, -0.001, 0.002, -0.004, 0.001, 0.0005, -0.002)[i % 7] for i, day in enumerate(dates)}
     strategy = [(day, exposure * market[day]) for day in dates]
-    block = _factor_regression(strategy, market, size, value)
+    block = _factor_regression(
+        strategy,
+        {
+            "benchmark_daily": market,
+            "size_factor_daily": size,
+            "value_factor_daily": value,
+            "turnover_factor_daily": turnover,
+        },
+    )
     assert block["available"] is True
     assert block["tracking_error"] == 0.0
     assert block["market_beta"] == exposure
-    assert block["size_beta"] == 0.0
-    assert block["value_beta"] == 0.0
+    assert (block["size_beta"], block["value_beta"], block["turnover_beta"]) == (0.0, 0.0, 0.0)
     # The raw benchmark excess is positive solely because less capital was exposed.
     raw = 1.0
     for _, value in strategy:
@@ -722,6 +889,7 @@ def test_the_factor_regression_reports_missing_factors_instead_of_zero(tmp_path:
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     block = analysis["factor_regression"]
     assert block["available"] is False
@@ -758,7 +926,7 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
     daily = pd.DataFrame(
         [
             {"trade_date": day, "ts_code": f"{slot:06d}.SZ", "close": 10.0,
-             "circ_mv": 100.0 * (slot + 1), "pb": _pb(slot), "turnover_rate": 1.0,
+             "circ_mv": 100.0 * (slot + 1), "pb": _pb(slot), "turnover_rate": _turnover(slot),
              "pct_chg": float(rng.normal(0.0, 0.01))}
             for day in days
             for slot in range(40)
@@ -783,7 +951,7 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
 
     def analyse(block):
         return replay_style_analysis(
-            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", baselines=block, benchmark_index=BENCHMARK_TS_CODE
+            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", baselines=block, benchmark_index=BENCHMARK_TS_CODE, permitted_boards=BOARDS
         )
 
     graded, bare = analyse(baselines), analyse(None)

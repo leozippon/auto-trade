@@ -396,7 +396,8 @@ class AcceptanceRules:
                 "copies of the node's own filled trades (same entry and exit instants, "
                 "same money per round trip, same Broker and costs; each name replaced by "
                 "one on the same side of the experiment's benchmark_index membership that one "
-                "board lot of that money could buy). Its annualized mean is the active "
+                "board lot of that money could buy; each copy's daily profit read on the "
+                "node's own previous-day equity). Its annualized mean is the active "
                 "excess, its annualized standard deviation the active tracking error "
                 "and their ratio the active information ratio: active.excess, "
                 "active.tracking_error and active.information_ratio of a validate row "
@@ -408,7 +409,8 @@ class AcceptanceRules:
                 "statistic": (
                     "the residual information ratio of the active series: its daily "
                     "return regressed by OLS on an intercept, the benchmark_index return "
-                    "(market), the size leg and the value leg (regression_method), the "
+                    "(market), the size leg, the value leg and the low-turnover leg "
+                    "(regression_method), the "
                     f"intercept times sqrt({years}) over the residual standard deviation; "
                     f"years = trading days / {years}"
                 ),

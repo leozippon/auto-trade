@@ -18,6 +18,7 @@ import pandas as pd
 
 from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.replay.stats import (
     ReplayResult,
@@ -197,7 +198,7 @@ class EveryEvaluationBackendPricesTheBlockTest(unittest.TestCase):
                     days[0],
                     days[-1],
                     StrategySchedule("day", "09:00"),
-                    BrokerProfile(initial_cash=100_000, slippage_bps=5.0),
+                    BrokerProfile(initial_cash=100_000, slippage_bps=5.0, permitted_boards=BOARDS),
                 )
             )
 

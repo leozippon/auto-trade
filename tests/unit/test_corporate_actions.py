@@ -25,7 +25,7 @@ from autotrade.paper import DailyPaperEngine
 DAYS = ("20260105", "20260106", "20260107")
 SYMBOL = "000001.SZ"
 PROFILE = BrokerProfile(
-    initial_cash=100_000.0, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0
+    initial_cash=100_000.0, min_commission_cny=0, slippage_bps=0, transfer_fee_bps=0, permitted_boards=("main",)
 )
 
 
