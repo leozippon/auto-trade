@@ -24,6 +24,7 @@ from autotrade.environment.executor import raised_by_strategy
 from autotrade.environment.replay import timeview as timeview_module
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import (
+    BASELINE_DRAWS,
     NullControlSetupError,
     RandomBaselineError,
 )
@@ -626,13 +627,13 @@ def test_pit_evaluation_credits_a_cash_dividend_from_the_slot_table(
     assert "corporate_actions" not in record["pit"]["asof_domains"]
 
     # A formal replay carries the random baseline the verdict grades it
-    # against: twenty draws of its own skeleton, the one other name standing
+    # against: BASELINE_DRAWS draws of its own skeleton, the one other name standing
     # in, matched on the float-cap decile because this slot mounts no
     # index_weight. The smoke window below is not a Validation and has none.
     style = json.loads(
         (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    assert style["baseline"]["k"] == 20 and style["baseline"]["round_trips"] == 1
+    assert style["baseline"]["k"] == BASELINE_DRAWS and style["baseline"]["round_trips"] == 1
     assert style["baseline"]["matched"] == "circ_mv_decile+affordability"
     assert style["baseline"]["dropped_trips_mean"] == 0.0
     assert [day for day, _value in style["baseline_daily"]] == ["20240102", "20240103"]

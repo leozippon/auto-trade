@@ -65,11 +65,13 @@ from .engine import ExecutionPriceProvider, run_daily_replay
 from .market import DailyMarketData, date_text
 from .stats import ReplayResult, compounded_return
 
-# Draws of one null control. Twenty put the composite's standard error at
-# 0.8-2.2 pp/yr within one year (seven books, 2026-11-15) against the 4-11
-# pp/yr active returns it is subtracted from, at a twenty-fifth of what a
-# percentile-grade 500 would cost on every replay.
-BASELINE_DRAWS = 20
+# Draws of one random baseline and of one null control. With twenty,
+# re-drawing alone moved a one-year residual IR of a 20-name book by about
+# 0.1 (eight seeds: SD 0.115; one reading went from 1.557 to 1.306 against a
+# 1.341 threshold, 2026-11-15); a hundred divide that noise by about 2.2.
+# The draws run one after another: over 1,701 days twenty took 46-64 s and a
+# hundred 259 s, three to four minutes more on a replay that takes hours.
+BASELINE_DRAWS = 100
 # How a replacement name is drawn: uniformly among the entry day's names that
 # one board lot of this round trip's own money can buy and that sit on the
 # original's side of the benchmark's membership. Without a membership table the

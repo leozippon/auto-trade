@@ -484,10 +484,10 @@ def test_identical_trades_meet_the_identical_random_baseline():
     their random baselines agree to the last digit."""
 
     arguments = (_frame(), BENCHMARK, PROFILE, StrategySchedule("day", "08:30"))
-    first = run_null_control(_observed_result(), *arguments, seed=17, baselines=True)
-    second = run_null_control(_observed_result(), *arguments, seed=17, baselines=True)
+    first = run_null_control(_observed_result(), *arguments, k=5, seed=17, baselines=True)
+    second = run_null_control(_observed_result(), *arguments, k=5, seed=17, baselines=True)
 
-    assert first["k"] == BASELINE_DRAWS
+    assert first["k"] == 5
     assert first == second
 
 
@@ -821,6 +821,25 @@ def test_excess_percentile_is_the_share_of_null_runs_at_or_below_the_observed():
     }
     assert _distribution(-0.5, null)["excess_percentile"] == 0.0
     assert _distribution(1.0, null)["excess_percentile"] == 1.0
+
+
+def test_the_default_null_ranks_the_observed_excess_among_a_hundred_draws():
+    """``BASELINE_DRAWS`` draws unless a caller names another count: the
+    percentile steps by a hundredth, and the 5th and 95th percentiles of the
+    draws fall between draws rather than on the extreme ones."""
+
+    assert BASELINE_DRAWS == 100
+    reading = _distribution(0.365, [index / 100 for index in range(100)])
+    assert reading["excess_percentile"] == 0.37
+    assert (reading["null_excess_p05"], reading["null_excess_p95"]) == pytest.approx((0.0495, 0.9405))
+
+    block = run_null_control(
+        _observed_result(), _frame(), BENCHMARK, PROFILE, StrategySchedule("day", "08:30"), seed=17
+    )
+    assert block["k"] == BASELINE_DRAWS
+    assert (block["excess_percentile"] * BASELINE_DRAWS) == pytest.approx(
+        round(block["excess_percentile"] * BASELINE_DRAWS)
+    )
 
 
 def test_run_null_control_replays_scripted_nulls_and_reports_one_block():
