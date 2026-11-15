@@ -42,6 +42,7 @@ Thumbs.db
 
 # Local agent workspace and evaluations
 /.pi/
+/.claude/
 
 # Docs and logbook stay local
 /docs/
