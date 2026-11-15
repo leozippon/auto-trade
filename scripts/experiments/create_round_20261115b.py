@@ -59,6 +59,8 @@ EXPERIMENTS: dict[str, dict[str, str]] = {
 
 ROUND = Round(
     experiments=EXPERIMENTS,
+    # A `--fill` pass created the experiment on 2026-11-15 at 09:41Z.
+    closed=True,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_TEN_YEAR_CSI1000,
