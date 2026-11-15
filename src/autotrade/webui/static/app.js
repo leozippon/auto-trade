@@ -30,9 +30,8 @@ const OUTCOME_LABELS = {
 // the ending and writes its one-line reason; the console only words it, and
 // words it the same way on the card, the page header, the process list, the
 // 读出 view and the best-experiment panel. A registered strategy with its readout
-// is worded by whether its Held-out reading passed (`forward.heldout.passed`,
-// registry.heldout_passed) rather than by its stored state (endingKey): the
-// Held-out residual IR against that slice's own threshold, and nothing else.
+// is worded by the server's pass reading (`forward.pass_reading.passed`,
+// registry.pass_reading) rather than by its stored state (endingKey).
 const ENDING_LABELS = {
   passed: "通过",
   failed: "未通过",
@@ -40,12 +39,16 @@ const ENDING_LABELS = {
   environment_blocked: "环境阻断",
   broken: "失败",
 };
-// The factor legs a stored reading was taken on (`forward.heldout.legs`,
-// registry.reading_legs): stored readings are never re-scored, so a label read
-// on three legs can sit beside one read on four; the badge's tooltip says which.
-const READING_LEGS = {
-  3: "三腿读数（市场、规模、价值）",
-  4: "四腿读数（市场、规模、价值、低换手）",
+// What that pass reading requires, as one clause the badge's tooltip and the
+// readout's rule both say; the periods it reads, and each condition as its
+// failure reads (`conditions`, in the server's order).
+const PASS_RULE = "前推年与 Held-out 段各自扣费后盈利、跑赢基准指数，且回撤与主动回撤都不超过模拟账户的终止上限";
+const PASS_PERIODS = { forward: "前推年", heldout: "Held-out 段" };
+const PASS_FAILURES = {
+  profit: "未盈利",
+  beats_index: "未跑赢基准指数",
+  drawdown: "回撤超过终止上限",
+  active_drawdown: "主动回撤超过终止上限",
 };
 // Where a Paper account's verdict stands (paper/verdict.py): the status as
 // [badge state, label], and the reason a terminal row or an unmeasured reading
@@ -2018,13 +2021,12 @@ function experimentGrid(rows, options = {}) {
 }
 
 /* The ending as the console words it: its state, except that a registered
-   strategy with its readout reads as passed or failed by its Held-out reading
-   alone; one the server did not find passed (no reading, or none at all) is
-   failed. */
+   strategy with its readout reads as passed or failed by the server's pass
+   reading; one the server did not find passed (or read at all) is failed. */
 function endingKey(item) {
   const state = ((item || {}).ending || {}).state || "";
   if (state !== "registered_with_record") return state;
-  return ((item.forward || {}).heldout || {}).passed === true ? "passed" : "failed";
+  return ((item.forward || {}).pass_reading || {}).passed === true ? "passed" : "failed";
 }
 
 function endingLabel(item) {
@@ -2032,31 +2034,37 @@ function endingLabel(item) {
   return ENDING_LABELS[key] || key;
 }
 
-/* What a registered strategy's label reads, as one clause: the Held-out
-   residual IR against that slice's own threshold over its days, and the legs
-   it was taken on; or that there is no reading to pass. */
-function heldoutLabelLine(item) {
-  const forward = item.forward || {};
-  const reading = ((forward.slices || {}).heldout || {}).residual_reading;
-  if (!reading) return "Held-out 无读数";
-  if (reading.unmeasured) return `Held-out 残差 IR 未读出：${reading.unmeasured}`;
-  const legs = READING_LEGS[(forward.heldout || {}).legs];
-  return (
-    `Held-out 残差 IR ${fmtSharpe(reading.residual_information_ratio)}（门槛 ${fmtSharpe(reading.threshold)}，${reading.days ?? "—"} 天）` +
-    (legs ? `，${legs}` : "")
-  );
+/* What a registered strategy's label read, one line each: the rule, then per
+   period the account's and the index's return and the two drawdowns against
+   their limits, with the first condition that period failed. A figure the
+   record does not carry is a dash. */
+function passLabelLines(item) {
+  const periods = ((item.forward || {}).pass_reading || {}).periods || {};
+  const signed = (value) => `${value > 0 ? "+" : ""}${fmtPct(value)}`;
+  return [
+    `${PASS_RULE}写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}`,
+    ...Object.entries(periods).map(([name, p]) => {
+      const conditions = p.conditions || {};
+      const failed = Object.keys(conditions).find((key) => conditions[key] !== true);
+      return (
+        `${PASS_PERIODS[name] || name}：账户 ${signed(p.account_return)}，基准指数 ${signed(p.index_return)}，` +
+        `回撤 ${fmtPct(p.max_drawdown)}（上限 ${fmtPct(p.max_drawdown_limit)}），主动回撤 ${fmtPct(p.active_max_drawdown)}（上限 ${fmtPct(p.active_max_drawdown_limit)}）` +
+        (failed ? `；未过：${PASS_FAILURES[failed] || failed}` : "")
+      );
+    }),
+  ].join("\n");
 }
 
 /* The ending as one badge; null while the experiment can still run. A
-   registered strategy's tooltip says first what its label reads. */
+   registered strategy's tooltip says first what its label read. */
 function endingBadge(item) {
   const ending = item.ending;
   if (!ending || !ending.state) return null;
   const key = endingKey(item);
-  const reads = ending.state === "registered_with_record" ? heldoutLabelLine(item) : null;
+  const reads = ending.state === "registered_with_record" ? passLabelLines(item) : null;
   return el(
     "span",
-    { class: `badge ending-${key}`, title: [reads, ending.reason].filter(Boolean).join("；") || null },
+    { class: `badge ending-${key}`, title: [reads, ending.reason].filter(Boolean).join("\n") || null },
     endingLabel(item),
   );
 }
@@ -2147,7 +2155,7 @@ function evidenceTiles(item) {
       value: heldout.residual_information_ratio,
       fmt: fmtSharpe,
       signed: true,
-      title: `Held-out 段主动序列对市场、规模、价值与低换手因子腿回归的残差 IR（此前存下的读数只有前三条）；不低于本段门槛写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}`,
+      title: "Held-out 段主动序列对市场、规模、价值与低换手因子腿回归的残差 IR（此前存下的读数只有前三条）；只报告，不作判定",
     },
   ];
   return statTilesRow(
@@ -3237,7 +3245,7 @@ function forwardStagePanel(detail) {
     replayErrorNode(forward),
     holderLine("前推", f),
     seedReadingsTable((forward || {}).slices, ["forward"]),
-    el("div", { class: "meta-line section-gap" }, "前推读数只报告，不作判定"),
+    el("div", { class: "meta-line section-gap" }, "前推的统计读数只报告；通过与否只看两段的账户盈亏、对指数的超出与回撤"),
     sliceStats(f, FORWARD_STAT_FIELDS),
     forwardPoolBlock(detail.readouts),
     forward && forward.result ? styleCard(detail.experiment_id, forward.result) : null,
@@ -3263,11 +3271,7 @@ function heldoutStagePanel(detail) {
     replayErrorNode(forward),
     holderLine("Held-out", h),
     seedReadingsTable((forward || {}).slices, ["heldout"]),
-    el(
-      "div",
-      { class: "meta-line section-gap" },
-      `Held-out 残差 IR 不低于本段门槛写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}；只是读法，不把关任何事`,
-    ),
+    el("div", { class: "meta-line section-gap" }, "Held-out 的统计读数只报告；通过与否只看两段的账户盈亏、对指数的超出与回撤"),
     sliceStats(h, HELDOUT_STAT_FIELDS),
   );
 }
@@ -3331,12 +3335,12 @@ function readoutStagePanel(detail) {
 /* How the readout will be read, before it exists, in the experiment's own
    stamped rules (registry._verdict_thresholds): the research years, the
    validation period and its step, the threshold a record over the whole
-   period is held to at the experiment's level, and the label, which reads the
-   Held-out slice against its own threshold (registry.heldout_passed). */
+   period is held to at the experiment's level, and the label's rule
+   (PASS_RULE, registry.pass_reading). */
 function readoutRule(t) {
   return (
     `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录（整段残差 IR 的门槛约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）；` +
-    `Held-out 段残差 IR 不低于按本段天数算出的门槛写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}，只是读法，不把关任何事`
+    `${PASS_RULE}写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}，只是读法，不把关任何事`
   );
 }
 

@@ -295,100 +295,170 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
     assert experiment_detail(tmp_path, "budget_exhausted")["ending"] == endings["budget_exhausted"]
 
 
+# Figures of one unseen period that meet every condition of the label under
+# limits of 0.55 (equity drawdown) and 0.30 (active drawdown).
+_PASSING = {"account": 0.065, "index": 0.062, "drawdown": 0.18, "active_drawdown": 0.12}
+
+
+def _forward_record(
+    forward: dict[str, object] | None = None,
+    heldout: dict[str, object] | None = None,
+    *,
+    rules: dict[str, object] | None = None,
+) -> dict[str, object]:
+    """A forward record carrying only what the label reads: each period's
+    account and index returns and drawdowns (``_PASSING`` overridden per
+    period), and the record's drawdown limits."""
+
+    def block(overrides: dict[str, object] | None) -> dict[str, object]:
+        figures = {**_PASSING, **(overrides or {})}
+        return {
+            "raw_readings": {"strategy_return": figures["account"], "benchmark_return": figures["index"]},
+            "max_drawdown": figures["drawdown"],
+            "active_max_drawdown": figures["active_drawdown"],
+        }
+
+    return {
+        "acceptance_rules": {"max_drawdown": 0.55, "active_max_drawdown": 0.30, **(rules or {})},
+        "slices": {"forward": block(forward), "heldout": block(heldout)},
+    }
+
+
 @pytest.mark.parametrize(
-    ("reading", "passed"),
+    ("record", "failed"),
     [
-        ({"residual_information_ratio": 1.2, "threshold": 0.9}, True),
-        ({"residual_information_ratio": 0.5, "threshold": 0.9}, False),
-        ({"residual_information_ratio": 0.9, "threshold": 0.9}, True),
-        ({"residual_information_ratio": float("nan"), "threshold": 0.9}, False),
-        ({"residual_information_ratio": float("inf"), "threshold": 0.9}, False),
-        ({"residual_information_ratio": 1.2, "threshold": float("nan")}, False),
-        ({"unmeasured": "12 day(s) carry every factor leg, fewer than 20"}, False),
-        ({"threshold": 0.9}, False),
-        ({"residual_information_ratio": 1.2}, False),
-        ({}, False),
+        (_forward_record(), []),
+        # A drawdown exactly at its limit is inside it.
+        (_forward_record(forward={"drawdown": 0.55}, heldout={"active_drawdown": 0.30}), []),
+        # Each condition failing alone, in one period; an account level with
+        # zero or with the index is no profit and no lead.
+        (_forward_record(forward={"account": -0.02, "index": -0.05}), [("forward", "profit")]),
+        (_forward_record(heldout={"account": 0.0, "index": -0.13}), [("heldout", "profit")]),
+        (_forward_record(forward={"account": 0.047}), [("forward", "beats_index")]),
+        (_forward_record(heldout={"index": 0.065}), [("heldout", "beats_index")]),
+        (_forward_record(forward={"drawdown": 0.5501}), [("forward", "drawdown")]),
+        (_forward_record(heldout={"active_drawdown": 0.3001}), [("heldout", "active_drawdown")]),
+        # A missing or non-finite figure fails each condition it enters, and a
+        # missing limit fails its condition in both periods.
+        (_forward_record(heldout={"account": None}), [("heldout", "profit"), ("heldout", "beats_index")]),
+        (_forward_record(forward={"index": float("nan")}), [("forward", "beats_index")]),
+        (_forward_record(heldout={"drawdown": float("inf")}), [("heldout", "drawdown")]),
+        (
+            _forward_record(rules={"active_max_drawdown": None}),
+            [("forward", "active_drawdown"), ("heldout", "active_drawdown")],
+        ),
     ],
 )
-def test_a_strategy_passes_when_its_heldout_residual_ir_reaches_that_slices_threshold(
-    reading: dict[str, object], passed: bool
+def test_a_strategy_passes_only_when_both_unseen_periods_meet_every_condition(
+    record: dict[str, object], failed: list[tuple[str, str]]
 ) -> None:
-    """通过 / 未通过 is read off the stored Held-out reading alone: its residual IR
-    at or above the threshold stored beside it. A reading that is missing,
-    unmeasured or not finite fails rather than passing by default."""
+    """通过 needs, in the Forward year and in the Held-out slice alike, a profit
+    after costs, a return above the index's, and both drawdowns at most the
+    limits at which a Paper account terminates. Any one condition failing in
+    one period fails the label, and the reading says which; a figure that is
+    missing or not finite fails rather than passing by default."""
 
-    assert registry.heldout_passed(reading) is passed
+    reading = registry.pass_reading(record)
+    assert reading["passed"] is (not failed)
+    assert list(reading["periods"]) == ["forward", "heldout"]
+    assert list(reading["periods"]["forward"]["conditions"]) == ["profit", "beats_index", "drawdown", "active_drawdown"]
+    assert [
+        (name, condition)
+        for name, period in reading["periods"].items()
+        for condition, result in period["conditions"].items()
+        if result is not True
+    ] == failed
 
 
-def _restate_readout(directory: Path, *, record_ir: float | None = None, heldout: dict[str, object] | None = None) -> None:
-    """Rewrite the last ledger row's stored record residual IR and Held-out reading."""
+def test_a_failed_readout_passes_nothing() -> None:
+    """A replay the strategy's own error stopped stores no slices: every
+    condition of both periods fails, each figure unread."""
+
+    reading = registry.pass_reading({"acceptance_rules": {"max_drawdown": 0.55, "active_max_drawdown": 0.3}, "slices": None})
+    assert reading["passed"] is False
+    for period in reading["periods"].values():
+        assert set(period["conditions"].values()) == {False}
+        assert period["account_return"] is None and period["max_drawdown_limit"] == 0.55
+
+
+def _restate_readout(directory: Path, edit) -> None:
+    """Rewrite the last ledger row, the forward record, through ``edit``."""
 
     ledger = directory / "ledgers/experiment_ledger.jsonl"
     rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-    if record_ir is not None:
-        rows[-1]["readout"]["record"]["residual_information_ratio"] = record_ir
-    if heldout is not None:
-        rows[-1]["slices"]["heldout"]["residual_reading"] = heldout
+    edit(rows[-1])
     ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
 
 
-def test_a_registered_experiment_passes_by_its_heldout_reading_alone_and_keeps_its_stored_state(
+def test_a_registered_experiment_passes_on_its_unseen_periods_alone_and_keeps_its_stored_state(
     tmp_path: Path,
 ) -> None:
-    """The listing row and the experiment page carry ``forward.heldout`` read off
-    the stored Held-out reading alone: a record that clears its threshold beside
-    a Held-out reading that does not is not passed, a record below its
-    threshold beside a Held-out reading that clears its own is, and a reading
-    that is missing or unmeasured is not. The stored verdict and ending state
-    stay ``registered_with_record`` and no record is rewritten; before the
-    readout exists there is nothing to pass. The legs are counted from the
-    loadings the Held-out reading carries: three for one taken before the
-    turnover leg joined."""
+    """The listing row and the experiment page carry ``forward.pass_reading``
+    read off the stored record: a loss in one period fails beside a record and
+    a Held-out residual reading that clear their thresholds, and a strategy that
+    meets every condition passes beside readings below every threshold and a
+    negative lower bound. The stored verdict and ending state stay
+    ``registered_with_record`` and no record is rewritten; before the readout
+    exists there is nothing to read."""
 
     root = tmp_path / "experiments"
-    for name in ("record_only", "heldout_only", "unmeasured", "three_legs"):
+    for name in ("loss", "passing"):
         build_experiment(root, name, "registered_with_record")
     build_experiment(root, "replaying", "forward")
-    stored = _records(root / "record_only")[-1]
+    stored = _records(root / "loss")[-1]
     record, reading = stored["readout"]["record"], stored["slices"]["heldout"]["residual_reading"]
     assert record["residual_information_ratio"] >= record["threshold"]
     assert reading["residual_information_ratio"] >= reading["threshold"]
-    _restate_readout(root / "record_only", heldout={**reading, "residual_information_ratio": reading["threshold"] - 0.01})
-    _restate_readout(root / "heldout_only", record_ir=record["threshold"] - 0.01)
-    _restate_readout(root / "unmeasured", heldout={"unmeasured": "12 day(s) carry every factor leg, fewer than 20"})
-    _restate_readout(root / "three_legs", heldout={key: value for key, value in reading.items() if key != "turnover_beta"})
-    restated = _records(root / "record_only")[-1]
+    assert stored["acceptance_rules"]["max_drawdown"] == 0.9
+
+    def figures(row: dict[str, object], **heldout: float) -> None:
+        for name, slice_ in row["slices"].items():
+            values = {**_PASSING, **(heldout if name == "heldout" else {})}
+            slice_["raw_readings"].update(strategy_return=values["account"], benchmark_return=values["index"])
+            slice_.update(max_drawdown=values["drawdown"], active_max_drawdown=values["active_drawdown"])
+
+    def below_every_threshold(row: dict[str, object]) -> None:
+        figures(row)
+        row["readout"]["record"]["residual_information_ratio"] = row["readout"]["record"]["threshold"] - 0.01
+        row["slices"]["heldout"]["residual_reading"]["residual_information_ratio"] = -1.0
+        row["readout"]["forward"]["lower_bound"] = -0.05
+
+    _restate_readout(root / "loss", lambda row: figures(row, account=-0.048, index=-0.129))
+    _restate_readout(root / "passing", below_every_threshold)
+    restated = _records(root / "passing")[-1]
 
     listed = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
-    assert {name: listed[name]["forward"]["heldout"] for name in ("record_only", "heldout_only", "unmeasured", "three_legs")} == {
-        "record_only": {"passed": False, "legs": 4},
-        "heldout_only": {"passed": True, "legs": 4},
-        "unmeasured": {"passed": False, "legs": None},
-        "three_legs": {"passed": True, "legs": 3},
+    loss = listed["loss"]["forward"]["pass_reading"]
+    assert loss["passed"] is False
+    assert loss["periods"]["heldout"]["conditions"] == {
+        "profit": False, "beats_index": True, "drawdown": True, "active_drawdown": True,
     }
+    assert loss["periods"]["heldout"]["account_return"] == -0.048
+    assert loss["periods"]["heldout"]["max_drawdown_limit"] == 0.9
+    assert listed["passing"]["forward"]["pass_reading"]["passed"] is True
     assert listed["replaying"]["forward"] is None and listed["replaying"]["ending"] is None
-    for name in ("record_only", "heldout_only"):
+    for name in ("loss", "passing"):
         detail = experiment_detail(root, name)
-        assert detail["forward"]["heldout"] == listed[name]["forward"]["heldout"]
+        assert detail["forward"]["pass_reading"] == listed[name]["forward"]["pass_reading"]
         assert detail["ending"]["state"] == listed[name]["ending"]["state"] == "registered_with_record"
         assert detail["verdict"]["status"] == "registered_with_record"
-        assert "passed" not in detail["record"] and "passed" not in listed[name]["record"]
-    assert _records(root / "record_only")[-1] == restated
+    assert _records(root / "passing")[-1] == restated
 
 
 def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_ending_shows(
     tmp_path: Path,
 ) -> None:
-    """A registered strategy with its readout wears 通过 or 未通过 by its Held-out
-    reading, never its stored state's name or its record; one with no
-    ``forward.heldout.passed`` at all is 未通过; every other ending keeps its own
-    label, and an experiment without an ending -- still running, or registered
-    with its replay still to come -- keeps its state badge. A registered
-    strategy's tooltip says first what its label reads: the Held-out residual
-    IR against its threshold over its days, and the legs it was taken on. The
-    card, the experiment page header and the best-experiment panel wear
-    experimentBadge, the 读出 view endingBadge and the process list
-    endingLabel, all of the whole item."""
+    """A registered strategy with its readout wears 通过 or 未通过 by the
+    server's ``forward.pass_reading.passed``, never its stored state's name, its
+    record or its own figures; one with no pass reading at all is 未通过; every
+    other ending keeps its own label, and an experiment without an ending --
+    still running, or registered with its replay still to come -- keeps its
+    state badge. A registered strategy's tooltip says first what its label
+    read: the rule, then one line per period with the account's and the
+    index's return, both drawdowns against their limits and the first
+    condition that period failed. The card, the experiment page header and
+    the best-experiment panel wear experimentBadge, the 读出 view endingBadge
+    and the process list endingLabel, all of the whole item."""
 
     for experiment_id, stage in (
         ("passed", "registered_with_record"),
@@ -400,22 +470,31 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
         build_experiment(tmp_path / "experiments", experiment_id, stage)
     build_experiment(tmp_path / "experiments", "running", "research", alive=True)
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path / "experiments")["experiments"]}
-    assert rows["passed"]["forward"]["heldout"] == {"passed": True, "legs": 4}
-    # Readings stated here so the tooltip's figures are exact.
-    rows["passed"]["forward"]["slices"]["heldout"]["residual_reading"].update(
-        residual_information_ratio=5.49, threshold=3.35, days=59
-    )
+    assert set(rows["passed"]["forward"]["pass_reading"]) == {"passed", "periods"}
 
-    def variant(passed: bool, legs: int | None, reading: object) -> dict[str, object]:
+    def variant(forward: dict[str, object], heldout: dict[str, object]) -> dict[str, object]:
+        """The listed row with the pass reading the server gives these figures."""
+
         row = json.loads(json.dumps(rows["passed"]))
-        row["forward"]["heldout"] = {"passed": passed, "legs": legs}
-        row["forward"]["slices"]["heldout"]["residual_reading"] = reading
+        row["forward"]["pass_reading"] = registry.pass_reading(_forward_record(forward, heldout))
         return row
 
-    rows["failed"] = variant(False, 4, {"residual_information_ratio": 0.37, "threshold": 1.66, "days": 59})
-    rows["three"] = variant(True, 3, {"residual_information_ratio": 5.49, "threshold": 3.35, "days": 59})
-    rows["unmeasured"] = variant(False, None, {"unmeasured": "too few days"})
-    rows["raised"] = {**rows["passed"], "forward": {**rows["passed"]["forward"], "slices": {}, "heldout": {"passed": False, "legs": None}}}
+    # The figures of a stored strategy that passed, and of one that lost 17.6 %
+    # in its Forward year and, here, went past its active-drawdown limit in the
+    # Held-out slice: each period names the first condition it failed.
+    rows["passed"] = variant(
+        {"account": 0.0648, "index": 0.0622, "drawdown": 0.1785, "active_drawdown": 0.1211},
+        {"account": 0.0403, "index": -0.1292, "drawdown": 0.0504, "active_drawdown": 0.037},
+    )
+    rows["failed"] = variant(
+        {"account": -0.1758, "index": 0.0622, "drawdown": 0.3372, "active_drawdown": 0.2354},
+        {"account": 0.0366, "index": -0.1292, "drawdown": 0.1502, "active_drawdown": 0.3053},
+    )
+    rows["unflagged"] = json.loads(json.dumps(rows["passed"]))
+    del rows["unflagged"]["forward"]["pass_reading"]["passed"]
+    # A replay the strategy's own error stopped: its record states its rules and no slice.
+    raised = registry.pass_reading({"acceptance_rules": _forward_record()["acceptance_rules"], "slices": None})
+    rows["raised"] = {**rows["passed"], "forward": {**rows["passed"]["forward"], "pass_reading": raised}}
     rows["unread"] = {**rows["passed"], "forward": None}
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -424,11 +503,10 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
         [
             "const el = (tag, attrs, ...children) => ({ tag, attrs, children });",
             "const stateBadge = (state) => el('span', { class: `badge state-${state}` }, state);",
-            _const_block(script, "ENDING_LABELS"),
-            _const_block(script, "READING_LEGS"),
+            *(_const_block(script, name) for name in ("ENDING_LABELS", "PASS_RULE", "PASS_PERIODS", "PASS_FAILURES")),
             *(
                 _fn(script, name)
-                for name in ("fmtSharpe", "endingKey", "endingLabel", "heldoutLabelLine", "endingBadge", "experimentBadge")
+                for name in ("fmtPct", "endingKey", "endingLabel", "passLabelLines", "endingBadge", "experimentBadge")
             ),
             f"const rows = {json.dumps(rows)};",
             "console.log(JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, row]) => {",
@@ -441,21 +519,25 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
     assert result.returncode == 0, result.stderr
     labels = json.loads(result.stdout)
     reasons = {name: (rows[name]["ending"] or {}).get("reason") for name in rows}
-    four, three_legs = "四腿读数（市场、规模、价值、低换手）", "三腿读数（市场、规模、价值）"
-    passing = f"Held-out 残差 IR 5.49（门槛 3.35，59 天），{four}；{reasons['passed']}"
+    rule = "前推年与 Held-out 段各自扣费后盈利、跑赢基准指数，且回撤与主动回撤都不超过模拟账户的终止上限写作通过，否则未通过"
+    passing = [
+        "前推年：账户 +6.48%，基准指数 +6.22%，回撤 17.85%（上限 55.00%），主动回撤 12.11%（上限 30.00%）",
+        "Held-out 段：账户 +4.03%，基准指数 -12.92%，回撤 5.04%（上限 55.00%），主动回撤 3.70%（上限 30.00%）",
+    ]
+    failing = [
+        "前推年：账户 -17.58%，基准指数 +6.22%，回撤 33.72%（上限 55.00%），主动回撤 23.54%（上限 30.00%）；未过：未盈利",
+        "Held-out 段：账户 +3.66%，基准指数 -12.92%，回撤 15.02%（上限 55.00%），主动回撤 30.53%（上限 30.00%）；未过：主动回撤超过终止上限",
+    ]
+    unread = [
+        f"{name}：账户 —，基准指数 —，回撤 —（上限 55.00%），主动回撤 —（上限 30.00%）；未过：未盈利"
+        for name in ("前推年", "Held-out 段")
+    ]
     assert labels == {
-        "passed": ["通过", "badge ending-passed", "通过", passing],
-        "failed": [
-            "未通过", "badge ending-failed", "未通过", f"Held-out 残差 IR 0.37（门槛 1.66，59 天），{four}；{reasons['failed']}",
-        ],
-        "three": [
-            "通过", "badge ending-passed", "通过", f"Held-out 残差 IR 5.49（门槛 3.35，59 天），{three_legs}；{reasons['three']}",
-        ],
-        "unmeasured": [
-            "未通过", "badge ending-failed", "未通过", f"Held-out 残差 IR 未读出：too few days；{reasons['unmeasured']}",
-        ],
-        "raised": ["未通过", "badge ending-failed", "未通过", f"Held-out 无读数；{reasons['raised']}"],
-        "unread": ["未通过", "badge ending-failed", "未通过", f"Held-out 无读数；{reasons['unread']}"],
+        "passed": ["通过", "badge ending-passed", "通过", "\n".join([rule, *passing, reasons["passed"]])],
+        "failed": ["未通过", "badge ending-failed", "未通过", "\n".join([rule, *failing, reasons["failed"]])],
+        "unflagged": ["未通过", "badge ending-failed", "未通过", "\n".join([rule, *passing, reasons["unflagged"]])],
+        "raised": ["未通过", "badge ending-failed", "未通过", "\n".join([rule, *unread, reasons["raised"]])],
+        "unread": ["未通过", "badge ending-failed", "未通过", "\n".join([rule, reasons["unread"]])],
         "deadline": ["预算耗尽", "badge ending-budget_exhausted", "预算耗尽", reasons["deadline"]],
         "environment_blocked": [
             "环境阻断", "badge ending-environment_blocked", "环境阻断", reasons["environment_blocked"],
@@ -863,7 +945,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     ).read_text(encoding="utf-8")
     harness = "\n".join(
         [
-            _const_block(script, "ENDING_LABELS"),
+            *(_const_block(script, name) for name in ("ENDING_LABELS", "PASS_RULE")),
             *(_fn(script, name) for name in ("fmtSharpe", "readoutRule")),
             f"console.log(readoutRule({json.dumps(preview)}));",
         ]
@@ -872,7 +954,10 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("1 个研究年之后的验证期 3 年按 3 个月一步走完或预算用尽后，")
     assert "读出验证记录（整段残差 IR 的门槛约 0.95，α = 0.05）；" in result.stdout
-    assert "Held-out 段残差 IR 不低于按本段天数算出的门槛写作通过，否则未通过" in result.stdout
+    assert (
+        "前推年与 Held-out 段各自扣费后盈利、跑赢基准指数，且回撤与主动回撤都不超过模拟账户的终止上限写作通过，否则未通过"
+        in result.stdout
+    )
     assert "readoutRule(thresholds || {})" in _fn(script, "readoutStagePanel")
 
 

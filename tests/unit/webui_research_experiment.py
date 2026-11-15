@@ -567,6 +567,8 @@ def build_experiment(
                 "run_id": "run_forward",
                 "session_key": "forward",
                 "artifact_id": "strategy_research_abc",
+                # The rules the record was read under, as the pipeline states them.
+                "acceptance_rules": RULES.to_record(),
                 "replay": REPLAY,
                 "status": "ok",
                 "error": None,

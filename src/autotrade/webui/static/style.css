@@ -449,9 +449,9 @@ main {
  color: var(--muted);
  font-weight: 500;
 }
-/* How an experiment ended: a registered strategy whose Held-out reading passed
-   reads as success and every other one as failure, a broken worker reads as a
-   failure, and a spent budget stays quiet. */
+/* How an experiment ended: a registered strategy the server's pass reading
+   passed reads as success and every other one as failure, a broken worker reads
+   as a failure, and a spent budget stays quiet. */
 .badge.ending-passed {
  background: var(--ok-soft);
  color: var(--ok);
