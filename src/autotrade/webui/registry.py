@@ -426,27 +426,56 @@ def _result_name(reference: object) -> str | None:
     return path.parent.name if path.name == "result.json" else path.name
 
 
+def heldout_passed(reading: Mapping[str, object]) -> bool:
+    """Whether a registered strategy passed, as the console words a
+    ``registered_with_record`` ending (``ENDING_LABELS`` in app.js): its stored
+    Held-out slice's residual IR (``reading`` is that slice's
+    ``residual_reading``) finite and at or above the threshold stored beside it
+    (z(1−α)/√years over the slice's own days). A reading that is missing,
+    unmeasured or not finite fails. Nothing else is read -- not the validation
+    record, not the forward year. Derived for display only: the stored verdict
+    stays ``registered_with_record`` and no record is rewritten."""
+
+    ratio = finite_number(reading.get("residual_information_ratio"))
+    threshold = finite_number(reading.get("threshold"))
+    return ratio is not None and threshold is not None and ratio >= threshold
+
+
+def reading_legs(reading: Mapping[str, object]) -> int | None:
+    """How many factor legs a stored residual reading was taken on, counted
+    from the loadings it carries (``style.FACTOR_SERIES``): three for one
+    taken before the turnover leg joined, which is never re-scored. ``None``
+    where it carries no loading (no reading)."""
+
+    return sum(1 for name, _series in FACTOR_SERIES if name in reading) or None
+
+
 def _forward_view(
     identity: PublicIdentity, record: Mapping[str, object] | None
 ) -> dict[str, object] | None:
     """The forward record: replay span, slice statistics and readout, as the
-    record stores them. ``None`` until the record exists, which is also when
-    the readout does."""
+    record stores them, and ``heldout``, the label the console reads off the
+    Held-out slice's residual reading (``passed``, :func:`heldout_passed`, and
+    the ``legs`` it was taken on, :func:`reading_legs`). ``None`` until the
+    record exists, which is also when the readout does."""
 
     if record is None:
         return None
+    slices = {
+        name: dict(block)
+        for name, block in as_mapping(record.get("slices")).items()
+        if isinstance(block, Mapping)
+    }
+    heldout = as_mapping(as_mapping(slices.get("heldout")).get("residual_reading"))
     return {
         "recorded_at": record.get("recorded_at"),
         "error": identity.public_text(str(record.get("error") or "")) or None,
         "replay": dict(as_mapping(record.get("replay"))),
         "result": _result_name(record.get("result_ref")),
-        "slices": {
-            name: dict(block)
-            for name, block in as_mapping(record.get("slices")).items()
-            if isinstance(block, Mapping)
-        },
+        "slices": slices,
         # The experiment's readout (``validation_record.readout``).
         "readout": dict(as_mapping(record.get("readout"))),
+        "heldout": {"passed": heldout_passed(heldout), "legs": reading_legs(heldout)},
     }
 
 
@@ -1017,52 +1046,23 @@ def _record_alpha(params: Mapping[str, object]) -> float:
     return acceptance_for(params).alpha
 
 
-def record_passed(readout: Mapping[str, object]) -> bool:
-    """Whether a registered strategy's validation record passed, as the console
-    words a ``registered_with_record`` ending (``ENDING_LABELS`` in app.js):
-    the record's residual IR at or above the threshold its stored readout carries
-    (z(1−α)/√years over the record's own length). A reading that is missing
-    or not finite fails. Derived for display only: the stored verdict stays
-    ``registered_with_record`` and no record is rewritten."""
-
-    record = as_mapping(readout.get("record"))
-    ratio = finite_number(record.get("residual_information_ratio"))
-    threshold = finite_number(record.get("threshold"))
-    return ratio is not None and threshold is not None and ratio >= threshold
-
-
-def record_legs(readout: Mapping[str, object]) -> int | None:
-    """How many factor legs the stored readout's record was read on, counted
-    from the loadings it carries (``style.FACTOR_SERIES``): three for a record
-    read before the turnover leg joined, which is never re-scored. ``None``
-    where the record carries no loading (no reading)."""
-
-    record = as_mapping(readout.get("record"))
-    return sum(1 for name, _series in FACTOR_SERIES if name in record) or None
-
-
 def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, object]) -> dict[str, object] | None:
     """The experiment's validation record so far, read as one series: the steps the
     ledger holds, the test horizon they reached, the significance test over them
-    (``validation_record.record_significance``), how often the candidate
-    changed, ``passed`` (:func:`record_passed` of the stored readout) and the
-    ``legs`` that label was read on (:func:`record_legs`), each None until the
-    readout exists. ``None`` before the first step is recorded:
-    nothing is read off a replay the ledger does not name."""
+    (``validation_record.record_significance``) and how often the candidate
+    changed. ``None`` before the first step is recorded: nothing is read off a
+    replay the ledger does not name."""
 
     tests = validation_record.test_step_records(records)
     if not tests:
         return None
     significance = validation_record.record_significance([row["entry"] for row in tests], alpha=_record_alpha(params))  # type: ignore[misc]
-    readout = as_mapping(as_mapping(forward_record(records)).get("readout"))
     return {
         **significance,
         "start": str(tests[0]["window"]["start"]),  # type: ignore[index]
         "end": str(tests[-1]["window"]["end"]),  # type: ignore[index]
         "test_horizon": str(tests[-1]["test_horizon"]),
         "candidate_changes": validation_record.candidate_changes(records),
-        "passed": record_passed(readout) if readout else None,
-        "legs": record_legs(readout) if readout else None,
     }
 
 

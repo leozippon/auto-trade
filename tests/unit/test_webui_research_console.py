@@ -296,7 +296,7 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("record", "passed"),
+    ("reading", "passed"),
     [
         ({"residual_information_ratio": 1.2, "threshold": 0.9}, True),
         ({"residual_information_ratio": 0.5, "threshold": 0.9}, False),
@@ -304,128 +304,167 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
         ({"residual_information_ratio": float("nan"), "threshold": 0.9}, False),
         ({"residual_information_ratio": float("inf"), "threshold": 0.9}, False),
         ({"residual_information_ratio": 1.2, "threshold": float("nan")}, False),
-        ({"residual_information_ratio": None, "threshold": 0.9, "unmeasured": "too few days"}, False),
+        ({"unmeasured": "12 day(s) carry every factor leg, fewer than 20"}, False),
         ({"threshold": 0.9}, False),
         ({"residual_information_ratio": 1.2}, False),
-        (None, False),
+        ({}, False),
     ],
 )
-def test_a_record_passes_when_its_residual_ir_reaches_its_stored_threshold(
-    record: dict[str, object] | None, passed: bool
+def test_a_strategy_passes_when_its_heldout_residual_ir_reaches_that_slices_threshold(
+    reading: dict[str, object], passed: bool
 ) -> None:
-    """记录过门槛 / 记录未过门槛 is read off the stored readout alone: the record's residual IR
-    at or above the threshold stored beside it. A reading that is missing or
-    not finite fails rather than passing by default."""
+    """通过 / 未通过 is read off the stored Held-out reading alone: its residual IR
+    at or above the threshold stored beside it. A reading that is missing,
+    unmeasured or not finite fails rather than passing by default."""
 
-    readout = {} if record is None else {"record": record}
-    assert registry.record_passed(readout) is passed
+    assert registry.heldout_passed(reading) is passed
 
 
-def test_a_registered_experiment_serves_whether_its_record_passed_and_keeps_its_stored_state(
+def _restate_readout(directory: Path, *, record_ir: float | None = None, heldout: dict[str, object] | None = None) -> None:
+    """Rewrite the last ledger row's stored record residual IR and Held-out reading."""
+
+    ledger = directory / "ledgers/experiment_ledger.jsonl"
+    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    if record_ir is not None:
+        rows[-1]["readout"]["record"]["residual_information_ratio"] = record_ir
+    if heldout is not None:
+        rows[-1]["slices"]["heldout"]["residual_reading"] = heldout
+    ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def test_a_registered_experiment_passes_by_its_heldout_reading_alone_and_keeps_its_stored_state(
     tmp_path: Path,
 ) -> None:
-    """The listing row and the experiment page carry ``record.passed`` from the
-    stored readout, so a record below its threshold reads as failed while its
-    stored verdict and ending state stay ``registered_with_record``; before the
-    readout exists there is nothing to pass."""
+    """The listing row and the experiment page carry ``forward.heldout`` read off
+    the stored Held-out reading alone: a record that clears its threshold beside
+    a Held-out reading that does not is not passed, a record below its
+    threshold beside a Held-out reading that clears its own is, and a reading
+    that is missing or unmeasured is not. The stored verdict and ending state
+    stay ``registered_with_record`` and no record is rewritten; before the
+    readout exists there is nothing to pass. The legs are counted from the
+    loadings the Held-out reading carries: three for one taken before the
+    turnover leg joined."""
 
     root = tmp_path / "experiments"
-    build_experiment(root, "passed", "registered_with_record")
-    build_experiment(root, "failed", "registered_with_record")
+    for name in ("record_only", "heldout_only", "unmeasured", "three_legs"):
+        build_experiment(root, name, "registered_with_record")
     build_experiment(root, "replaying", "forward")
-    ledger = root / "failed/ledgers/experiment_ledger.jsonl"
-    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-    stored = rows[-1]["readout"]["record"]
-    stored["residual_information_ratio"] = stored["threshold"] - 0.01
-    ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    stored = _records(root / "record_only")[-1]
+    record, reading = stored["readout"]["record"], stored["slices"]["heldout"]["residual_reading"]
+    assert record["residual_information_ratio"] >= record["threshold"]
+    assert reading["residual_information_ratio"] >= reading["threshold"]
+    _restate_readout(root / "record_only", heldout={**reading, "residual_information_ratio": reading["threshold"] - 0.01})
+    _restate_readout(root / "heldout_only", record_ir=record["threshold"] - 0.01)
+    _restate_readout(root / "unmeasured", heldout={"unmeasured": "12 day(s) carry every factor leg, fewer than 20"})
+    _restate_readout(root / "three_legs", heldout={key: value for key, value in reading.items() if key != "turnover_beta"})
+    restated = _records(root / "record_only")[-1]
+
     listed = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
-    assert (listed["passed"]["record"]["passed"], listed["failed"]["record"]["passed"]) == (True, False)
-    assert listed["replaying"]["record"]["passed"] is None
-    for name in ("passed", "failed"):
+    assert {name: listed[name]["forward"]["heldout"] for name in ("record_only", "heldout_only", "unmeasured", "three_legs")} == {
+        "record_only": {"passed": False, "legs": 4},
+        "heldout_only": {"passed": True, "legs": 4},
+        "unmeasured": {"passed": False, "legs": None},
+        "three_legs": {"passed": True, "legs": 3},
+    }
+    assert listed["replaying"]["forward"] is None and listed["replaying"]["ending"] is None
+    for name in ("record_only", "heldout_only"):
         detail = experiment_detail(root, name)
-        assert detail["record"]["passed"] is listed[name]["record"]["passed"]
+        assert detail["forward"]["heldout"] == listed[name]["forward"]["heldout"]
         assert detail["ending"]["state"] == listed[name]["ending"]["state"] == "registered_with_record"
         assert detail["verdict"]["status"] == "registered_with_record"
-    assert _records(root / "failed")[-1]["readout"]["record"] == stored
-
-
-def test_a_record_label_names_the_legs_its_stored_record_was_read_on(tmp_path: Path) -> None:
-    """Stored records are never re-scored, so a label read on three legs sits
-    beside labels read on four. The legs are counted from the loadings the
-    stored readout's record carries, with no field of their own."""
-
-    build_experiment(tmp_path, "four", "registered_with_record")
-    build_experiment(tmp_path, "three", "registered_with_record")
-    ledger = tmp_path / "three/ledgers/experiment_ledger.jsonl"
-    rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-    assert "turnover_beta" in rows[-1]["readout"]["record"]
-    del rows[-1]["readout"]["record"]["turnover_beta"]
-    ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-
-    listed = {row["experiment_id"]: row for row in experiment_listing(tmp_path)["experiments"]}
-    assert (listed["four"]["record"]["legs"], listed["three"]["record"]["legs"]) == (4, 3)
-    assert experiment_detail(tmp_path, "three")["record"]["legs"] == 3
-    assert registry.record_legs({}) is None and registry.record_legs({"record": {"unmeasured": "x"}}) is None
+        assert "passed" not in detail["record"] and "passed" not in listed[name]["record"]
+    assert _records(root / "record_only")[-1] == restated
 
 
 def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_ending_shows(
     tmp_path: Path,
 ) -> None:
-    """A registered strategy with its record wears 记录过门槛 or 记录未过门槛 by its
-    record's test, never its stored state's name; a record with no ``passed``
-    at all is 记录未过门槛; every other ending keeps its own label. A record
-    label's tooltip names the legs it was read on. The card, the experiment
-    page header and the best-experiment panel wear experimentBadge, the 读出
-    view endingBadge and the process list endingLabel, all of the whole item."""
+    """A registered strategy with its readout wears 通过 or 未通过 by its Held-out
+    reading, never its stored state's name or its record; one with no
+    ``forward.heldout.passed`` at all is 未通过; every other ending keeps its own
+    label, and an experiment without an ending -- still running, or registered
+    with its replay still to come -- keeps its state badge. A registered
+    strategy's tooltip says first what its label reads: the Held-out residual
+    IR against its threshold over its days, and the legs it was taken on. The
+    card, the experiment page header and the best-experiment panel wear
+    experimentBadge, the 读出 view endingBadge and the process list
+    endingLabel, all of the whole item."""
 
     for experiment_id, stage in (
         ("passed", "registered_with_record"),
         ("deadline", "deadline"),
         ("environment_blocked", "environment_blocked"),
         ("broken", "broken"),
+        ("awaiting_replay", "forward"),
     ):
         build_experiment(tmp_path / "experiments", experiment_id, stage)
+    build_experiment(tmp_path / "experiments", "running", "research", alive=True)
     rows = {row["experiment_id"]: row for row in experiment_listing(tmp_path / "experiments")["experiments"]}
-    failed = json.loads(json.dumps(rows["passed"]))
-    failed["record"]["passed"] = False
-    rows["failed"] = failed
-    rows["unread"] = {**rows["passed"], "record": None}
-    three = json.loads(json.dumps(rows["passed"]))
-    three["record"]["legs"] = 3
-    rows["three"] = three
+    assert rows["passed"]["forward"]["heldout"] == {"passed": True, "legs": 4}
+    # Readings stated here so the tooltip's figures are exact.
+    rows["passed"]["forward"]["slices"]["heldout"]["residual_reading"].update(
+        residual_information_ratio=5.49, threshold=3.35, days=59
+    )
+
+    def variant(passed: bool, legs: int | None, reading: object) -> dict[str, object]:
+        row = json.loads(json.dumps(rows["passed"]))
+        row["forward"]["heldout"] = {"passed": passed, "legs": legs}
+        row["forward"]["slices"]["heldout"]["residual_reading"] = reading
+        return row
+
+    rows["failed"] = variant(False, 4, {"residual_information_ratio": 0.37, "threshold": 1.66, "days": 59})
+    rows["three"] = variant(True, 3, {"residual_information_ratio": 5.49, "threshold": 3.35, "days": 59})
+    rows["unmeasured"] = variant(False, None, {"unmeasured": "too few days"})
+    rows["raised"] = {**rows["passed"], "forward": {**rows["passed"]["forward"], "slices": {}, "heldout": {"passed": False, "legs": None}}}
+    rows["unread"] = {**rows["passed"], "forward": None}
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
     harness = "\n".join(
         [
             "const el = (tag, attrs, ...children) => ({ tag, attrs, children });",
-            "const stateBadge = () => null;",
+            "const stateBadge = (state) => el('span', { class: `badge state-${state}` }, state);",
             _const_block(script, "ENDING_LABELS"),
-            _const_block(script, "RECORD_LEGS"),
-            *(_fn(script, name) for name in ("endingKey", "endingLabel", "endingBadge", "experimentBadge")),
+            _const_block(script, "READING_LEGS"),
+            *(
+                _fn(script, name)
+                for name in ("fmtSharpe", "endingKey", "endingLabel", "heldoutLabelLine", "endingBadge", "experimentBadge")
+            ),
             f"const rows = {json.dumps(rows)};",
             "console.log(JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, row]) => {",
             "  const badge = experimentBadge(row);",
-            "  return [id, [endingLabel(row), badge.attrs.class, badge.children[0], badge.attrs.title]];",
+            "  return [id, [endingLabel(row), badge.attrs.class, badge.children[0], badge.attrs.title ?? null]];",
             "}))));",
         ]
     )
     result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     labels = json.loads(result.stdout)
-    reasons = {name: rows[name]["ending"]["reason"] for name in rows}
+    reasons = {name: (rows[name]["ending"] or {}).get("reason") for name in rows}
     four, three_legs = "四腿读数（市场、规模、价值、低换手）", "三腿读数（市场、规模、价值）"
+    passing = f"Held-out 残差 IR 5.49（门槛 3.35，59 天），{four}；{reasons['passed']}"
     assert labels == {
-        "passed": ["记录过门槛", "badge ending-passed", "记录过门槛", f"{reasons['passed']}；{four}"],
-        "failed": ["记录未过门槛", "badge ending-failed", "记录未过门槛", f"{reasons['failed']}；{four}"],
-        "unread": ["记录未过门槛", "badge ending-failed", "记录未过门槛", reasons["unread"]],
-        "three": ["记录过门槛", "badge ending-passed", "记录过门槛", f"{reasons['three']}；{three_legs}"],
+        "passed": ["通过", "badge ending-passed", "通过", passing],
+        "failed": [
+            "未通过", "badge ending-failed", "未通过", f"Held-out 残差 IR 0.37（门槛 1.66，59 天），{four}；{reasons['failed']}",
+        ],
+        "three": [
+            "通过", "badge ending-passed", "通过", f"Held-out 残差 IR 5.49（门槛 3.35，59 天），{three_legs}；{reasons['three']}",
+        ],
+        "unmeasured": [
+            "未通过", "badge ending-failed", "未通过", f"Held-out 残差 IR 未读出：too few days；{reasons['unmeasured']}",
+        ],
+        "raised": ["未通过", "badge ending-failed", "未通过", f"Held-out 无读数；{reasons['raised']}"],
+        "unread": ["未通过", "badge ending-failed", "未通过", f"Held-out 无读数；{reasons['unread']}"],
         "deadline": ["预算耗尽", "badge ending-budget_exhausted", "预算耗尽", reasons["deadline"]],
         "environment_blocked": [
             "环境阻断", "badge ending-environment_blocked", "环境阻断", reasons["environment_blocked"],
         ],
         "broken": ["失败", "badge ending-broken", "失败", reasons["broken"]],
+        "awaiting_replay": ["", "badge state-stopped", "stopped", None],
+        "running": ["", f"badge state-{rows['running']['state']}", rows["running"]["state"], None],
     }
+    assert rows["running"]["ending"] is None and rows["running"]["state"] != "stopped"
     assert "registered_with_record" not in _const_block(script, "ENDING_LABELS")
     assert "endingBadge(detail)" in _fn(script, "readoutStagePanel")
     assert "status: endingLabel(item)" in _fn(script, "pipelineTailSteps")
@@ -832,7 +871,8 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("1 个研究年之后的验证期 3 年按 3 个月一步走完或预算用尽后，")
-    assert "门槛（约 0.95，α = 0.05）写作记录过门槛，否则记录未过门槛" in result.stdout
+    assert "读出验证记录（整段残差 IR 的门槛约 0.95，α = 0.05）；" in result.stdout
+    assert "Held-out 段残差 IR 不低于按本段天数算出的门槛写作通过，否则未通过" in result.stdout
     assert "readoutRule(thresholds || {})" in _fn(script, "readoutStagePanel")
 
 
@@ -1359,7 +1399,10 @@ def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(t
     ).read_text(encoding="utf-8")
     harness = "\n".join(
         [
-            *(_const_block(script, name) for name in ("RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")),
+            *(
+                _const_block(script, name)
+                for name in ("ENDING_LABELS", "RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")
+            ),
             *(_fn(script, name) for name in ("fmtPct", "fmtSharpe", "fmtPValue", "fmtSteps", "signCls", "evidenceTiles")),
             "const statTilesRow = (tiles) => tiles;",
             f"const rows = {json.dumps(rows)};",
@@ -1654,7 +1697,7 @@ def test_a_replay_that_failed_is_drawn_failed_not_done_or_pending(tmp_path: Path
         *done,
         ["forward", "failed", "策略报错"],
         ["heldout", "failed", "策略报错"],
-        ["readout", "done", "记录过门槛" if rows["raised"]["record"]["passed"] else "记录未过门槛"],
+        ["readout", "done", "未通过"],
     ]
     assert drawn["broken"] == [
         *done,

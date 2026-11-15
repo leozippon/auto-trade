@@ -29,21 +29,21 @@ const OUTCOME_LABELS = {
 // How an experiment ended (webui/registry.py ENDING_STATES). The server classifies
 // the ending and writes its one-line reason; the console only words it, and
 // words it the same way on the card, the page header, the process list, the
-// 读出 view and the best-experiment panel. A registered strategy with its record
-// is worded by whether that record passed (`record.passed`, registry.record_passed)
-// rather than by its stored state (endingKey): the label names what it reads,
-// the record against its threshold, and nothing else.
+// 读出 view and the best-experiment panel. A registered strategy with its readout
+// is worded by whether its Held-out reading passed (`forward.heldout.passed`,
+// registry.heldout_passed) rather than by its stored state (endingKey): the
+// Held-out residual IR against that slice's own threshold, and nothing else.
 const ENDING_LABELS = {
-  passed: "记录过门槛",
-  failed: "记录未过门槛",
+  passed: "通过",
+  failed: "未通过",
   budget_exhausted: "预算耗尽",
   environment_blocked: "环境阻断",
   broken: "失败",
 };
-// The factor legs a record label was read on (`record.legs`, registry.record_legs):
-// stored records are never re-scored, so a three-leg label can sit beside a
-// four-leg one; the badge's tooltip says which.
-const RECORD_LEGS = {
+// The factor legs a stored reading was taken on (`forward.heldout.legs`,
+// registry.reading_legs): stored readings are never re-scored, so a label read
+// on three legs can sit beside one read on four; the badge's tooltip says which.
+const READING_LEGS = {
   3: "三腿读数（市场、规模、价值）",
   4: "四腿读数（市场、规模、价值、低换手）",
 };
@@ -2018,13 +2018,13 @@ function experimentGrid(rows, options = {}) {
 }
 
 /* The ending as the console words it: its state, except that a registered
-   strategy with its record reads as passed or failed by its record's own test;
-   a record the server did not find passed (no reading, or none at all) is
+   strategy with its readout reads as passed or failed by its Held-out reading
+   alone; one the server did not find passed (no reading, or none at all) is
    failed. */
 function endingKey(item) {
   const state = ((item || {}).ending || {}).state || "";
   if (state !== "registered_with_record") return state;
-  return (item.record || {}).passed === true ? "passed" : "failed";
+  return ((item.forward || {}).heldout || {}).passed === true ? "passed" : "failed";
 }
 
 function endingLabel(item) {
@@ -2032,16 +2032,31 @@ function endingLabel(item) {
   return ENDING_LABELS[key] || key;
 }
 
-/* The ending as one badge; null while the experiment can still run. A record
-   label's tooltip also names the legs it was read on. */
+/* What a registered strategy's label reads, as one clause: the Held-out
+   residual IR against that slice's own threshold over its days, and the legs
+   it was taken on; or that there is no reading to pass. */
+function heldoutLabelLine(item) {
+  const forward = item.forward || {};
+  const reading = ((forward.slices || {}).heldout || {}).residual_reading;
+  if (!reading) return "Held-out 无读数";
+  if (reading.unmeasured) return `Held-out 残差 IR 未读出：${reading.unmeasured}`;
+  const legs = READING_LEGS[(forward.heldout || {}).legs];
+  return (
+    `Held-out 残差 IR ${fmtSharpe(reading.residual_information_ratio)}（门槛 ${fmtSharpe(reading.threshold)}，${reading.days ?? "—"} 天）` +
+    (legs ? `，${legs}` : "")
+  );
+}
+
+/* The ending as one badge; null while the experiment can still run. A
+   registered strategy's tooltip says first what its label reads. */
 function endingBadge(item) {
   const ending = item.ending;
   if (!ending || !ending.state) return null;
   const key = endingKey(item);
-  const legs = key === "passed" || key === "failed" ? RECORD_LEGS[(item.record || {}).legs] : null;
+  const reads = ending.state === "registered_with_record" ? heldoutLabelLine(item) : null;
   return el(
     "span",
-    { class: `badge ending-${key}`, title: [ending.reason, legs].filter(Boolean).join("；") || null },
+    { class: `badge ending-${key}`, title: [reads, ending.reason].filter(Boolean).join("；") || null },
     endingLabel(item),
   );
 }
@@ -2132,7 +2147,7 @@ function evidenceTiles(item) {
       value: heldout.residual_information_ratio,
       fmt: fmtSharpe,
       signed: true,
-      title: "Held-out 段主动序列对市场、规模、价值与低换手因子腿回归的残差 IR（此前存下的读数只有前三条）；只报告，不作判定",
+      title: `Held-out 段主动序列对市场、规模、价值与低换手因子腿回归的残差 IR（此前存下的读数只有前三条）；不低于本段门槛写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}`,
     },
   ];
   return statTilesRow(
@@ -3248,7 +3263,11 @@ function heldoutStagePanel(detail) {
     replayErrorNode(forward),
     holderLine("Held-out", h),
     seedReadingsTable((forward || {}).slices, ["heldout"]),
-    el("div", { class: "meta-line section-gap" }, "Held-out 读数只报告，不作判定"),
+    el(
+      "div",
+      { class: "meta-line section-gap" },
+      `Held-out 残差 IR 不低于本段门槛写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}；只是读法，不把关任何事`,
+    ),
     sliceStats(h, HELDOUT_STAT_FIELDS),
   );
 }
@@ -3309,14 +3328,15 @@ function readoutStagePanel(detail) {
   );
 }
 
-/* How the record will be read, before it exists, in the experiment's own
+/* How the readout will be read, before it exists, in the experiment's own
    stamped rules (registry._verdict_thresholds): the research years, the
-   validation period and its step, and the threshold a record over the whole
-   period is held to at the experiment's level. */
+   validation period and its step, the threshold a record over the whole
+   period is held to at the experiment's level, and the label, which reads the
+   Held-out slice against its own threshold (registry.heldout_passed). */
 function readoutRule(t) {
   return (
-    `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；` +
-    `整段记录的残差 IR 不低于门槛（约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}，只是读法，不把关任何事`
+    `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录（整段残差 IR 的门槛约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）；` +
+    `Held-out 段残差 IR 不低于按本段天数算出的门槛写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}，只是读法，不把关任何事`
   );
 }
 
