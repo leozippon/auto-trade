@@ -107,9 +107,11 @@ def _market() -> tuple[pd.DataFrame, pd.DataFrame]:
                     "pre_close": pre_close,
                     "pct_chg": round(close / pre_close - 1.0, 6),
                     "circ_mv": base_cap * close / 10.0,
-                    # Book-to-price spread over the names, independent of
-                    # size, so the slot's value leg is a real spread.
+                    # Book-to-price and turnover spreads over the names,
+                    # independent of size and of each other, so the slot's
+                    # value and turnover legs are real spreads.
                     "pb": (1.0 + (index * 7) % len(SYMBOLS) / 10.0) * close / 10.0,
+                    "turnover_rate": 0.01 * (1.0 + (index * 11) % len(SYMBOLS) / 10.0),
                     "up_limit": round(pre_close * 1.1, 2),
                     "down_limit": round(pre_close * 0.9, 2),
                     "available_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T17:30:00+08:00",

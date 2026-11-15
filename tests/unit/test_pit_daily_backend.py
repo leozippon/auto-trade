@@ -27,6 +27,7 @@ from autotrade.environment.replay.null_control import (
     NullControlSetupError,
     RandomBaselineError,
 )
+from autotrade.environment.replay.style import STYLE_SCHEMA_VERSION
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
@@ -235,8 +236,8 @@ def generate_orders(context):
     style = json.loads(
         (Path(result.result_ref).parent / "style_analysis.json").read_text(encoding="utf-8")
     )
-    assert style["schema_version"] == 3 and style["mode"] == "valid"
-    assert style["benchmark_regression"]["reason"] == "benchmark_unavailable"
+    assert style["schema_version"] == STYLE_SCHEMA_VERSION and style["mode"] == "valid"
+    assert style["factor_regression"]["reason"] == "factors_unavailable"
     assert style["style"]["reason"] == "style_columns_unavailable"
     assert len(record["inference_dates"]) == 2
     first, second = record["pending_orders"]

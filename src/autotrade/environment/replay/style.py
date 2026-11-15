@@ -51,6 +51,7 @@ from .stats import (
     TRADING_DAYS_PER_YEAR,
     ReplayResult,
     compounded_drawdown,
+    compounded_return,
     plain_statistics,
     total_return_from_curve,
 )
@@ -65,26 +66,55 @@ BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 # verdict never waits on a replay it cannot read.
 MIN_REGRESSION_DAYS = 8
 STYLE_ARTIFACT_NAME = "style_analysis.json"
-# 3 (2026-11-03): the strategy, benchmark, size, value and random baseline
-# series, and the three-factor regression over the market, size and value legs.
-STYLE_SCHEMA_VERSION = 3
+# 4 (2026-11-15): the strategy, benchmark, size, value, turnover and random
+# baseline series, and the factor regression over the market, size, value and
+# turnover legs. Version 3 had no turnover series or loading and a
+# single-factor benchmark regression beside the factor one; a version-3
+# sidecar stays readable and is read on the three legs it stored
+# (:func:`stored_factor_series`), never re-scored.
+STYLE_SCHEMA_VERSION = 4
+READABLE_STYLE_SCHEMA_VERSIONS = frozenset({3, STYLE_SCHEMA_VERSION})
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
-# The size and value legs of the factor regression: daily spreads of the replay
-# slot's OWN cross-section, equal-weighted inside each leg, the legs formed on
-# the previous trading day's value -- small minus big float cap, and high
-# minus low book-to-price (1 / pb, names with pb <= 0 left out). The audited
-# edge read as a small-cap / low-beta tilt rather than proven alpha, and a raw
-# excess return cannot tell those apart. These are not Barra or Fama-French
-# factors and the result says so in ``method``.
+# The size, value and turnover legs of the factor regression: daily spreads of
+# the replay slot's OWN cross-section, equal-weighted inside each leg, the legs
+# formed on the previous trading day's value -- small minus big float cap,
+# high minus low book-to-price (1 / pb, names with pb <= 0 left out), and low
+# minus high turnover: a name's mean daily turnover rate over the slot's last
+# ``_TURNOVER_DAYS`` trading days, read where at least ``_TURNOVER_MIN_DAYS``
+# of them carry one, so the leg begins on the slot's eleventh day. The
+# audited edge read as a small-cap / low-beta tilt rather than proven alpha,
+# and a raw excess return cannot tell those apart; the measured rankers'
+# residual then read mostly as low turnover, and the lowest-turnover decile
+# with no model cleared the research-year threshold on the other three legs
+# (2026-11-15). These are not Barra or Fama-French factors and the result
+# says so in ``method``.
 _FACTOR_QUANTILE = 0.3
 _FACTOR_MIN_NAMES = 30
-# The three legs every factor regression reads, by the sidecar series that
-# stores each, in the order of their betas.
+_TURNOVER_DAYS = 20
+_TURNOVER_MIN_DAYS = 10
+# The legs every factor regression reads, by the sidecar series that stores
+# each, in the order of their betas. A positive size, value or turnover
+# loading is a tilt toward small caps, cheap names or low-turnover names.
 FACTOR_SERIES = (
     ("market_beta", "benchmark_daily"),
     ("size_beta", "size_factor_daily"),
     ("value_beta", "value_factor_daily"),
+    ("turnover_beta", "turnover_factor_daily"),
 )
+# The legs a version-3 sidecar stored, before the turnover leg joined.
+VERSION_3_FACTOR_SERIES = FACTOR_SERIES[:3]
+
+
+def stored_factor_series(analysis: Mapping[str, object]) -> tuple[tuple[str, str], ...]:
+    """The legs a stored series is read on: every leg of :data:`FACTOR_SERIES`,
+    or the market, size and value legs of one written before the turnover leg
+    joined -- a version-3 sidecar, or a validation record entry read off one,
+    neither of which carries ``turnover_factor_daily`` -- so a stored reading
+    reads as it was taken. A sidecar written since always carries the series,
+    empty where the leg could not be built, and such a reading is unmeasured,
+    never taken on fewer legs."""
+
+    return FACTOR_SERIES if "turnover_factor_daily" in analysis else VERSION_3_FACTOR_SERIES
 
 
 def regression_method(benchmark_index: str) -> str:
@@ -96,10 +126,11 @@ def regression_method(benchmark_index: str) -> str:
     """
 
     return (
-        f"日度收益对{benchmark_index_label(benchmark_index)}收益、规模因子与价值因子"
-        "（后两者取本回放槽全市场截面、不是本实验股票池，按前一交易日分组的 30% 等权两端之差："
-        "规模为流通市值最小减最大，价值为账面市值比 1/pb 最高减最低，pb 不为正的股票不入组）"
-        "的三元 OLS，给出三个载荷与残差跟踪误差"
+        f"日度收益对{benchmark_index_label(benchmark_index)}收益、规模因子、价值因子与换手因子"
+        f"（后三者取本回放槽全市场截面、不是本实验股票池，按前一交易日分组的 {_FACTOR_QUANTILE:.0%} 等权两端之差："
+        "规模为流通市值最小减最大，价值为账面市值比 1/pb 最高减最低，pb 不为正的股票不入组，"
+        f"换手为近 {_TURNOVER_DAYS} 个交易日平均换手率最低减最高，不足 {_TURNOVER_MIN_DAYS} 日有值的股票不入组）"
+        "的 OLS，给出各因子载荷与残差跟踪误差"
         f"（按 {TRADING_DAYS_PER_YEAR} 个交易日年化）"
     )
 
@@ -236,53 +267,6 @@ def daily_returns_from_curve(
     return result
 
 
-def _benchmark_regression(
-    strategy: list[tuple[str, float]],
-    benchmark: Mapping[str, float],
-) -> dict[str, object]:
-    paired = [(strategy_return, benchmark[date]) for date, strategy_return in strategy if date in benchmark]
-    days = len(paired)
-    benchmark_total = 1.0
-    for _strategy_return, benchmark_return in paired:
-        benchmark_total *= 1.0 + benchmark_return
-    result: dict[str, object] = {
-        "available": False,
-        "reason": "benchmark_unavailable" if not days else "insufficient_overlapping_days",
-        "n_days": days,
-        "benchmark_return": round(benchmark_total - 1.0, 6) if days else None,
-        "beta": None,
-        "alpha_annualized": None,
-        "r2": None,
-    }
-    if days < MIN_REGRESSION_DAYS:
-        return result
-    mean_strategy = sum(value for value, _ in paired) / days
-    mean_benchmark = sum(value for _, value in paired) / days
-    covariance = sum(
-        (strategy_return - mean_strategy) * (benchmark_return - mean_benchmark)
-        for strategy_return, benchmark_return in paired
-    ) / days
-    variance_benchmark = sum((value - mean_benchmark) ** 2 for _, value in paired) / days
-    variance_strategy = sum((value - mean_strategy) ** 2 for value, _ in paired) / days
-    if variance_benchmark <= 0:
-        result["reason"] = "benchmark_variance_zero"
-        return result
-    beta = covariance / variance_benchmark
-    alpha_daily = mean_strategy - beta * mean_benchmark
-    result.update(
-        available=True,
-        reason=None,
-        beta=round(beta, 3),
-        alpha_annualized=round(alpha_daily * TRADING_DAYS_PER_YEAR, 4),
-        r2=(
-            round((covariance * covariance) / (variance_benchmark * variance_strategy), 3)
-            if variance_strategy > 0
-            else None
-        ),
-    )
-    return result
-
-
 def _symbol_column(frame: pd.DataFrame) -> str:
     return "ts_code" if "ts_code" in frame.columns else "symbol"
 
@@ -358,10 +342,40 @@ def _value_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
     return _prior_day_spread(replay_daily, "pb", lambda pb: (1.0 / pb).where(pb > 0))
 
 
+def _turnover_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
+    """Daily low-minus-high turnover spread (:func:`_prior_day_spread`) on
+    each name's mean daily turnover rate over the slot's last
+    ``_TURNOVER_DAYS`` trading days, a mean read only where at least
+    ``_TURNOVER_MIN_DAYS`` of those days carry the name's rate.
+
+    The window counts the slot's trading days, not the name's rows, so a
+    name back from a long suspension waits for its rows like a new listing,
+    whose first days' turnover says nothing about the name. A day's mean
+    includes the day's own rate, so the spread sorts each name on its mean
+    through the previous trading day, as the other legs sort on the previous
+    day's value.
+    """
+
+    symbol = _symbol_column(replay_daily)
+    if not {symbol, "trade_date", "turnover_rate", "pct_chg"}.issubset(replay_daily.columns):
+        return {}
+    day, days = pd.factorize(replay_daily["trade_date"], sort=True)
+    name, names = pd.factorize(replay_daily[symbol])
+    rates = np.full((len(days), len(names)), np.nan)
+    rates[day, name] = pd.to_numeric(replay_daily["turnover_rate"], errors="coerce").to_numpy(dtype=float)
+    means = pd.DataFrame(rates).rolling(_TURNOVER_DAYS, min_periods=_TURNOVER_MIN_DAYS).mean().to_numpy()
+    frame = replay_daily.assign(turnover_mean=means[day, name])
+    return {
+        date: -value
+        for date, value in _prior_day_spread(frame, "turnover_mean", lambda mean: mean).items()
+    }
+
+
 def factor_ols(y: np.ndarray, legs: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """OLS of the daily series ``y`` on an intercept and the ``legs`` columns
-    (market, size, value): the coefficients ``[intercept, *betas]`` and the
-    residuals. ``ValueError`` when the legs are collinear over the days.
+    (:data:`FACTOR_SERIES`, or the legs a stored series carries): the
+    coefficients ``[intercept, *betas]`` and the residuals. ``ValueError``
+    when the legs are collinear over the days.
 
     The one fit every factor reading runs: the sidecar's own
     ``factor_regression`` block and every verdict statistic
@@ -377,23 +391,23 @@ def factor_ols(y: np.ndarray, legs: np.ndarray) -> tuple[np.ndarray, np.ndarray]
 
 def _factor_regression(
     strategy: list[tuple[str, float]],
-    benchmark: Mapping[str, float],
-    size: Mapping[str, float],
-    value: Mapping[str, float],
+    legs: Mapping[str, Mapping[str, float]],
 ) -> dict[str, object]:
-    """The strategy's loadings on the benchmark, the size and the value legs.
+    """The strategy's loadings on the factor legs, ``legs`` holding each
+    leg's daily values by its :data:`FACTOR_SERIES` series name.
 
-    Three-regressor OLS (:func:`factor_ols`) over the days that carry every
-    leg; a collinear set is reported as a reason instead of raising:
-    attribution is advisory and must never fail a backtest. It reports the
-    three loadings, the residual standard deviation annualised (what a
-    tracking mandate caps, n - 4 degrees of freedom) and R².
+    OLS (:func:`factor_ols`) over the days that carry every leg; a collinear
+    set is reported as a reason instead of raising: attribution is advisory
+    and must never fail a backtest. It reports one loading per leg, the
+    residual standard deviation annualised (what a tracking mandate caps, on
+    n minus the fitted coefficients degrees of freedom) and R².
     """
 
+    series = [legs[name] for _beta, name in FACTOR_SERIES]
     rows = [
-        (daily, benchmark[date], size[date], value[date])
+        (daily, *(leg[date] for leg in series))
         for date, daily in strategy
-        if date in benchmark and date in size and date in value
+        if all(date in leg for leg in series)
     ]
     days = len(rows)
     result: dict[str, object] = {
@@ -593,10 +607,14 @@ def replay_style_analysis(
     method = regression_method(benchmark_index)
     strategy = daily_returns_from_curve(replay.equity_curve)
     benchmark = slot_benchmark(replay_dir, benchmark_index=benchmark_index)
-    regression = _benchmark_regression(strategy, benchmark)
-    size = _size_factor(replay_daily)
-    value = _value_factor(replay_daily)
-    factors = {"method": method, **_factor_regression(strategy, benchmark, size, value)}
+    legs = {
+        "benchmark_daily": benchmark,
+        "size_factor_daily": _size_factor(replay_daily),
+        "value_factor_daily": _value_factor(replay_daily),
+        "turnover_factor_daily": _turnover_factor(replay_daily),
+    }
+    factors = {"method": method, **_factor_regression(strategy, legs)}
+    covered = [benchmark[date] for date, _value in strategy if date in benchmark]
     baseline_blocks: dict[str, object] = {}
     baseline_compact: dict[str, object] = {}
     if baselines is not None:
@@ -637,7 +655,7 @@ def replay_style_analysis(
         replay_daily, replay.equity_curve, _industry_vintages(universes)
     )
     total_return = total_return_from_curve(replay.equity_curve)
-    benchmark_return = regression.get("benchmark_return")
+    benchmark_return = round(compounded_return(covered), 6) if covered else None
     excess_return = (
         round(float(total_return) - float(benchmark_return), 6)
         if isinstance(total_return, (int, float))
@@ -651,33 +669,29 @@ def replay_style_analysis(
         "schema_version": STYLE_SCHEMA_VERSION,
         "mode": mode,
         "benchmark": {"ts_code": benchmark_index, "label": label},
-        "benchmark_regression": regression,
         "factor_regression": factors,
         "style": style,
         "strategy_daily": [[date, value] for date, value in strategy],
-        "benchmark_daily": [[date, benchmark[date]] for date, _ in strategy if date in benchmark],
-        "size_factor_daily": [[date, size[date]] for date, _ in strategy if date in size],
-        "value_factor_daily": [[date, value[date]] for date, _ in strategy if date in value],
+        **{
+            series: [[date, legs[series][date]] for date, _value in strategy if date in legs[series]]
+            for _name, series in FACTOR_SERIES
+        },
         **baseline_blocks,
         "compact": {
             "benchmark_return": benchmark_return,
             "excess_return": excess_return,
-            # The two figures a tracking mandate limits: the residual standard
+            # The two figures a tracking mandate limits, the residual standard
             # deviation of the strategy's own factor regression and its
-            # loading on the benchmark.
-            "tracking_error": factors.get("tracking_error"),
-            "market_beta": factors.get("market_beta"),
-            **baseline_compact,
-            "beta": regression.get("beta"),
-            "n_days": regression.get("n_days"),
-            "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
+            # loading on the benchmark, beside its other loadings.
             # ``size_tilt`` says which rung of the cap ladder the book stands
             # on; ``size_beta`` is the book's loading on the size factor.
             # Across measured books the two move in opposite
             # directions, so a budget written on the tilt cannot reach the
             # loading that produces a size-driven drawdown.
-            "size_beta": factors.get("size_beta"),
-            "value_beta": factors.get("value_beta"),
+            "tracking_error": factors.get("tracking_error"),
+            **{name: factors.get(name) for name, _series in FACTOR_SERIES},
+            **baseline_compact,
+            "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
             "top_industry_weight": style.get("top_industry_weight"),
         },
         "created_at": utc_now_iso(),
@@ -790,8 +804,10 @@ __all__ = [
     "BENCHMARK_TS_CODE",
     "FACTOR_SERIES",
     "MIN_REGRESSION_DAYS",
+    "READABLE_STYLE_SCHEMA_VERSIONS",
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
+    "VERSION_3_FACTOR_SERIES",
     "active_analysis",
     "benchmark_summary_block",
     "daily_returns_from_curve",
@@ -800,6 +816,7 @@ __all__ = [
     "replay_style_analysis",
     "slot_benchmark",
     "slot_membership",
+    "stored_factor_series",
     "window_plain_excess",
     "write_style_rollup",
 ]

@@ -158,9 +158,26 @@ def test_a_result_without_a_style_sidecar_is_not_an_unknown_result(tmp_path: Pat
     assert present.status_code == 200
     assert present.json()["available"] is True
 
-    # A sidecar of another schema is no sidecar of this code's.
+    # A sidecar stored before the turnover leg (version 3) shows as it was
+    # stored: its three loadings, no turnover loading, nothing re-scored.
     sidecar = directory / "artifacts/results" / name / "style_analysis.json"
-    sidecar.write_text(json.dumps({**json.loads(sidecar.read_text(encoding="utf-8")), "schema_version": 2}), encoding="utf-8")
+    current = json.loads(sidecar.read_text(encoding="utf-8"))
+    stored = {
+        **{key: value for key, value in current.items() if key != "turnover_factor_daily"},
+        "schema_version": 3,
+        "factor_regression": {
+            key: value for key, value in current["factor_regression"].items() if key != "turnover_beta"
+        },
+        "benchmark_regression": {"available": True, "beta": 0.9, "alpha_annualized": 0.05, "r2": 0.8, "n_days": 120},
+    }
+    sidecar.write_text(json.dumps(stored), encoding="utf-8")
+    shown = client.get(f"/api/experiments/experiment/results/{name}/style").json()
+    assert shown["available"] is True and shown["schema_version"] == 3
+    assert shown["factor_regression"] == stored["factor_regression"]
+    assert "turnover_beta" not in shown["factor_regression"] and "turnover_factor_daily" not in shown
+
+    # A sidecar of another schema is no sidecar of this code's.
+    sidecar.write_text(json.dumps({**current, "schema_version": 2}), encoding="utf-8")
     assert client.get(f"/api/experiments/experiment/results/{name}/style").json() == {
         "available": False,
         "reason": "no_style_artifact",

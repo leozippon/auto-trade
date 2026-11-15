@@ -9,7 +9,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from autotrade.pipelines import validation_record
+from autotrade.pipelines import validation_record, verdict
 from autotrade.pipelines.calendar import Slot, step_windows
 from autotrade.pipelines.ledger import (
     LEDGER_RECORD_SCHEMA_VERSION,
@@ -84,6 +84,7 @@ def _replay(days: list[str], rng: np.random.Generator, *, edge: float = 0.002):
     market = rng.normal(0.0003, 0.008, len(days))
     size = rng.normal(0.0, 0.003, len(days))
     value = rng.normal(0.0, 0.003, len(days))
+    turnover = np.random.default_rng(len(days)).normal(0.0005, 0.004, len(days))
     baselines = market + rng.normal(0.0, 0.002, len(days))
     strategy = baselines + edge + rng.normal(0.0, 0.004, len(days))
     equity = 100_000.0
@@ -111,6 +112,7 @@ def _replay(days: list[str], rng: np.random.Generator, *, edge: float = 0.002):
         "benchmark_daily": [[day, float(v)] for day, v in zip(days, market, strict=True)],
         "size_factor_daily": [[day, float(v)] for day, v in zip(days, size, strict=True)],
         "value_factor_daily": [[day, float(v)] for day, v in zip(days, value, strict=True)],
+        "turnover_factor_daily": [[day, float(v)] for day, v in zip(days, turnover, strict=True)],
     }
     return replay, analysis
 
@@ -169,6 +171,35 @@ def test_the_significance_test_reads_the_stitched_entries_with_the_threshold_for
     short = record_significance([{**entries[0], "daily": entries[0]["daily"][:3]}], alpha=0.05)
     assert "unmeasured" in short and "residual_information_ratio" not in short
     assert record_significance([], alpha=0.05)["unmeasured"] == "the record has no entry yet"
+
+
+def test_a_record_stored_on_three_legs_reads_as_it_was_and_never_beside_four() -> None:
+    """Entries recorded before the turnover leg joined carry three legs a day
+    and the record reads on those, as it read when it was stored; entries
+    taken since carry four. A record holding both is refused: a regression
+    never reads two leg sets as one series."""
+
+    days = _days("20200803", 250)
+    replay, analysis = _replay(days, np.random.default_rng(4), edge=0.0005)
+    stored = {key: value for key, value in analysis.items() if key != "turnover_factor_daily"}
+    steps = ValidationSteps("20200801", "20210731", step_windows("20200801", "20210731", 3))
+    old = [step_entry(replay, stored, start=first, end=last) for first, last in steps.windows[:3]]
+    new = [step_entry(replay, analysis, start=first, end=last) for first, last in steps.windows[:3]]
+    assert {len(row) for entry in old for row in entry["daily"]} == {6}
+    assert {len(row) for entry in new for row in entry["daily"]} == {7}
+
+    three = record_significance(old, alpha=0.05)
+    window = (steps.windows[0][0], steps.windows[2][1])
+    assert {key: three[key] for key in ("residual_information_ratio", "market_beta", "size_beta", "value_beta")} == pytest.approx(
+        {
+            key: verdict.residual_reading(stored, start=window[0], end=window[1], alpha=0.05)[key]
+            for key in ("residual_information_ratio", "market_beta", "size_beta", "value_beta")
+        }
+    )
+    assert "turnover_beta" not in three
+    assert "turnover_beta" in record_significance(new, alpha=0.05)
+    with pytest.raises(ValueError, match="different factor legs"):
+        record_significance([*old[:2], new[2]], alpha=0.05)
 
 
 def test_the_ledger_records_each_step_once_in_order(tmp_path: Path) -> None:

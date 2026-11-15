@@ -79,7 +79,7 @@ const REASON_LABELS = {
 const EXCESS_TITLE = "主动序列（账户日收益 − 随机对照组合日收益，不做回归）的年化均值";
 const TRACKING_ERROR_TITLE = "主动序列日收益的年化标准差";
 const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
-const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值三条因子腿回归的残差 IR；门槛 z(1−α)/√年数";
+const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值与低换手因子腿回归的残差 IR（低换手腿 2026-11-15 加入，此前存下的读数只有前三条）；门槛 z(1−α)/√年数";
 const P_VALUE_TITLE = "零技能原假设下读到至少这么高的残差 IR 的单侧概率；只报告，不作判定";
 // The holder's money, which no active figure is: the account's own return
 // after every cost minus the benchmark index's price return over the same days.
@@ -2107,7 +2107,7 @@ function evidenceTiles(item) {
       value: heldout.residual_information_ratio,
       fmt: fmtSharpe,
       signed: true,
-      title: "Held-out 段主动序列对市场、规模、价值三条因子腿回归的残差 IR；只报告，不作判定",
+      title: "Held-out 段主动序列对市场、规模、价值与低换手因子腿回归的残差 IR（此前存下的读数只有前三条）；只报告，不作判定",
     },
   ];
   return statTilesRow(
@@ -2948,7 +2948,7 @@ const SLICE_ROWS = [
   ["plain_excess", "主动超额（年化）", fmtPct, true, EXCESS_TITLE],
   ["days", "交易日", String],
   ["information_ratio", "主动 IR", fmtSharpe, true, IR_TITLE],
-  ["residual_information_ratio", "残差 IR（三因子）", fmtSharpe, true],
+  ["residual_information_ratio", "残差 IR（因子腿）", fmtSharpe, true],
   ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true, LOWER_BOUND_TITLE],
   ["max_drawdown", "最大回撤", fmtPct],
   ["active_max_drawdown", "主动回撤", fmtPct],
@@ -6037,7 +6037,7 @@ function subWindowSection(title, rows) {
   );
 }
 
-/* Barra-lite style validation card: benchmark alpha/beta regression + holdings
+/* Barra-lite style validation card: the strategy's own factor loadings + holdings
    style tilts (signed percentile deviation, [-1,1]) + SW industry weights. */
 function styleCard(expId, result) {
   const host = el(
@@ -6062,16 +6062,23 @@ function styleCard(expId, result) {
         );
         return;
       }
-      const reg = payload.benchmark_regression || {};
+      // The strategy's own loadings, as its sidecar's factor regression
+      // recorded them: a result stored before the turnover leg has none on
+      // it, and its tile is left out rather than shown empty.
+      const reg = payload.factor_regression || {};
       const style = payload.style || {};
       const tiles = presentTiles([
         {
           // The experiment's own benchmark, as its sidecar recorded it.
-          label: `β（vs ${payload.benchmark?.label || "基准"}）`,
-          value: reg.beta,
+          label: `市场 β（vs ${payload.benchmark?.label || "基准"}）`,
+          value: reg.market_beta,
           fmt: fmtSharpe,
+          title: reg.method || null,
         },
-        { label: "年化 α", value: reg.alpha_annualized, fmt: fmtPct, signed: true },
+        { label: "规模载荷", value: reg.size_beta, fmt: fmtSharpe, signed: true, title: "正为偏小盘" },
+        { label: "价值载荷", value: reg.value_beta, fmt: fmtSharpe, signed: true, title: "正为偏低估值" },
+        { label: "低换手载荷", value: reg.turnover_beta, fmt: fmtSharpe, signed: true, title: "正为偏低换手" },
+        { label: "残差跟踪误差", value: reg.tracking_error, fmt: fmtPct },
         { label: "R²", value: reg.r2, fmt: fmtSharpe },
         { label: "样本天数", value: reg.n_days, fmt: String },
       ]);
@@ -6080,7 +6087,7 @@ function styleCard(expId, result) {
         host.append(
           chipsRow([
             chip(
-              `基准回归 · ${STYLE_REASON_LABELS[reg.reason] || "不可算"}`,
+              `因子回归 · ${STYLE_REASON_LABELS[reg.reason] || "不可算"}`,
               STYLE_REASON_TITLES[reg.reason] || null,
             ),
           ]),
@@ -6149,17 +6156,17 @@ function styleCard(expId, result) {
 /* Why a style figure is absent, as a label on the chip and the full reason
    in its tooltip (environment/replay/style.py). */
 const STYLE_REASON_LABELS = {
-  benchmark_unavailable: "无同窗基准指数",
+  factors_unavailable: "无同窗基准或因子腿",
   insufficient_overlapping_days: "重叠交易日不足 8 天",
-  benchmark_variance_zero: "基准指数无波动",
+  factors_collinear: "因子腿共线",
   style_columns_unavailable: "缺市值 / PB / 换手截面",
   no_holdings: "无持仓",
   no_valued_holdings: "持仓无收盘价",
 };
 const STYLE_REASON_TITLES = {
-  benchmark_unavailable: "回放槽中没有可用的基准指数同窗数据，基准回归为空",
-  insufficient_overlapping_days: "与基准指数重叠的交易日不足 8 天，β、α 与 R² 不计算",
-  benchmark_variance_zero: "同窗基准指数收益没有可回归的波动，β、α 与 R² 不计算",
+  factors_unavailable: "回放槽中没有基准指数或因子腿的同窗数据，因子回归为空",
+  insufficient_overlapping_days: "同时有基准与各因子腿的交易日不足 8 天，载荷与 R² 不计算",
+  factors_collinear: "这些交易日上因子腿共线，载荷与 R² 不计算",
   style_columns_unavailable: "回放槽缺少市值、PB 或换手截面，风格暴露为空",
   no_holdings: "该回测没有持仓，风格暴露为空",
   no_valued_holdings: "该回测的持仓没有可用收盘价，风格暴露为空",

@@ -177,7 +177,10 @@ def write_result(
                 "ts_code": BENCHMARK_TS_CODE,
                 "label": benchmark_index_label(BENCHMARK_TS_CODE),
             },
-            "benchmark_regression": {"available": True, "beta": 0.9, "alpha_annualized": 0.05, "r2": 0.8, "n_days": days},
+            "factor_regression": {
+                "available": True, "reason": None, "n_days": days - 10, "tracking_error": 0.12,
+                "market_beta": 0.9, "size_beta": 0.2, "value_beta": -0.1, "turnover_beta": 0.3, "r2": 0.8,
+            },
             "style": {"available": False, "reason": "no_holdings"},
             "strategy_daily": [[day, float(value)] for day, value in zip(dates, strategy, strict=True)],
             "benchmark_daily": [[day, float(value)] for day, value in zip(dates, benchmark, strict=True)],
@@ -189,6 +192,12 @@ def write_result(
                 [day, float(value)]
                 for day, value in zip(
                     dates, np.random.default_rng(len(dates)).normal(0.0, 0.003, len(dates)), strict=True
+                )
+            ],
+            "turnover_factor_daily": [
+                [day, float(value)]
+                for day, value in zip(
+                    dates, np.random.default_rng(len(dates) + 1).normal(0.0, 0.004, len(dates)), strict=True
                 )
             ],
         },

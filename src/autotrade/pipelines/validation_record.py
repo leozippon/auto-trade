@@ -16,7 +16,7 @@ with ``source`` ``host_completion`` and no replicate entries.
 The record's significance test (:func:`record_significance`) reads the entries' daily
 rows stitched in step order with the residual statistic every other reading
 uses (``pipelines/verdict.py``): the residual information ratio of the active
-series on the market, size and value legs, its betas, the threshold for the record's
+series on the factor legs (``style.FACTOR_SERIES``), its betas, the threshold for the record's
 length and the one-sided null p-value, beside the stitched return, drawdown
 and turnover. A test reads its own replay step by step (:func:`step_table`),
 the rows it returns as ``candidate_by_step``.
@@ -35,14 +35,29 @@ from autotrade.environment.replay.stats import (
     window_activity,
     window_fees,
 )
-from autotrade.environment.replay.style import FACTOR_SERIES, series_pairs
+from autotrade.environment.replay.style import (
+    FACTOR_SERIES,
+    VERSION_3_FACTOR_SERIES,
+    series_pairs,
+    stored_factor_series,
+)
 
 from .calendar import Slot, step_windows
 from .config import ReplaySpan
 from .ledger import LINK_KEYS, TEST_STEP_RECORD_TYPE, VerdictStatus
 from .verdict import null_p_value, residual_reading
 
-_DAILY_SERIES = ("strategy_daily", "baseline_daily", *(series for _name, series in FACTOR_SERIES))
+# The series an entry's daily row carries after its date, by the row's width:
+# every factor leg, or the market, size and value legs of an entry recorded
+# before the turnover leg joined, which reads as it was recorded
+# (``style.stored_factor_series``).
+_ROW_SERIES = {
+    1 + len(names): names
+    for names in (
+        ("strategy_daily", "baseline_daily", *(series for _name, series in legs))
+        for legs in (FACTOR_SERIES, VERSION_3_FACTOR_SERIES)
+    )
+}
 # Where a test_step record came from: the session's own test, or the host
 # filling the record after the session.
 SOURCE_TEST = "test"
@@ -104,9 +119,10 @@ def step_entry(
     benchmark's, ``active_return`` is book minus random baseline, ``turnover`` and
     ``fees`` are the window's own fills (``stats.window_activity``,
     ``stats.window_fees``), and ``daily`` carries the window's rows (the date,
-    the book's return, the random baseline's and the three factor legs the
-    significance test regresses on, in that order). A window the replay
-    does not cover raises ``ValueError``: an entry is never read off nothing.
+    the book's return, the random baseline's and the factor legs the sidecar
+    carries, ``style.stored_factor_series``, in that order), which the
+    significance test regresses on. A window the replay does not cover raises
+    ``ValueError``: an entry is never read off nothing.
     """
 
     strategy = _in_window(analysis.get("strategy_daily"), start, end)
@@ -115,7 +131,8 @@ def step_entry(
     baseline = dict(_in_window(analysis.get("baseline_daily"), start, end))
     if set(baseline) != {day for day, _value in strategy}:
         raise ValueError(f"the replay carries no random baseline over every day of {start}..{end}")
-    legs = {series: dict(_in_window(analysis.get(series), start, end)) for _name, series in FACTOR_SERIES}
+    stored = stored_factor_series(analysis)
+    legs = {series: dict(_in_window(analysis.get(series), start, end)) for _name, series in stored}
     benchmark = [legs["benchmark_daily"][day] for day, _value in strategy if day in legs["benchmark_daily"]]
     activity = window_activity(replay["equity_curve"], replay["executions"], start=start, end=end)  # type: ignore[arg-type]
     book = compounded_return(value for _day, value in strategy)
@@ -133,7 +150,7 @@ def step_entry(
         "active_return": book - baseline_return,
         "index_return": compounded_return(benchmark) if len(benchmark) == len(strategy) else None,
         "daily": [
-            [day, value, baseline[day], *(legs[series].get(day) for _name, series in FACTOR_SERIES)]
+            [day, value, baseline[day], *(legs[series].get(day) for _name, series in stored)]
             for day, value in strategy
         ],
     }
@@ -167,14 +184,24 @@ def record_significance(entries: Sequence[Mapping[str, object]], *, alpha: float
     sums the entries' own. A record the statistic cannot read yet (too few
     days, or legs that explain it exactly) says why under ``unmeasured`` and
     carries the compounded figures alone; one it read carries ``unmeasured``
-    as None, so every reader sees one shape.
+    as None, so every reader sees one shape. Entries recorded before the
+    turnover leg joined are read on the three legs they carry; a record whose
+    entries carry different legs raises ``ValueError``: one regression never
+    reads two leg sets.
     """
 
     daily = [row for entry in entries for row in entry.get("daily") or ()]
-    series: dict[str, list[list[object]]] = {name: [] for name in _DAILY_SERIES}
+    widths = {len(row) for row in daily}
+    if len(widths) > 1 or not widths <= _ROW_SERIES.keys():
+        raise ValueError(
+            f"the record's daily rows carry {sorted(widths)} columns, not one of {sorted(_ROW_SERIES)}: "
+            "entries recorded on different factor legs are never read as one series"
+        )
+    names = _ROW_SERIES[next(iter(widths))] if widths else ()
+    series: dict[str, list[list[object]]] = {name: [] for name in names}
     for row in daily:
         day = str(row[0])
-        for name, value in zip(_DAILY_SERIES, row[1:], strict=True):
+        for name, value in zip(names, row[1:], strict=True):
             if value is not None:
                 series[name].append([day, value])
     returns = [float(row[1]) for row in daily]

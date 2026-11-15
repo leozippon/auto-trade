@@ -49,6 +49,7 @@ from autotrade.environment.replay.null_control import (
 )
 from autotrade.environment.replay.stats import plain_statistics
 from autotrade.environment.replay.style import (
+    FACTOR_SERIES,
     active_analysis,
     series_pairs,
 )
@@ -1173,7 +1174,7 @@ def active_reading(
     """The graded series over one replay: the book's daily return minus its
     random baseline (``verdict.graded_statistics``: the annualised excess,
     tracking error and information ratio, and the series' loadings on the
-    market, size and value legs), the residual statistic of the same
+    factor legs), the residual statistic of the same
     regression at the experiment's ``alpha`` (``verdict.residual_reading``)
     with the ``threshold`` for the replay's length for the caller to place,
     the drawdown of its compounded path as the replay states it, and the
@@ -1198,9 +1199,7 @@ def active_reading(
         "residual_excess": reading.get("residual_excess"),
         "tracking_error": graded["tracking_error"],
         "max_drawdown": benchmark.get("active_max_drawdown"),
-        "market_beta": graded["market_beta"],
-        "size_beta": graded["size_beta"],
-        "value_beta": graded["value_beta"],
+        **{name: graded[name] for name, _series in FACTOR_SERIES if name in graded},
         "excess_at_cost_stress": summary_excess_at_cost_stress(
             graded, summary, cost_stress_multiplier=rules.cost_stress_multiplier
         ),
@@ -1554,7 +1553,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "acceptance_rules.significance reads it. In each row, active is the graded "
         "series, book minus its random baseline: annualised excess, tracking_error "
         "and information_ratio, residual_* and betas from its OLS on the market, "
-        "size and value legs, and excess_at_cost_stress (after "
+        "size, value and low-turnover legs, and excess_at_cost_stress (after "
         "cost_stress_multiplier x the slippage on the span's turnover); readings, "
         "not verdicts. book is the holder's money after every cost: max_drawdown is "
         "the equity drawdown registration limits, turnover is traded notional over "
@@ -1564,7 +1563,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "same_bytes_as names earlier nodes with these bytes on this span: the same "
         "trial, no new evidence. result_ref (under root steps) is the full record; "
         "validation/active_daily.csv beside it is the graded series day by day with "
-        "the three legs.",
+        "the factor legs.",
         {
             "type": "object",
             "properties": {
@@ -2629,9 +2628,7 @@ SIGNIFICANCE_KEYS = (
     "p_value",
     "residual_excess",
     "residual_tracking_error",
-    "market_beta",
-    "size_beta",
-    "value_beta",
+    *(name for name, _series in FACTOR_SERIES),
     "days",
     "years",
 )

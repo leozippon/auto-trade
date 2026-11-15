@@ -62,27 +62,28 @@ def _analysis(*segments):
     """A sidecar of ``segments``, each ``(days, strategy, benchmark, size)``
     with ``value`` as a fifth item where the test names one; a segment that
     names none gets a value leg of independent noise the book does not load
-    on, so the three-factor fit is defined. Its random baseline is zero, so
-    the active series is the strategy's own (``_with_baselines`` sets
-    another)."""
+    on, and every segment a turnover leg of independent noise, so the factor
+    fit is defined. Its random baseline is zero, so the active series is the
+    strategy's own (``_with_baselines`` sets another)."""
 
     def legs(segment):
-        if len(segment) == 5:
-            return segment
         days = segment[0]
-        noise = np.random.default_rng(len(days) + 1).normal(0.0, 0.08 / SCALE, len(days))
-        return (*segment, noise)
+        if len(segment) == 4:
+            noise = np.random.default_rng(len(days) + 1).normal(0.0, 0.08 / SCALE, len(days))
+            segment = (*segment, noise)
+        return (*segment, np.random.default_rng(len(days) + 2).normal(0.0, 0.10 / SCALE, len(days)))
 
     rows = [
         row
-        for days, strategy, benchmark, size, value in map(legs, segments)
-        for row in zip(days, strategy, benchmark, size, value)
+        for days, strategy, benchmark, size, value, turnover in map(legs, segments)
+        for row in zip(days, strategy, benchmark, size, value, turnover)
     ]
     return {
         "strategy_daily": [[row[0], float(row[1])] for row in rows],
         "benchmark_daily": [[row[0], float(row[2])] for row in rows],
         "size_factor_daily": [[row[0], float(row[3])] for row in rows],
         "value_factor_daily": [[row[0], float(row[4])] for row in rows],
+        "turnover_factor_daily": [[row[0], float(row[5])] for row in rows],
         "baseline_daily": [[row[0], 0.0] for row in rows],
     }
 
@@ -145,6 +146,7 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
             [value for _, value in analysis["benchmark_daily"]],
             [value for _, value in analysis["size_factor_daily"]],
             [value for _, value in analysis["value_factor_daily"]],
+            [value for _, value in analysis["turnover_factor_daily"]],
         ]
     )
     coefficients, residual_ss, _, _ = np.linalg.lstsq(design, strategy, rcond=None)
@@ -155,14 +157,14 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
     assert stats["tracking_error"] == pytest.approx(strategy.std(ddof=1) * SCALE, rel=1e-12)
     assert stats["information_ratio"] == pytest.approx(stats["plain_excess"] / stats["tracking_error"])
     # The loadings ride as a diagnostic; their variance stays in the series.
-    assert (stats["market_beta"], stats["size_beta"], stats["value_beta"]) == pytest.approx(
+    assert (stats["market_beta"], stats["size_beta"], stats["value_beta"], stats["turnover_beta"]) == pytest.approx(
         tuple(coefficients[1:]), rel=1e-9
     )
-    assert stats["tracking_error"] > math.sqrt(residual_ss[0] / (len(strategy) - 4)) * SCALE * 1.5
+    assert stats["tracking_error"] > math.sqrt(residual_ss[0] / (len(strategy) - 5)) * SCALE * 1.5
     mandate = verdict._mandate(analysis, FORWARD_START, FORWARD_END)
     assert mandate == pytest.approx(
         {
-            "tracking_error": math.sqrt(residual_ss[0] / (len(strategy) - 4)) * SCALE,
+            "tracking_error": math.sqrt(residual_ss[0] / (len(strategy) - 5)) * SCALE,
             "market_beta": coefficients[1],
         },
         rel=1e-9,
@@ -171,7 +173,7 @@ def test_statistics_are_the_series_as_it_is_and_its_loadings_beside_it():
 
 def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     """The one statistic the validation record is read with: OLS of a daily series on the
-    three legs, its intercept annualised over its residual standard deviation
+    factor legs, its intercept annualised over its residual standard deviation
     annualised, with the threshold z(1 - alpha) / sqrt(years) beside it."""
 
     rng = np.random.default_rng(5)
@@ -180,18 +182,26 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     size = rng.normal(0.0, 0.10 / SCALE, days)
     value = rng.normal(0.0, 0.08 / SCALE, days)
     noise = rng.normal(0.0, 0.10 / SCALE, days)
-    design = np.column_stack([np.ones(days), market, size, value])
+    turnover = np.random.default_rng(6).normal(0.0, 0.10 / SCALE, days)
+    design = np.column_stack([np.ones(days), market, size, value, turnover])
     # Noise orthogonal to the design: the fit returns the coefficients exactly.
     noise -= design @ np.linalg.lstsq(design, noise, rcond=None)[0]
-    active = 0.06 / TRADING_DAYS_PER_YEAR + 0.3 * market - 0.4 * size + 0.25 * value + noise
+    active = 0.06 / TRADING_DAYS_PER_YEAR + 0.3 * market - 0.4 * size + 0.25 * value + 0.5 * turnover + noise
 
-    reading = verdict.residual_statistics(active, market, size, value, alpha=0.05)
+    def legs(rows=slice(None)):
+        return {
+            "market_beta": market[rows], "size_beta": size[rows],
+            "value_beta": value[rows], "turnover_beta": turnover[rows],
+        }
 
-    sigma = math.sqrt(float(noise @ noise) / (days - 4))
+    reading = verdict.residual_statistics(active, legs(), alpha=0.05)
+
+    sigma = math.sqrt(float(noise @ noise) / (days - 5))
     assert reading["days"] == days and reading["years"] == pytest.approx(5.0)
     assert reading["market_beta"] == pytest.approx(0.3, abs=1e-12)
     assert reading["size_beta"] == pytest.approx(-0.4, abs=1e-12)
     assert reading["value_beta"] == pytest.approx(0.25, abs=1e-12)
+    assert reading["turnover_beta"] == pytest.approx(0.5, abs=1e-12)
     assert reading["residual_excess"] == pytest.approx(0.06, abs=1e-12)
     assert reading["residual_tracking_error"] == pytest.approx(sigma * SCALE, rel=1e-12)
     assert reading["residual_information_ratio"] == pytest.approx(0.06 / (sigma * SCALE), rel=1e-9)
@@ -202,11 +212,7 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     assert verdict.residual_threshold(1.0, 0.05) == pytest.approx(1.6449, abs=1e-4)
     assert verdict.residual_threshold(5.0, 0.025) == pytest.approx(NormalDist().inv_cdf(0.975) / math.sqrt(5.0))
     one_year = verdict.residual_statistics(
-        active[:TRADING_DAYS_PER_YEAR],
-        market[:TRADING_DAYS_PER_YEAR],
-        size[:TRADING_DAYS_PER_YEAR],
-        value[:TRADING_DAYS_PER_YEAR],
-        alpha=0.05,
+        active[:TRADING_DAYS_PER_YEAR], legs(slice(TRADING_DAYS_PER_YEAR)), alpha=0.05
     )
     assert one_year["years"] == 1.0 and one_year["threshold"] == pytest.approx(1.6449, abs=1e-4)
 
@@ -217,6 +223,7 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
         "benchmark_daily": [[keys[index], float(item)] for index, item in enumerate(market)],
         "size_factor_daily": [[keys[index], float(item)] for index, item in enumerate(size)],
         "value_factor_daily": [[keys[index], float(item)] for index, item in enumerate(value)],
+        "turnover_factor_daily": [[keys[index], float(item)] for index, item in enumerate(turnover)],
         "baseline_daily": [[keys[index], 0.0] for index in range(len(active))],
     }
     assert verdict.residual_reading(analysis, alpha=0.05) == {"series": "active", **reading, "dropped_days": 0}
@@ -228,9 +235,66 @@ def test_the_residual_statistic_recovers_a_known_alpha_and_betas():
     assert math.isfinite(patched["residual_information_ratio"])
 
     with pytest.raises(ValueError, match="collinear"):
-        verdict.residual_statistics(active, market, market * 2.0, value, alpha=0.05)
+        verdict.residual_statistics(active, {**legs(), "size_beta": market * 2.0}, alpha=0.05)
     with pytest.raises(ValueError, match="fewer than"):
-        verdict.residual_statistics(active[:5], market[:5], size[:5], value[:5], alpha=0.05)
+        verdict.residual_statistics(active[:5], legs(slice(5)), alpha=0.05)
+
+
+def test_a_pure_low_turnover_tilt_reads_no_residual_on_the_turnover_leg():
+    """A book that only leans to low-turnover names earns the leg's premium
+    times its loading: on the other three legs alone that premium is all
+    intercept and reads as skill; with the turnover leg its loading is
+    positive and nothing is left. A sidecar stored before the turnover leg
+    carries no turnover series and is read on its three legs exactly as it
+    was, with no turnover loading."""
+
+    rng = np.random.default_rng(29)
+    days = 3 * TRADING_DAYS_PER_YEAR
+    keys = list(pd.bdate_range("2016-01-04", periods=days).strftime("%Y%m%d"))
+    market = rng.normal(0.0, 0.20 / SCALE, days)
+    size = rng.normal(0.0, 0.10 / SCALE, days)
+    value = rng.normal(0.0, 0.08 / SCALE, days)
+    # The leg earns 25 % a year at an IR of about 1.7, as the measured one did.
+    turnover = rng.normal(0.25 / TRADING_DAYS_PER_YEAR, 0.15 / SCALE, days)
+    noise = rng.normal(0.0, 0.04 / SCALE, days)
+    design = np.column_stack([np.ones(days), market, size, value, turnover])
+    noise -= design @ np.linalg.lstsq(design, noise, rcond=None)[0]
+    active = 0.5 * turnover + noise
+
+    def series(values):
+        return [[day, float(item)] for day, item in zip(keys, values, strict=True)]
+
+    stored = {
+        "strategy_daily": series(active),
+        "baseline_daily": series(np.zeros(days)),
+        "benchmark_daily": series(market),
+        "size_factor_daily": series(size),
+        "value_factor_daily": series(value),
+    }
+    now = verdict.residual_reading({**stored, "turnover_factor_daily": series(turnover)}, alpha=0.05)
+    before = verdict.residual_reading(stored, alpha=0.05)
+
+    assert now["turnover_beta"] == pytest.approx(0.5, abs=1e-12)
+    assert abs(now["residual_information_ratio"]) < 1e-9 and abs(now["residual_excess"]) < 1e-12
+    assert "turnover_beta" not in before
+    assert before["residual_information_ratio"] > before["threshold"]
+    # The stored reading is the three-leg fit itself, not a refit on fewer days.
+    coefficients, residual = factor_ols(active, np.column_stack([market, size, value]))
+    sigma = math.sqrt(float(residual @ residual) / (days - 4))
+    assert before["residual_information_ratio"] == pytest.approx(coefficients[0] * SCALE / sigma, rel=1e-12)
+    assert (before["market_beta"], before["size_beta"], before["value_beta"]) == pytest.approx(
+        tuple(coefficients[1:]), rel=1e-12
+    )
+    assert before["days"] == now["days"] == days
+    # The graded figures carry the loadings the stored series has, and no more.
+    assert "turnover_beta" not in verdict.graded_statistics(stored)
+    assert verdict.graded_statistics({**stored, "turnover_factor_daily": series(turnover)})[
+        "turnover_beta"
+    ] == pytest.approx(0.5, abs=1e-12)
+    # A sidecar written since carries the series even where the leg could not
+    # be built, and is then unmeasured rather than read on three legs.
+    with pytest.raises(ValueError, match="carry every factor leg"):
+        verdict.residual_reading({**stored, "turnover_factor_daily": []}, alpha=0.05)
     with pytest.raises(ValueError, match="alpha"):
         verdict.residual_threshold(5.0, 0.0)
 
@@ -481,10 +545,10 @@ def _selection_book(rng, mean, *, days=FORWARD_DAYS):
 
 
 def _intercept(analysis, start="", end=""):
-    """The annualised intercept of the graded series on the three factor
-    legs: what a regressed grade would have read."""
+    """The annualised intercept of the graded series on the factor legs:
+    what a regressed grade would have read."""
 
-    rows, _dropped = verdict._regression_rows(verdict._graded(analysis), start, end)
+    rows, _dropped, _names = verdict._regression_rows(verdict._graded(analysis), start, end)
     return float(factor_ols(rows[:, 0], rows[:, 1:])[0][0]) * TRADING_DAYS_PER_YEAR
 
 

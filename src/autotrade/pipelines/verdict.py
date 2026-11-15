@@ -10,7 +10,7 @@ random baseline removes what the universe construction hands any zero-skill book
 affordability, boards, equal weighting, the book's own schedule and cash).
 
 The significance test reads the factor residual of that series: OLS on the experiment's
-benchmark (market), the size and the value legs of the replay's own
+benchmark (market) and the size, value and turnover legs of the replay's own
 cross-section (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio is read against ``z(1 − alpha) / √years`` for the
 series' length (:func:`residual_statistics`, :func:`residual_threshold`), with
@@ -63,6 +63,7 @@ from autotrade.environment.replay.style import (
     active_analysis,
     factor_ols,
     series_pairs,
+    stored_factor_series,
 )
 
 from .calendar import FULL_SPAN
@@ -82,7 +83,12 @@ BOOTSTRAP_DRAWS = 2_000
 # that bound would give).
 FORWARD_MDE_Z = 2.12
 
-# The columns of one validation's daily graded series (:func:`active_daily`).
+# The columns of one validation's daily graded series (:func:`active_daily`),
+# each factor leg named after its sidecar series (``benchmark_return`` for
+# ``benchmark_daily``).
+_LEG_COLUMNS = tuple(
+    (series.removesuffix("_daily") + "_return", series) for _name, series in FACTOR_SERIES
+)
 ACTIVE_DAILY_COLUMNS = (
     "trade_date",
     "strategy_return",
@@ -90,9 +96,7 @@ ACTIVE_DAILY_COLUMNS = (
     "active_return",
     "active_cumulative",
     "active_drawdown",
-    "benchmark_return",
-    "size_factor_return",
-    "value_factor_return",
+    *(column for column, _series in _LEG_COLUMNS),
 )
 
 
@@ -133,14 +137,16 @@ def _strategy_returns(
 
 def _regression_rows(
     analysis: Mapping[str, object], start: str, end: str
-) -> tuple[np.ndarray, int]:
-    """``(strategy, market, size, value)`` rows of every day of the slice that
-    carries all three legs (``style.FACTOR_SERIES``), joined exactly as
-    ``style._factor_regression`` joins them, and how many such days were
-    dropped for a non-finite value: a NaN is never read as a figure. A day
-    missing a leg yields no row."""
+) -> tuple[np.ndarray, int, tuple[str, ...]]:
+    """``(strategy, *legs)`` rows of every day of the slice that carries every
+    leg the analysis is read on (``style.stored_factor_series``), joined
+    exactly as ``style._factor_regression`` joins them, how many such days
+    were dropped for a non-finite value -- a NaN is never read as a figure --
+    and the legs' loading names in column order. A day missing a leg yields
+    no row."""
 
-    legs = [dict(series_pairs(analysis.get(series))) for _name, series in FACTOR_SERIES]
+    stored = stored_factor_series(analysis)
+    legs = [dict(series_pairs(analysis.get(series))) for _name, series in stored]
     rows = np.asarray(
         [
             (value, *(leg[date] for leg in legs))
@@ -148,9 +154,9 @@ def _regression_rows(
             if all(date in leg for leg in legs)
         ],
         dtype=float,
-    ).reshape(-1, 1 + len(FACTOR_SERIES))
+    ).reshape(-1, 1 + len(stored))
     finite = np.isfinite(rows).all(axis=1)
-    return rows[finite], int((~finite).sum())
+    return rows[finite], int((~finite).sum()), tuple(name for name, _series in stored)
 
 
 class ExactFit(ValueError):
@@ -176,9 +182,7 @@ def residual_threshold(years: float, alpha: float) -> float:
 
 def residual_statistics(
     active: Sequence[float],
-    market: Sequence[float],
-    size: Sequence[float],
-    value: Sequence[float],
+    legs: Mapping[str, Sequence[float]],
     *,
     alpha: float,
 ) -> dict[str, float]:
@@ -186,29 +190,28 @@ def residual_statistics(
     the validation record, every validation and every forward slice is read with.
 
     ``active`` is the daily active series (the strategy's return minus its
-    random-baseline composite, ``series: active``) and ``market``, ``size``
-    and ``value`` the three legs over the same days. OLS of the series on an
-    intercept and the legs (``style.factor_ols``) gives the three betas and
+    random-baseline composite, ``series: active``) and ``legs`` the factor
+    legs over the same days by loading name (``style.FACTOR_SERIES``, or the
+    legs a stored series carries). OLS of the series on an intercept and the
+    legs (``style.factor_ols``) gives one beta per leg, under its name, and
     the residuals;
     the residual information ratio is the intercept annualised over the
     residual standard deviation annualised, ``intercept × √244 / σ̂`` with σ̂
-    on n − 4 degrees of freedom. ``years`` is days / 244 and ``threshold`` the
-    :func:`residual_threshold` at ``alpha`` for that length. ``ValueError`` on
-    series of unequal length, fewer than ``MIN_REGRESSION_DAYS`` days or
-    collinear legs, and :class:`ExactFit` on a series the legs explain
-    exactly.
+    on n minus the fitted coefficients degrees of freedom. ``years`` is
+    days / 244 and ``threshold`` the :func:`residual_threshold` at ``alpha``
+    for that length. ``ValueError`` on series of unequal length, fewer than
+    ``MIN_REGRESSION_DAYS`` days or collinear legs, and :class:`ExactFit` on
+    a series the legs explain exactly.
     """
 
     y = np.asarray(active, dtype=float)
-    legs = np.column_stack(
-        [np.asarray(market, dtype=float), np.asarray(size, dtype=float), np.asarray(value, dtype=float)]
-    )
-    if legs.shape[0] != len(y):
-        raise ValueError("the active series and the three legs cover different days")
+    columns = np.column_stack([np.asarray(leg, dtype=float) for leg in legs.values()])
+    if columns.shape[0] != len(y):
+        raise ValueError("the active series and the factor legs cover different days")
     days = len(y)
     if days < MIN_REGRESSION_DAYS:
         raise ValueError(f"{days} day(s) carry every factor leg, fewer than {MIN_REGRESSION_DAYS}")
-    coefficients, residual = factor_ols(y, legs)
+    coefficients, residual = factor_ols(y, columns)
     sigma = math.sqrt(float(residual @ residual) / (days - len(coefficients)))
     if not sigma > 0:
         raise ExactFit("the factor legs explain the series exactly: no residual to read")
@@ -220,7 +223,7 @@ def residual_statistics(
         "residual_excess": float(coefficients[0]) * TRADING_DAYS_PER_YEAR,
         "residual_tracking_error": sigma * scale,
         "residual_information_ratio": float(coefficients[0]) * scale / sigma,
-        **{name: float(beta) for (name, _series), beta in zip(FACTOR_SERIES, coefficients[1:], strict=True)},
+        **{name: float(beta) for name, beta in zip(legs, coefficients[1:], strict=True)},
         "threshold": residual_threshold(years, alpha),
     }
 
@@ -234,8 +237,9 @@ def residual_reading(
     ``ValueError`` where it cannot be read (see :func:`residual_statistics`
     and :func:`_graded`)."""
 
-    rows, dropped = _regression_rows(_graded(analysis), start, end)
-    return {"series": GRADED_SERIES, **residual_statistics(*rows.T, alpha=alpha), "dropped_days": dropped}
+    rows, dropped, names = _regression_rows(_graded(analysis), start, end)
+    legs = {name: rows[:, column] for column, name in enumerate(names, start=1)}
+    return {"series": GRADED_SERIES, **residual_statistics(rows[:, 0], legs, alpha=alpha), "dropped_days": dropped}
 
 
 def _reported_residual(
@@ -290,15 +294,16 @@ def pooled_reading(readings: Sequence[Mapping[str, object]]) -> dict[str, object
 
 
 def _loadings(analysis: Mapping[str, object], start: str, end: str) -> dict[str, float] | None:
-    """The factor regression of a span's ``strategy_daily`` on the market,
-    size and value legs (``style.factor_ols``): its three loadings and its
-    residual tracking error (n − 4 degrees of freedom, annualised by
+    """The factor regression of a span's ``strategy_daily`` on the legs it is
+    read on (``style.factor_ols``, ``style.stored_factor_series``): its
+    loadings and its residual tracking error (on n minus the fitted
+    coefficients degrees of freedom, annualised by
     √``TRADING_DAYS_PER_YEAR``). ``None`` when fewer than
     ``MIN_REGRESSION_DAYS`` days carry every leg or they are collinear: the
     graded series' loadings are a diagnostic, the strategy's own what a
     tracking mandate limits."""
 
-    rows, _dropped = _regression_rows(analysis, start, end)
+    rows, _dropped, names = _regression_rows(analysis, start, end)
     if len(rows) < MIN_REGRESSION_DAYS:
         return None
     try:
@@ -309,7 +314,7 @@ def _loadings(analysis: Mapping[str, object], start: str, end: str) -> dict[str,
         "tracking_error": math.sqrt(
             float(residual @ residual) / (len(rows) - len(coefficients)) * TRADING_DAYS_PER_YEAR
         ),
-        **{name: float(beta) for (name, _series), beta in zip(FACTOR_SERIES, coefficients[1:], strict=True)},
+        **{name: float(beta) for name, beta in zip(names, coefficients[1:], strict=True)},
     }
 
 
@@ -330,7 +335,7 @@ def _measured(
     loadings = _loadings(analysis, start, end) or {}
     return {
         **statistics,
-        **{name: loadings.get(name) for name, _series in FACTOR_SERIES},
+        **{name: loadings.get(name) for name, _series in stored_factor_series(analysis)},
     }, daily
 
 
@@ -358,8 +363,9 @@ def graded_statistics(
     names it. ``plain_excess`` is its annualised mean, ``tracking_error`` its
     annualised standard deviation and ``information_ratio`` their ratio
     (``None`` on a flat series), as ``stats.plain_statistics`` reads them;
-    ``market_beta``, ``size_beta`` and ``value_beta`` are its loadings
-    (:func:`_loadings`). An empty ``start``/``end`` takes the whole analysis.
+    one loading per factor leg (``market_beta`` and the rest of
+    ``style.FACTOR_SERIES``, :func:`_loadings`) beside them. An empty
+    ``start``/``end`` takes the whole analysis.
     """
 
     start = _date(start, "start") if start else ""
@@ -407,7 +413,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
     annualised standard deviation is the active IR -- its
     :func:`stats.compounded_path` (``active_cumulative`` is the equity minus
     1, ``active_drawdown`` the loss below the running peak, whose largest
-    value is the ``active_max_drawdown``), and the three factor legs its
+    value is the ``active_max_drawdown``), and the factor legs its
     loadings are read against. Only the composite of the random baseline is stored, so
     no draw's names can be read back. Without a random baseline every ``active_*``
     column is empty.
@@ -417,12 +423,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
         series_pairs(analysis.get("strategy_daily")),
         columns=["trade_date", "strategy_return"],
     )
-    for column, key in (
-        ("baseline_return", "baseline_daily"),
-        ("benchmark_return", "benchmark_daily"),
-        ("size_factor_return", "size_factor_daily"),
-        ("value_factor_return", "value_factor_daily"),
-    ):
+    for column, key in (("baseline_return", "baseline_daily"), *_LEG_COLUMNS):
         frame[column] = frame["trade_date"].map(dict(series_pairs(analysis.get(key))))
     active = active_analysis(analysis)
     if active is not None:

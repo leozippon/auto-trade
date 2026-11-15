@@ -409,7 +409,8 @@ class AcceptanceRules:
                 "statistic": (
                     "the residual information ratio of the active series: its daily "
                     "return regressed by OLS on an intercept, the benchmark_index return "
-                    "(market), the size leg and the value leg (regression_method), the "
+                    "(market), the size leg, the value leg and the low-turnover leg "
+                    "(regression_method), the "
                     f"intercept times sqrt({years}) over the residual standard deviation; "
                     f"years = trading days / {years}"
                 ),

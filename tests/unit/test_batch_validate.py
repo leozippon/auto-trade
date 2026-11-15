@@ -46,7 +46,7 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import active_analysis
+from autotrade.environment.replay.style import FACTOR_SERIES, active_analysis
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree
@@ -328,6 +328,10 @@ def _write_style_sidecar(directory: Path, *, alpha: float, seed: int) -> None:
         "value_factor_daily": [
             [day, float(value)]
             for day, value in zip(days, np.random.default_rng(seed + 10_000).normal(0.0, 0.003, len(days)))
+        ],
+        "turnover_factor_daily": [
+            [day, float(value)]
+            for day, value in zip(days, np.random.default_rng(seed + 20_000).normal(0.0, 0.003, len(days)))
         ],
         "baseline_daily": [[day, float(value)] for day, value in zip(days, baselines)],
     }
@@ -1263,7 +1267,7 @@ class BatchValidateRunTest(unittest.TestCase):
                     list(row["active"]),
                     [
                         "excess", "information_ratio", "residual_information_ratio", "residual_excess",
-                        "tracking_error", "max_drawdown", "market_beta", "size_beta", "value_beta",
+                        "tracking_error", "max_drawdown", *(name for name, _series in FACTOR_SERIES),
                         "excess_at_cost_stress",
                     ],
                 )
@@ -1297,7 +1301,7 @@ class BatchValidateRunTest(unittest.TestCase):
         self,
     ) -> None:
         """A row reads the sealed gate's statistic over its own span -- the
-        residual IR and the three betas of the active series -- and the batch
+        residual IR and the betas of the active series -- and the batch
         states the threshold for that span's length once; nothing passes or
         fails."""
         with TemporaryDirectory() as tmp:
@@ -1312,7 +1316,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 )
                 expected = residual_reading(sidecar, alpha=REQUIRED_RULES["alpha"])
                 active = row["active"]
-                for key in ("residual_information_ratio", "residual_excess", "market_beta", "size_beta", "value_beta"):
+                for key in ("residual_information_ratio", "residual_excess", *(name for name, _series in FACTOR_SERIES)):
                     self.assertAlmostEqual(active[key], expected[key], places=6, msg=key)
                 self.assertAlmostEqual(value["threshold"], expected["threshold"], places=6)
                 graded = graded_statistics(sidecar)
@@ -1582,7 +1586,7 @@ class DailySeriesTest(unittest.TestCase):
                 )
             # The full-span candidate: the file reproduces the active
             # drawdown the verdict holds to its limit, and the residual
-            # reading off the series and the three legs beside it.
+            # reading off the series and the factor legs beside it.
             [edge] = [row for row in full["candidates"] if row["name"] == "edge"]
             frame = pd.read_csv(session.tree.root / Path(edge["result_ref"]).parent / "active_daily.csv")
             sidecar = json.loads(
@@ -1592,10 +1596,13 @@ class DailySeriesTest(unittest.TestCase):
             drawdown = _max_slice_drawdown(active_analysis(sidecar), "", "")
             self.assertGreater(drawdown, 0.0)
             self.assertAlmostEqual(frame["active_drawdown"].max(), drawdown, delta=1e-9)
-            legs = frame[["benchmark_return", "size_factor_return", "value_factor_return"]].dropna()
+            columns = {
+                name: series.removesuffix("_daily") + "_return" for name, series in FACTOR_SERIES
+            }
+            legs = frame[list(columns.values())].dropna()
             kept = frame.loc[legs.index, "active_return"]
             reading = residual_statistics(
-                kept, legs["benchmark_return"], legs["size_factor_return"], legs["value_factor_return"],
+                kept, {name: legs[column] for name, column in columns.items()},
                 alpha=REQUIRED_RULES["alpha"],
             )
             self.assertAlmostEqual(
@@ -1700,7 +1707,7 @@ class BatchValidateContractTest(unittest.TestCase):
         from autotrade.pipelines.session_tools import SmokeBacktestTool, TestTool
 
         limits = (
-            (ValidateTool.spec, 2_250),
+            (ValidateTool.spec, 2_400),
             (TestTool.spec, 1_500),
             (SmokeBacktestTool.spec, 900),
             (NullControlTool(SimpleNamespace(), max_calls=12).spec, 700),  # type: ignore[arg-type]

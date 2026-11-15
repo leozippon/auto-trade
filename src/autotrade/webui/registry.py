@@ -38,8 +38,8 @@ from autotrade.common.records import (
     read_json_object,
 )
 from autotrade.environment.replay.style import (
+    READABLE_STYLE_SCHEMA_VERSIONS,
     STYLE_ARTIFACT_NAME,
-    STYLE_SCHEMA_VERSION,
 )
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.report_issue import (
@@ -1569,7 +1569,7 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
     except (OSError, ValueError):
         return {"available": False, "reason": "unreadable"}
     if (
-        payload.get("schema_version") != STYLE_SCHEMA_VERSION
+        payload.get("schema_version") not in READABLE_STYLE_SCHEMA_VERSIONS
         or payload.get("mode") not in _RESULT_MODES
     ):
         return {"available": False, "reason": "no_style_artifact"}
