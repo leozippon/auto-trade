@@ -1306,6 +1306,38 @@ def year_readings(
     return readings
 
 
+def recent_reading(
+    analysis: Mapping[str, object], span: ReplaySpan, *, rules: AcceptanceRules
+) -> dict[str, object]:
+    """``recent``: a full-span replay of three or more research years read
+    over its last two (``Yn-1..Yn``) as the whole span is read
+    (``verdict.residual_reading`` of that window: its own regression and the
+    threshold for its own length), or ``unmeasured`` with why; nothing for
+    any other span. A reading only: registration, the record and every
+    label read the whole span."""
+
+    if span.label != FULL_SPAN or len(span.year_windows) < 3:
+        return {}
+    (start, _end), (_start, end) = span.year_windows[-2:]
+    count = len(span.year_windows)
+    try:
+        reading = residual_reading(analysis, start=start, end=end, alpha=rules.alpha)
+    except ValueError as exc:
+        reading = {"unmeasured": str(exc)}
+    return {
+        "recent": _rounded_row(
+            {
+                "span": f"Y{count - 1}..Y{count}",
+                **{
+                    key: reading[key]
+                    for key in ("residual_information_ratio", "residual_excess", "threshold", "unmeasured")
+                    if key in reading
+                },
+            }
+        )
+    }
+
+
 def resource_reading(resources: Mapping[str, object] | None) -> dict[str, object]:
     """``{"resources": ...}``: what a replay cost its strategy container, or
     nothing when it measured nothing.
@@ -1473,8 +1505,9 @@ def replay_legs(
 
 # A validate row's keys in the order the Agent reads them; a failed row has
 # name, control, status, cause, error, wall_seconds and resources (a revealed
-# one the first five, its error a fixed sentence). Once a step is tested, a
-# completed full-span row also carries ``revealed`` (``ValidateTool._read_revealed``).
+# one the first five, its error a fixed sentence). A completed full-span row
+# carries ``recent`` (``recent_reading``) and, once a step is tested,
+# ``revealed`` (``ValidateTool._read_revealed``).
 VALIDATE_ROW_KEYS = (
     "name",
     "control",
@@ -1490,6 +1523,7 @@ VALIDATE_ROW_KEYS = (
     "by_year",
     "by_step",
     "concentration",
+    "recent",
     "revealed",
     "resources",
     "same_bytes_as",
@@ -1533,7 +1567,9 @@ class ValidateTool(SessionTimeBudgetAware):
         f"Replay {BATCH_VALIDATE_MIN_CANDIDATES}-{BATCH_VALIDATE_MAX_CANDIDATES} "
         "candidates over one span in one call; the only way to make a node that "
         "test can take. A span of years replays as one continuous book from its "
-        "first year. Once a step is tested, a full-span row also carries revealed: "
+        "first year. A full-span row of three or more research years also carries "
+        "recent: residual_* and threshold over its last two years alone. "
+        "Once a step is tested, a full-span row also carries revealed: "
         "its candidate over the tested steps, replayed and reported as test does; "
         "span revealed replays only those steps. "
         "At most acceptance_rules.validation.validates_per_step counted calls "
@@ -1818,7 +1854,7 @@ class ValidateTool(SessionTimeBudgetAware):
             )
         thresholds: list[object] = []
         for row, step in recorded:
-            row.update(self._reading(step.validation, revealed))
+            row.update(self._reading(step.validation, span, revealed))
             thresholds.append(row["active"].pop("threshold", None))  # type: ignore[attr-defined]
         if span.label == FULL_SPAN and self.backtest.tests:
             # Every full-span node, once a step is tested, read over it too.
@@ -2230,10 +2266,13 @@ class ValidateTool(SessionTimeBudgetAware):
 
     # ---- readings ----
 
-    def _reading(self, evaluation: EvaluationResult, revealed: int | None) -> dict[str, object]:
-        """One completed replay as a row reads it: ``active`` (its
+    def _reading(
+        self, evaluation: EvaluationResult, span: ReplaySpan, revealed: int | None
+    ) -> dict[str, object]:
+        """One completed replay of ``span`` as a row reads it: ``active`` (its
         ``threshold`` still inside), ``book``, and over research years
-        ``by_year`` with ``concentration`` or, over the ``revealed`` steps,
+        ``by_year`` with ``concentration`` and, over the full span,
+        ``recent`` (:func:`recent_reading`), or, over the ``revealed`` steps,
         ``by_step``, the steps read as a test reads its candidate."""
 
         result_ref, summary = evaluation.result_ref, evaluation.summary
@@ -2244,6 +2283,7 @@ class ValidateTool(SessionTimeBudgetAware):
         }
         if revealed is None:
             reading.update(year_readings(analysis, summary, self.backtest.request.years))
+            reading.update(recent_reading(analysis, span, rules=self.backtest.rules))
         else:
             reading["by_step"] = step_readings(
                 *replay_and_analysis(result_ref), self.backtest.steps_plan, through=revealed
@@ -2279,7 +2319,7 @@ class ValidateTool(SessionTimeBudgetAware):
         )
         for (row, _step), replayed in zip(recorded, outcomes, strict=True):
             if replayed.evaluation is not None:
-                row["revealed"] = self._reading(replayed.evaluation, tested)
+                row["revealed"] = self._reading(replayed.evaluation, span, tested)
                 continue
             error = replayed.error
             assert error is not None  # a replay holds one of the two

@@ -14,6 +14,8 @@
 
 测过步之后，全段 `validate` 完成的行另带 `revealed`：同一候选从验证期起点作为一本新账回放到测试终点，与 `span: "revealed"` 的行、`test` 的 `whole_replay` 与 `candidate_by_step` 同口径，同一份字节读数相同，可逐步对照 `record`。它只有几步长：`revealed.active.threshold` 是这段长度的门槛，远高于研究年的；`revealed.book.turnover` 折年时除以这几步的年数。
 
+全段 `validate` 完成的行（研究年不少于三年）另带 `recent`：同一回放只取最后两个研究年，单独回归得到的残差信息比率、残差超额与这两年长度的门槛。
+
 ## 主动、账户与对照组合
 
 主动读数赢了对照组合，账户却可能没赢基准：对照组合本身扣费后也会亏（`book.baseline_return`），赢一个亏钱的对照组合不等于账户赚钱。`active.excess` 是主动序列逐日差的年化均值，`book.excess_vs_baseline` 是两条复利收益之差，两者同号居多，但不是同一个数。
