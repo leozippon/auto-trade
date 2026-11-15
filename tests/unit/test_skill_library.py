@@ -81,6 +81,7 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
     # description or prompt already states; renaming one is a deliberate
     # library change.
     assert set(entries) == {
+        "deterministic-fit",
         "offline-readings",
         "refit-snapshot-rescore",
         "residual-label-benchmark",

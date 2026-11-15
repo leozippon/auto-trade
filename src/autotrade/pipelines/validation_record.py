@@ -19,12 +19,14 @@ uses (``pipelines/verdict.py``): the residual information ratio of the active
 series on the factor legs (``style.FACTOR_SERIES``), its betas, the threshold for the record's
 length and the one-sided null p-value, beside the stitched return, drawdown
 and turnover. A test reads its own replay step by step (:func:`step_table`),
-the rows it returns as ``candidate_by_step``.
+the rows it returns as ``candidate_by_step``. A test of bytes an earlier test
+replayed compares the two books over the days both cover (:func:`reproduction`),
+which says whether the record's steps from those bytes are one account's path.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, timedelta
 from itertools import pairwise
@@ -173,6 +175,65 @@ def step_table(
     return rows
 
 
+def earlier_replays(
+    tests: Sequence[Mapping[str, object]],
+    fingerprint: str,
+    replicates: Sequence[tuple[str, str]] = (),
+) -> list[tuple[Mapping[str, object], str] | None]:
+    """For each leg of a test, the latest of ``tests`` (``test_step`` records
+    in step order) that replayed the same bytes to completion, with that
+    replay's ``result_ref``: the candidate's by ``fingerprint`` against each
+    record's candidate, then each seed replicate's by its ``(step_id,
+    revision_id)`` against each record's completed replicates. None where no
+    earlier test did."""
+
+    def completed(record: Mapping[str, object]) -> Iterator[tuple[tuple[str, ...], str]]:
+        yield ("candidate", str(record["candidate"]["fingerprint"])), str(record["replay"]["result_ref"])  # type: ignore[index]
+        for item in record.get("replicates") or ():  # type: ignore[attr-defined]
+            if item.get("result_ref"):
+                yield ("replicate", str(item["step_id"]), str(item["revision_id"])), str(item["result_ref"])
+
+    def latest(key: tuple[str, ...]) -> tuple[Mapping[str, object], str] | None:
+        return next(
+            ((record, result_ref) for record in reversed(tests) for found, result_ref in completed(record) if found == key),
+            None,
+        )
+
+    return [latest(("candidate", fingerprint)), *(latest(("replicate", *identity)) for identity in replicates)]
+
+
+def reproduction(
+    earlier: Mapping[str, object], earlier_analysis: Mapping[str, object], analysis: Mapping[str, object]
+) -> dict[str, object]:
+    """One leg's book in this replay (``analysis``, its style sidecar)
+    compared with its replay in the earlier test ``earlier`` (a ``test_step``
+    record, ``earlier_analysis`` that replay's sidecar) over the days that
+    test covered: the validation start through its horizon.
+
+    The series is the book's own daily return (``strategy_daily``), compared
+    exactly as stored. Both replays open one fresh book at the validation
+    start on the same views, and the host's replay is deterministic, so a
+    deterministic strategy repeats every day bit for bit and any difference is
+    the strategy's; the sidecar writes each return as a JSON float, which
+    reads back as the float the replay computed, so no tolerance is owed. A
+    day one replay holds and the other lacks differs.
+    """
+
+    through = str(earlier["replay"]["end"])  # type: ignore[index]
+    before, now = (
+        {day: value for day, value in series_pairs(sidecar.get("strategy_daily")) if day <= through}
+        for sidecar in (earlier_analysis, analysis)
+    )
+    days = before.keys() | now.keys()
+    differing = sum(1 for day in days if before.get(day) != now.get(day))
+    return {
+        "reproduced": differing == 0,
+        "days": len(days),
+        "differing_days": differing,
+        "against_step": int(earlier["step"]),  # type: ignore[call-overload]
+    }
+
+
 def record_significance(entries: Sequence[Mapping[str, object]], *, alpha: float) -> dict[str, object]:
     """The validation record read as one series.
 
@@ -237,6 +298,7 @@ def test_step_record(
     registration: Mapping[str, object],
     source: str,
     replicates: Sequence[Mapping[str, object]] = (),
+    reproduction: Sequence[Mapping[str, object]] = (),
 ) -> dict[str, object]:
     """One ``test_step`` ledger record.
 
@@ -252,7 +314,9 @@ def test_step_record(
     over the same window, or ``result_ref`` None, ``strategy_error`` (the
     error text, for the host) and ``failure`` (its class, what the session
     reads) when its own code raised; the significance test and the
-    readout read the candidate's entry alone.
+    readout read the candidate's entry alone. ``reproduction`` holds, for
+    each leg (``step_id``) an earlier test replayed with the same bytes, its
+    book compared with that replay (:func:`reproduction`); it gates nothing.
     """
 
     if source not in (SOURCE_TEST, SOURCE_HOST_COMPLETION):
@@ -281,6 +345,10 @@ def test_step_record(
         # replays the registered strategy alone), and in every case truly
         # holds no replicate entry.
         **({"replicates": [dict(item) for item in replicates]} if replicates else {}),
+        # Optional and additive in the same way: a record without it was
+        # written before tests compared replays, or its legs' bytes had no
+        # earlier test, or the host completed it.
+        **({"reproduction": [dict(item) for item in reproduction]} if reproduction else {}),
     }
 
 
@@ -364,9 +432,11 @@ __all__ = [
     "SOURCE_TEST",
     "ValidationSteps",
     "candidate_changes",
+    "earlier_replays",
     "horizon_after",
     "readout",
     "record_significance",
+    "reproduction",
     "step_entry",
     "step_table",
     "test_step_record",

@@ -1737,7 +1737,7 @@ class BatchValidateContractTest(unittest.TestCase):
 
         limits = (
             (ValidateTool.spec, 2_400),
-            (TestTool.spec, 1_500),
+            (TestTool.spec, 1_700),
             (SmokeBacktestTool.spec, 900),
             (NullControlTool(SimpleNamespace(), max_calls=12).spec, 700),  # type: ignore[arg-type]
             (ModificationCheckTool.spec, 212),

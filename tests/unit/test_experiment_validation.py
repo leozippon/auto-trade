@@ -7,6 +7,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 import uuid
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -54,13 +55,16 @@ class _WindowEvaluator:
     day: what makes a record completed by one whole replay equal the record
     of successive tests. ``raise_for`` maps a marker in ``main.py`` to the
     error its replay raises; ``validation_raise_for`` does so only for a
-    replay stopped at a horizon, one over the validation period.
+    replay stopped at a horizon, one over the validation period. ``drift``
+    maps a marker to a day whose book return a replay of a source holding it
+    moves: a strategy that does not repeat itself on that day.
     """
 
     def __init__(self, results_root: Path, *, raise_for: dict[str, Exception] | None = None) -> None:
         self.results_root = results_root
         self.raise_for = raise_for or {}
         self.validation_raise_for: dict[str, Exception] = {}
+        self.drift: dict[str, str] = {}
         self.requests: list[tuple[str, str, str | None]] = []
         # Each replay's source, card and (inference, fit) clocks as it ran.
         self.legs: list[tuple[str, tuple[int, ...] | None, tuple[float, float] | None]] = []
@@ -82,7 +86,11 @@ class _WindowEvaluator:
             rng = np.random.default_rng([seed, int(day)])
             market = rng.normal(0.0003, 0.008)
             rows.append((day, market, rng.normal(0.0, 0.003), rng.normal(0.0, 0.003), market + rng.normal(0.0, 0.002), rng.normal(0.0, 0.004)))
-        strategy = [market + 0.0015 + noise + 0.0 * baselines for _d, market, _s, _v, baselines, noise in rows]
+        moved = {day for marker, day in self.drift.items() if marker in source}
+        strategy = [
+            market + 0.0015 + noise + 0.0 * baselines + (1e-4 if day in moved else 0.0)
+            for day, market, _s, _v, baselines, noise in rows
+        ]
         equity, curve, executions = 100_000.0, [], []
         for index, ((day, *_rest), value) in enumerate(zip(rows, strategy, strict=True)):
             equity *= 1.0 + value
@@ -805,6 +813,104 @@ def test_a_replicate_that_raises_is_a_reading_and_one_the_host_fails_fails_the_s
         assert "KeyError" not in json.dumps(result.value)
         assert result.value["record"][0]["seed_replicates"][0] == row["seed_replicates"][0]
         assert harness.backtest.test_replays == 3
+
+
+def _bdays(start: str, end: str) -> int:
+    return len(pd.bdate_range(start, end))
+
+
+def test_a_test_of_bytes_tested_before_compares_its_book_with_that_replay() -> None:
+    """A test of bytes an earlier test replayed reads its book beside the
+    latest such replay over the days that replay covered, in the reply and in
+    the step's ledger record. The first test of some bytes, and a switch to
+    new bytes, carries no comparison; a return to earlier bytes compares with
+    their latest test."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        a, b = harness.node("a", "1"), harness.node("b", "2")
+        [handle] = harness.backtest.named([a])
+        first = harness.test.invoke({"candidate": a}).value
+        assert "reproduction" not in first and "reproduction" not in harness.records()[0]
+        second = harness.test.invoke({"candidate": a}).value
+        block = {"reproduced": True, "days": _bdays("20250701", "20250930"), "differing_days": 0, "against_step": 1}
+        assert second["reproduction"] == [{"handle": handle, **block}]
+        assert harness.records()[1]["reproduction"] == [{"step_id": a, **block}]
+        assert list(second) == [
+            "status", "step", "steps", "steps_left", "test_horizon", "candidate", "replay",
+            "whole_replay", "candidate_by_step", "reproduction", "record", "significance",
+        ]
+        third = harness.test.invoke({"candidate": b}).value
+        assert "reproduction" not in third and "reproduction" not in harness.records()[2]
+        fourth = harness.test.invoke({"candidate": a}).value
+        assert fourth["reproduction"] == [
+            {"handle": handle, "reproduced": True, "days": _bdays("20250701", "20251231"), "differing_days": 0, "against_step": 2}
+        ]
+
+
+def test_a_leg_whose_book_moves_between_replays_reads_as_not_reproduced() -> None:
+    """A replicate whose book moves on one day between two tests of its bytes
+    reads as not reproduced, with that day and the earlier test's step, while
+    the candidate beside it reproduces; a candidate that moves reads so
+    against its own latest test. The step is recorded either way."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        nominee, second, third = (harness.seeded(name, seed) for name, seed in (("a", 1000), ("b", 2000), ("c", 3000)))
+        handles = harness.backtest.named([nominee, second, third])
+        harness.test.invoke({"candidate": nominee, "seed_replicates": [second, third]})
+        harness.evaluator.drift = {"SEED_BASE = 2000": "20250805"}
+        result = harness.test.invoke({"candidate": nominee, "seed_replicates": [second, third]})
+        days = _bdays("20250701", "20250930")
+        same = {"reproduced": True, "days": days, "differing_days": 0, "against_step": 1}
+        assert result.value["reproduction"] == [
+            {"handle": handles[0], **same},
+            {"handle": handles[1], "reproduced": False, "days": days, "differing_days": 1, "against_step": 1},
+            {"handle": handles[2], **same},
+        ]
+        assert [(row["step_id"], row["reproduced"]) for row in harness.records()[1]["reproduction"]] == [
+            (nominee, True), (second, False), (third, True),
+        ]
+        harness.evaluator.drift = {"SEED_BASE = 1000": "20250805"}
+        moved = harness.test.invoke({"candidate": nominee}).value
+        assert moved["reproduction"] == [
+            {"handle": handles[0], "reproduced": False, "days": _bdays("20250701", "20251231"), "differing_days": 1, "against_step": 2}
+        ]
+        assert [row["step"] for row in harness.records()] == [1, 2, 3]
+
+
+def test_a_resumed_attempt_compares_with_tests_recorded_before_the_comparison_existed() -> None:
+    """A test_step record written before tests compared replays carries no
+    reproduction: a resumed attempt reads it as before, and a test of the
+    same bytes compares with it. An earlier replay the record names but the
+    disk lacks ends the attempt before the replay, as it ends a resume."""
+
+    with TemporaryDirectory() as tmp:
+        harness = _Harness(Path(tmp))
+        node = harness.node("a", "1")
+        for _step in range(2):
+            harness.test.invoke({"candidate": node})
+        # The ledger as an earlier version wrote it, read back as a resumed
+        # attempt reads it (``tests_before``, ``SessionValidations.tests``).
+        ledger = harness.backtest.ledger.path
+        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        for row in rows:
+            row.pop("reproduction", None)
+        ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        harness.backtest.tests = [dict(row) for row in harness.records()]
+        resumed = harness.test.invoke({"candidate": node}).value
+        assert [(row["step"], row["candidate"]) for row in resumed["record"]] == [
+            (1, "valid_001"), (2, "valid_001"), (3, "valid_001"),
+        ]
+        assert resumed["reproduction"] == [
+            {"handle": "valid_001", "reproduced": True, "days": _bdays("20250701", "20251231"), "differing_days": 0, "against_step": 2}
+        ]
+        assert validation_record.candidate_changes(harness.backtest.ledger.read()) == 0
+        shutil.rmtree(Path(harness.records()[2]["replay"]["result_ref"]).parent)
+        replays = len(harness.evaluator.requests)
+        with pytest.raises(EnvironmentBlocked, match=r"test step 4: .*is recorded but not on disk"):
+            harness.test.invoke({"candidate": node})
+        assert len(harness.records()) == 3 and len(harness.evaluator.requests) == replays
 
 
 def test_a_test_replays_its_legs_under_the_card_and_clock_rules_of_validate() -> None:

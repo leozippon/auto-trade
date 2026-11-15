@@ -105,13 +105,15 @@ from .experiment import (
     research_step_record,
     result_analysis,
 )
-from .ledger import ExperimentLedger, SessionKind, link_head
+from .ledger import ExperimentLedger, SessionKind, link_head, recorded_path
 from .session_resume import record_step_sidecar
 from .skills import assert_skills_absent_from_formal
 from .validation_record import (
     SOURCE_TEST,
     ValidationSteps,
+    earlier_replays,
     record_significance,
+    reproduction,
     step_entry,
     step_table,
     test_step_record,
@@ -2359,6 +2361,9 @@ TEST_DESCRIPTION = (
     "registered.\n\nwhole_replay reads this replay as a validate row does. "
     "candidate_by_step is this replay's view of every step so far, beside each "
     "replicate's: a counterfactual for steps recorded with another candidate. "
+    "reproduction, where an earlier test replayed a leg's bytes, compares its "
+    "book with that replay over the days it covered, exactly: the host's replay "
+    "is deterministic, so a difference is the strategy's. "
     "record is authoritative, as recorded. significance reads the record as "
     "acceptance_rules.significance defines."
 )
@@ -2476,6 +2481,16 @@ class TestTool(SessionTimeBudgetAware):
                 ]
                 if callable(require_prebuilt):
                     require_prebuilt(requests[0])
+                # Each leg's latest earlier replay of the same bytes, whose
+                # book this replay's is compared with once it completes
+                # (``validation_record.reproduction``): one the record names
+                # but the disk lacks ends the attempt here, as it ends a resume.
+                earlier = [
+                    None if found is None else (found[0], result_analysis(recorded_path(backtest.experiment_dir, found[1])))
+                    for found in earlier_replays(
+                        backtest.tests, legs[0].fingerprint, [(leg.step_id, leg.revision_id) for leg in legs[1:]]
+                    )
+                ]
             except (FileNotFoundError, RuntimeError) as exc:
                 raise EnvironmentBlocked(f"test step {step}: {_public_error_text(exc)}") from exc
             started = time.perf_counter()
@@ -2528,9 +2543,12 @@ class TestTool(SessionTimeBudgetAware):
             # candidate's with the error text, which only the host reads.
             replicate_rows: list[list[dict[str, object]] | str] = []
             replicate_records: list[dict[str, object]] = []
+            # Each leg's style sidecar; None for a replicate whose code raised.
+            analyses: list[Mapping[str, object] | None] = [analysis]
             for leg, outcome in zip(legs[1:], outcomes[1:], strict=True):
                 identity = {"step_id": leg.step_id, "revision_id": leg.revision_id}
                 if outcome.evaluation is None:
+                    analyses.append(None)
                     failure = validation_period_failure(outcome.error)  # type: ignore[arg-type]
                     replicate_rows.append(failure)
                     replicate_records.append(
@@ -2543,6 +2561,7 @@ class TestTool(SessionTimeBudgetAware):
                     )
                     continue
                 leg_replay, leg_analysis = replay_and_analysis(outcome.evaluation.result_ref)
+                analyses.append(leg_analysis)
                 replicate_rows.append(step_table(leg_replay, leg_analysis, steps, through=step))
                 replicate_records.append(
                     {
@@ -2551,6 +2570,13 @@ class TestTool(SessionTimeBudgetAware):
                         "entry": step_entry(leg_replay, leg_analysis, start=window[0], end=window[1]),
                     }
                 )
+            # Every completed leg an earlier test replayed with the same
+            # bytes, beside that replay: a reading, not a condition.
+            compared = [
+                (leg, reproduction(*before, read))
+                for leg, before, read in zip(legs, earlier, analyses, strict=True)
+                if before is not None and read is not None
+            ]
             record = test_step_record(
                 head=backtest.ledger_head(),
                 steps=steps,
@@ -2566,6 +2592,7 @@ class TestTool(SessionTimeBudgetAware):
                 registration=registration,
                 source=SOURCE_TEST,
                 replicates=replicate_records,
+                reproduction=[{"step_id": leg.step_id, **block} for leg, block in compared],
             )
             # Durable before anything is returned: a resumed attempt
             # continues from this test horizon.
@@ -2612,6 +2639,18 @@ class TestTool(SessionTimeBudgetAware):
             "replay": {"start": steps.start, "end": test_horizon, "wall_seconds": round(time.perf_counter() - started, 1)},
             "whole_replay": {"active": active, "book": book_reading(analysis, evaluation.summary)},
             "candidate_by_step": by_step,
+            **(
+                {
+                    "reproduction": [
+                        {"handle": handle, **block}
+                        for handle, (_leg, block) in zip(
+                            backtest.named([leg.step_id for leg, _block in compared]), compared, strict=True
+                        )
+                    ]
+                }
+                if compared
+                else {}
+            ),
             "record": [backtest.record_row(row) for row in backtest.tests],
             "significance": _rounded_row(
                 {

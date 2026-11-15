@@ -304,3 +304,38 @@ def test_a_step_keeps_the_entries_of_its_replicates_beside_the_candidates_and_on
         validation_record.test_step_record(
             **step, replicates=[{**replicates[0], "entry": step_entry(other, other_analysis, start=first, end="20200930")}]
         )
+
+
+def test_a_leg_is_compared_exactly_with_the_latest_earlier_replay_of_its_bytes() -> None:
+    """The latest earlier test of a leg's bytes is found by role -- the
+    candidate by fingerprint, a replicate by step and revision with a
+    completed replay -- and its book is compared exactly over the days that
+    test covered: one ulp differs, a day only one replay holds differs, a day
+    after that test's horizon is not read."""
+
+    def record(step: int, fingerprint: str, replicates: list[dict[str, object]]) -> dict[str, object]:
+        return {
+            "step": step,
+            "candidate": {"fingerprint": fingerprint},
+            "replay": {"end": "20200805", "result_ref": f"{step}.json"},
+            "replicates": replicates,
+        }
+
+    tests = [
+        record(1, "aaa", [{"step_id": "b", "revision_id": "rb", "result_ref": "1b.json"}]),
+        record(2, "aaa", [{"step_id": "b", "revision_id": "rb", "result_ref": None}]),
+        record(3, "ccc", []),
+    ]
+    found = validation_record.earlier_replays(tests, "aaa", [("b", "rb"), ("b", "rother")])
+    assert [None if row is None else (row[0]["step"], row[1]) for row in found] == [(2, "2.json"), (1, "1b.json"), None]
+    assert validation_record.earlier_replays(tests, "bbb") == [None]
+
+    series = [["20200803", 0.01], ["20200804", -0.002], ["20200805", 0.003]]
+    earlier = {"strategy_daily": series}
+
+    def compared(now: list[list[object]]) -> dict[str, object]:
+        return validation_record.reproduction(tests[1], earlier, {"strategy_daily": now})
+
+    assert compared([*series, ["20200806", 0.5]]) == {"reproduced": True, "days": 3, "differing_days": 0, "against_step": 2}
+    assert compared([series[0], ["20200804", math.nextafter(-0.002, 0.0)], series[2]])["differing_days"] == 1
+    assert compared([series[0], series[2]]) == {"reproduced": False, "days": 3, "differing_days": 1, "against_step": 2}
