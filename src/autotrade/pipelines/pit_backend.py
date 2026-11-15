@@ -1159,6 +1159,7 @@ class PITDailyEvaluationBackend:
                     mode=request.mode,
                     baselines=baselines,
                     benchmark_index=self.benchmark_index,
+                    permitted_boards=request.broker_profile.permitted_boards,
                 )
             summary = record.get("stats")
             if not isinstance(summary, dict):

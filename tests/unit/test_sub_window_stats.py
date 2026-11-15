@@ -22,6 +22,7 @@ import pandas as pd
 
 from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.replay.stats import (
     ReplayResult,
@@ -563,7 +564,7 @@ class SubWindowRequestTest(unittest.TestCase):
             span.request(
                 self.revision,
                 schedule=StrategySchedule("day", "09:00"),
-                broker_profile=BrokerProfile(initial_cash=100_000),
+                broker_profile=BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
             ),
             **kwargs,  # type: ignore[arg-type]
         )

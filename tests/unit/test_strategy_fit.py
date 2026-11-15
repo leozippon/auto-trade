@@ -28,6 +28,7 @@ import pytest
 
 from autotrade.environment.artifacts import ArtifactRevision
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.executor import (
     CONTAINER_STATE_DIR,
@@ -673,7 +674,7 @@ def _evaluate(tmp_path: Path, revision: Path, snapshot: Path, replay: Path, days
             days[0],
             days[-1],
             StrategySchedule("day", "08:30"),
-            BrokerProfile(initial_cash=1_000_000),
+            BrokerProfile(initial_cash=1_000_000, permitted_boards=BOARDS),
         ),
         max_days=max_days,
     )
@@ -913,7 +914,7 @@ def generate_orders(context):
             days[0],
             days[-1],
             StrategySchedule("day", "08:30"),
-            BrokerProfile(initial_cash=1_000_000),
+            BrokerProfile(initial_cash=1_000_000, permitted_boards=BOARDS),
         )
     )
     record = json.loads(Path(result.result_ref).read_text(encoding="utf-8"))

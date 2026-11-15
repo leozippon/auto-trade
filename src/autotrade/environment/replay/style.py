@@ -8,6 +8,8 @@ Agent actually saw):
 - strategy daily returns: the window's own ``equity_curve``;
 - holdings: the replay result's end-of-day position snapshots;
 - cross-sectional style ranks: the replay slot's ``daily.parquet``;
+- size, value and turnover legs: the same bars, of the names on the boards the
+  account may buy on (:func:`_factor_legs`);
 - benchmark: the experiment's ``benchmark_index`` rows of ``index_daily`` inside
   the replay slot's ``macro.parquet``;
 - SW L1 industry: each replay slot's as-of ``universe.parquet``, the vintage
@@ -26,13 +28,14 @@ is (``stats.plain_statistics``), which is what ``pipelines/verdict.py``
 grades.
 
 Everything degrades to None/empty blocks when inputs are missing —
-attribution is advisory and must never fail a backtest.
+attribution is advisory and must never fail a backtest. The one refusal is a
+Broker profile that pins no boards, which the random baseline refuses too.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -40,6 +43,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.common.records import write_json_atomic
+from autotrade.environment.broker_core import board_of
 from autotrade.environment.data.contracts import (
     DEFAULT_BENCHMARK_INDEX,
     benchmark_index_label,
@@ -76,12 +80,13 @@ STYLE_SCHEMA_VERSION = 4
 READABLE_STYLE_SCHEMA_VERSIONS = frozenset({3, STYLE_SCHEMA_VERSION})
 _STYLE_COLUMNS = ("circ_mv", "pb", "turnover_rate")
 # The size, value and turnover legs of the factor regression: daily spreads of
-# the replay slot's OWN cross-section, equal-weighted inside each leg, the legs
-# formed on the previous trading day's value -- small minus big float cap,
-# high minus low book-to-price (1 / pb, names with pb <= 0 left out), and low
-# minus high turnover: a name's mean daily turnover rate over the slot's last
-# ``_TURNOVER_DAYS`` trading days, read where at least ``_TURNOVER_MIN_DAYS``
-# of them carry one, so the leg begins on the slot's eleventh day. The
+# the replay slot's own bars, over the names of the boards the account may buy
+# on, equal-weighted inside each leg, the legs formed on the previous trading
+# day's value -- small minus big float cap, high minus low book-to-price
+# (1 / pb, names with pb <= 0 left out), and low minus high turnover: a name's
+# mean daily turnover rate over the slot's last ``_TURNOVER_DAYS`` trading
+# days, read where at least ``_TURNOVER_MIN_DAYS`` of them carry one, so the
+# leg begins on the slot's eleventh day. The
 # audited edge read as a small-cap / low-beta tilt rather than proven alpha,
 # and a raw excess return cannot tell those apart; the measured rankers'
 # residual then read mostly as low turnover, and the lowest-turnover decile
@@ -121,13 +126,15 @@ def regression_method(benchmark_index: str) -> str:
     """The caliber sentence every factor loading and residual tracking error
     is computed under.
 
-    Names the experiment's own benchmark: the market leg is index-specific, the size
-    leg is built from the replay's own cross-section whatever the benchmark is.
+    Names the experiment's own benchmark: the market leg is index-specific, the size,
+    value and turnover legs are built from the names of the boards the account
+    may buy on whatever the benchmark is.
     """
 
     return (
         f"日度收益对{benchmark_index_label(benchmark_index)}收益、规模因子、价值因子与换手因子"
-        f"（后三者取本回放槽全市场截面、不是本实验股票池，按前一交易日分组的 {_FACTOR_QUANTILE:.0%} 等权两端之差："
+        "（后三者取本实验可买板块（permitted_boards）的全部股票、不是本实验股票池，"
+        f"按前一交易日分组的 {_FACTOR_QUANTILE:.0%} 等权两端之差："
         "规模为流通市值最小减最大，价值为账面市值比 1/pb 最高减最低，pb 不为正的股票不入组，"
         f"换手为近 {_TURNOVER_DAYS} 个交易日平均换手率最低减最高，不足 {_TURNOVER_MIN_DAYS} 日有值的股票不入组）"
         "的 OLS，给出各因子载荷与残差跟踪误差"
@@ -276,17 +283,18 @@ def _prior_day_spread(
     column: str,
     key: Callable[[pd.Series], pd.Series],
 ) -> dict[str, float]:
-    """Daily high-minus-low spread of the replay slot's own universe, the
-    names sorted on ``key`` of the PREVIOUS trading day's ``column``.
+    """Daily high-minus-low spread of the names in ``replay_daily``, sorted
+    on ``key`` of the PREVIOUS trading day's ``column``.
 
     Frozen replay data only, like every other input here: the cross-section is
-    the slot's ``daily`` frame, so a leg cannot disagree with what the
-    strategy actually traded against. ``daily``'s ``pct_chg`` is already a
-    decimal fraction (the unit registry applies the percent->decimal factor at
-    snapshot load), matching the strategy and benchmark return scale, so the
-    spread is used as-is. The high and low legs are the top and bottom
-    ``_FACTOR_QUANTILE`` of the day's sort, equal-weighted; a day with fewer
-    than ``_FACTOR_MIN_NAMES`` sorted names has no reading.
+    the replay's ``daily`` frame (:func:`_factor_legs`), so a leg cannot
+    disagree with what the strategy actually traded against. ``daily``'s
+    ``pct_chg`` is already a decimal fraction (the unit registry applies the
+    percent->decimal factor at snapshot load), matching the strategy and
+    benchmark return scale, so the spread is used as-is. The high and low
+    legs are the top and bottom ``_FACTOR_QUANTILE`` of the day's sort,
+    equal-weighted; a day with fewer than ``_FACTOR_MIN_NAMES`` sorted names
+    has no reading.
 
     A name joins a leg by the value it had at the previous trading day's
     close. The same day's float cap is the end-of-day cap and already embeds
@@ -294,7 +302,7 @@ def _prior_day_spread(
     leg and its losers into the small leg and biases the spread negative
     whatever the true size premium (2022 replay: -17% sorted on the same day,
     +8% on the prior day); the same holds for a price-scaled ratio such as
-    pb. A name's first row in the slot -- the window's first day, or an IPO's
+    pb. A name's first row in the frame -- the frame's first day, or an IPO's
     listing day -- has no prior value and sits out that day, and so does one
     whose ``key`` is NaN.
     """
@@ -344,11 +352,11 @@ def _value_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
 
 def _turnover_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
     """Daily low-minus-high turnover spread (:func:`_prior_day_spread`) on
-    each name's mean daily turnover rate over the slot's last
+    each name's mean daily turnover rate over the frame's last
     ``_TURNOVER_DAYS`` trading days, a mean read only where at least
     ``_TURNOVER_MIN_DAYS`` of those days carry the name's rate.
 
-    The window counts the slot's trading days, not the name's rows, so a
+    The window counts the frame's trading days, not the name's rows, so a
     name back from a long suspension waits for its rows like a new listing,
     whose first days' turnover says nothing about the name. A day's mean
     includes the day's own rate, so the spread sorts each name on its mean
@@ -368,6 +376,41 @@ def _turnover_factor(replay_daily: pd.DataFrame) -> dict[str, float]:
     return {
         date: -value
         for date, value in _prior_day_spread(frame, "turnover_mean", lambda mean: mean).items()
+    }
+
+
+def _factor_legs(
+    replay_daily: pd.DataFrame, permitted_boards: Collection[str] | None
+) -> dict[str, dict[str, float]]:
+    """The size, value and turnover legs of the replay's days, by their
+    :data:`FACTOR_SERIES` series name.
+
+    Formed on the names of the boards the account may buy on
+    (``BrokerProfile.permitted_boards``, a name's board told by
+    ``broker_core.board_of``), the pool the random baseline draws from: a
+    Beijing-exchange micro-cap the account cannot buy would otherwise sit in
+    the small-cap and turnover tails. A profile that pins no boards is
+    refused, as the random baseline refuses it, never read on every board.
+    """
+
+    if permitted_boards is None:
+        raise ValueError(
+            "the factor legs are formed on the boards the account may buy on, and its "
+            "Broker profile pins none (BrokerProfile.permitted_boards)"
+        )
+    frame = replay_daily
+    symbol = _symbol_column(frame)
+    if symbol in frame.columns:
+        codes = frame[symbol].astype(str)
+        boards = codes.map({code: board_of(code) for code in codes.unique()})
+        frame = frame[boards.isin(set(permitted_boards)).to_numpy()]
+    return {
+        series: leg(frame)
+        for series, leg in (
+            ("size_factor_daily", _size_factor),
+            ("value_factor_daily", _value_factor),
+            ("turnover_factor_daily", _turnover_factor),
+        )
     }
 
 
@@ -585,6 +628,7 @@ def replay_style_analysis(
     mode: str,
     baselines: Mapping[str, object] | None = None,
     benchmark_index: str,
+    permitted_boards: Collection[str] | None,
 ) -> dict[str, object]:
     """Compute one result sidecar from the just-finished daily replay.
 
@@ -600,6 +644,8 @@ def replay_style_analysis(
     are stored beside the strategy's, and the active series (strategy minus
     composite), the series the verdict grades, is read as it is. A truncated
     smoke replay passes none.
+    ``permitted_boards`` is the boards the account may buy on: the factor
+    legs are formed on their names (:func:`_factor_legs`).
     """
 
     label = benchmark_index_label(benchmark_index)
@@ -607,12 +653,7 @@ def replay_style_analysis(
     method = regression_method(benchmark_index)
     strategy = daily_returns_from_curve(replay.equity_curve)
     benchmark = slot_benchmark(replay_dir, benchmark_index=benchmark_index)
-    legs = {
-        "benchmark_daily": benchmark,
-        "size_factor_daily": _size_factor(replay_daily),
-        "value_factor_daily": _value_factor(replay_daily),
-        "turnover_factor_daily": _turnover_factor(replay_daily),
-    }
+    legs = {"benchmark_daily": benchmark, **_factor_legs(replay_daily, permitted_boards)}
     factors = {"method": method, **_factor_regression(strategy, legs)}
     covered = [benchmark[date] for date, _value in strategy if date in benchmark]
     baseline_blocks: dict[str, object] = {}

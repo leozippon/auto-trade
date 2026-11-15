@@ -18,6 +18,7 @@ import pytest
 
 from autotrade.environment.artifacts import readonly_baseline
 from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -118,7 +119,7 @@ def _tool(
             daily, root / "results", execution_mode="trusted", benchmark_index=DEFAULT_BENCHMARK_INDEX
         ),
         schedule=StrategySchedule("day", "09:00"),
-        broker_profile=BrokerProfile(initial_cash=100_000),
+        broker_profile=BrokerProfile(initial_cash=100_000, permitted_boards=BOARDS),
         # Host-only in production; a sibling of the workspace here.
         scratch_root=root / "runtime" / "smoke",
         time_budget=time_budget or InferenceTimeBudget(duration_seconds=1200.0),

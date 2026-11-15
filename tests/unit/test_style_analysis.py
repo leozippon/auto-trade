@@ -14,6 +14,7 @@ from autotrade.environment.replay.style import (
     BENCHMARK_TS_CODE,
     FACTOR_SERIES,
     STYLE_SCHEMA_VERSION,
+    _factor_legs,
     _factor_regression,
     _size_factor,
     _turnover_factor,
@@ -26,6 +27,8 @@ from autotrade.environment.replay.style import (
 )
 from autotrade.pipelines.session_tools import book_reading
 
+# The boards the account may buy on: a current experiment's.
+BOARDS = ("main", "gem")
 # Forty names make a cross-section, ordered by float cap (slot 0 smallest).
 # Twelve are cheap and twelve dear on book-to-price, each set split evenly
 # between the small and the big size legs and between the slots below and
@@ -116,6 +119,7 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
         universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
     assert payload["schema_version"] == STYLE_SCHEMA_VERSION and payload["mode"] == "valid"
@@ -182,6 +186,7 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
         universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
     # The share of the largest industry, averaged over decision days — the same
@@ -232,6 +237,7 @@ def test_a_span_classifies_each_day_under_its_own_slots_universe_vintage(tmp_pat
         universes=[(days[0], first / "universe.parquet"), (days[4], second / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )["style"]
 
     # Four days wholly 电子, six wholly 计算机; nothing falls to 未分类.
@@ -261,6 +267,7 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         universes=[(days[0], tmp_path / "missing-decision-snapshot" / "universe.parquet")],
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
     regression = payload["factor_regression"]
@@ -280,6 +287,7 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     assert no_columns["compact"]["benchmark_return"] is None
     assert no_columns["style"]["reason"] == "style_columns_unavailable"
@@ -326,6 +334,7 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
         universes=(),
         mode="heldout",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     block = benchmark_summary_block(analysis)
     assert block is not None
@@ -338,7 +347,7 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
 def test_benchmark_block_is_absent_when_the_slot_has_no_benchmark(tmp_path: Path):
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=6)]
     analysis = replay_style_analysis(
-        _replay(days), _daily(days), replay_dir=None, universes=(), mode="valid", benchmark_index=BENCHMARK_TS_CODE
+        _replay(days), _daily(days), replay_dir=None, universes=(), mode="valid", benchmark_index=BENCHMARK_TS_CODE, permitted_boards=BOARDS
     )
     # No fabricated zero: a slot without index rows carries no benchmark at all,
     # and the report keeps reporting missing coverage truthfully.
@@ -429,6 +438,7 @@ def test_the_factor_regression_reads_the_market_and_size_loadings(tmp_path: Path
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     block = analysis["factor_regression"]
     assert block["available"] is True
@@ -468,6 +478,7 @@ def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
     size_beta = analysis["factor_regression"]["size_beta"]
@@ -488,6 +499,7 @@ def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     assert unmeasured["factor_regression"]["size_beta"] is None
     unmeasured_block = benchmark_summary_block(unmeasured)
@@ -579,6 +591,7 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
 
     # The published factor series is the raw decimal spread, not a percent. It
@@ -721,6 +734,56 @@ def test_turnover_legs_sort_on_the_prior_days_twenty_day_mean():
     assert _turnover_factor(shuffled) == factor
 
 
+def _leg_panel(days: list[str], codes: list[str], seed: int) -> pd.DataFrame:
+    """Daily bars of ``codes`` whose caps, book-to-price, turnover and returns
+    all move from day to day, so every leg sorts afresh each day."""
+
+    rng = np.random.default_rng(seed)
+    shape = (len(days), len(codes))
+    return pd.DataFrame(
+        {
+            "trade_date": np.repeat(days, len(codes)),
+            "ts_code": np.tile(codes, len(days)),
+            "close": 10.0,
+            "circ_mv": rng.lognormal(8.0, 1.0, shape).ravel(),
+            "pb": rng.normal(2.0, 1.5, shape).ravel(),
+            "turnover_rate": rng.lognormal(0.0, 1.0, shape).ravel(),
+            "pct_chg": rng.normal(0.0, 0.02, shape).ravel(),
+        }
+    )
+
+
+# Thirty main-board and ten ChiNext names: the boards a current account may buy on.
+_PERMITTED = [f"{slot:06d}.SZ" for slot in range(30)] + [f"3000{slot:02d}.SZ" for slot in range(10)]
+
+
+def test_the_legs_are_formed_on_the_boards_the_account_may_buy_on():
+    """Beijing-exchange and STAR names the account cannot buy -- micro-caps
+    with extreme moves here -- leave the size, value and turnover legs as they
+    are without them; read on every board they would move them. A profile
+    that pins no boards is refused rather than read on every board."""
+
+    days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=15)]
+    permitted = _leg_panel(days, _PERMITTED, seed=3)
+    foreign = _leg_panel(
+        days, [f"8300{slot:02d}.BJ" for slot in range(12)] + [f"6880{slot:02d}.SH" for slot in range(12)], seed=4
+    ).assign(circ_mv=1.0, pb=50.0, turnover_rate=40.0, pct_chg=0.3)
+    mixed = pd.concat([permitted, foreign], ignore_index=True).sample(frac=1, random_state=2)
+
+    assert _factor_legs(mixed, BOARDS) == _factor_legs(permitted, BOARDS)
+    assert _factor_legs(mixed, ("main", "gem", "star", "bj")) != _factor_legs(permitted, BOARDS)
+    with pytest.raises(ValueError, match="permitted_boards"):
+        replay_style_analysis(
+            _replay(days),
+            mixed,
+            replay_dir=None,
+            universes=(),
+            mode="valid",
+            benchmark_index=BENCHMARK_TS_CODE,
+            permitted_boards=None,
+        )
+
+
 @pytest.mark.parametrize("exposure", [0.0, 0.2])
 def test_cash_and_a_constant_low_beta_book_load_on_the_market_alone(exposure: float):
     """A book that only scales the market loads on it by its exposure and on
@@ -769,6 +832,7 @@ def test_the_factor_regression_reports_missing_factors_instead_of_zero(tmp_path:
         universes=(),
         mode="valid",
         benchmark_index=BENCHMARK_TS_CODE,
+        permitted_boards=BOARDS,
     )
     block = analysis["factor_regression"]
     assert block["available"] is False
@@ -830,7 +894,7 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
 
     def analyse(block):
         return replay_style_analysis(
-            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", baselines=block, benchmark_index=BENCHMARK_TS_CODE
+            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", baselines=block, benchmark_index=BENCHMARK_TS_CODE, permitted_boards=BOARDS
         )
 
     graded, bare = analyse(baselines), analyse(None)

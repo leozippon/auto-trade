@@ -10,8 +10,8 @@ random baseline removes what the universe construction hands any zero-skill book
 affordability, boards, equal weighting, the book's own schedule and cash).
 
 The significance test reads the factor residual of that series: OLS on the experiment's
-benchmark (market) and the size, value and turnover legs of the replay's own
-cross-section (``style.FACTOR_SERIES``) removes style, and the residual
+benchmark (market) and the size, value and turnover legs of the names the
+account may buy on (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio is read against ``z(1 − alpha) / √years`` for the
 series' length (:func:`residual_statistics`, :func:`residual_threshold`), with
 its one-sided null p-value (:func:`null_p_value`). The validation record is
