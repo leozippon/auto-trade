@@ -31,13 +31,21 @@ const OUTCOME_LABELS = {
 // words it the same way on the card, the page header, the process list, the
 // 读出 view and the best-experiment panel. A registered strategy with its record
 // is worded by whether that record passed (`record.passed`, registry.record_passed)
-// rather than by its stored state (endingKey).
+// rather than by its stored state (endingKey): the label names what it reads,
+// the record against its threshold, and nothing else.
 const ENDING_LABELS = {
-  passed: "通过",
-  failed: "未通过",
+  passed: "记录过门槛",
+  failed: "记录未过门槛",
   budget_exhausted: "预算耗尽",
   environment_blocked: "环境阻断",
   broken: "失败",
+};
+// The factor legs a record label was read on (`record.legs`, registry.record_legs):
+// stored records are never re-scored, so a three-leg label can sit beside a
+// four-leg one; the badge's tooltip says which.
+const RECORD_LEGS = {
+  3: "三腿读数（市场、规模、价值）",
+  4: "四腿读数（市场、规模、价值、低换手）",
 };
 // Where a Paper account's verdict stands (paper/verdict.py): the status as
 // [badge state, label], and the reason a terminal row or an unmeasured reading
@@ -1890,8 +1898,8 @@ async function renderHomePage() {
   }, 5000);
 }
 
-/* The server names a best experiment only when a registered strategy has its
-   forward reading, so the hero is absent until one has. */
+/* The server names a best experiment only when a registered strategy's
+   forward lower bound is above zero. */
 function bestRow(payload) {
   const best = payload.best;
   if (!best) return null;
@@ -1902,11 +1910,25 @@ function bestRow(payload) {
   );
 }
 
+/* The best-experiment panel: the strategy the server named or, when it named
+   none, one plain line saying so; nothing before the first experiment. */
+function bestPanel(payload) {
+  const best = bestRow(payload);
+  if (best) return heroPanel(best);
+  if (!(payload.experiments || []).length) return null;
+  const panel = el(
+    "div",
+    { class: "panel", id: "hero-panel" },
+    el("div", { class: "hint" }, "没有一个定版策略的前推主动超额下界大于零。"),
+  );
+  panel.__signature = "";
+  return panel;
+}
+
 function homeView(payload) {
   const container = el("div", { id: "home" });
-  const best = bestRow(payload);
-  if (best)
-    container.append(heroPanel(best), el("div", { class: "section-gap" }));
+  const panel = bestPanel(payload);
+  if (panel) container.append(panel, el("div", { class: "section-gap" }));
   const rows = payload.experiments || [];
   container.append(
     listHead(payload),
@@ -2010,13 +2032,16 @@ function endingLabel(item) {
   return ENDING_LABELS[key] || key;
 }
 
-/* The ending as one badge; null while the experiment can still run. */
+/* The ending as one badge; null while the experiment can still run. A record
+   label's tooltip also names the legs it was read on. */
 function endingBadge(item) {
   const ending = item.ending;
   if (!ending || !ending.state) return null;
+  const key = endingKey(item);
+  const legs = key === "passed" || key === "failed" ? RECORD_LEGS[(item.record || {}).legs] : null;
   return el(
     "span",
-    { class: `badge ending-${endingKey(item)}`, title: ending.reason || null },
+    { class: `badge ending-${key}`, title: [ending.reason, legs].filter(Boolean).join("；") || null },
     endingLabel(item),
   );
 }
@@ -2244,7 +2269,7 @@ function experimentCard(item, { archived = false } = {}) {
 }
 
 /* The best experiment (`registry.best_experiment`): the registered strategy
-   whose readout states the highest forward lower bound, with its badge, its
+   whose readout states the highest forward lower bound above zero, with its badge, its
    Forward and Held-out tiles, its curve, and the Paper handoff the 读出 view
    offers -- the account it has, or a button that opens one within the cap the
    server enforces. Only an experiment the server named reaches here. */
@@ -2258,7 +2283,7 @@ function heroPanel(item) {
       el(
         "h3",
         { class: "hero-title" },
-        el("span", { "aria-hidden": "true", title: "最佳实验：前推主动超额下界最高的定版策略" }, "🏆"),
+        el("span", { "aria-hidden": "true", title: "最佳实验：前推主动超额下界大于零且最高的定版策略" }, "🏆"),
         experimentName(item.experiment_id),
       ),
       experimentBadge(item),
@@ -3291,7 +3316,7 @@ function readoutStagePanel(detail) {
 function readoutRule(t) {
   return (
     `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录；` +
-    `整段记录的残差 IR 不低于门槛（约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）写作通过，否则未通过，只是读法，不把关任何事`
+    `整段记录的残差 IR 不低于门槛（约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}，只是读法，不把关任何事`
   );
 }
 

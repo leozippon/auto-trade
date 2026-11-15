@@ -38,6 +38,7 @@ from autotrade.common.records import (
     read_json_object,
 )
 from autotrade.environment.replay.style import (
+    FACTOR_SERIES,
     READABLE_STYLE_SCHEMA_VERSIONS,
     STYLE_ARTIFACT_NAME,
 )
@@ -856,15 +857,18 @@ def experiment_listing(
 
 def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
     """The home page's best experiment: the registered strategy whose readout
-    states the highest forward lower bound.
+    states the highest forward lower bound, offered only when that bound is
+    above zero.
 
     Only an experiment that ended ``registered_with_record`` is offered: every
     other ending registered nothing or was stopped by the environment or the
-    host, and an experiment still running has no forward reading at all, so
-    with none the home page names no best experiment rather than crowning the
-    least bad ending. A strategy that raised in its forward replay has no lower
-    bound and is not offered. Research-period numbers never rank. Ties keep the
-    listing order.
+    host, and an experiment still running has no forward reading at all. A
+    bound at or below zero does not show the strategy beat its random baseline
+    on the forward months, so with none above it the home page names no best
+    experiment rather than crowning the least bad one (an experiment's own
+    page still opens Paper). A strategy that raised in its forward replay has
+    no lower bound and is not offered. Research-period numbers never rank.
+    Ties keep the listing order.
     """
 
     ranked: list[tuple[float, int, Mapping[str, object]]] = []
@@ -873,7 +877,7 @@ def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] |
             continue
         forward = as_mapping(as_mapping(as_mapping(row.get("forward")).get("readout")).get("forward"))
         bound = finite_number(forward.get("lower_bound"))
-        if bound is not None:
+        if bound is not None and bound > 0:
             ranked.append((-bound, position, row))
     if not ranked:
         return None
@@ -1015,8 +1019,8 @@ def _record_alpha(params: Mapping[str, object]) -> float:
 
 def record_passed(readout: Mapping[str, object]) -> bool:
     """Whether a registered strategy's validation record passed, as the console
-    words a ``registered_with_record`` ending (通过 / 未通过): the record's
-    residual IR at or above the threshold its stored readout carries
+    words a ``registered_with_record`` ending (``ENDING_LABELS`` in app.js):
+    the record's residual IR at or above the threshold its stored readout carries
     (z(1−α)/√years over the record's own length). A reading that is missing
     or not finite fails. Derived for display only: the stored verdict stays
     ``registered_with_record`` and no record is rewritten."""
@@ -1027,12 +1031,23 @@ def record_passed(readout: Mapping[str, object]) -> bool:
     return ratio is not None and threshold is not None and ratio >= threshold
 
 
+def record_legs(readout: Mapping[str, object]) -> int | None:
+    """How many factor legs the stored readout's record was read on, counted
+    from the loadings it carries (``style.FACTOR_SERIES``): three for a record
+    read before the turnover leg joined, which is never re-scored. ``None``
+    where the record carries no loading (no reading)."""
+
+    record = as_mapping(readout.get("record"))
+    return sum(1 for name, _series in FACTOR_SERIES if name in record) or None
+
+
 def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, object]) -> dict[str, object] | None:
     """The experiment's validation record so far, read as one series: the steps the
     ledger holds, the test horizon they reached, the significance test over them
     (``validation_record.record_significance``), how often the candidate
-    changed, and ``passed`` (:func:`record_passed` of the stored readout; None
-    until the readout exists). ``None`` before the first step is recorded:
+    changed, ``passed`` (:func:`record_passed` of the stored readout) and the
+    ``legs`` that label was read on (:func:`record_legs`), each None until the
+    readout exists. ``None`` before the first step is recorded:
     nothing is read off a replay the ledger does not name."""
 
     tests = validation_record.test_step_records(records)
@@ -1047,6 +1062,7 @@ def _record_view(records: Sequence[Mapping[str, object]], params: Mapping[str, o
         "test_horizon": str(tests[-1]["test_horizon"]),
         "candidate_changes": validation_record.candidate_changes(records),
         "passed": record_passed(readout) if readout else None,
+        "legs": record_legs(readout) if readout else None,
     }
 
 
