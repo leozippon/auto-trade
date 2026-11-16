@@ -1369,63 +1369,93 @@ def test_a_plan_of_unknown_sessions_is_listed_as_unreadable(tmp_path: Path) -> N
     assert rows["current"]["stage"] == "research"
 
 
-def test_the_best_experiment_is_the_registered_strategy_with_the_highest_forward_lower_bound(
+def _restate_bound(directory: Path, bound: float | None) -> None:
+    """Restate the forward lower bound the readout states."""
+
+    _restate_readout(directory, lambda row: row["readout"]["forward"].update(lower_bound=bound))
+
+
+def _fail_heldout(row: dict[str, object]) -> None:
+    """Make the stored record fail the label: a Held-out loss."""
+
+    row["slices"]["heldout"]["raw_readings"].update(strategy_return=-0.048, benchmark_return=-0.129)
+
+
+def test_the_best_experiment_is_the_passed_strategy_with_the_highest_forward_lower_bound(
     tmp_path: Path,
 ) -> None:
-    """Only an experiment that ended ``registered_with_record`` is offered, by the
-    forward lower bound its readout states; a strategy that raised in its
-    forward replay has no bound and is not offered; no other ending is ever
-    the best, whatever bound it carries. Ties keep the listing order. (The
-    fixture's bounds are above zero; at or below it nothing is offered.)"""
+    """The label is the gate and the forward lower bound only ranks: a passed
+    strategy is offered whatever the sign of its bound, a strategy the label
+    fails is never offered however high its bound, and a passed strategy that
+    states no finite bound ranks after every one that does. No ending but
+    ``registered_with_record`` is ever the best, whatever it carries. Ties keep
+    the listing order."""
 
     for experiment_id, stage in (
         ("first", "registered_with_record"),
-        ("second", "registered_with_record"),
-        ("raised", "registered_with_record"),
+        ("negative", "registered_with_record"),
+        ("unbounded", "registered_with_record"),
+        ("failing", "registered_with_record"),
         ("researching", "research"),
         ("exhausted", "deadline"),
         ("blocked", "environment_blocked"),
     ):
         build_experiment(tmp_path, experiment_id, stage)
-
-    def restate(name: str, **forward: object) -> None:
-        ledger = tmp_path / name / "ledgers/experiment_ledger.jsonl"
-        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-        rows[-1]["readout"]["forward"].update(forward)
-        ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
-
     bound = _records(tmp_path / "first")[-1]["readout"]["forward"]["lower_bound"]
-    restate("second", lower_bound=bound + 0.1)
-    restate("raised", lower_bound=None, residual_reading=None, strategy_error={"slice": "forward", "error": "boom"})
+    assert bound > 0
+    _restate_bound(tmp_path / "negative", -0.007)
+    _restate_bound(tmp_path / "unbounded", None)
+    _restate_readout(tmp_path / "failing", _fail_heldout)
+    _restate_bound(tmp_path / "failing", bound + 0.5)
+
     rows = experiment_listing(tmp_path)["experiments"]
-    assert best_experiment(rows) == {"experiment_id": "second"}
     by_id = {row["experiment_id"]: row for row in rows}
-    assert best_experiment([by_id["raised"]]) is None
-    tie = json.loads(json.dumps(by_id["second"]))
+    passed = {name: by_id[name]["forward"]["pass_reading"]["passed"] for name in ("first", "negative", "unbounded", "failing")}
+    assert passed == {"first": True, "negative": True, "unbounded": True, "failing": False}
+    assert best_experiment(rows) == {"experiment_id": "first"}
+    # One passed strategy with a negative bound is offered; a failed one with a
+    # higher, positive bound is not.
+    assert best_experiment([by_id["failing"], by_id["negative"]]) == {"experiment_id": "negative"}
+    assert best_experiment([by_id["failing"]]) is None
+    # Without a finite bound a passed strategy ranks last, but is still offered alone.
+    assert best_experiment([by_id["unbounded"], by_id["negative"]]) == {"experiment_id": "negative"}
+    assert best_experiment([by_id["unbounded"]]) == {"experiment_id": "unbounded"}
+    tie = json.loads(json.dumps(by_id["negative"]))
     tie["experiment_id"] = "tie"
-    assert best_experiment([by_id["second"], tie]) == {"experiment_id": "second"}
-    # An ending that registered nothing is never crowned, even carrying a bound.
+    assert best_experiment([by_id["negative"], tie]) == {"experiment_id": "negative"}
+    # An ending that registered nothing is never crowned, even carrying a passed reading.
     for name in ("researching", "exhausted", "blocked"):
         other = json.loads(json.dumps(by_id[name]))
-        other["forward"] = by_id["second"]["forward"]
-        assert best_experiment([other, by_id["first"]]) == {"experiment_id": "first"}, name
+        other["forward"] = by_id["first"]["forward"]
+        assert best_experiment([other, by_id["negative"]]) == {"experiment_id": "negative"}, name
     # The home page serves the same answer with its listing.
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
-    assert listed["best"] == {"experiment_id": "second"} and "ranking" not in listed
+    assert listed["best"] == {"experiment_id": "first"} and "ranking" not in listed
 
 
-def test_no_strategy_is_offered_as_best_without_a_forward_lower_bound_above_zero(tmp_path: Path) -> None:
-    """A lower bound at or below zero does not show the strategy beat its random
-    baseline forward, so the panel offers none and says so in one line; the
-    experiment's own page keeps its Paper handoff."""
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS check")
+def test_no_strategy_is_offered_as_best_when_none_is_labelled_passed(tmp_path: Path) -> None:
+    """With no listed strategy passed -- one failing the label beside a positive
+    bound, one whose forward replay raised -- the panel offers none and says so
+    in one line; the experiment's own page keeps its Paper handoff."""
 
-    for name, bound in (("negative", -0.007), ("zero", 0.0)):
-        build_experiment(tmp_path, name, "registered_with_record")
-        ledger = tmp_path / name / "ledgers/experiment_ledger.jsonl"
-        rows = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-        rows[-1]["readout"]["forward"]["lower_bound"] = bound
-        ledger.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    build_experiment(tmp_path, "failing", "registered_with_record")
+    _restate_readout(tmp_path / "failing", _fail_heldout)
+    build_experiment(tmp_path, "raised", "registered_with_record")
+
+    def raised(row: dict[str, object]) -> None:
+        row.update(status="strategy_error", strategy_error="forward", slices=None)
+        row["readout"]["forward"] = {
+            "lower_bound": None,
+            "residual_reading": None,
+            "strategy_error": {"slice": "forward", "error": "StrategyRaised: boom"},
+        }
+
+    _restate_readout(tmp_path / "raised", raised)
     listed = TestClient(create_app(tmp_path, tmp_path)).get("/api/experiments").json()
+    by_id = {row["experiment_id"]: row for row in listed["experiments"]}
+    assert by_id["failing"]["forward"]["readout"]["forward"]["lower_bound"] > 0
+    assert not any(by_id[name]["forward"]["pass_reading"]["passed"] for name in ("failing", "raised"))
     assert listed["best"] is None
 
     script = (
@@ -1433,6 +1463,7 @@ def test_no_strategy_is_offered_as_best_without_a_forward_lower_bound_above_zero
     ).read_text(encoding="utf-8")
     harness = "\n".join(
         [
+            _const_block(script, "ENDING_LABELS"),
             "const el = (tag, attrs, ...children) => ({ tag, attrs, children });",
             "const heroPanel = (row) => ({ hero: row.experiment_id });",
             *(_fn(script, name) for name in ("bestRow", "bestPanel")),
@@ -1440,14 +1471,14 @@ def test_no_strategy_is_offered_as_best_without_a_forward_lower_bound_above_zero
             "const empty = bestPanel(listed);",
             "console.log(JSON.stringify([",
             "  empty.children[0].children[0],",
-            "  bestPanel({ ...listed, best: { experiment_id: 'zero' } }),",
+            "  bestPanel({ ...listed, best: { experiment_id: 'failing' } }),",
             "  bestPanel({ experiments: [], best: null }),",
             "]));",
         ]
     )
     result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == ["没有一个定版策略的前推主动超额下界大于零。", {"hero": "zero"}, None]
+    assert json.loads(result.stdout) == ["没有一个定版策略通过。", {"hero": "failing"}, None]
     assert "paperHandoff(detail)" in _fn(script, "readoutStagePanel")
 
 

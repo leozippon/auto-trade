@@ -917,32 +917,31 @@ def experiment_listing(
 
 
 def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
-    """The home page's best experiment: the registered strategy whose readout
-    states the highest forward lower bound, offered only when that bound is
-    above zero.
+    """The home page's best experiment: of the strategies the console labels
+    通过, the one whose readout states the highest forward lower bound.
 
-    Only an experiment that ended ``registered_with_record`` is offered: every
-    other ending registered nothing or was stopped by the environment or the
-    host, and an experiment still running has no forward reading at all. A
-    bound at or below zero does not show the strategy beat its random baseline
-    on the forward months, so with none above it the home page names no best
-    experiment rather than crowning the least bad one (an experiment's own
-    page still opens Paper). A strategy that raised in its forward replay has
-    no lower bound and is not offered. Research-period numbers never rank.
-    Ties keep the listing order.
+    The label is the gate and the bound only ranks. A row is offered only as
+    the label reads it: ended ``registered_with_record`` with
+    ``forward.pass_reading.passed`` (:func:`pass_reading`) -- every other
+    ending registered nothing or was stopped by the environment or the host,
+    and an experiment still running has no forward reading at all. With none
+    passed the home page names no best experiment. A passed strategy whose
+    readout states no finite bound ranks after every one that does.
+    Research-period numbers never rank. Ties keep the listing order.
     """
 
-    ranked: list[tuple[float, int, Mapping[str, object]]] = []
+    ranked: list[tuple[bool, float, int, Mapping[str, object]]] = []
     for position, row in enumerate(rows):
         if as_mapping(row.get("ending")).get("state") != VerdictStatus.REGISTERED_WITH_RECORD:
             continue
-        forward = as_mapping(as_mapping(as_mapping(row.get("forward")).get("readout")).get("forward"))
-        bound = finite_number(forward.get("lower_bound"))
-        if bound is not None and bound > 0:
-            ranked.append((-bound, position, row))
+        forward = as_mapping(row.get("forward"))
+        if as_mapping(forward.get("pass_reading")).get("passed") is not True:
+            continue
+        bound = finite_number(as_mapping(as_mapping(forward.get("readout")).get("forward")).get("lower_bound"))
+        ranked.append((bound is None, -(bound or 0.0), position, row))
     if not ranked:
         return None
-    _bound, _position, row = min(ranked, key=lambda item: item[:2])
+    *_key, row = min(ranked, key=lambda item: item[:3])
     return {"experiment_id": row["experiment_id"]}
 
 

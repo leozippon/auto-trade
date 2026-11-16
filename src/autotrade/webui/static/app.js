@@ -1901,8 +1901,8 @@ async function renderHomePage() {
   }, 5000);
 }
 
-/* The server names a best experiment only when a registered strategy's
-   forward lower bound is above zero. */
+/* The server names a best experiment only when a listed strategy is labelled
+   passed (registry.best_experiment). */
 function bestRow(payload) {
   const best = payload.best;
   if (!best) return null;
@@ -1922,7 +1922,7 @@ function bestPanel(payload) {
   const panel = el(
     "div",
     { class: "panel", id: "hero-panel" },
-    el("div", { class: "hint" }, "没有一个定版策略的前推主动超额下界大于零。"),
+    el("div", { class: "hint" }, `没有一个定版策略${ENDING_LABELS.passed}。`),
   );
   panel.__signature = "";
   return panel;
@@ -2291,8 +2291,8 @@ function experimentCard(item, { archived = false } = {}) {
   return card;
 }
 
-/* The best experiment (`registry.best_experiment`): the registered strategy
-   whose readout states the highest forward lower bound above zero, with its badge, its
+/* The best experiment (`registry.best_experiment`): of the strategies labelled
+   passed, the one whose readout states the highest forward lower bound, with its badge, its
    Forward and Held-out tiles, its curve, and the Paper handoff the 读出 view
    offers -- the account it has, or a button that opens one within the cap the
    server enforces. Only an experiment the server named reaches here. */
@@ -2306,7 +2306,7 @@ function heroPanel(item) {
       el(
         "h3",
         { class: "hero-title" },
-        el("span", { "aria-hidden": "true", title: "最佳实验：前推主动超额下界大于零且最高的定版策略" }, "🏆"),
+        el("span", { "aria-hidden": "true", title: `最佳实验：${ENDING_LABELS.passed}的定版策略中前推主动超额下界最高的一个` }, "🏆"),
         experimentName(item.experiment_id),
       ),
       experimentBadge(item),
