@@ -298,7 +298,8 @@ AGENT_TOOL_DESCRIPTION = (
     "只用于改变范围、追加新发现的约束或让它提前收尾，不为催促而发。\n"
     f"- 默认与上限：默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队；max_turns 默认 {DEFAULT_SUBAGENT_MAX_TURNS} 回合，"
     "几个并行的有界子代理好过一个很长的串行子代理。"
-    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，有界的机械工作降到 low/medium：每回合输出上限 {AGENT_MAX_OUTPUT_TOKENS} token，"
+    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，有界的机械工作降到 low/medium：每回合输出上限 {AGENT_MAX_OUTPUT_TOKENS} token"
+    "（单次回复含思考的上限，不是会话预算），"
     f"全耗在思考里的回合只有 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
     f"汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长时只内联开头（summary_truncated=true），"
     "全文以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号）。"
@@ -366,7 +367,7 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "description": (
                     f"子代理思考强度 off/low/medium/xhigh；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_THINKING}），不继承父会话。"
                     "需要判断的任务保留默认；有界的机械工作显式给 low/medium，"
-                    f"因为把 {AGENT_MAX_OUTPUT_TOKENS} token 的输出预算全部耗在思考里而发不出工具调用的一个回合"
+                    f"因为单次回复 {AGENT_MAX_OUTPUT_TOKENS} token 的输出上限（含思考）全部耗在思考里、发不出工具调用的一个回合"
                     f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
                     "high 与 max 是 xhigh 的别名，会被接受并记为 xhigh；off 关闭扩展思考。"
                 ),
@@ -1006,7 +1007,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             continue
                         status = "error"
                         error = (
-                            f"output budget exhausted on reasoning in {truncated_turns} "
+                            f"per-reply output cap spent on reasoning in {truncated_turns} "
                             "turns without a tool call or report"
                         )
                         break

@@ -3183,7 +3183,7 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
     assert result["status"] == "error" and result["summary"] == ""
     assert result["llm_calls"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
     assert result["truncated_turns"] == SUBAGENT_MAX_TRUNCATION_CONTINUATIONS + 1
-    assert "output budget exhausted" in result["error"] and result["tool_calls"] == 0
+    assert "per-reply output cap spent" in result["error"] and result["tool_calls"] == 0
 
 
 class _OverflowingLLM:

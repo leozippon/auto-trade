@@ -6,7 +6,7 @@ keys for stable parsing. Static content comes first and per-run facts last so
 the shared prefix stays byte-stable across sessions; the only fact-dependent
 lines above the environment block are the orientation's closing bullets: the
 GPU bullet, present only when the Sandbox has cards and naming none of them,
-and the compute-budget bullet, which states the experiment's two strategy time
+and the timeout bullet, which states the experiment's two strategy time
 limits, so every attempt of an experiment shares the whole prefix.
 
 The static part follows the layout of minimal agent-harness prompts (Pi,
@@ -16,9 +16,9 @@ work is read, the boundaries no instruction relaxes and how to work in the
 harness, each rule stated once. It carries what the harness enforces, what
 the Agent cannot find out itself, and the owner's research orientation (the
 ambition and depth expected, research through the validation period as well
-as the research years, the strategy compute budget the experiment grants and,
-on a Sandbox with cards, full use of them; not a method) and, in the working
-method, that strategy code is written for speed; what a tool's
+as the research years, the strategy timeouts as guards rather than allowances
+and, on a Sandbox with cards, what the cards are for; not a method) and, in the
+working method, what a replay keeps from one decision day to the next; what a tool's
 parameter, limit or returned field means is the tool's description and
 schema, the strategy contract is ``output/README.md``, the run's values are
 the facts JSON, and how to research within that orientation is the Agent's
@@ -54,26 +54,34 @@ SESSION_PROCESS_SECTION = """\
 SESSION_ORIENTATION_SECTION = """\
 # 研究取向
 - 目标是有创新性、有深度的策略，而不是教科书式的风格因子组合：优先探索学习型模型、预训练模型与嵌入、财务与公告标题等多个数据域、自适应重训与组合构建等复杂方法；简单的规则打分只作基线对照，不作为目标。
-- 预算是为深入研究准备的，规模见「本次运行」；回放的等待不计入推理时间。\
+- 预算是为深入研究准备的，规模与计法见「本次运行」。\
 """
 
 # The orientation's GPU bullet when the run facts' ``runtime_tools.sandbox_gpus``
-# names cards; it names no card (the facts state the hardware) and says what
-# using them means, training and batched inference on the device; a Sandbox
-# without cards reads the orientation without it (``build_system_prompt``).
-SESSION_GPU_ORIENTATION_BULLET = "- 充分利用 Sandbox 可用的 GPU 算力：模型的训练与批量推理放在 GPU 上。"
+# names cards; it names no card (the facts state the hardware). It says what the
+# cards are for and what counts as using them, and that a method's scale is
+# bounded by card memory and the per-call timeouts, not by replay speed (sessions
+# built sub-0.5 GiB networks to keep replays short); the measured costs are the
+# curated ``pretrained-costs`` skill. A Sandbox without cards reads the
+# orientation without it (``build_system_prompt``).
+SESSION_GPU_ORIENTATION_BULLET = (
+    "- GPU 留给需要它的方法：在全市场、长历史上训练的序列或注意力模型，以及用模型库里的预训练语言与嵌入模型"
+    "对文本编码、打分或微调（路径与加载见 `output/README.md` 的 Pretrained models，实测开销见技能 `pretrained-costs`）。"
+    "只占几百 MiB 显存的小网络不算用上了卡；方法的规模受卡的显存与单次调用超时约束，不受回放快慢约束。"
+)
 
-# The orientation's compute-budget bullet, after the GPU bullet when that one is
+# The orientation's strategy-timeout bullet, after the GPU bullet when that one is
 # present: the run facts' ``budgets.strategy_inference_timeout_seconds`` and
 # ``strategy_fit_timeout_seconds`` in words (:func:`build_budget_orientation_bullet`),
 # so it never claims a limit the experiment does not grant. Both are floors,
 # since ``validate`` scales them with its batch (its description states how).
-# The replay results report per-call seconds; the owner wants those read as
-# room for the method, not as a cost to cut.
+# They are timeouts against a runaway call: sessions read them as a daily
+# allowance and priced a daily fit at 1,701 times the limit, so the bullet says
+# they are neither an allowance nor a target.
 SESSION_BUDGET_ORIENTATION_BULLET = (
-    "- 策略的计算时间是为方法准备的预算：每个决策日的 `generate_orders` 至少有 {inference}，"
-    "每次 `fit` 至少有 {fit}（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
-    "不必为省时间简化方法，复杂度由研究需要决定。"
+    "- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 {inference}，"
+    "每次 `fit` 至少 {fit}（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
+    "它们只拦下失控的调用，不是每天的额度，也不是目标；不必为省时间简化方法，复杂度由研究需要决定。"
 )
 
 SESSION_READINGS_SECTION = """\
@@ -102,7 +110,7 @@ PATH_RULES_BULLET = f"- {FILE_PATH_RULE}；{SHELL_PATH_RULE}。"
 SESSION_WORKFLOW_SECTION = f"""\
 # 工作方式
 - 策略合同（入口、`context`、订单、允许的库与模型库）在只读的 `output/README.md`。只有 `output/`（以 `main.py` 为入口的包）和 `models/` 随策略回测与定版；策略任一次超时或报错都让整场回测失败。
-- 策略代码要高效：截面计算向量化，费时的特征、模型与中间结果算一次后缓存复用，不逐日重算；回放的快慢决定每次 `validate` 与 `test` 要等多久。
+- 策略代码要高效：截面计算向量化；一场回放里 `fit` 与 `generate_orders` 各在一个贯穿整场的进程里运行，读进内存的表、特征面板和加载到 GPU 上的模型留在模块级状态里给下一个决策日用；`context.state_dir` 整场保留、两边共用，每场回放从空目录开始。所以每天只读新增的行、只算新的一天，不每天重读整张表、重建整个面板或重写全部状态；只有之后的调用重建不了的才需要写盘（见技能 `replay-state`）。这省的是回放的墙钟，回放不计入任何会话预算，不是缩小模型的理由。
 {PATH_RULES_BULLET}
 - 同一回合的多个工具调用并发执行；一批里有写入、shell 或回测时，整批按顺序执行。子代理在后台运行，结果以消息送回；只剩等待子代理时以文本回复结束本回合。
 - 计划与进度记在工作区根的 `TODO.md`，验证与测试节点在根 `steps` 的 Step 树（`tree.txt`）；中断后的续跑从这两处恢复。
@@ -143,6 +151,13 @@ WRAP_UP_PROMPT = """\
 
 # How each step length of ``research_geometry.step`` reads in the run section.
 STEP_LENGTH_WORDS = {"quarter": "一个季度", "month": "一个月"}
+
+# Used fractions of each session budget -- the inference time, the API spend
+# and the model calls -- at which the runner injects one ``budget_notice``
+# observation stating what is left of that budget and how many backtests have
+# run so far. Defined here because the run section states them; the runner
+# reads the same tuple.
+BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
 
 
 def build_session_directive_section(session_directive: str) -> str:
@@ -214,8 +229,9 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
     ``budgets.validates_per_step``. Empty for facts whose geometry states no
     test horizon; a geometry that does state one must carry every other key.
     The session budgets (``budgets.deadline_seconds``, ``max_llm_calls``,
-    ``max_api_spend_usd``) add a closing line with their scale per research
-    interval; a budget the facts do not carry is left out of it.
+    ``max_api_spend_usd``) add a closing line with their totals, how inference
+    time is counted and when the host reports use (:func:`_run_budget_line`);
+    a budget the facts do not carry is left out of it.
     """
 
     geometry = experiment_facts.get("research_geometry")
@@ -245,21 +261,32 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
 
 
 def _run_budget_line(budgets: Mapping[str, object]) -> str:
-    """The session budgets; empty when the facts carry none of the three."""
+    """The session budgets, how inference time is counted, that there is no
+    token budget, and when the runner reports use; empty when the facts carry
+    none of the three. Sessions with totals only invented their own usage
+    ("27k tokens used out of 32k", "28 hours with 55 % remaining")."""
 
     seconds = budgets.get("deadline_seconds")
     calls = budgets.get("max_llm_calls")
     spend = budgets.get("max_api_spend_usd")
     totals: list[str] = []
     if seconds is not None:
-        totals.append(f"推理时间 {chinese_duration(seconds)}")  # type: ignore[arg-type]
+        # The clock pauses only inside smoke_backtest, validate, test and
+        # run_null_control (``InferenceTimeBudget.pause`` in session_tools).
+        totals.append(
+            f"推理时间 {chinese_duration(seconds)}（会话的墙钟时间，回放与随机对照的等待不计）"  # type: ignore[arg-type]
+        )
     if calls is not None:
         totals.append(f"模型调用 {calls} 次")
     if spend is not None:
         totals.append(f"API 花费 {spend:g} 美元")
     if not totals:
         return ""
-    return f"- 预算（整个会话共用）：{'、'.join(totals)}。"
+    fractions = "、".join(f"{fraction:.0%}" for fraction in BUDGET_NOTICE_FRACTIONS)
+    return (
+        f"- 预算（整个会话共用）：{'、'.join(totals)}；没有 token 预算，上下文靠压缩（`compact`）管理。"
+        f"每项用到 {fractions} 时宿主各提醒一次（`budget_notice`，或最后一档的收尾提示），没收到提醒就是还没用到 {BUDGET_NOTICE_FRACTIONS[0]:.0%}。"
+    )
 
 
 def chinese_duration(seconds: float) -> str:
@@ -272,7 +299,7 @@ def chinese_duration(seconds: float) -> str:
 
 
 def build_budget_orientation_bullet(experiment_facts: Mapping[str, object]) -> str:
-    """The orientation's compute-budget bullet; empty unless the facts state both strategy limits."""
+    """The orientation's strategy-timeout bullet; empty unless the facts state both strategy limits."""
 
     budgets = experiment_facts.get("budgets")
     if not isinstance(budgets, Mapping):
@@ -295,7 +322,7 @@ def build_system_prompt(
 ) -> str:
     # The orientation closes with the GPU bullet when the same
     # ``runtime_tools.sandbox_gpus`` the facts JSON below carries names cards,
-    # then with the compute-budget bullet when the facts state both limits.
+    # then with the strategy-timeout bullet when the facts state both limits.
     facts = experiment_facts or {}
     closing: list[str] = []
     runtime_tools = facts.get("runtime_tools")

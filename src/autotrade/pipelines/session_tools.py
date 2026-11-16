@@ -1672,9 +1672,9 @@ class ValidateTool(SessionTimeBudgetAware):
             "span": "Y3..Y4",
             "candidates": [
                 {
-                    "name": "lgbm_ranker",
-                    "hypothesis": "LightGBM 横截面排序（季度重训）的主动超额在两个年份都为正",
-                    "path": "candidates/lgbm_ranker",
+                    "name": "candidate_a",
+                    "hypothesis": "<候选是什么、预期两个年份的读数怎样>",
+                    "path": "candidates/candidate_a",
                 },
             ],
         },

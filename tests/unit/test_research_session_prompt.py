@@ -159,19 +159,27 @@ def test_the_run_section_states_this_runs_view_steps_and_threshold() -> None:
 
 
 def test_the_run_section_states_the_session_budgets() -> None:
-    """The three session budgets in words, totals only. A budget the facts do
-    not carry is left out, never printed as a blank."""
+    """The three session budgets in words, with what inference time counts,
+    that no token budget exists, and the used fractions at which the runner
+    sends its notices (the tuple it reads), so a session never has to guess its
+    use. A budget the facts do not carry is left out, never printed as a blank."""
 
+    from autotrade.agent.runner import BUDGET_NOTICE_FRACTIONS
+
+    assert BUDGET_NOTICE_FRACTIONS is prompts.BUDGET_NOTICE_FRACTIONS
+    clock = "推理时间 166 小时 40 分钟（会话的墙钟时间，回放与随机对照的等待不计）"
+    rules = (
+        "；没有 token 预算，上下文靠压缩（`compact`）管理。"
+        "每项用到 50%、75%、90% 时宿主各提醒一次（`budget_notice`，或最后一档的收尾提示），没收到提醒就是还没用到 50%。"
+    )
     facts = _run_facts()
     facts["budgets"].update(  # type: ignore[attr-defined]
         deadline_seconds=600_000.0, max_llm_calls=6400, max_api_spend_usd=50.0
     )
     assert prompts.build_run_section(facts).endswith(
-        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟、模型调用 6400 次、API 花费 50 美元。"
+        f"\n- 预算（整个会话共用）：{clock}、模型调用 6400 次、API 花费 50 美元{rules}"
     )
     del facts["budgets"]["max_api_spend_usd"]  # type: ignore[attr-defined]
     del facts["budgets"]["max_llm_calls"]  # type: ignore[attr-defined]
-    assert prompts.build_run_section(facts).endswith(
-        "\n- 预算（整个会话共用）：推理时间 166 小时 40 分钟。"
-    )
+    assert prompts.build_run_section(facts).endswith(f"\n- 预算（整个会话共用）：{clock}{rules}")
     assert "预算" not in prompts.build_run_section(_run_facts())

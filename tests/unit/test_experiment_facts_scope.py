@@ -374,8 +374,8 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     """A session on an A100 could learn the card model only through nvidia-smi,
     and the card sat idle while LightGBM trained on CPU. The Sandbox's cards are
     one fact, count and model read off its own spec; with cards the orientation
-    closes with one sentence that says what using them means and names no card,
-    without any it reads unchanged."""
+    closes with one bullet that says what the cards are for and what counts as
+    using them, and names no card; without any it reads unchanged."""
 
     a100 = _facts(
         sandbox_spec=SandboxSpec(gpu=(0,), gpu_count=1, gpu_name_filter="A100").to_record()
@@ -383,7 +383,8 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     assert a100["runtime_tools"]["sandbox_gpus"] == "1 × A100"
     prompt = build_system_prompt(experiment_facts=a100)
     orientation = prompt[prompt.index("# 研究取向") : prompt.index("# 读数")]
-    assert SESSION_GPU_ORIENTATION_BULLET == "- 充分利用 Sandbox 可用的 GPU 算力：模型的训练与批量推理放在 GPU 上。"
+    assert SESSION_GPU_ORIENTATION_BULLET.startswith("- GPU 留给需要它的方法：")
+    assert "\n" not in SESSION_GPU_ORIENTATION_BULLET
     assert orientation.rstrip().endswith("\n" + SESSION_GPU_ORIENTATION_BULLET)
     assert orientation.count("\n- ") == 3
     assert "A100" not in orientation
@@ -393,7 +394,7 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     assert cpu["runtime_tools"]["sandbox_gpus"] == "none"
     prompt = build_system_prompt(experiment_facts=cpu)
     assert prompt.startswith(PROTOCOL_INSTRUCTION + "\n\n# 环境")
-    assert "充分利用 Sandbox 可用的 GPU 算力" not in prompt
+    assert SESSION_GPU_ORIENTATION_BULLET not in prompt
 
 
 def _orientation(facts: dict[str, object]) -> str:
@@ -401,12 +402,13 @@ def _orientation(facts: dict[str, object]) -> str:
     return prompt[prompt.index("# 研究取向") : prompt.index("# 读数")].rstrip()
 
 
-def test_the_orientation_states_the_strategy_limits_as_a_compute_budget() -> None:
+def test_the_orientation_states_the_strategy_limits_as_timeouts() -> None:
     """Replay results report each call's seconds, and the owner does not want
     them read as a cost to cut: the orientation states the experiment's own
-    per-decision and per-fit limits as floors of the compute budget, so it never
-    claims an hour the experiment does not grant, and says nothing when the
-    facts state no limits. With cards it follows the GPU bullet."""
+    per-decision and per-fit limits as timeouts against a runaway call, never as
+    a daily allowance, so it never claims an hour the experiment does not grant,
+    and says nothing when the facts state no limits. With cards it follows the
+    GPU bullet."""
 
     def limits(inference: float, fit: float, **overrides: object) -> dict[str, object]:
         return _facts(
@@ -416,9 +418,9 @@ def test_the_orientation_states_the_strategy_limits_as_a_compute_budget() -> Non
 
     hour = _orientation(limits(3600.0, 7200))
     assert hour.endswith(
-        "\n- 策略的计算时间是为方法准备的预算：每个决策日的 `generate_orders` 至少有 1 小时，"
-        "每次 `fit` 至少有 2 小时（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
-        "不必为省时间简化方法，复杂度由研究需要决定。"
+        "\n- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 1 小时，"
+        "每次 `fit` 至少 2 小时（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
+        "它们只拦下失控的调用，不是每天的额度，也不是目标；不必为省时间简化方法，复杂度由研究需要决定。"
     )
     assert hour.count("\n- ") == 3
     quarter = _orientation(limits(900, 5400))

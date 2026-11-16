@@ -83,7 +83,9 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
     assert set(entries) == {
         "deterministic-fit",
         "offline-readings",
+        "pretrained-costs",
         "refit-snapshot-rescore",
+        "replay-state",
         "residual-label-benchmark",
         "validation-readings",
     }

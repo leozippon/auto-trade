@@ -75,6 +75,7 @@ from .compact import (
     safe_error_summary,
 )
 from .prompts import (
+    BUDGET_NOTICE_FRACTIONS,
     WRAP_UP_PROMPT,
 )
 from .subagent import (
@@ -188,10 +189,8 @@ INBOX_SAFE_AFTER_PARALLEL_READONLY = "after_parallel_readonly"
 INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM = "after_tools_before_llm"
 _INBOX_TRACE_CHARS = 400
 _INTERRUPTED_BY_USER = "interrupted_by_user"
-# Used fractions of each session budget -- the inference time, the API spend
-# and the model calls -- at which one ``budget_notice`` observation states what
-# is left of that budget and how many backtests have run so far.
-BUDGET_NOTICE_FRACTIONS = (0.5, 0.75, 0.9)
+# The used fractions at which one ``budget_notice`` goes out are
+# ``prompts.BUDGET_NOTICE_FRACTIONS``, beside the run section that states them.
 # The used fraction of the API spend or of the model calls at which the wrap-up
 # prompt goes out, as it does for the time budget at its grace window: running
 # out of either stops the session at once, so the session gets its chance to
