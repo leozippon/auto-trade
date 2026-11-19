@@ -1,29 +1,30 @@
 #!/usr/bin/env python
-"""The 2026-11-17b round: an attention-only continual model and the open direction, on DeepSeek-V4.1-Flash, one after another on the ZGCA A100.
+"""The 2026-11-19 round: three directions on DeepSeek-V4.1-Flash, one after another on the ZGCA A100.
 
-One of two rounds under the owner's instructions of 2026-11-16, the other being
-round 20261117 on this host:
+The round follows the owner's instructions of 2026-11-16 and 2026-11-19:
 
-- DeepSeek-V4.1-Flash as the main model, as round 20261113b's Flash arm ran it,
-  with sub-agents and compaction on Flash as before;
+- DeepSeek-V4.1-Flash for every conversation role;
 - packs that require every tested candidate to run a model that needs the card,
   one of them a language model;
-- the prompt and skill corrections made with them.
+- every experiment on the ZGCA instance.
 
-`attnonly_200k_10y_flash_zgca_20261117b` mounts pack `attnonly_200k_20261117`:
-an attention-only model, without feed-forward blocks, attending across each
-decision day's cross-section and across each stock's daily series, trained on
-the card and carrying its learned state from decision to decision. It is read
-against the same architecture with the feed-forward blocks back and against
-itself refit cold each quarter, both validated in the same batch.
-`open_200k_10y_flash_zgca_20261117b` mounts pack `open_200k_20261117`: the
+`llmadapt_200k_10y_flash_zgca_20261119` mounts pack `llmadapt_200k_20261117`: a
+language model from the pretrained store reads the visible titles in the replay
+and keeps learning as outcomes mature. It is read against the same strategy
+without its text branch and against the same model as a frozen encoder.
+`attnonly_200k_10y_flash_zgca_20261119` mounts pack `attnonly_200k_20261117`: an
+attention-only model, without feed-forward blocks, attending across each
+decision day's cross-section and across each stock's daily series, carrying its
+learned state from decision to decision. It is read against the same
+architecture with the feed-forward blocks back and against itself refit cold
+each quarter.
+`open_200k_10y_flash_zgca_20261119` mounts pack `open_200k_20261117`: the
 direction is open, but every tested candidate runs a model that needs the card.
-Everything else is round 20261115c's.
 
-It runs on the instance, whose fill loop creates the first experiment once the
-card is free and the second once the first has ended:
+The instance's fill loop creates the first experiment once the card is free and
+each next one once the one before it has ended:
 
-    ~/miniconda3/envs/quant/bin/python ops/zgca/zgca.py run scripts/experiments/create_round_20261117b.py --fill
+    ~/miniconda3/envs/quant/bin/python ops/zgca/zgca.py run scripts/experiments/create_round_20261119.py --fill
 
 `--dry-run` with the port contacts no console and creates nothing: it runs the
 console's create-time pre-flight, prints what each experiment sends, and, unless
@@ -51,19 +52,12 @@ from scripts.experiments._round import PACKS_DIR, Round
 
 FLASH = "DeepSeek-V4.1-Flash"
 
-# Each pack states the direction and the owner's requirement on the card; the
-# directive does not repeat them.
-MECHANISM_DIRECTIVE = (
-    "读 `refs/README.md`：研究方向、所有者的提案与算力要求、让结果读得出来的对照、数据边界、账户与成本都在参考包里；"
-    "在这些之内，方法与资源使用由会话自主决定。"
-)
-OPEN_DIRECTIVE = (
-    "读 `refs/README.md`：研究方向、所有者的算力要求、让结果读得出来的对照、数据边界、账户与成本都在参考包里；"
-    "在这些之内，方法与资源使用由会话自主决定。"
-)
+# The pack states the direction, the owner's requirement and the controls; the
+# directive only sends the session there.
+DIRECTIVE = "研究方向与所有者的要求在 `refs/README.md`；在它之内，方法与资源使用由会话自主决定。"
 
 
-def _experiment(pack: str, directive: str) -> dict[str, str]:
+def _experiment(pack: str) -> dict[str, str]:
     """One experiment on Flash for every conversation role; a main model other
     than the console default is the experiment's own declaration."""
 
@@ -72,15 +66,16 @@ def _experiment(pack: str, directive: str) -> dict[str, str]:
         "subagent_model": FLASH,
         "compact_model": FLASH,
         "workspace_reference": f"{PACKS_DIR}/{pack}",
-        "research_directive": directive,
+        "research_directive": DIRECTIVE,
     }
 
 
 # File order is the fill order: the instance has one card, so they run one
 # after another in this order.
 EXPERIMENTS: dict[str, dict[str, str]] = {
-    "attnonly_200k_10y_flash_zgca_20261117b": _experiment("attnonly_200k_20261117", MECHANISM_DIRECTIVE),
-    "open_200k_10y_flash_zgca_20261117b": _experiment("open_200k_20261117", OPEN_DIRECTIVE),
+    "llmadapt_200k_10y_flash_zgca_20261119": _experiment("llmadapt_200k_20261117"),
+    "attnonly_200k_10y_flash_zgca_20261119": _experiment("attnonly_200k_20261117"),
+    "open_200k_10y_flash_zgca_20261119": _experiment("open_200k_20261117"),
 }
 
 ROUND = Round(
