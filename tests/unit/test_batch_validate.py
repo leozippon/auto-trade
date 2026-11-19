@@ -123,6 +123,13 @@ def _strategy(marker: str) -> str:
 COSTED = {"cost_sensitivity": {"slippage_bps": 5.0, "cost_per_bp_per_side": 1.2e-4}}
 
 
+def _node_id(row: dict[str, object]) -> str:
+    """A completed row's full node id: rows name their node by handle, and
+    result_ref is ``<node_id>/validation/result.json``."""
+
+    return str(row.get("node_id") or str(row["result_ref"]).split("/")[0])
+
+
 def _summary(
     total_return: float, year_windows: tuple[tuple[str, str], ...] = (("20210701", "20220630"),)
 ) -> dict[str, object]:
@@ -593,7 +600,7 @@ class BatchValidateRefusalTest(unittest.TestCase):
             )
             self.assertTrue(result.ok, result.error)
             row = result.value["candidates"][0]
-            node = session.tree.get_node(str(row["node_id"]))
+            node = session.tree.get_node(str(_node_id(row)))
             self.assertEqual(node["metadata"]["source_path"], "output")
             with self.assertRaises(ToolError) as caught:
                 session.batch.invoke(
@@ -684,7 +691,7 @@ class BatchValidateSpanTest(unittest.TestCase):
             # Two candidates on two years cost four replay-years.
             for row, step in zip(value["candidates"], session.backtest.steps, strict=True):
                 self.assertEqual(step.span, "Y2..Y3")
-                node = session.tree.get_node(str(row["node_id"]))
+                node = session.tree.get_node(str(_node_id(row)))
                 self.assertEqual(node["metadata"]["span"], "Y2..Y3")
 
     def test_the_default_and_the_whole_range_are_the_full_span(self) -> None:
@@ -721,7 +728,7 @@ class BatchValidateSpanTest(unittest.TestCase):
             session = _Session(Path(tmp))
             calls: list[dict[str, object]] = []
             session.evaluator.null_control = _canned_null(calls)
-            node = session.validate_one("y3", _strategy("7"), span="Y3")["node_id"]
+            node = _node_id(session.validate_one("y3", _strategy("7"), span="Y3"))
             NullControlTool(session.backtest, max_calls=1).invoke({"node_id": node})
             self.assertEqual((calls[0]["start"], calls[0]["end"]), ("20230701", "20240630"))
 
@@ -733,13 +740,13 @@ class RegistrationTest(unittest.TestCase):
     def test_a_sub_span_node_does_not_register_and_a_lone_full_span_one_does(self) -> None:
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
-            year = session.validate_one("year", _strategy("1"), span="Y2")["node_id"]
+            year = _node_id(session.validate_one("year", _strategy("1"), span="Y2"))
             registration = session.backtest.registration(year)
             self.assertFalse(registration["passed"])
             self.assertIn("registration_needs_full_span_validation", registration["reasons"])
             # One full-span validation is enough: no count of validations, no
             # score and no other node's reading stands between it and a test.
-            full = session.validate_one("full", _strategy("22"))["node_id"]
+            full = _node_id(session.validate_one("full", _strategy("22")))
             registration = session.backtest.registration(full)
             self.assertEqual((registration["passed"], registration["reasons"]), (True, []))
 
@@ -755,7 +762,7 @@ class RegistrationTest(unittest.TestCase):
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("2" * 60))
             value = session.call("a", "b").value
-            winner = value["candidates"][1]["node_id"]
+            winner = _node_id(value["candidates"][1])
             registration = session.backtest.registration(str(winner))
             self.assertTrue(registration["passed"], registration)
             tested = session.finish.invoke({"candidate": winner})
@@ -781,7 +788,7 @@ class ControlsTest(unittest.TestCase):
             cand, control = value["candidates"]
             self.assertEqual((cand["control"], control["control"]), (False, True))
             for row, step in zip(value["candidates"], session.backtest.steps, strict=True):
-                node = session.tree.get_node(str(row["node_id"]))
+                node = session.tree.get_node(str(_node_id(row)))
                 self.assertEqual(node["metadata"]["control"], row["control"])
                 self.assertNotIn("offline_trials", node["metadata"])
                 ledger_row = research_step_record(step)
@@ -789,12 +796,12 @@ class ControlsTest(unittest.TestCase):
                     (ledger_row["control"], ledger_row["batch_id"]),
                     (row["control"], value["batch_id"]),
                 )
-            registration = session.backtest.registration(str(control["node_id"]))
+            registration = session.backtest.registration(str(_node_id(control)))
             self.assertFalse(registration["passed"])
             self.assertIn("registration_nominee_is_control", registration["reasons"])
             # Rows name a node by the short handle the tools accept.
             self.assertEqual(
-                [cand["handle"], control["handle"]], session.backtest.named([cand["node_id"], control["node_id"]])
+                [cand["handle"], control["handle"]], session.backtest.named([_node_id(cand), _node_id(control)])
             )
             self.assertTrue(cand["handle"].startswith("valid_"))
 
@@ -825,7 +832,7 @@ class BatchValidateRunTest(unittest.TestCase):
             session = _Session(Path(tmp))
             # A batch branches off wherever the session stands, so start from a
             # real node rather than the empty root.
-            branch_point = str(session.validate_one("start", _strategy("9"))["node_id"])
+            branch_point = str(_node_id(session.validate_one("start", _strategy("9"))))
             self.assertTrue(session.rollback.invoke({"node_id": branch_point}).ok)
             self.assertEqual(session.tree.current_node_id, branch_point)
             for index, name in enumerate(("alpha", "beta", "gamma")):
@@ -836,7 +843,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertEqual(value["parent_node_id"], branch_point)
             self.assertEqual(value["complete_validations"], 3)
             self.assertEqual(value["failed"], 0)
-            node_ids = [row["node_id"] for row in value["candidates"]]
+            node_ids = [_node_id(row) for row in value["candidates"]]
             self.assertEqual(len(set(node_ids)), 3)
             nodes = {node["node_id"]: node for node in session.tree.nodes()}
             for row, node_id in zip(value["candidates"], node_ids, strict=True):
@@ -1261,7 +1268,7 @@ class BatchValidateRunTest(unittest.TestCase):
                 self.assertEqual(
                     list(row),
                     [
-                        "name", "control", "status", "handle", "node_id", "revision_id",
+                        "name", "control", "status", "handle",
                         "wall_seconds", "active", "book", "by_year", "concentration", "recent",
                         "result_ref",
                     ],
@@ -1282,9 +1289,8 @@ class BatchValidateRunTest(unittest.TestCase):
                     list(row["book"]),
                     [
                         "return", "annualized_return", "excess_vs_benchmark", "baseline_return",
-                        "excess_vs_baseline", "max_drawdown", "sharpe", "turnover", "avg_gross",
-                        "zero_position_days", "size_tilt", "top_industry_weight", "orders", "trades",
-                        "win_rate", "top5_share_of_gains", "breakeven_extra_slippage_bps",
+                        "excess_vs_baseline", "max_drawdown", "sharpe", "turnover", "size_tilt",
+                        "top_industry_weight", "orders", "trades",
                     ],
                 )
                 self.assertEqual([year["label"] for year in row["by_year"]], ["Y1", "Y2", "Y3", "Y4"])
@@ -1413,7 +1419,7 @@ class BatchValidateRunTest(unittest.TestCase):
             self.assertLess(below["active"]["excess_at_cost_stress"], 0)
             self.assertGreater(above["active"]["excess_at_cost_stress"], 0)
             # A reading, not a condition: the node registers and is registered.
-            finished = session.finish.invoke({"node_id": below["node_id"]})
+            finished = session.finish.invoke({"node_id": _node_id(below)})
             self.assertTrue(finished.finish)
 
     def test_concentration_reads_the_best_year_against_the_rest_of_the_span(self) -> None:
@@ -1585,11 +1591,13 @@ class DailySeriesTest(unittest.TestCase):
             self.assertEqual(len(rows), 3)
             for row in rows:
                 # Beside the record result_ref names, as the description says.
-                self.assertEqual(row["result_ref"], f"{row['node_id']}/validation/result.json")
+                # The row names its node by handle; result_ref is the node's record.
+                self.assertTrue(row["result_ref"].endswith(f"__{row['handle']}/validation/result.json"))
+                self.assertEqual(session.tree.get_node(_node_id(row))["node_id"], _node_id(row))
                 path = session.tree.root / Path(row["result_ref"]).parent / "active_daily.csv"
                 frame = pd.read_csv(path, dtype={"trade_date": str})
                 self.assertEqual(tuple(frame.columns), ACTIVE_DAILY_COLUMNS)
-                result_ref = steps[row["node_id"]].validation.result_ref
+                result_ref = steps[_node_id(row)].validation.result_ref
                 sidecar = json.loads(
                     (Path(result_ref).parent / "style_analysis.json").read_text(
                         encoding="utf-8"
@@ -1619,7 +1627,7 @@ class DailySeriesTest(unittest.TestCase):
             [edge] = [row for row in full["candidates"] if row["name"] == "edge"]
             frame = pd.read_csv(session.tree.root / Path(edge["result_ref"]).parent / "active_daily.csv")
             sidecar = json.loads(
-                (Path(steps[edge["node_id"]].validation.result_ref).parent / "style_analysis.json")
+                (Path(steps[_node_id(edge)].validation.result_ref).parent / "style_analysis.json")
                 .read_text(encoding="utf-8")
             )
             drawdown = _max_slice_drawdown(active_analysis(sidecar), "", "")
@@ -1646,7 +1654,7 @@ class DailySeriesTest(unittest.TestCase):
                 atol=1e-9,
             )
             # The tree lists it beside the record, so an older node names it too.
-            node = session.tree.get_node(edge["node_id"])
+            node = session.tree.get_node(_node_id(edge))
             self.assertIn("validation/active_daily.csv", node["attachments"])
 
     def test_a_failed_validation_leaves_no_series(self) -> None:
@@ -1736,8 +1744,8 @@ class BatchValidateContractTest(unittest.TestCase):
         from autotrade.pipelines.session_tools import SmokeBacktestTool, TestTool
 
         limits = (
-            (ValidateTool.spec, 2_400),
-            (TestTool.spec, 1_700),
+            (ValidateTool.spec, 2_350),
+            (TestTool.spec, 1_400),
             (SmokeBacktestTool.spec, 900),
             (NullControlTool(SimpleNamespace(), max_calls=12).spec, 700),  # type: ignore[arg-type]
             (ModificationCheckTool.spec, 212),
@@ -1761,17 +1769,19 @@ class BatchValidateContractTest(unittest.TestCase):
         record = {
             "ok": True,
             "value": {
+                # A completed row names its node by handle, by node_id where
+                # the handle is shared; a failed row names none.
                 "candidates": [
-                    {"node_id": "n1", "revision_id": "r1", "stats": {"sharpe": 1.0}},
-                    {"node_id": "n2", "revision_id": "r2", "stats": {"sharpe": 2.0}},
-                    {"status": "failed", "error": "boom"},
+                    {"name": "a", "status": "ok", "handle": "valid_001"},
+                    {"name": "b", "status": "ok", "node_id": "n2"},
+                    {"name": "c", "status": "failed", "error": "boom"},
                 ]
             },
         }
         runner = AgentSessionRunner.__new__(AgentSessionRunner)
         runner._complete_validation_nodes = set()
         runner._record_complete_validations(record)
-        self.assertEqual(runner._complete_validation_nodes, {"n1", "n2"})
+        self.assertEqual(runner._complete_validation_nodes, {"valid_001", "n2"})
 
 
 class BatchTemplateFilesTest(unittest.TestCase):
@@ -1786,7 +1796,7 @@ class BatchTemplateFilesTest(unittest.TestCase):
             value = session.call("a", "b").value
             self.assertEqual(value["complete_validations"], 2)
             for row in value["candidates"]:
-                snapshot = session.tree.node_output_dir(row["node_id"])
+                snapshot = session.tree.node_output_dir(_node_id(row))
                 self.assertEqual(
                     (snapshot / "README.md").read_text(encoding="utf-8"), TEMPLATE_README
                 )
@@ -1940,7 +1950,7 @@ class NullControlToolTest(unittest.TestCase):
             session = _Session(Path(tmp))
             calls: list[dict[str, object]] = []
             session.evaluator.null_control = _canned_null(calls)
-            node = session.validate_one("n", _strategy("7"))["node_id"]
+            node = _node_id(session.validate_one("n", _strategy("7")))
             tool = NullControlTool(session.backtest, max_calls=2)
             first = tool.invoke({"node_id": node}).value
             self.assertEqual(
@@ -1966,8 +1976,8 @@ class NullControlToolTest(unittest.TestCase):
         with TemporaryDirectory() as tmp:
             session = _Session(Path(tmp))
             session.evaluator.null_control = _canned_null([])
-            first = session.validate_one("n1", _strategy("7"))["node_id"]
-            second = session.validate_one("n2", _strategy("2"))["node_id"]
+            first = _node_id(session.validate_one("n1", _strategy("7")))
+            second = _node_id(session.validate_one("n2", _strategy("2")))
             tool = NullControlTool(session.backtest, max_calls=1)
             with self.assertRaises(ToolError) as refused:
                 tool.invoke({"node_id": "not_a_node"})
@@ -1994,7 +2004,7 @@ class NullControlToolTest(unittest.TestCase):
                 raise RuntimeError("no replacement name for 000001.SZ entered 20220104")
 
             session.evaluator.null_control = boom
-            node = session.validate_one("n", _strategy("7"))["node_id"]
+            node = _node_id(session.validate_one("n", _strategy("7")))
             tool = NullControlTool(session.backtest, max_calls=1)
             with self.assertRaises(ToolError) as failed:
                 tool.invoke({"node_id": node})
@@ -2022,7 +2032,7 @@ class NullControlToolTest(unittest.TestCase):
                 )
 
             session.evaluator.null_control = unresolved
-            node = session.validate_one("n", _strategy("7"))["node_id"]
+            node = _node_id(session.validate_one("n", _strategy("7")))
             tool = NullControlTool(session.backtest, max_calls=1)
             with self.assertRaises(ToolError) as refused:
                 tool.invoke({"node_id": node})
@@ -2072,7 +2082,7 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
             session.candidate("a", _strategy("1"))
             session.candidate("b", _strategy("22"))
             result = session.call("a", "b")
-            nodes = [row["node_id"] for row in result.value["candidates"]]
+            nodes = [_node_id(row) for row in result.value["candidates"]]
             published = json.loads((experiment / "steps" / "tree.json").read_text(encoding="utf-8"))
             self.assertEqual([node["node_id"] for node in published["nodes"]], nodes)
             self.assertTrue(all((experiment / "steps" / node / "output" / "main.py").is_file() for node in nodes))

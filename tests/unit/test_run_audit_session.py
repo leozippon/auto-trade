@@ -56,7 +56,7 @@ def _options(tmp_path: Path, **overrides: object) -> SimpleNamespace:
             compaction=object(),
             compaction_for=lambda role: object(),
             build_gateway=lambda role, **kwargs: object(),
-            max_tokens_for=lambda role: 4096,
+            max_tokens_for=lambda role: {"main": 128_000, "subagent": 384_000}[role],
         ),
         agent_sandbox=SandboxSpec(image="audit-image:test"),
         data_backend="daily",
@@ -229,6 +229,9 @@ def test_the_assembled_session_mounts_the_image_refs_and_memory_it_was_given(
     assert developer["workspace_reference"] == "configs/workspace_refs/pack"
     assert developer["skill_library"] == "curated"
     assert developer["repo_root"] == tmp_path
+    # The parent and its children each ask for their own model's longest reply.
+    assert developer["max_response_tokens"] == 128_000
+    assert developer["subagent_max_response_tokens"] == 384_000
 
 
 def test_the_pipeline_uses_the_experiments_own_pit_view_seed(

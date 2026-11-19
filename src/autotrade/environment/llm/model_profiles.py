@@ -43,8 +43,14 @@ class ModelProfile:
     # List prices the session's API spend cap charges (``pricing``); FREE
     # only for the locally served model.
     prices: TokenPrices
+    # The longest reply one request may ask for, thinking tokens included:
+    # the model's own maximum, unless a comment at the profile says
+    # otherwise. A research session's conversations ask for exactly this
+    # (``worker.LLMWorkerSettings.max_tokens_for``), so the host never cuts a
+    # long answer short of what the model can give; the gateway lowers it per
+    # request to what the window leaves beside the prompt.
+    max_output_tokens: int
     context_window_tokens: int | None = None
-    max_output_tokens: int | None = None
     # Whether the output counts against ``context_window_tokens``: True where
     # the engine bounds prompt plus output by the window (the OpenAI-style
     # Responses and Chat models, DeepSeek, MiMo, the local vLLM), False where
@@ -75,7 +81,12 @@ _VLLM_PROFILE = ModelProfile(
     request_dialect="vllm-qwen",
     prices=FREE,
     context_window_tokens=262_144,
-    max_output_tokens=262_144,
+    # The host's choice, not the model's: vLLM bounds prompt plus output by
+    # the window and sets no output ceiling of its own, so the model's
+    # maximum reply is the whole window, which would leave no room for a
+    # prompt. 65,536 keeps 262,144 − 65,536 − 8,192 = 188,416 tokens for the
+    # conversation before it compacts (``worker.COMPACTION_SAFETY_MARGIN_TOKENS``).
+    max_output_tokens=65_536,
 )
 _MIMO_FLASH_PROFILE = ModelProfile(
     provider="mimo",
@@ -124,15 +135,17 @@ _PROFILES = (
     *_LIGHTING_PROFILES.values(),
 )
 
-# Smallest declared window in the catalog. A component that must pick a
-# window-dependent default before the run's model roles are known (the
-# compaction threshold) bounds itself here; the worker replaces it with the
-# exact per-role bound once the roles are resolved.
-MIN_CONTEXT_WINDOW_TOKENS = min(
-    profile.context_window_tokens
-    for profile in _PROFILES
-    if profile.context_window_tokens is not None
+# The catalog model with the narrowest window (the local Qwen). A session
+# assembled without the worker's per-role settings (tests) knows no model, so
+# it takes this one's reply limit and a compaction threshold derived from its
+# window; the worker replaces both with each role's own once the roles are
+# resolved.
+_NARROWEST_PROFILE = min(
+    (profile for profile in _PROFILES if profile.context_window_tokens is not None),
+    key=lambda profile: cast(int, profile.context_window_tokens),
 )
+MIN_CONTEXT_WINDOW_TOKENS = cast(int, _NARROWEST_PROFILE.context_window_tokens)
+MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS = _NARROWEST_PROFILE.max_output_tokens
 
 # Transient provider failures (HTTP 429/500/503, transport timeouts, an empty
 # or cut-off stream) are retried until the logical call's hard deadline, with
@@ -140,17 +153,6 @@ MIN_CONTEXT_WINDOW_TOKENS = min(
 # ``RETRY_BACKOFF_CAP_SECONDS``. The context-overflow shrink path is not a
 # transient error and never waits.
 DEFAULT_LLM_RETRY_BACKOFF_SECONDS = 2.0
-
-# Completion-token ceiling for the research-session parent conversation and its
-# sub-agents (thinking tokens included): the single default for both; the
-# console-managed ``llm_max_response_tokens`` is the only override. Observed
-# calls pool around 1.4k tokens with p90 ≈ 4k, and the earlier 12k cap still cut
-# 1-3 turns per session; a truncated thinking block loses the whole answer, so
-# the ceiling is the practical per-turn maximum the window leaves next to
-# the compaction threshold. A turn that spends it all on reasoning costs
-# ~15 min at 25-40 tok/s — the accepted price of not cutting a long answer.
-# compact and analysis keep their own budgets.
-AGENT_MAX_OUTPUT_TOKENS = 32_768
 
 
 # An experiment's ``llm_key``: which relay credential its calls start on
@@ -208,13 +210,16 @@ def token_prices(provider: str, model: str) -> TokenPrices:
     return model_profile(model).prices
 
 
-def effective_max_output_tokens(model: str, requested: int) -> int:
-    """Apply the trusted model profile's per-generation output ceiling."""
+def effective_max_output_tokens(model: str, requested: int | None) -> int:
+    """Apply the trusted model profile's per-generation output ceiling; None
+    asks for the ceiling itself."""
 
+    limit = model_profile(model).max_output_tokens
+    if requested is None:
+        return limit
     if isinstance(requested, bool) or not isinstance(requested, int) or requested <= 0:
         raise ValueError("requested output tokens must be a positive integer")
-    limit = model_profile(model).max_output_tokens
-    return min(requested, limit) if limit is not None else requested
+    return min(requested, limit)
 
 
 def build_model_gateway(
@@ -313,7 +318,6 @@ def build_model_gateway(
 
 
 __all__ = [
-    "AGENT_MAX_OUTPUT_TOKENS",
     "DEEPSEEK_FLASH_MODEL",
     "DEFAULT_LLM_RETRY_BACKOFF_SECONDS",
     "LLM_KEYS",
@@ -321,6 +325,7 @@ __all__ = [
     "MIMO_FLASH_MODEL",
     "MIMO_MODELS",
     "MIMO_PRO_MODEL",
+    "MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS",
     "MIN_CONTEXT_WINDOW_TOKENS",
     "MODEL_CHOICES",
     "ModelProfile",

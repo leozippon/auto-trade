@@ -197,7 +197,7 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
     block = benchmark_summary_block(payload)
     assert block["top_industry_weight"] == 0.75
     # What a validate row's book carries of it.
-    visible = book_reading({}, {"total_return": 0.1, "benchmark": block})
+    visible = book_reading({}, {"total_return": 0.1, "benchmark": block}, detail=False)
     assert visible["top_industry_weight"] == 0.75
     assert "size_tilt" in visible
 

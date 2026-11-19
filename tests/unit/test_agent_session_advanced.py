@@ -452,9 +452,11 @@ def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_
         for message in call["messages"]
         if message.role == "user" and "context_notice" in (message.content or "")
     )
-    assert observation["observation"] == "context_notice" and "compact(summary=...)" in observation["message"]
-    # The writer is told the limit its summary is cut at.
-    assert f"摘要不超过 {COMPACT_SUMMARY_MAX_CHARS} 字符" in observation["message"]
+    # What the summary holds is the compact description's; the notice says when.
+    assert observation["observation"] == "context_notice" and "调用 compact" in observation["message"]
+    # The writer is told the limit its summary is cut at, once, by the tool.
+    assert f"-{COMPACT_SUMMARY_MAX_CHARS} characters" in CompactTool.spec.description
+    assert str(COMPACT_SUMMARY_MAX_CHARS) not in observation["message"]
 
 
 def test_a_runtime_compaction_updates_the_agents_own_summary(tmp_path: Path):
@@ -1446,7 +1448,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     reference = Path("configs/agent_output_template/README.md").read_text(encoding="utf-8")
     for rule in (
         "def generate_orders(context):",
-        "## Strict JSON order array",
+        "## Orders",
         "The fixed inference time controls when the strategy runs",
         "`context.bars` is an evaluation-interval market surface, not the complete strategy input history",
     ):
@@ -1468,9 +1470,9 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         ref_store=AgentRefStore(tmp_path / "experiment"),
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
-    assert facts["visibility_policy"]["visible_research_period"] is True
-    # The hidden periods are the prompt's process section, stated once.
-    assert "after_the_research_years" not in facts["visibility_policy"]
+    # The data view is the run section's and the hidden periods the prompt's
+    # process section, each stated once; the facts carry no visibility policy.
+    assert "visibility_policy" not in facts
     assert "读数不回到会话" in prompt
 
 

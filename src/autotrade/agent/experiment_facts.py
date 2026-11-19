@@ -3,9 +3,11 @@
 ``build_experiment_facts`` is the visibility contract for what a research
 session may know about its own run (budgets, snapshot windows, broker replay
 policy, artifact contract, runtime tools). Pure data shaping —
-the prompt text that wraps it lives in ``prompts.py``. The facts hold values
-and structured definitions; a rule the system prompt or a tool description
-already states is not repeated here as prose.
+the prompt text that wraps it lives in ``prompts.py``. The facts hold this
+experiment's values, identifiers and structured definitions; a rule the
+system prompt, a tool description or the contract README already states is
+not repeated here, and neither is a value another key, the Step tree or the
+resume message already carries.
 """
 
 from __future__ import annotations
@@ -18,12 +20,11 @@ from autotrade.environment.dividend_tax import (
     DIVIDEND_TAX_CUTOVER,
     NEW_RULE,
     OLD_RULE,
+    DividendTaxRule,
 )
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import regression_method
 from autotrade.environment.sandbox import SCREENING_TOOL_MOUNT
-
-EXPERIMENT_FACTS_SCHEMA_VERSION = 2
 
 # ``runtime_tools.sandbox_gpus`` of a Sandbox without cards; the prompt's
 # orientation reads the same fact (``prompts.build_system_prompt``).
@@ -82,19 +83,14 @@ def build_experiment_facts(
     benchmark_index = str(manifest["benchmark_index"])
 
     facts: dict[str, object] = {
+        # The experiment and this attempt's run. The session's own ref is not
+        # repeated: every node id the session reads carries it.
         "identity": compact_mapping(
             {
-                "facts_schema_version": EXPERIMENT_FACTS_SCHEMA_VERSION,
                 "experiment_id": manifest.get("experiment_id"),
                 "run_id": (
                     ref_store.get_or_create("run", str(manifest["run_id"]))
                     if manifest.get("run_id")
-                    else None
-                ),
-                "session_kind": manifest.get("kind"),
-                "session_ref": (
-                    ref_store.get_or_create("session", str(manifest["fold_id"]))
-                    if manifest.get("fold_id")
                     else None
                 ),
             }
@@ -124,18 +120,13 @@ def build_experiment_facts(
                 else None
             ),
         },
-        "visibility_policy": {
-            "visible_research_period": True,
-            "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
-        },
+        # No visibility policy (the run section states the data view, the
+        # contract README the strategy's read roots) and no count of earlier
+        # Validations (the Step tree holds them).
         "research_geometry": _research_geometry(manifest),
         "visible_timeline": _visible_timeline(
             data_summary=data_summary, snapshot_config=snapshot_config
         ),
-        # The experiment's state at session start: nothing registered yet, and the
-        # Validations earlier attempts recorded. ``False`` and zero counts are
-        # facts, not absences.
-        "experiment": dict(_as_mapping(manifest.get("experiment"))) or None,
         "budgets": _budget_facts(
             manifest,
             max_llm_calls=max_llm_calls,
@@ -167,13 +158,19 @@ def _research_geometry(manifest: Mapping[str, object]) -> dict[str, object] | No
     """The manifest's research geometry with the research years alone in
     ``years``: the validation years reach the session as
     ``validation_period`` and through ``test``, and the manifest keeps every
-    year because the acceptance facts count the validation years off it."""
+    year because the acceptance facts count the validation years off it.
+    Each year keeps its label and dates; the view its replay starts from
+    (``input_window``) follows from the snapshot windows and history floors."""
 
     geometry = _as_mapping(manifest.get("research"))
     if not geometry:
         return None
     research_end = str(geometry["research_period"]).split("..")[1]
-    years = [year for year in _as_list(geometry.get("years")) if str(_as_mapping(year)["end"]) <= research_end]
+    years = [
+        {key: value for key, value in _as_mapping(year).items() if key != "input_window"}
+        for year in _as_list(geometry.get("years"))
+        if str(_as_mapping(year)["end"]) <= research_end
+    ]
     return {**geometry, "years": years}
 
 
@@ -285,9 +282,9 @@ def _budget_facts(
             # the authoritative device fact: a per-session GPU override moves
             # only the session's own container, never this number.
             "strategy_gpu_count": budgets.get("strategy_gpu_count"),
-            # The totals above are the experiment's, spent across every attempt of
-            # its one session; what earlier attempts already used of them.
-            "used_before_this_attempt": budgets.get("used_before_this_attempt"),
+            # The totals above are the experiment's, spent across every attempt
+            # of its one session; what earlier attempts used of them is the
+            # resumed attempt's opening message (``prompts.RESUME_INSTRUCTION``).
             # CPU quota that same container is started with, from which its
             # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read
             # from the run manifest, which carries the evaluator's own
@@ -366,6 +363,33 @@ def _artifact_contract_facts(
     )
 
 
+def _dividend_tax_rule_text(rule: DividendTaxRule, record_dates: str) -> str:
+    tiers = ", ".join(
+        f"{rate:.0%} {'if held ' if index == 0 else ''}at most {months} month{'' if months == 1 else 's'}"
+        for index, (months, rate) in enumerate(rule.tiers)
+    )
+    return (
+        f"{record_dates}: {rule.withholding_rate:.0%} withheld on the ex date, "
+        f"final rate {tiers}, {rule.rate_beyond:.0%} beyond"
+    )
+
+
+# The Broker's dividend tax (``environment.dividend_tax``) in one sentence,
+# from the same constants.
+DIVIDEND_TAX_POLICY = (
+    "charged; the dividend's record date picks the rule: "
+    + "; ".join(
+        (
+            _dividend_tax_rule_text(OLD_RULE, f"2013 to before {DIVIDEND_TAX_CUTOVER}"),
+            _dividend_tax_rule_text(NEW_RULE, f"from {DIVIDEND_TAX_CUTOVER}"),
+        )
+    )
+    + ". A FIFO sale pays the final rate minus the withheld one, held from acquisition through "
+    "the day before the sale in calendar months; taxable per share = cash dividend + bonus "
+    f"shares x {BONUS_SHARE_PAR_CNY:g} CNY par; bonus shares keep their acquisition date; "
+    "conversions are not income"
+)
+
 # What ``BrokerProfile.permitted_boards`` means for the Agent, stated beside the
 # boards on an experiment whose account carries them.
 PERMITTED_BOARDS_RULE = (
@@ -394,32 +418,7 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
                 }
             ),
             "slippage_bps": profile.get("slippage_bps"),
-            "dividend_tax_policy": (
-                {
-                    "charged": True,
-                    "charged_at": "old_rule_withholding_on_ex_date_then_fifo_sale_supplement",
-                    "regime_selected_by": "dividend_record_date_not_ex_date_or_sale_date",
-                    "record_date_cutover": DIVIDEND_TAX_CUTOVER,
-                    "holding_period": "acquisition_through_day_before_sale_natural_months_and_years",
-                    "taxable_income_per_share": "gross_cash_dividend_plus_bonus_shares_times_par",
-                    "bonus_share_par_cny": BONUS_SHARE_PAR_CNY,
-                    "rules": {
-                        rule.key: {
-                            "record_dates": "before_cutover_since_2013" if rule == OLD_RULE else "from_cutover",
-                            "withholding_rate": rule.withholding_rate,
-                            "final_rate_by_months_held_at_most": {
-                                str(months): rate for months, rate in rule.tiers
-                            },
-                            "final_rate_beyond": rule.rate_beyond,
-                            "sale_supplement": "final_rate_minus_withholding_rate",
-                        }
-                        for rule in (OLD_RULE, NEW_RULE)
-                    },
-                    "conventions": "ex_date_cash_settlement_bonus_shares_keep_original_acquisition_date_conversions_not_income",
-                }
-                if profile["dividend_tax"]
-                else {"charged": False}
-            ),
+            "dividend_tax_policy": DIVIDEND_TAX_POLICY if profile["dividend_tax"] else "not charged",
             # Only where the profile pins them: an account without the field
             # buys on every board, and its facts say nothing new.
             "permitted_boards": (

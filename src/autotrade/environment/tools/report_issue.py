@@ -98,17 +98,11 @@ def append_issue_resolution(
 class ReportIssueTool:
     spec = ToolSpec(
         "report_issue",
-        "Report a suspected defect in the environment, a trusted tool's output, "
-        "the mounted data, or the mounted documentation to the human operators. "
-        "category is tool_output (a trusted tool or command returned something "
-        "misleading or malformed), environment (sandbox/replay/timeout/"
-        "infrastructure behavior), data (PIT data, field or unit surprises), "
-        "docs (mounted docs or reference text wrong or misleading), or other. "
-        "summary states the issue in one or two sentences; evidence gives the "
-        "concrete reproduction: what was run or read, expected vs observed, "
-        "workspace-relative paths. Host-side telemetry only: it changes no "
-        "artifact, budget, or result, is never read back by any session, and is "
-        "not a research-notes or results channel. At most "
+        "Report a suspected defect in the environment, a tool's output, the "
+        "mounted data or documentation to the operators: summary in one or two "
+        "sentences, evidence the concrete reproduction (what was run or read, "
+        "expected vs observed, workspace-relative paths). Only operators read it; "
+        "it changes nothing in the session and is no notes channel. At most "
         f"{MAX_ISSUE_REPORTS_PER_SESSION} reports per session.",
         {
             "type": "object",

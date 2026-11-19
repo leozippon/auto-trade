@@ -21,9 +21,8 @@ from autotrade.environment.step_tree import (
 from .base import ToolError
 
 NODE_REFERENCE_DESCRIPTION = (
-    "A Step node of this session: its full node_id, or its short handle "
-    "(valid_002 -- the result name that batch rows, the Step tree and these "
-    "tools show beside the id) wherever no other node of the session shares it."
+    "A Step node of this session: its node_id or, where no other node of the "
+    "session shares it, its short handle (e.g. valid_002)."
 )
 NODE_REFERENCE_EXAMPLE = "valid_002"
 

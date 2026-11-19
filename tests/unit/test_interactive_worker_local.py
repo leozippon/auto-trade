@@ -17,10 +17,14 @@ import pytest
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     LOCAL_QWEN_MODEL,
+    MODEL_CHOICES,
+    ChatMessage,
+    LLMProxyError,
     OpenAICompatibleProxy,
     ProviderResponse,
     ScriptedLLM,
     ToolCall,
+    model_profile,
 )
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import CommandResult
@@ -407,7 +411,9 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     assert isinstance(subagent, OpenAICompatibleProxy)
     assert subagent.provider == "deepseek"
     assert subagent.model == "deepseek-flash"
-    assert main.config.max_tokens == 32_768
+    # Each role asks for its own model's longest reply.
+    assert main.config.max_tokens == model_profile(LOCAL_QWEN_MODEL).max_output_tokens == 65_536
+    assert subagent.config.max_tokens == model_profile("deepseek-flash").max_output_tokens == 393_216
     assert main.config.timeout_seconds == 120
     assert main.config.reasoning_effort == "xhigh"
     with pytest.raises(ValueError, match="unknown model role: meta"):
@@ -435,26 +441,77 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     options = load_worker_options(experiment, repo_root=repo)
     assert options.llm is not None
     assert options.llm.compaction.max_response_tokens == 20_000
-    assert options.llm.max_tokens_for("main") == 32_768
+    local_limit = model_profile(LOCAL_QWEN_MODEL).max_output_tokens
+    assert options.llm.max_tokens_for("main") == local_limit
     assert options.llm.max_tokens_for("subagent", requested=1_200) == 1_200
     assert options.llm.max_tokens_for("subagent", requested=20_000) == 20_000
+    # A request past the model's own maximum is held to it.
+    assert options.llm.max_tokens_for("subagent", requested=local_limit + 1) == local_limit
     for role in ("main", "subagent"):
-        assert options.llm.build_gateway(role).config.max_tokens == 32_768
+        assert options.llm.build_gateway(role).config.max_tokens == local_limit
     assert options.llm.build_gateway("compact").config.max_tokens == 20_000
+
+
+def test_every_catalog_model_asks_for_its_own_longest_reply_and_compacts_before_it(
+    tmp_path: Path,
+) -> None:
+    """The host sets no reply limit of its own: a conversation on any catalog
+    model sends that model's profile maximum in the dialect's output field,
+    and the threshold derived for it still leaves that whole reply and the
+    margin inside the window."""
+    from dataclasses import replace
+
+    from autotrade.pipelines.worker import (
+        COMPACTION_SAFETY_MARGIN_TOKENS,
+        resolve_worker_options,
+    )
+
+    class Capture:
+        def __init__(self) -> None:
+            self.bodies: list[dict[str, object]] = []
+
+        def post(self, url, headers, body, timeout):
+            self.bodies.append(json.loads(body))
+            raise LLMProxyError("captured", retryable=False)
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
+    params["compact_token_threshold"] = None
+    for model in MODEL_CHOICES:
+        profile = model_profile(model)
+        roles = {"model": model, "subagent_model": model, "compact_model": model}
+        settings = resolve_worker_options(
+            {**params, **roles}, experiment_dir=experiment, repo_root=repo, preflight=True
+        ).llm
+        assert settings.max_tokens_for("main") == settings.max_tokens_for("subagent")
+        assert settings.max_tokens_for("main") == profile.max_output_tokens != 32_768
+        gateway = settings.build_gateway("main", require_credentials=False)
+        capture = Capture()
+        probe = type(gateway)(replace(gateway.config, conversation_log_dir=None), transport=capture)
+        with pytest.raises(LLMProxyError, match="captured"):
+            probe.complete([ChatMessage("user", "hi")], max_tokens=settings.max_tokens_for("main"))
+        field = {"openai-responses": "max_output_tokens", "mimo": "max_completion_tokens"}.get(
+            profile.request_dialect, "max_tokens"
+        )
+        assert capture.bodies[0][field] == profile.max_output_tokens, model
+        reply = profile.max_output_tokens if profile.output_shares_context_window else 0
+        for role in ("main", "subagent"):
+            threshold = settings.compaction_for(role).token_threshold
+            assert threshold + reply + COMPACTION_SAFETY_MARGIN_TOKENS <= profile.context_window_tokens, model
 
 
 def test_worker_derives_the_compaction_threshold_from_the_model_context(
     tmp_path: Path,
     monkeypatch,
 ):
-    """The default threshold is window − output ceiling − margin, and a
-    configured value above that same bound is refused, not clamped."""
-    from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
+    """The default threshold is window − the model's longest reply − margin,
+    and a configured value above that same bound is refused, not clamped."""
     from autotrade.pipelines.worker import COMPACTION_SAFETY_MARGIN_TOKENS
 
     assert COMPACTION_SAFETY_MARGIN_TOKENS == 8_192
-    derived = 262_144 - AGENT_MAX_OUTPUT_TOKENS - COMPACTION_SAFETY_MARGIN_TOKENS
-    assert derived == 221_184
+    reply = model_profile(LOCAL_QWEN_MODEL).max_output_tokens
+    derived = 262_144 - reply - COMPACTION_SAFETY_MARGIN_TOKENS
+    assert derived == 188_416
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
@@ -472,7 +529,7 @@ def test_worker_derives_the_compaction_threshold_from_the_model_context(
     params["compact_token_threshold"] = 300_000
     path.write_text(json.dumps(params), encoding="utf-8")
     with pytest.raises(
-        ValueError, match=r"compact_token_threshold 300,000 exceeds the \w+ conversation's bound 221,184"
+        ValueError, match=r"compact_token_threshold 300,000 exceeds the \w+ conversation's bound 188,416"
     ):
         load_worker_options(experiment, repo_root=repo)
     params["compact_token_threshold"] = derived
@@ -481,11 +538,14 @@ def test_worker_derives_the_compaction_threshold_from_the_model_context(
     params["compact_token_threshold"] = 90_000
     path.write_text(json.dumps(params), encoding="utf-8")
     assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == 90_000
-    # A larger output ceiling lowers the derived threshold by the same amount.
+    # A host cap below the model's maximum shortens the reply and raises the
+    # derived threshold by the same amount.
     params["compact_token_threshold"] = None
-    params["llm_max_response_tokens"] = AGENT_MAX_OUTPUT_TOKENS + 1_000
+    params["llm_max_response_tokens"] = reply - 1_000
     path.write_text(json.dumps(params), encoding="utf-8")
-    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == derived - 1_000
+    capped = load_worker_options(experiment, repo_root=repo).llm
+    assert capped.max_tokens_for("main") == reply - 1_000
+    assert capped.compaction.token_threshold == derived + 1_000
 
 
 def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
@@ -503,14 +563,14 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
-    # 1,048,576 − 32,768 output ceiling − 8,192 margin: shipped defaults launch.
-    assert options.llm.compaction.token_threshold == 1_007_616
+    # 1,048,576 − 393,216 longest reply − 8,192 margin: shipped defaults launch.
+    assert options.llm.compaction.token_threshold == 647_168
     # A file without the key reads the parameter's one default, the null a
     # console create stamps, so it derives the same bound.
     assert WEB_CREATE_DEFAULTS["compact_token_threshold"] is None
     params.pop("compact_token_threshold")
     path.write_text(json.dumps(params), encoding="utf-8")
-    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == 1_007_616
+    assert load_worker_options(experiment, repo_root=repo).llm.compaction.token_threshold == 647_168
     params["disable_context_compact"] = True
     path.write_text(json.dumps(params), encoding="utf-8")
     disabled = load_worker_options(experiment, repo_root=repo)
@@ -544,16 +604,20 @@ def test_a_console_default_experiment_compacts_gpt6_astra_at_its_maximum(
         "DeepSeek-V4.1-Flash",
         "DeepSeek-V4.1-Flash",
     )
-    # 1,000,000 − 32,768 output − 8,192 margin for both conversation roles,
-    # below the DeepSeek compaction model's 1,000,000 − 10,000 − 8,192.
-    assert settings.compaction.token_threshold == 959_040
-    assert settings.compaction_for("subagent").token_threshold == 959_040
-    # A lower stated threshold applies; one past the bound is refused.
-    assert load(compact_token_threshold=500_000).compaction.token_threshold == 500_000
+    # Each conversation role's window less its model's longest reply and the
+    # 8,192 margin, below the DeepSeek compaction model's 1,000,000 − 10,000 −
+    # 8,192: 1,000,000 − 128,000 for gpt-6-astra, − 384,000 for the sub-agents.
+    assert settings.compaction.token_threshold == 863_808
+    assert settings.compaction_for("subagent").token_threshold == 607_808
+    # A lower stated threshold applies to both; one past the narrower bound is
+    # refused.
+    stated = load(compact_token_threshold=500_000)
+    assert stated.compaction.token_threshold == 500_000
+    assert stated.compaction_for("subagent").token_threshold == 500_000
     with pytest.raises(
-        ValueError, match=r"compact_token_threshold 959,041 exceeds the \w+ conversation's bound 959,040"
+        ValueError, match=r"compact_token_threshold 607,809 exceeds the subagent conversation's bound 607,808"
     ):
-        load(compact_token_threshold=959_041)
+        load(compact_token_threshold=607_809)
     # Compaction may be switched off on gpt-6-astra like on any other model.
     assert load(compact_token_threshold=None, disable_context_compact=True).compact_enabled is False
 
@@ -634,30 +698,32 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     assert isinstance(child, OpenAICompatibleProxy)
     assert (child.provider, child.model) == ("vllm", LOCAL_QWEN_MODEL)
     assert child.config.thinking_enabled and child.config.reasoning_effort == "xhigh"
-    assert child.config.max_tokens == 32_768
+    # The child asks for its own model's longest reply, not the parent's.
+    assert child.config.max_tokens == 65_536
+    assert settings.max_tokens_for("main") == 393_216
     assert settings.build_gateway("main").provider == "deepseek"
     # The local compaction model reads the whole parent conversation:
     # 262,144 − 1,600 − 8,192 bounds the DeepSeek parent; the children
-    # compact at their own Qwen bound 262,144 − 32,768 − 8,192.
+    # compact at their own Qwen bound 262,144 − 65,536 − 8,192.
     assert settings.compaction.token_threshold == 252_352
     assert settings.compaction_for("main") == settings.compaction
-    assert settings.compaction_for("subagent").token_threshold == 221_184
+    assert settings.compaction_for("subagent").token_threshold == 188_416
     with pytest.raises(ValueError, match="unknown conversation role"):
         settings.compaction_for("compact")
     # With a DeepSeek compaction model the parent compacts at its own bound
-    # 1,048,576 − 32,768 − 8,192.
+    # 1,048,576 − 393,216 − 8,192.
     settings = settings_for(compact_model="deepseek-flash")
-    assert settings.compaction.token_threshold == 1_007_616
-    assert settings.compaction_for("subagent").token_threshold == 221_184
+    assert settings.compaction.token_threshold == 647_168
+    assert settings.compaction_for("subagent").token_threshold == 188_416
     # A stated threshold holds for every conversation role, so it is refused
     # past the narrowest role's bound and applies to both below it.
     with pytest.raises(
-        ValueError, match=r"compact_token_threshold 230,000 exceeds the subagent conversation's bound 221,184"
+        ValueError, match=r"compact_token_threshold 200,000 exceeds the subagent conversation's bound 188,416"
     ):
-        settings_for(compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=230_000)
-    settings = settings_for(compact_token_threshold=200_000)
-    assert settings.compaction.token_threshold == 200_000
-    assert settings.compaction_for("subagent").token_threshold == 200_000
+        settings_for(compact_model=LOCAL_QWEN_MODEL, compact_token_threshold=200_000)
+    settings = settings_for(compact_token_threshold=180_000)
+    assert settings.compaction.token_threshold == 180_000
+    assert settings.compaction_for("subagent").token_threshold == 180_000
     settings_for(compact_token_threshold=None)
     # Every gateway is validated at create preflight without credentials.
     monkeypatch.delenv("DEEPSEEK_API_KEY")
@@ -911,7 +977,8 @@ class _NominatingLLM(ScriptedLLM):
         ):
             return response
         rows = re.findall(
-            r'"name":\s*"working_copy".*?"node_id":\s*"([^"]+)"',
+            # A completed row names its node by handle (node_id where shared).
+            r'"name":\s*"working_copy".*?"(?:handle|node_id)":\s*"([^"]+)"',
             "\n".join(message.content or "" for message in messages),
             flags=re.DOTALL,
         )

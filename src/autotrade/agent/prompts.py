@@ -16,16 +16,18 @@ work is read, the boundaries no instruction relaxes and how to work in the
 harness, each rule stated once. It carries what the harness enforces, what
 the Agent cannot find out itself, and the owner's research orientation (the
 ambition and depth expected, research through the validation period as well
-as the research years, the strategy timeouts as guards rather than allowances
-and, on a Sandbox with cards, what the cards are for; not a method) and, in the
-working method, what a replay keeps from one decision day to the next; what a tool's
-parameter, limit or returned field means is the tool's description and
-schema, the strategy contract is ``output/README.md``, the run's values are
-the facts JSON, and how to research within that orientation is the Agent's
-own call. The dynamic part is the environment block: the run's dates, steps,
-threshold, validate allowance and session budgets generated from the run facts
-(:func:`build_run_section`), the facts themselves behind an index of their
-keys, then the experiment's direction and the researcher's directive.
+as the research years, the strategy timeouts as guards rather than allowances,
+replay wall clock as no reason to shrink a model and, on a Sandbox with cards,
+what the cards are for; not a method). The working method points where the
+rest lives instead of restating it: what a tool's parameter, limit or
+returned field means is the tool's description and schema, every
+strategy-side mechanic (what persists between calls, days and replays
+included) is ``output/README.md``, measured facts are the skills, the run's
+values are the facts JSON, and how to research within that orientation is the
+Agent's own call. The dynamic part is the environment block: the run's dates,
+steps, threshold, validate allowance and session budgets generated from the
+run facts (:func:`build_run_section`), the facts themselves as compact JSON,
+then the experiment's direction and the researcher's directive.
 Rendered copies for human audit are exported by ``scripts/dev/export_prompts.py``
 into ``configs/prompts/PROMPTS.md``.
 """
@@ -43,10 +45,9 @@ SESSION_PREAMBLE = """\
 
 SESSION_PROCESS_SECTION = """\
 # 会话怎样推进
-- 你能读到的数据止于研究年末，整个会话不变；验证期的数据不挂载，只随每次 `test` 的结果揭开一步。
 - 研究：写候选，用 `validate` 回测。方向来自参考工作区（`refs/`）与「环境」里注入的方向。
 - 测试：`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录，测试终点前进一步，`validate` 的次数重新计。
-- 两次 `test` 之间是一段研究：已揭开的步是样本外读数，全段 `validate` 的结果附带候选在这些步上的读数，`span: "revealed"` 只回放这些步。据此改进现有候选或开发全新的策略，让每一步都由当时最好的候选记入；按这些读数选择、更换候选是正当的：已记入记录的条目不改写，定版后还有 Forward 与 Held-out 检验。换候选只花一次回放。
+- 两次 `test` 之间是一段研究：已揭开的步是样本外读数。据此改进现有候选或开发全新的策略，让每一步都由当时最好的候选记入；按这些读数选择、更换候选是正当的：已记入记录的条目不改写，定版后还有 Forward 与 Held-out 检验。
 - 结束：最后一步测完会话结束，最后测试的候选定版。会话不能主动结束；预算耗尽时宿主用最后测试的候选跑完剩余的步，还没测试过时用最后一个满足登记条件的完整研究年候选，没有则不定版。
 - 之后：宿主在会话从未见过的数据上运行 Forward 与 Held-out，读数不回到会话；是否进入 Paper 由运营者决定。定版后再没有 Agent 改它，需要随时间调整的部分写进策略自己的 `fit` 与 `REFIT_PERIOD`。\
 """
@@ -79,9 +80,9 @@ SESSION_GPU_ORIENTATION_BULLET = (
 # allowance and priced a daily fit at 1,701 times the limit, so the bullet says
 # they are neither an allowance nor a target.
 SESSION_BUDGET_ORIENTATION_BULLET = (
-    "- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 {inference}，"
-    "每次 `fit` 至少 {fit}（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
-    "它们只拦下失控的调用，不是每天的额度，也不是目标；不必为省时间简化方法，复杂度由研究需要决定。"
+    "- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 {inference}，每次 `fit` 至少 {fit}"
+    "（`budgets` 的两项）。它们只拦下失控的调用，不是每天的额度或目标；"
+    "不必为省时间简化方法，复杂度由研究需要决定。"
 )
 
 SESSION_READINGS_SECTION = """\
@@ -107,14 +108,20 @@ FILE_PATH_RULE = '文件工具按根名加相对路径寻址（如 `{"root": "wo
 SHELL_PATH_RULE = "`shell` 在工作区目录里按字面路径运行，脚本路径不带 `workspace/` 前缀"
 PATH_RULES_BULLET = f"- {FILE_PATH_RULE}；{SHELL_PATH_RULE}。"
 
+# The working method points instead of restating: the contract README owns
+# every strategy-side mechanic, the skills the measured facts. Its second
+# bullet keeps the one orientation clause about replay speed (sessions shrank
+# their models to shorten replays no budget charges) and points, prominently,
+# at what persists between calls, days and replays, which the owner asked the
+# sessions to be made aware of (2026-11-16).
 SESSION_WORKFLOW_SECTION = f"""\
 # 工作方式
-- 策略合同（入口、`context`、订单、允许的库与模型库）在只读的 `output/README.md`。只有 `output/`（以 `main.py` 为入口的包）和 `models/` 随策略回测与定版；策略任一次超时或报错都让整场回测失败。
-- 策略代码要高效：截面计算向量化；一场回放里 `fit` 与 `generate_orders` 各在一个贯穿整场的进程里运行，读进内存的表、特征面板和加载到 GPU 上的模型留在模块级状态里给下一个决策日用；`context.state_dir` 整场保留、两边共用，每场回放从空目录开始。所以每天只读新增的行、只算新的一天，不每天重读整张表、重建整个面板或重写全部状态；只有之后的调用重建不了的才需要写盘（见技能 `replay-state`）。这省的是回放的墙钟，回放不计入任何会话预算，不是缩小模型的理由。
+- 策略合同（入口、包与 `models/`、限额、`context`、订单、允许的库与模型库）在只读的 `output/README.md`。
+- 策略代码要高效，但回放的墙钟不计入任何会话预算，也不是缩小模型的理由。调用之间、交易日之间与各场回放之间留下什么，怎样不重建数据、不重载权重，见 `output/README.md` 的 State across calls and days。
 {PATH_RULES_BULLET}
 - 同一回合的多个工具调用并发执行；一批里有写入、shell 或回测时，整批按顺序执行。子代理在后台运行，结果以消息送回；只剩等待子代理时以文本回复结束本回合。
 - 计划与进度记在工作区根的 `TODO.md`，验证与测试节点在根 `steps` 的 Step 树（`tree.txt`）；中断后的续跑从这两处恢复。
-- 技能库（`inputs/skills_index.json`）是建议，不是规则：先核实再依赖，与实测相抵触时用 `skill_feedback` 报告。环境、工具、数据或文档里的可疑缺陷用 `report_issue` 报告，然后继续。\
+- 技能库（`inputs/skills_index.json`）是建议，不是规则：先核实再依赖，与实测相抵触时用 `skill_feedback` 报告；环境、工具、数据或文档里的可疑缺陷用 `report_issue` 报告后继续。\
 """
 
 SESSION_STATIC_SECTIONS = (
@@ -135,10 +142,11 @@ SESSION_DYNAMIC_CONTEXT_HEADER = """\
 """
 
 # Opens the run facts in the environment block; the exporter renders the
-# same constant, so the heading has one source.
+# same constant, so the heading has one source. The JSON shows its own keys,
+# so the header names none of them.
 EXPERIMENT_FACTS_HEADER = """\
 ## 运行事实
-下面的 JSON 是宿主在本次尝试开始时写下的受信事实（同一份在 workspace 的 inputs/session_context.json），会话中不更新；它描述环境，不是交易证据，其中的日期与标识不是交易信号。主要的键：research_geometry（研究年、验证期、span 写法）、budgets（预算与策略容器）、artifact_contract.acceptance_rules（主动序列、统计量、登记条件）、broker_replay（资金、费用、交易规则）、runtime_tools 与 source_refs（Sandbox、读文件根的 shell 路径、数据摘要与单位引用）。\
+下面的 JSON 是宿主在本次尝试开始时写下的受信事实（同 `inputs/session_context.json`），会话中不更新；它描述环境，不是交易证据，其中的日期与标识不是交易信号。\
 """
 
 RESUME_INSTRUCTION = """\
@@ -359,11 +367,12 @@ def build_system_prompt(
 
 
 def render_experiment_facts_section(experiment_facts: Mapping[str, object]) -> str:
+    # Compact: indentation cost a quarter of the facts' tokens on every call.
     payload = json.dumps(
         compact_mapping(experiment_facts),
         ensure_ascii=False,
         sort_keys=True,
-        indent=2,
+        separators=(",", ":"),
         default=str,
     )
     return (

@@ -6,7 +6,7 @@ remaining successful research-session row are deliberately unreachable orphans.
 
 ``memory/`` is the second source of session knowledge: entries the researcher
 curated into ``configs/skill_library/`` and mounted read-only for this run.
-Both reach the Agent through one ``inputs/skills_index.json``, tagged by origin,
+Both reach the Agent through one ``inputs/skills_index.json``, in two lists,
 and only the writable ``skills/`` tree is ever published as a generation.
 """
 
@@ -322,8 +322,22 @@ def build_skills_index(root: str | Path) -> dict[str, object]:
     }
 
 
+# What a session's ``inputs/skills_index.json`` says of each entry: where it is
+# and what it is about. Sizes, file lists and origin tags are the console's
+# (``build_skills_index``); the list an entry is in and its path say whether
+# the session may rewrite it.
+SKILLS_INDEX_ENTRY_KEYS = ("name", "path", "title", "summary")
+
+
 def write_skills_index(root: str | Path, index_path: str | Path) -> SkillsStats:
-    payload = build_skills_index(root)
+    index = build_skills_index(root)
+    payload = {
+        section: [
+            {key: entry[key] for key in SKILLS_INDEX_ENTRY_KEYS}
+            for entry in index[section]  # type: ignore[attr-defined]
+        ]
+        for section in ("skills", "skill_library")
+    }
     write_json_atomic(Path(index_path), payload)
     return validate_skills_tree(root, require_writable=False)
 

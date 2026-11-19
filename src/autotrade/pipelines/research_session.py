@@ -42,10 +42,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.llm.model_profiles import (
-    AGENT_MAX_OUTPUT_TOKENS,
-    token_prices,
-)
+from autotrade.environment.llm.model_profiles import token_prices
 from autotrade.environment.llm.pricing import (
     FREE,
     ApiSpendExhausted,
@@ -425,8 +422,10 @@ class LLMResearchDeveloper:
         runtime_root: str | Path,
         sandbox_spec: SandboxSpec | None = None,
         command_runner_factory: Callable[[Path], CommandRunner] | None = None,
-        # One completion ceiling for the parent conversation and its children.
-        max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS,
+        # The longest reply one call asks for: the main model's own maximum
+        # for the parent, the sub-agent model's for its children.
+        max_response_tokens: int,
+        subagent_max_response_tokens: int,
         research_directive: str = "",
         workspace_reference: str = "",
         skill_library: str = "none",
@@ -449,6 +448,7 @@ class LLMResearchDeveloper:
         self.sandbox_spec = sandbox_spec or SandboxSpec()
         self.command_runner_factory = command_runner_factory
         self.max_response_tokens = max_response_tokens
+        self.subagent_max_response_tokens = subagent_max_response_tokens
         self.research_directive = research_directive
         self.workspace_reference = workspace_reference
         self.skill_library = str(skill_library)
@@ -1122,7 +1122,7 @@ class LLMResearchDeveloper:
         subagent = SubAgentEngine(
             llm=subagent_budgeted,
             tools=subagent_tools,
-            config=SubAgentConfig(max_tokens=self.max_response_tokens),
+            config=SubAgentConfig(max_tokens=self.subagent_max_response_tokens),
             time_budget=time_budget,
             # The parent's compaction gateway and archive, at the
             # threshold the children's own model window allows.

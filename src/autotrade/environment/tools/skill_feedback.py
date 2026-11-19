@@ -97,20 +97,16 @@ def append_skill_feedback_resolution(
 class SkillFeedbackTool:
     spec = ToolSpec(
         "skill_feedback",
-        "Tell the human operators that one mounted skill-library entry is "
-        "contradicted by what this session measured. skill is the mounted "
-        "reference '<source>/<name>' exactly as inputs/skills_index.json lists "
-        "it (source 'curated'). claim is "
-        "outdated (the advice no longer matches the current data contract, "
-        "tooling or figures) or wrong (this session's own measurements "
-        "contradict it). evidence says what was tried and what the data showed "
-        f"in {MIN_SKILL_EVIDENCE_CHARS}-{MAX_SKILL_EVIDENCE_CHARS} characters: "
-        "the reading, the node id or path, expected vs observed. Negative only: "
-        "there is no positive verdict and none is wanted — an entry used "
-        "without contradiction needs no call. One report per entry per "
-        "session. Host-side telemetry: it changes no artifact, budget, or "
-        "result, changes nothing about the mounted entry, and is never read "
-        "back by any session.",
+        "Tell the operators that a mounted skill-library entry is contradicted by "
+        "this session's measurements. skill is the entry's path in "
+        "inputs/skills_index.json between memory/ and /SKILL.md (e.g. "
+        "curated/validation-readings). claim is outdated (no longer matches the "
+        "current contract, tooling or figures) or wrong (this session's own "
+        "measurements contradict it); evidence "
+        f"({MIN_SKILL_EVIDENCE_CHARS}-{MAX_SKILL_EVIDENCE_CHARS} characters) gives the "
+        "reading, the node or path, expected vs observed. Negative only: an entry "
+        "used without contradiction needs no call. One report per entry per "
+        "session; only operators read it.",
         {
             "type": "object",
             "properties": {

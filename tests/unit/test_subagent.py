@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 import time
 from collections import deque
@@ -2945,23 +2946,30 @@ def test_a_parent_working_alone_is_never_nudged_to_delegate() -> None:
 
 def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None:
     from autotrade.agent.subagent import SUBAGENT_MAX_TRUNCATION_CONTINUATIONS
-    from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
 
     continuations = f"最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写"
     for phrase in (
         "thinking 默认 xhigh",
         "降到 low/medium",
         "机械工作",
-        f"{AGENT_MAX_OUTPUT_TOKENS} token",
+        # The limit is one reply's, thinking included, and the model's own.
+        "单次回复（含思考）",
+        "模型自身的输出上限",
         f"{SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写",
         "不要串成 resume 链",
         "不为催促而发",
         "status=refused",
     ):
         assert phrase in AGENT_TOOL_DESCRIPTION
+    # The defaults and why bounded work lowers thinking are stated once, in
+    # the description; the field says only what its values mean.
     thinking_field = AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
-    assert "均为 xhigh" in thinking_field and continuations in thinking_field
-    assert "显式给 low/medium" in thinking_field
+    for repeated in ("默认", "均为", "low/medium", continuations):
+        assert repeated not in thinking_field
+    # The schema is shared by every model, so it names no figure of one: the
+    # truncation observation states the limit of the call that hit it.
+    for text in (AGENT_TOOL_DESCRIPTION, thinking_field):
+        assert re.search(r"\d\s*token", text) is None
     # The call shapes and launch knobs live in the description alone.
     for prompt in (SESSION_WORKFLOW_SECTION,):
         assert "xhigh 只给纯文本" not in prompt
@@ -3097,14 +3105,21 @@ def test_a_full_round_of_writable_children_runs_concurrently() -> None:
     assert all(record["ok"] for record in runner._wait_subagent_jobs())
 
 
-def test_parent_and_child_output_budgets_share_the_safety_ceiling() -> None:
-    from autotrade.environment.llm import AGENT_MAX_OUTPUT_TOKENS
+def test_a_child_asks_for_the_reply_limit_it_was_given() -> None:
+    """The pipeline hands parent and children their own models' limits; a
+    session assembled without them takes the narrowest catalog model's."""
+    from autotrade.environment.llm import (
+        LOCAL_QWEN_MODEL,
+        MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS,
+        model_profile,
+    )
 
-    assert AGENT_MAX_OUTPUT_TOKENS == 32_768
-    assert AgentSessionConfig().max_response_tokens == AGENT_MAX_OUTPUT_TOKENS
-    assert SubAgentConfig().max_tokens == AGENT_MAX_OUTPUT_TOKENS
+    fallback = model_profile(LOCAL_QWEN_MODEL).max_output_tokens
+    assert MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS == fallback
+    assert AgentSessionConfig().max_response_tokens == fallback
+    assert SubAgentConfig().max_tokens == fallback
     # The cap a child sends, with room to spare in a 128k window.
-    for config, cap in ((None, AGENT_MAX_OUTPUT_TOKENS), (SubAgentConfig(max_tokens=500), 500)):
+    for config, cap in ((None, fallback), (SubAgentConfig(max_tokens=500), 500)):
         llm = ScriptedLLM([ProviderResponse(content="done")], context_window_tokens=128_000)
         SubAgentEngine(
             llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]), config=config
@@ -3283,10 +3298,12 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
     assert SubAgentConfig().max_turns == 48
     assert "48 回合" in AGENT_TOOL_DESCRIPTION and "24 回合" not in AGENT_TOOL_DESCRIPTION
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]["description"]
-    # Parents learn that a child has their context window (the field's text),
-    # and that several bounded parallel children still beat one long serial
-    # child.
-    assert "48 回合" in max_turns_field and "子代理的上下文与你同样大并自动压缩" in max_turns_field
+    # The default is the description's alone; the field states the grace
+    # turns and the shared call quota, and that several bounded parallel
+    # children still beat one long serial child is the description's.
+    assert "48" not in max_turns_field
+    assert f"倒数第 {SUBAGENT_GRACE_TURNS} 回合起收到收尾提示" in max_turns_field
+    assert "max_llm_calls 的一半" in max_turns_field
     assert "并行的有界子代理好过一个很长的串行子代理" in AGENT_TOOL_DESCRIPTION
 
     busy = ScriptedLLM(
@@ -3572,6 +3589,44 @@ def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> Non
     assert observation["observation"] == "output_truncated"
     assert "被截断" in observation["message"]
     assert not any('"no_tool_call"' in str(message.content or "") for message in second)
+
+
+def test_a_turn_that_spends_its_models_own_maximum_is_continued_with_that_figure() -> None:
+    """Parent and child ask for the model's own longest reply; one spent
+    whole on thinking still gets the concise continuation, which names it."""
+    from autotrade.environment.llm import model_profile
+
+    profile = model_profile("DeepSeek-V4.1-Flash")
+    limit = profile.max_output_tokens
+    cut = ProviderResponse(
+        content="",
+        reasoning_content="thinking until the model's own limit",
+        usage={"prompt_tokens": 10, "completion_tokens": limit},
+    )
+
+    def scripted(*then: ProviderResponse) -> ScriptedLLM:
+        return ScriptedLLM([cut, *then], context_window_tokens=profile.context_window_tokens)
+
+    parent = scripted(ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)))
+    AgentSessionRunner(
+        llm=parent,
+        tools=ToolRegistry([_FinishStub("test")]),
+        system_prompt="research",
+        config=_session_config(max_response_tokens=limit),
+    ).run("go")
+    child = scripted(ProviderResponse(content="简洁结论"))
+    result = SubAgentEngine(
+        llm=child,
+        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        config=SubAgentConfig(max_tokens=limit),
+    ).run_with_transcript("audit", role="Explore")[0]
+    assert result["status"] == "completed" and result["truncated_turns"] == 1
+    for llm in (parent, child):
+        assert llm.calls[0]["max_tokens"] == limit == 384_000
+        observation = json.loads(str(llm.calls[1]["messages"][-1].content))
+        assert observation["observation"] == "output_truncated"
+        assert observation["max_tokens"] == limit
+        assert f"{limit} token 上限被截断" in observation["message"]
 
 
 def test_parent_truncation_is_measured_against_the_cap_the_window_left() -> None:
@@ -4282,14 +4337,15 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     # The inference-time notice is the plain fact: used share and minutes left.
     assert delivered[0]["message"] == (
         "推理时间预算已用去 50%，剩余约 750 分钟；至今 smoke_backtest 0 次、validate 0 次、"
-        "test 0 次、完整 Validation 0 个。预算耗尽时宿主以最近一次 test 的候选补完记录，"
-        "还没 test 过时用最后一个满足登记条件的完整研究年候选，没有则不定版。"
+        "test 0 次、完整 Validation 0 个。"
     )
     assert "smoke_backtest 1 次" in delivered[1]["message"]
     # The notice reports the budget; it is not a wrap-up cue. A session that read
     # a finishing cue at 50% finished with 280 minutes and 7 backtests unused.
     assert all("收尾" not in item["message"] for item in delivered)
-    assert all("宿主以最近一次 test 的候选补完记录" in item["message"] for item in delivered)
+    # What the host does once a budget runs out is the prompt's and the
+    # wrap-up's, not repeated on every notice.
+    assert all("不定版" not in item["message"] for item in delivered)
 
     # Crossing several fractions at once yields one notice.
     clock = _Clock()
@@ -4336,10 +4392,11 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
         assert role.default_thinking == DEFAULT_SUBAGENT_THINKING
         assert role.default_max_turns(DEFAULT_SUBAGENT_MAX_TURNS) == DEFAULT_SUBAGENT_MAX_TURNS
         assert subagent_role(role.name) is role
+        # A role without its own defaults states its capability alone: the
+        # global defaults are the description's.
         line = (
             f"{role.name}：{role.description}（"
-            f"{'有 Sandbox shell 与 smoke_backtest、可写' if role.shell else '只读 glob/grep/read_file，不能执行'}；"
-            f"默认 thinking {DEFAULT_SUBAGENT_THINKING}、max_turns {DEFAULT_SUBAGENT_MAX_TURNS}）"
+            f"{'有 Sandbox shell 与 smoke_backtest、可写' if role.shell else '只读 glob/grep/read_file，不能执行'}）"
         )
         assert line in AGENT_TOOL_SPEC.input_schema["properties"]["agent"]["description"]
     assert {role.name for role in SUBAGENT_ROLE_TABLE if role.shell} == {"general-purpose"}
@@ -4361,12 +4418,13 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
     for bad in (0, -1, True, "3"):
         with pytest.raises(ValueError, match="max_turns"):
             resolve_subagent_max_turns(bad, "Explore", 48)
-    # The fields state the fallback to the role default and the ranges.
-    for field in ("max_turns", "thinking"):
-        assert "省略时按角色默认" in AGENT_TOOL_SPEC.input_schema["properties"][field]["description"]
+    # The defaults are stated once, in the description, and a role's own ones
+    # on the agent field; the schema carries the ranges.
+    assert f"max_turns 默认 {DEFAULT_SUBAGENT_MAX_TURNS} 回合" in AGENT_TOOL_DESCRIPTION
+    assert f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}" in AGENT_TOOL_DESCRIPTION
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]
     assert max_turns_field["minimum"] == 1 and "max_llm_calls 的一半" in max_turns_field["description"]
-    assert "off/low/medium/xhigh" in AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["description"]
+    assert AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["enum"] == list(SUBAGENT_THINKING_LEVELS)
 
 
 def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.MonkeyPatch) -> None:

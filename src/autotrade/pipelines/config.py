@@ -355,11 +355,13 @@ class AcceptanceRules:
         prompt restates a threshold. ``validation_years`` is how many years
         the experiment's geometry leaves after the research years, for the threshold over
         the whole validation period. Rules, structured definitions and that
-        count only: how ``validate`` and ``test`` advance the session is the
-        prompt's and their descriptions', the dates of the research and
-        validation years are the research geometry's
-        (``research_session.research_geometry_record``), and no forward or
-        Held-out date appears anywhere a session reads."""
+        count only: how ``validate`` and ``test`` advance the session and
+        where a reading appears are the prompt's and their descriptions', the
+        dates of the research and validation years and the step length are the
+        research geometry's (``research_session.research_geometry_record``),
+        the validate allowance is ``budgets.validates_per_step``, the factor
+        legs are ``regression_method``, and no forward or Held-out date
+        appears anywhere a session reads."""
 
         if isinstance(validation_years, bool) or not isinstance(validation_years, int) or validation_years < 1:
             raise ValueError(f"validation_years must be a positive integer, got {validation_years!r}")
@@ -390,27 +392,20 @@ class AcceptanceRules:
         years = TRADING_DAYS_PER_YEAR
         return {
             "graded_series": (
-                "every return statistic below is measured on the ACTIVE series: the "
-                "node's daily return after every cost minus the host's random baseline "
-                f"composite, the equal-weight mean of {verdict.BASELINE_DRAWS} random-name "
-                "copies of the node's own filled trades (same entry and exit instants, "
-                "same money per round trip, same Broker and costs; each name replaced by "
-                "one on the same side of the experiment's benchmark_index membership that one "
-                "board lot of that money could buy; each copy's daily profit read on the "
-                "node's own previous-day equity). Its annualized mean is the active "
-                "excess, its annualized standard deviation the active tracking error "
-                "and their ratio the active information ratio: active.excess, "
-                "active.tracking_error and active.information_ratio of a validate row "
-                "and of test's whole_replay, per research year by_year[].active_excess, "
-                "and day by day the node's validation/active_daily.csv. The strategy "
-                "exposes nothing for this beyond its orders"
+                "every return statistic below is measured on the ACTIVE series: the node's "
+                "daily return after every cost minus the equal-weight mean of "
+                f"{verdict.BASELINE_DRAWS} random-name copies of its own filled trades (same "
+                "entry and exit instants, money, Broker and costs; each name replaced by one "
+                "on the same side of benchmark_index membership that one board lot of that "
+                "money could buy; each copy read on the node's previous-day equity). Its "
+                "annualized mean is active.excess, its annualized standard deviation "
+                "active.tracking_error, their ratio active.information_ratio"
             ),
             "significance": {
                 "statistic": (
                     "the residual information ratio of the active series: its daily "
-                    "return regressed by OLS on an intercept, the benchmark_index return "
-                    "(market), the size leg, the value leg and the low-turnover leg "
-                    "(regression_method), the "
+                    "return regressed by OLS on an intercept and the four legs of "
+                    "regression_method, the "
                     f"intercept times sqrt({years}) over the residual standard deviation; "
                     f"years = trading days / {years}"
                 ),
@@ -420,11 +415,6 @@ class AcceptanceRules:
                 "threshold_over_validation_period": round(
                     verdict.residual_threshold(float(validation_years), self.alpha), 3
                 ),
-            },
-            "validation": {
-                "research_years": self.research_years,
-                "test_step_months": self.test_step_months,
-                "validates_per_step": self.validates_per_step,
             },
             "registration": {
                 "span": f"the candidate replayed the whole research-years span (span={FULL_SPAN})",
@@ -447,14 +437,12 @@ class AcceptanceRules:
             },
             "forward": {
                 "reported": (
-                    "one continuous replay of the registered strategy over the twelve months "
-                    "after the research geometry's last year and then Held-out, graded on its "
-                    "active series against a random baseline drawn from that replay: the "
+                    "after the session, on data it never sees: the registered book and its "
+                    "seed replicates replayed and read on the active series (the "
                     f"{self.forward_confidence:.0%} block-bootstrap lower bound of active "
-                    "excess over the registered book and its seed replicates, the active excess "
-                    f"with slippage multiplied by {self.cost_stress_multiplier}, drawdowns, "
-                    "turnover and the residual statistic; recorded beside the validation "
-                    "record, pooled across registered strategies, deciding nothing"
+                    f"excess, the active excess with slippage multiplied by "
+                    f"{self.cost_stress_multiplier}, drawdowns, turnover, the residual "
+                    "statistic); deciding nothing"
                 ),
             },
         }

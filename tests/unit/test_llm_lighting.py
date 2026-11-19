@@ -374,20 +374,22 @@ def test_gemini_sends_its_whole_output_budget_beside_a_prompt_near_its_window(
     less than the output budget inside the window still sends the whole
     budget, the session wrapper's pre-flight agrees, and only a prompt past
     the window (less the tokenizer slack) is refused before the request."""
+    # The budget a session conversation asks for: the model's own maximum.
+    budget = model_profile(GEMINI_MODEL).max_output_tokens
     proxy, transport = _proxy(
-        tmp_path, [_chat_json(GEMINI_MODEL)], model=GEMINI_MODEL, max_tokens=32_768
+        tmp_path, [_chat_json(GEMINI_MODEL)], model=GEMINI_MODEL, max_tokens=budget
     )
     window = model_profile(GEMINI_MODEL).context_window_tokens
     assert window == 1_000_000
     near = [ChatMessage("user", "研" * (window - 20_000))]
     prompt = estimate_chat_request_tokens(near)
-    assert window - 32_768 < prompt < window - CONTEXT_OUTPUT_TOKEN_MARGIN
+    assert window - budget < prompt < window - CONTEXT_OUTPUT_TOKEN_MARGIN
     budgeted = SessionBudgetLLM(
         proxy, budget=SessionCallBudget(max_calls=1, time_budget=InferenceTimeBudget(duration_seconds=600))
     )
-    assert context_request_fits(budgeted, near, max_tokens=32_768)[0]
+    assert context_request_fits(budgeted, near, max_tokens=budget)[0]
     proxy.complete(near)
-    assert transport.bodies[0]["max_tokens"] == 32_768
+    assert transport.bodies[0]["max_tokens"] == budget
     with pytest.raises(LLMProxyError, match="before provider request"):
         proxy.complete([ChatMessage("user", "研" * window)])
     assert len(transport.bodies) == 1

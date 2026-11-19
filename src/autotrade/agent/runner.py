@@ -35,7 +35,7 @@ from dataclasses import dataclass, field
 from typing import Protocol
 
 from autotrade.environment.llm import (
-    AGENT_MAX_OUTPUT_TOKENS,
+    MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS,
     ApiSpendExhausted,
     CallBudgetExhausted,
     ChatMessage,
@@ -61,7 +61,6 @@ from autotrade.environment.tools.base import (
     ToolRegistry,
     is_sequential_tool,
 )
-from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.environment.tools.search import trace_read_stub
 from autotrade.environment.trace import TraceEvent, trace_reasoning
 
@@ -280,9 +279,10 @@ class AgentSessionConfig:
     deadline_grace_seconds: float = field(default_factory=_pipeline_deadline_grace_seconds)
     max_llm_calls: int = 200
     deadline_seconds: float = 1_200.0
-    # Completion-token safety ceiling shared with the sub-agents; see
-    # ``AGENT_MAX_OUTPUT_TOKENS``.
-    max_response_tokens: int = AGENT_MAX_OUTPUT_TOKENS
+    # The longest reply one call asks for, thinking included: the pipeline
+    # passes the main model's own maximum (``ModelProfile.max_output_tokens``);
+    # a session assembled without it takes the narrowest catalog model's.
+    max_response_tokens: int = MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS
 
     def __post_init__(self) -> None:
         for name in (
@@ -946,15 +946,15 @@ class AgentSessionRunner:
                 "tests": backtests["test"],
                 "complete_validations": complete,
             }
+            # What the host does once a budget runs out is the prompt's process
+            # section and the wrap-up's, not repeated on every notice.
             advice = _BUDGET_NOTICE_ADVICE.get(level.budget)
             payload["message"] = (
                 f"{_budget_spent_phrase(level, crossed)}；"
                 f"至今 smoke_backtest {backtests['smoke_backtest']} 次、"
                 f"validate {backtests['validate']} 次、test {backtests['test']} 次、"
                 f"完整 Validation {complete} 个。"
-                + (f"{advice}；" if advice else "")
-                + "预算耗尽时宿主以最近一次 test 的候选补完记录，"
-                "还没 test 过时用最后一个满足登记条件的完整研究年候选，没有则不定版。"
+                + (f"{advice}。" if advice else "")
             )
             messages.append(
                 ChatMessage("user", json.dumps(payload, ensure_ascii=False))
@@ -982,16 +982,13 @@ class AgentSessionRunner:
                 self._record_complete_validation(row)
 
     def _record_complete_validation(self, value: Mapping[str, object]) -> None:
-        # A complete Validation node carries both ids; a failed row has neither.
-        node_id = value.get("node_id")
-        revision_id = value.get("revision_id")
-        if (
-            isinstance(node_id, str)
-            and node_id
-            and isinstance(revision_id, str)
-            and revision_id
-        ):
-            self._complete_validation_nodes.add(node_id)
+        # A resumed attempt's recorded node carries its node and revision ids;
+        # a completed validate row has status ok and names its node by handle
+        # (node_id where the handle is shared). A failed row is neither.
+        node = value.get("node_id") or value.get("handle")
+        complete = bool(value.get("revision_id")) or value.get("status") == "ok"
+        if isinstance(node, str) and node and complete:
+            self._complete_validation_nodes.add(node)
 
     def _dispatch_tool_calls(
         self, calls: tuple[ToolCall, ...], time_budget: InferenceTimeBudget
@@ -1837,11 +1834,11 @@ class AgentSessionRunner:
             "observation": "context_notice",
             "estimated_tokens": estimated,
             "token_threshold": threshold,
+            # What the summary holds, its limits and what the host does
+            # without it are the compact description's, stated once there.
             "message": (
-                f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}。请在当前这一回合的结果消化完后"
-                "调用 compact(summary=...)：把策略现状、已做的决定与被否定的方向（带读数与节点 id）、"
-                f"未完成的线索与 trace 里的定位写进摘要，摘要不超过 {COMPACT_SUMMARY_MAX_CHARS} 字符"
-                "（超出时只保留上限内的完整行）；达到阈值仍未压缩时宿主用压缩模型代劳。"
+                f"上下文估算已达到压缩阈值的 {COMPACT_ADVISORY_FRACTION:.0%}：消化完当前这一回合的结果后调用 compact，"
+                "摘要按它的描述写。"
             ),
         }
         messages.append(ChatMessage("user", json.dumps(payload, ensure_ascii=False)))

@@ -31,9 +31,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from autotrade.environment.llm import (
-    AGENT_MAX_OUTPUT_TOKENS,
     CONTEXT_OUTPUT_MIN_TOKENS,
     CONTEXT_OUTPUT_TOKEN_MARGIN,
+    MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS,
     MIN_CONTEXT_WINDOW_TOKENS,
     ChatMessage,
     LLMProxy,
@@ -86,11 +86,13 @@ _READ_TOOLS = frozenset({"read_file", "grep", "glob"})
 _WRITE_TOOLS = frozenset({"write_file", "edit_file", "write_skill", "delete_skill"})
 _THINK_BLOCK = re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL)
 # Fallback threshold for a session assembled without the worker's per-role
-# derivation: the smallest catalog window minus the agent output ceiling and
+# derivation: the narrowest catalog window minus that model's reply limit and
 # the gateway's tokenizer slack, so proactive compaction still triggers on the
 # narrowest supported model instead of never firing.
 DEFAULT_COMPACTION_TOKEN_THRESHOLD = (
-    MIN_CONTEXT_WINDOW_TOKENS - AGENT_MAX_OUTPUT_TOKENS - CONTEXT_OUTPUT_TOKEN_MARGIN
+    MIN_CONTEXT_WINDOW_TOKENS
+    - MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS
+    - CONTEXT_OUTPUT_TOKEN_MARGIN
 )
 
 

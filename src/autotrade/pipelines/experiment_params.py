@@ -44,10 +44,7 @@ from autotrade.environment.llm.lighting import (
     DEEPSEEK_FLASH_MODEL,
     GPT_ASTRA_MODEL,
 )
-from autotrade.environment.llm.model_profiles import (
-    AGENT_MAX_OUTPUT_TOKENS,
-    DEFAULT_LLM_RETRY_BACKOFF_SECONDS,
-)
+from autotrade.environment.llm.model_profiles import DEFAULT_LLM_RETRY_BACKOFF_SECONDS
 from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
 
 from .config import (
@@ -260,7 +257,10 @@ class AgentParams:
     llm_timeout_seconds: float | None = _host()
     llm_retry_backoff_seconds: float | None = _host(DEFAULT_LLM_RETRY_BACKOFF_SECONDS)
     llm_temperature: float | None = _host(0.0)
-    llm_max_response_tokens: int | None = _host(AGENT_MAX_OUTPUT_TOKENS)
+    # Left out: the main conversation and the sub-agents each ask for their
+    # own model's maximum reply (``ModelProfile.max_output_tokens``); a value
+    # caps both.
+    llm_max_response_tokens: int | None = _host()
 
 
 def _managed(stamp: str, *, default: object = MISSING) -> Any:

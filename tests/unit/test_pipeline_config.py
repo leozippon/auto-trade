@@ -291,24 +291,21 @@ class AcceptanceRulesTest(unittest.TestCase):
             max_drawdown=0.2, cost_stress_multiplier=3.0, active_max_drawdown=0.11
         )
         facts = rules.agent_facts(validation_years=5)
-        self.assertEqual(
-            sorted(facts), ["forward", "graded_series", "registration", "significance", "validation"]
-        )
+        # No validation block: the research years and the step length are the
+        # geometry's, the validate allowance is budgets.validates_per_step.
+        self.assertEqual(sorted(facts), ["forward", "graded_series", "registration", "significance"])
         self.assertIn(str(verdict.BASELINE_DRAWS), facts["graded_series"])
         self.assertIn("active.information_ratio", facts["graded_series"])
         statistic = facts["significance"]
         self.assertIn("intercept times sqrt(244) over the residual standard deviation", statistic["statistic"])
-        self.assertIn("the size leg, the value leg and the low-turnover leg", statistic["statistic"])
+        # The legs are regression_method's, named there once.
+        self.assertIn("the four legs of regression_method", statistic["statistic"])
         self.assertIn("z(1 - alpha) / sqrt(years)", statistic["threshold"])
         self.assertEqual(statistic["alpha"], 0.05)
         self.assertEqual(statistic["threshold_over_one_year"], 1.645)
         self.assertEqual(statistic["threshold_over_validation_period"], round(verdict.residual_threshold(5.0, 0.05), 3))
         with self.assertRaises(ValueError):
             rules.agent_facts(validation_years=0)
-        validation = facts["validation"]
-        # The validation block is the three numbers; how test advances the
-        # session is the prompt's and the tool's text.
-        self.assertEqual(validation, {"research_years": 5, "test_step_months": 1, "validates_per_step": 4})
         registration = facts["registration"]
         self.assertEqual(
             sorted(registration),
@@ -335,8 +332,9 @@ class AcceptanceRulesTest(unittest.TestCase):
         facts = AcceptanceRules(**REQUIRED_RULES).agent_facts(validation_years=1)
         graded = facts["graded_series"]
         # The fields a validate row and test's whole_replay carry (WP-B's
-        # projection), not the stored record's names.
-        for field in ("active.excess", "by_year[].active_excess", "validation/active_daily.csv"):
+        # projection), not the stored record's names; where each appears is
+        # the validate description's.
+        for field in ("active.excess", "active.tracking_error", "active.information_ratio"):
             self.assertIn(field, graded)
         for stale in ("benchmark.active_", "sub_windows", "daily_series", "residual_reading"):
             self.assertNotIn(stale, json.dumps(facts))
@@ -548,13 +546,14 @@ class DefaultsDriftTest(unittest.TestCase):
         self.assertTrue(profile.dividend_tax)
         self.assertEqual(current.experiment.acceptance, AcceptanceRules(**REQUIRED_RULES))
         policy = _broker_replay_facts({"broker_profile": profile.to_record()})["dividend_tax_policy"]
-        self.assertTrue(policy["charged"])
-        self.assertEqual(policy["record_date_cutover"], "20150908")
-        old, new = policy["rules"]["2012_85"], policy["rules"]["2015_101"]
-        self.assertEqual(old["withholding_rate"], 0.05)
-        self.assertEqual(new["withholding_rate"], 0.0)
-        self.assertEqual(old["final_rate_by_months_held_at_most"], {"1": 0.2, "12": 0.1})
-        self.assertEqual((old["final_rate_beyond"], new["final_rate_beyond"]), (0.05, 0.0))
+        # One sentence read off the Broker's own rule constants.
+        old, new = policy.split("; from 20150908: ")
+        self.assertTrue(old.startswith("charged; the dividend's record date picks the rule: 2013 to before 20150908: "))
+        self.assertIn("5% withheld on the ex date, final rate 20% if held at most 1 month, 10% at most 12 months, 5% beyond", old)
+        self.assertIn("0% withheld on the ex date, final rate 20% if held at most 1 month, 10% at most 12 months, 0% beyond", new)
+        self.assertIn("A FIFO sale pays the final rate minus the withheld one", new)
+        uncharged = replace(profile, dividend_tax=False).to_record()
+        self.assertEqual(_broker_replay_facts({"broker_profile": uncharged})["dividend_tax_policy"], "not charged")
 
     def test_the_permitted_boards_are_pinned_per_experiment_and_stated_only_where_pinned(self) -> None:
         """An experiment without the key buys on every board and its facts say nothing

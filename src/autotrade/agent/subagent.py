@@ -6,8 +6,8 @@ runner, and the runner starts the child in the background and returns at once.
 Roles are two capability classes: ``general-purpose`` reads, writes and runs
 the sandbox shell and smoke replay; ``Explore`` is read-only. Depth is one.
 The child shares the parent SafeWorkspace, SessionBudgetLLM calls, inference
-time budget, output ceiling, context window with its compaction gateway and
-thresholds, and Trace. A finished child keeps its transcript for
+time budget, compaction gateway and Trace; its reply limit and compaction
+threshold are its own model's. A finished child keeps its transcript for
 the session so ``resume=<task_id>`` can hand it a follow-up task. Failures
 return a structured observation; they do not finish the parent session.
 """
@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import cast
 
 from autotrade.environment.llm import (
-    AGENT_MAX_OUTPUT_TOKENS,
+    MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS,
     ApiSpendExhausted,
     CallBudgetExhausted,
     ChatMessage,
@@ -123,10 +123,11 @@ OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 # tool call) gets a forced concise continuation — the same observation the
 # parent conversation receives — at most this many times per child before the
 # launch is reported as failed instead of terminated as ``completed``. One:
-# at the 12k cap 1-3 turns per session were cut and the single observed
-# continuation succeeded at once; at the 32k ceiling a cut turn is rare and
-# costs ~15 min, so a second consecutive all-reasoning turn after an explicit
-# "be concise" instruction is a stuck loop, not an unfinished answer.
+# at a 12k cap 1-3 turns per session were cut and the single observed
+# continuation succeeded at once; at a 32k cap a cut turn was rare and cost
+# ~15 min, and the limit is now the model's own, so a second consecutive
+# all-reasoning turn after an explicit "be concise" instruction is a stuck
+# loop, not an unfinished answer.
 SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
 OUTPUT_TRUNCATED_CONTINUATION = (
     "上一回合的输出在 {limit} token 上限被截断且没有工具调用。"
@@ -236,7 +237,8 @@ def subagent_role(name: object) -> SubAgentRole:
 
 
 def _role_schema_text() -> str:
-    """Per-role capability and launch defaults for the ``agent`` field."""
+    """Per-role capability for the ``agent`` field, and a role's own launch
+    defaults where it has any; the global defaults are the description's."""
 
     lines = []
     for role in SUBAGENT_ROLE_TABLE:
@@ -245,10 +247,12 @@ def _role_schema_text() -> str:
             if role.shell
             else "只读 glob/grep/read_file，不能执行"
         )
-        lines.append(
-            f"{role.name}：{role.description}（{tools}；默认 thinking {role.default_thinking}、"
-            f"max_turns {role.default_max_turns(DEFAULT_SUBAGENT_MAX_TURNS)}）"
-        )
+        own = [
+            f"默认 {name} {value}"
+            for name, value in (("thinking", role.thinking), ("max_turns", role.max_turns))
+            if value is not None
+        ]
+        lines.append(f"{role.name}：{role.description}（{'；'.join((tools, *own))}）")
     return "；".join(lines) + "。"
 
 
@@ -282,26 +286,26 @@ _WRITE_LINES = """
 # The single place the sub-agent mechanism is explained to the model; the
 # system prompt only says children run in the background. Modeled on Pi's
 # Agent tool description: purpose, the three call shapes with the one rule of
-# each, then defaults and caps. What a field means is its schema description
-# (``resume`` takes agent and task, ``text`` is delivered as a ``[父代理指令]``
-# message, ``max_turns`` and ``thinking`` state the grace turns and the
-# fallback to the role default), and the roles are the generated ``agent``
-# field (``_role_schema_text``), so neither is restated here.
+# each, then the defaults, each stated once here, and the caps. A field's
+# schema description says only what the field is (``text`` is delivered as a
+# ``[父代理指令]`` message, ``max_turns`` states the grace turns and the
+# call quota), and the roles are the generated ``agent`` field
+# (``_role_schema_text``).
 AGENT_TOOL_DESCRIPTION = (
     "启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。"
     "能独立完成的阅读、计算、实现或审计交给子代理以保护主上下文；目标已知的单个文件自己用 read_file/grep/glob 读。\n"
-    "- launch：{\"agent\": <角色>, \"task\": <完整任务>}，可选 description、max_turns、thinking、inherit_context。"
+    "- launch：{\"agent\": <角色>, \"task\": <完整任务>}。"
     "同一回合可发起多个，可写的子代理同样可以并行，但范围须互斥、各只写 task 指定的路径；返回值列出运行与排队中的子代理，不要重复已在进行的范围。\n"
     "- resume：{\"agent\": <原角色>, \"task\": <后续任务>, \"resume\": <已完成子代理的 task_id>}，是 launch 的参数而不是 action；"
     "只在后续任务需要它已有的上下文时用，独立的后续工作另起新的子代理，不要串成 resume 链。\n"
     "- message：{\"action\": \"message\", \"task_id\": <运行或排队中的 task_id>, \"text\": <指令>}，立即返回 status=queued；"
     "只用于改变范围、追加新发现的约束或让它提前收尾，不为催促而发。\n"
-    f"- 默认与上限：默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队；max_turns 默认 {DEFAULT_SUBAGENT_MAX_TURNS} 回合，"
-    "几个并行的有界子代理好过一个很长的串行子代理。"
-    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}，有界的机械工作降到 low/medium：每回合输出上限 {AGENT_MAX_OUTPUT_TOKENS} token"
-    "（单次回复含思考的上限，不是会话预算），"
-    f"全耗在思考里的回合只有 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
-    f"汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长时只内联开头（summary_truncated=true），"
+    f"- 默认同时运行 {DEFAULT_SUBAGENT_MAX_CONCURRENT} 个，超出排队；max_turns 默认 {DEFAULT_SUBAGENT_MAX_TURNS} 回合，"
+    "几个并行的有界子代理好过一个很长的串行子代理；"
+    f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}、不继承父会话，需要判断的任务保留，有界的机械工作降到 low/medium："
+    "单次回复（含思考）以模型自身的输出上限为界，"
+    f"把它全耗在思考里、没有工具调用的回合只有 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。\n"
+    f"- 汇报最多内联 {SUBAGENT_REPORT_MAX_CHARS} 字符，更长时只内联开头（summary_truncated=true），"
     "全文以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号）。"
     "服务方拒绝请求时子代理以 status=refused 结束、没有汇报，error 是服务方原文：任务没有完成，换种表述重新委托或自己做。"
 )
@@ -316,15 +320,14 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "type": "string",
                 "enum": ["launch", "message"],
                 "description": (
-                    "省略或 launch：启动子代理（须给 agent 与 task；续跑已完成的子代理也是 launch，"
-                    "另加 resume=<task_id>）；message：给仍在运行的子代理发中途指令（须给 task_id 与 text）。"
+                    "省略或 launch：启动或（加 resume）续跑子代理；message：给运行中的子代理发中途指令。"
                     "没有 resume 这个 action。"
                 ),
             },
             "agent": {
                 "type": "string",
                 "enum": list(SUBAGENT_ROLES),
-                "description": "launch：角色、能力与默认档位——" + _role_schema_text(),
+                "description": "launch：角色——" + _role_schema_text(),
             },
             "task": {
                 "type": "string",
@@ -340,10 +343,7 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "type": "string",
                 "minLength": 1,
                 "maxLength": SUBAGENT_STEER_MAX_CHARS,
-                "description": (
-                    f"message：中途指令正文（≤{SUBAGENT_STEER_MAX_CHARS} 字符），"
-                    "在子代理下一回合模型调用前作为 `[父代理指令]` 消息送达。"
-                ),
+                "description": "message：指令正文，在子代理下一回合模型调用前作为 `[父代理指令]` 消息送达。",
             },
             "description": {
                 "type": "string",
@@ -355,22 +355,15 @@ AGENT_TOOL_SPEC = ToolSpec(
                 "type": "integer",
                 "minimum": 1,
                 "description": (
-                    f"子代理最多的模型回合，≥1；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_MAX_TURNS} 回合），"
-                    f"倒数第 {SUBAGENT_GRACE_TURNS} 回合起收到收尾提示，上限后强制简洁总结；显式值按原值生效。"
-                    "子代理的上下文与你同样大并自动压缩，回合只约束工作量。没有 schema 上限，但每回合占用会话共享调用配额中的一次子代理调用"
-                    "（全部子代理累计不超过会话 max_llm_calls 的一半），配额耗尽的子代理以 error 结束，所以不要设得远超任务需要。"
+                    f"子代理最多的模型回合；倒数第 {SUBAGENT_GRACE_TURNS} 回合起收到收尾提示，用完后强制简洁总结。"
+                    "每回合计一次子代理调用（全部子代理合计不超过 max_llm_calls 的一半，用尽时子代理以 error 结束），"
+                    "不要设得远超任务需要。"
                 ),
             },
             "thinking": {
                 "type": "string",
                 "enum": list(SUBAGENT_THINKING_LEVELS),
-                "description": (
-                    f"子代理思考强度 off/low/medium/xhigh；省略时按角色默认（当前各角色均为 {DEFAULT_SUBAGENT_THINKING}），不继承父会话。"
-                    "需要判断的任务保留默认；有界的机械工作显式给 low/medium，"
-                    f"因为单次回复 {AGENT_MAX_OUTPUT_TOKENS} token 的输出上限（含思考）全部耗在思考里、发不出工具调用的一个回合"
-                    f"只得到最多 {SUBAGENT_MAX_TRUNCATION_CONTINUATIONS} 次强制简洁续写，之后记为 error。"
-                    "high 与 max 是 xhigh 的别名，会被接受并记为 xhigh；off 关闭扩展思考。"
-                ),
+                "description": "子代理思考强度；high 与 max 是 xhigh 的别名，off 关闭扩展思考。",
             },
             "inherit_context": {
                 "type": "boolean",
@@ -379,10 +372,7 @@ AGENT_TOOL_SPEC = ToolSpec(
             "resume": {
                 "type": "string",
                 "minLength": 1,
-                "description": (
-                    "launch 的可选参数：本会话中一个已完成子代理的 task_id，在它自己的对话上继续执行新的 task。"
-                    "仍须给 agent（与原角色相同）和 task；id 写在这里，不写 task_id。"
-                ),
+                "description": "本会话一个已完成子代理的 task_id，在它的对话上执行新的 task；id 写在这里，不写 task_id。",
             },
         },
         # ``launch`` needs agent+task and ``message`` needs task_id+text; the
@@ -599,9 +589,11 @@ def llm_with_thinking(proxy: LLMProxy, thinking: str) -> LLMProxy:
 
 @dataclass(frozen=True)
 class SubAgentConfig:
-    # The child's completion ceiling, clamped per call to the remaining
-    # context; the pipeline passes the parent conversation's value.
-    max_tokens: int = AGENT_MAX_OUTPUT_TOKENS
+    # The longest reply a child's call asks for, clamped per call to the
+    # remaining context: the pipeline passes the sub-agent model's own
+    # maximum; an engine assembled without it takes the narrowest catalog
+    # model's.
+    max_tokens: int = MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS
     # Turn budget for a child whose launch omits ``max_turns``; None = only the
     # parent session deadline bounds it. Context is not a bound: a child
     # compacts at the parent's threshold (``SubAgentEngine.compactor``).

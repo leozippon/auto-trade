@@ -483,7 +483,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     received = _facts(system_prompts[0])
     previewed = _facts(str(build_prompt_preview(experiment, "research", "", repo_root=repo)["prompt"]))
     assert set(previewed) == set(received)
-    for block in ("budgets", "visible_timeline", "visibility_policy", "broker_replay", "experiment"):
+    for block in ("budgets", "visible_timeline", "broker_replay"):
         assert set(previewed[block]) == set(received[block]), block
     assert previewed["research_geometry"] == received["research_geometry"]
     assert "session" not in received["identity"]
@@ -726,9 +726,9 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert "回测年" not in note
     assert "上面是中断前最近一次压缩的摘要" in note
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
-    assert facts["experiment"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
-    assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 0
-    assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 5
+    # What earlier attempts used and validated is the note's and the Step
+    # tree's, not a second copy in the facts.
+    assert "experiment" not in facts and "used_before_this_attempt" not in facts["budgets"]
     # One session root, two transcripts, and both attempts' revisions kept as
     # the experiment's artifact history: the resumed attempt's revision descends from
     # the one the node it continued out of was validated as.
@@ -825,7 +825,9 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
         if event.get("event_type") == "tool_call" and event.get("tool") == "validate" and "span" not in event["arguments"]
     ][-1]
     [row] = full["candidates"]
-    assert row["node_id"] == record["steps"][2]["step_id"]
+    # The row names its node by handle; result_ref is under the full id.
+    assert row["result_ref"].split("/")[0] == record["steps"][2]["step_id"]
+    assert record["steps"][2]["step_id"].endswith(f"__{row['handle']}")
     assert [step["step"] for step in row["revealed"]["by_step"]] == [1]
     assert (record["attempts"], record["outcome"], record["finish_reason"]) == (
         2, "deadline", "llm_call_budget_exhausted"
@@ -855,8 +857,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     geometry = facts["research_geometry"]
     assert (geometry["test_horizon"], geometry["steps_tested"], geometry["steps"]) == ("20230930", 1, 4)
-    assert facts["experiment"] == {"validations_to_date": 1, "full_span_validations_to_date": 1}
-    assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 1
+    assert "experiment" not in facts and "used_before_this_attempt" not in facts["budgets"]
     assert "第 2 次尝试" in opening[1].content
 
 
@@ -925,8 +926,7 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
         1,
     )
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
-    assert facts["budgets"]["used_before_this_attempt"]["llm_calls"] == 3
-    assert facts["experiment"]["validations_to_date"] == 0
+    assert "experiment" not in facts and "used_before_this_attempt" not in facts["budgets"]
     assert not (options.work_root / options.experiment_id).exists()
 
 
@@ -1021,7 +1021,6 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     assert (notice["budget"], notice["used_fraction"]) == ("api_spend", 0.5)
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     assert facts["budgets"]["max_api_spend_usd"] == 0.08
-    assert facts["budgets"]["used_before_this_attempt"]["api_spend_usd"] == 0.041
 
 
 def test_release_finished_sandbox_removes_only_that_experiment(tmp_path: Path) -> None:
@@ -1293,7 +1292,6 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     assert facts["research_geometry"]["validation_period"] == "20230701..20240630"
     assert facts["research_geometry"]["input_window"] == "20210701..20230630"
     assert (facts["research_geometry"]["test_horizon"], facts["research_geometry"]["steps_tested"]) == ("20230630", 0)
-    assert facts["experiment"] == {"validations_to_date": 0, "full_span_validations_to_date": 0}
     significance = facts["artifact_contract"]["acceptance_rules"]["significance"]
     assert (significance["alpha"], significance["threshold_over_validation_period"]) == (0.05, 1.645)
     # The facts state the test horizon, so the prompt carries the run section

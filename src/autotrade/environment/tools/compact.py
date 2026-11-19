@@ -45,11 +45,7 @@ class CompactTool:
                 "summary": {
                     "type": "string",
                     "minLength": COMPACT_SUMMARY_MIN_CHARS,
-                    "description": (
-                        "Your working state, written for yourself: strategy state, "
-                        "decisions and rejected directions with numbers and node ids, "
-                        "open threads, next steps, trace pointers."
-                    ),
+                    "description": "Your working state, as the tool description lists it.",
                 }
             },
             "required": ["summary"],

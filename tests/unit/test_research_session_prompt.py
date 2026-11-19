@@ -32,7 +32,7 @@ def test_the_tools_state_the_validate_allowance_the_prompt_states() -> None:
     from autotrade.pipelines.session_tools import SmokeBacktestTool, ValidateTool
 
     for tool in (ValidateTool, SmokeBacktestTool):
-        assert "acceptance_rules.validation.validates_per_step" in tool.spec.description
+        assert "budgets.validates_per_step" in tool.spec.description
     assert "before the first test and between two tests" in ValidateTool.spec.description
     run = prompts.build_run_section(_run_facts())
     assert "- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 6 次。" in run

@@ -2345,7 +2345,8 @@ class ValidateSnapshotAccountingTest(unittest.TestCase):
             # The replay read the approved bytes...
             self.assertEqual(replayed, [approved])
             # ...the Step node kept them...
-            node_id = result.value["candidates"][0]["node_id"]
+            # The row names its node by handle; result_ref is under the node.
+            node_id = result.value["candidates"][0]["result_ref"].split("/")[0]
             node = tool.backtest.tree.root / node_id / "output" / "main.py"
             self.assertEqual(node.read_text(encoding="utf-8"), approved)
             # ...and the working copy really did move on underneath it.

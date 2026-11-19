@@ -270,7 +270,7 @@ class SessionFactsTest(unittest.TestCase):
         self.addCleanup(self._refs_tmp.cleanup)
         self.ref_store = AgentRefStore(Path(self._refs_tmp.name) / "experiment")
 
-    def test_facts_carry_the_research_geometry_and_the_experiment_but_no_later_date(self):
+    def test_facts_carry_the_research_geometry_but_no_later_date(self):
         facts = build_experiment_facts(
             manifest=RESEARCH_MANIFEST,
             ref_store=self.ref_store,
@@ -284,10 +284,12 @@ class SessionFactsTest(unittest.TestCase):
 
         self.assertIn("## 运行事实", prompt)
         self.assertEqual(facts["research_geometry"], RESEARCH_MANIFEST["research"])
-        self.assertNotIn("session", facts["identity"])
-        self.assertTrue(facts["identity"]["session_ref"].startswith("session_ref_"))
-        self.assertEqual(facts["experiment"]["validations_to_date"], 5)
-        self.assertEqual(facts["experiment"]["full_span_validations_to_date"], 2)
+        # The experiment and the run by reference; the session's ref rides in
+        # every node id and the earlier Validations are the Step tree's.
+        self.assertEqual(facts["identity"]["experiment_id"], "exp")
+        self.assertTrue(facts["identity"]["run_id"].startswith("run_ref_"))
+        self.assertNotIn("session_ref", facts["identity"])
+        self.assertNotIn("experiment", facts)
         self.assertEqual(facts["budgets"]["max_null_controls"], 3)
         self.assertEqual(
             facts["artifact_contract"]["start"],

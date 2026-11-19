@@ -170,16 +170,6 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "max_null_controls": experiment_default("max_null_controls"),
         "max_llm_calls": experiment_default("max_llm_calls"),
         "max_api_spend_usd": experiment_default("max_api_spend_usd"),
-        "used_before_this_attempt": {
-            "inference_seconds": 0.0,
-            "llm_calls": 0,
-            "main_calls": 0,
-            "subagent_calls": 0,
-            "compact_calls": 0,
-            "test_replays": 0,
-            "null_controls": 0,
-            "api_spend_usd": 0.0,
-        },
         "strategy_fit_timeout_seconds": float(
             experiment_default("strategy_fit_timeout_seconds")
         ),
@@ -201,7 +191,8 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
     assert (geometry["step"], geometry["steps"], geometry["steps_tested"]) == ("quarter", 12, 0)
     assert [year["label"] for year in geometry["years"]] == [year.label for year in research] == ["Y1"]
     assert "session" not in facts["identity"]
-    assert facts["budgets"]["used_before_this_attempt"]["test_replays"] == 0
+    # What earlier attempts used is the resumed attempt's opening message.
+    assert "used_before_this_attempt" not in facts["budgets"]
     # Runtime-only facts are marked, never invented.
     assert facts["identity"]["run_id"] == RUNTIME_PLACEHOLDER
     assert facts["visible_timeline"]["execution_policy"]["text_available"] == RUNTIME_PLACEHOLDER

@@ -161,7 +161,20 @@ class _Harness:
         self.session.candidate(name, source)
         result = self.session.call(name, span=span, controls=(name,) if control else ())
         assert result.ok, result.error
-        return str(result.value["candidates"][0]["node_id"])
+        return self.node_of(result.value["candidates"][0])
+
+    def node_of(self, row: dict[str, object]) -> str:
+        """A row's full node id: rows name their node by handle, by node_id
+        only where the handle is shared."""
+
+        if "node_id" in row:
+            return str(row["node_id"])
+        [node_id] = [
+            str(node["node_id"])
+            for node in self.backtest.tree.nodes()
+            if str(node["node_id"]).endswith(f"__{row['handle']}")
+        ]
+        return node_id
 
     def steps(self) -> ValidationSteps:
         return self.backtest.steps_plan
@@ -339,7 +352,7 @@ def test_a_revealed_validation_changes_no_record_and_never_registers() -> None:
         ledger = harness.backtest.ledger.path
         before = (ledger.read_bytes(), json.dumps(harness.backtest.tests), harness.backtest.test_horizon)
         harness.session.candidate("b", _seeded(2000))
-        revealed = harness.session.call("b", span="revealed").value["candidates"][0]["node_id"]
+        revealed = harness.node_of(harness.session.call("b", span="revealed").value["candidates"][0])
         assert (ledger.read_bytes(), json.dumps(harness.backtest.tests), harness.backtest.test_horizon) == before
         for arguments, reason in (
             ({"candidate": revealed}, "registration_needs_full_span_validation"),
@@ -555,8 +568,9 @@ def test_a_revealed_node_carries_what_a_test_returns() -> None:
         harness.test.invoke({"candidate": harness.node("a", "1")})
         [row] = harness.session.call("a", span="revealed").value["candidates"]
         assert "result_ref" not in row and "resources" not in row
-        [node] = [item for item in harness.backtest.tree.nodes() if item["node_id"] == row["node_id"]]
-        assert node["attachments"] == {} and not (harness.backtest.tree.root / row["node_id"] / "validation").exists()
+        node_id = harness.node_of(row)
+        [node] = [item for item in harness.backtest.tree.nodes() if item["node_id"] == node_id]
+        assert node["attachments"] == {} and not (harness.backtest.tree.root / node_id / "validation").exists()
         assert node["metrics"] and all(not isinstance(value, (dict, list)) for value in node["metrics"].values())
         readable = _agent_readable(harness)
         # The revealed window is the first step: no day strictly inside it is
@@ -589,7 +603,7 @@ def test_a_full_span_validate_reads_each_candidate_over_the_tested_steps_once_a_
         before = harness.session.call("a").value
         assert requests == [("20210701", "20250630", None)] and "revealed" not in json.dumps(before)
         first = before["candidates"][0]
-        tested = harness.test.invoke({"candidate": first["node_id"]}).value
+        tested = harness.test.invoke({"candidate": harness.node_of(first)}).value
 
         ledger = harness.backtest.ledger.path
         record = (ledger.read_bytes(), harness.backtest.test_horizon)
@@ -622,12 +636,12 @@ def test_a_full_span_validate_reads_each_candidate_over_the_tested_steps_once_a_
         assert threshold == revealed["threshold"] != after["threshold"]
 
         # The node is a full-span node like one made before the first test.
-        assert _node_shape(harness, other["node_id"]) == _node_shape(harness, first["node_id"])
-        step = next(item for item in harness.backtest.steps if item.step_id == other["node_id"])
+        assert _node_shape(harness, harness.node_of(other)) == _node_shape(harness, harness.node_of(first))
+        step = next(item for item in harness.backtest.steps if item.step_id == harness.node_of(other))
         assert step.span == "full" and json.loads(Path(step.validation.result_ref).read_text())["end"] == "20250630"
-        assert harness.session.rollback.invoke({"node_id": other["node_id"]}).ok
+        assert harness.session.rollback.invoke({"node_id": harness.node_of(other)}).ok
         assert (harness.session.output / "main.py").read_text(encoding="utf-8") == _strategy("2")
-        assert harness.test.invoke({"candidate": other["node_id"]}).value["candidate"]["node_id"] == other["node_id"]
+        assert harness.test.invoke({"candidate": harness.node_of(other)}).value["candidate"]["node_id"] == harness.node_of(other)
 
         # Two steps tested: the reading covers both and stops at the second.
         harness.session.candidate("c", _strategy("3"))
@@ -681,7 +695,7 @@ def test_a_failed_reading_over_the_tested_steps_reports_its_class_and_leaves_the
         # The candidates whose reading failed register and test as full-span nodes.
         harness.evaluator.validation_raise_for = {}
         for row in (raised, hosted):
-            assert harness.test.invoke({"candidate": row["node_id"]}).value["candidate"]["node_id"] == row["node_id"]
+            assert harness.test.invoke({"candidate": harness.node_of(row)}).value["candidate"]["node_id"] == harness.node_of(row)
 
 
 def test_the_readings_over_the_tested_steps_replay_after_the_research_replays_at_the_call_width() -> None:

@@ -1826,9 +1826,10 @@ def test_model_factory_reads_local_endpoint_and_key_from_export_env(tmp_path: Pa
     assert proxy.model == LOCAL_QWEN_MODEL
     assert proxy.config.base_url == "http://127.0.0.1:8011/v1"
     assert proxy.context_window_tokens == 262_144
-    assert model_profile(LOCAL_QWEN_MODEL).max_output_tokens == 262_144
+    # The host's choice: vLLM's own ceiling is the whole shared window.
+    assert model_profile(LOCAL_QWEN_MODEL).max_output_tokens == 65_536
     assert proxy.config.max_tokens == 8_000
-    assert proxy.config.max_output_tokens == 262_144
+    assert proxy.config.max_output_tokens == 65_536
     assert "local-secret" not in repr(proxy.config)
 
     transport = FakeTransport([_response({"content": "bounded"})])

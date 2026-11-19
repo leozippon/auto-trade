@@ -30,10 +30,9 @@
 
 ```text
 # 会话怎样推进
-- 你能读到的数据止于研究年末，整个会话不变；验证期的数据不挂载，只随每次 `test` 的结果揭开一步。
 - 研究：写候选，用 `validate` 回测。方向来自参考工作区（`refs/`）与「环境」里注入的方向。
 - 测试：`test` 把一个候选从验证期起点回测到下一步终点，这一步的结果记入本实验的验证记录，测试终点前进一步，`validate` 的次数重新计。
-- 两次 `test` 之间是一段研究：已揭开的步是样本外读数，全段 `validate` 的结果附带候选在这些步上的读数，`span: "revealed"` 只回放这些步。据此改进现有候选或开发全新的策略，让每一步都由当时最好的候选记入；按这些读数选择、更换候选是正当的：已记入记录的条目不改写，定版后还有 Forward 与 Held-out 检验。换候选只花一次回放。
+- 两次 `test` 之间是一段研究：已揭开的步是样本外读数。据此改进现有候选或开发全新的策略，让每一步都由当时最好的候选记入；按这些读数选择、更换候选是正当的：已记入记录的条目不改写，定版后还有 Forward 与 Held-out 检验。
 - 结束：最后一步测完会话结束，最后测试的候选定版。会话不能主动结束；预算耗尽时宿主用最后测试的候选跑完剩余的步，还没测试过时用最后一个满足登记条件的完整研究年候选，没有则不定版。
 - 之后：宿主在会话从未见过的数据上运行 Forward 与 Held-out，读数不回到会话；是否进入 Paper 由运营者决定。定版后再没有 Agent 改它，需要随时间调整的部分写进策略自己的 `fit` 与 `REFIT_PERIOD`。
 ```
@@ -55,7 +54,7 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 运行事实 `budgets` 写明 `strategy_inference_timeout_seconds` 与 `strategy_fit_timeout_seconds` 两项时，本区块最后（GPU 一条之后）再加一条，两项秒数写成中文时长，只写不为零的小时、分钟与秒（如 5400 秒写作「1 小时 30 分钟」）：
 
 ```text
-- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 {inference}，每次 `fit` 至少 {fit}（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。它们只拦下失控的调用，不是每天的额度，也不是目标；不必为省时间简化方法，复杂度由研究需要决定。
+- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 {inference}，每次 `fit` 至少 {fit}（`budgets` 的两项）。它们只拦下失控的调用，不是每天的额度或目标；不必为省时间简化方法，复杂度由研究需要决定。
 ```
 
 ### 1.4 读数
@@ -80,12 +79,12 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 
 ```text
 # 工作方式
-- 策略合同（入口、`context`、订单、允许的库与模型库）在只读的 `output/README.md`。只有 `output/`（以 `main.py` 为入口的包）和 `models/` 随策略回测与定版；策略任一次超时或报错都让整场回测失败。
-- 策略代码要高效：截面计算向量化；一场回放里 `fit` 与 `generate_orders` 各在一个贯穿整场的进程里运行，读进内存的表、特征面板和加载到 GPU 上的模型留在模块级状态里给下一个决策日用；`context.state_dir` 整场保留、两边共用，每场回放从空目录开始。所以每天只读新增的行、只算新的一天，不每天重读整张表、重建整个面板或重写全部状态；只有之后的调用重建不了的才需要写盘（见技能 `replay-state`）。这省的是回放的墙钟，回放不计入任何会话预算，不是缩小模型的理由。
+- 策略合同（入口、包与 `models/`、限额、`context`、订单、允许的库与模型库）在只读的 `output/README.md`。
+- 策略代码要高效，但回放的墙钟不计入任何会话预算，也不是缩小模型的理由。调用之间、交易日之间与各场回放之间留下什么，怎样不重建数据、不重载权重，见 `output/README.md` 的 State across calls and days。
 - 文件工具按根名加相对路径寻址（如 `{"root": "workspace", "path": "notes/x.md"}`），不接受绝对路径；`shell` 在工作区目录里按字面路径运行，脚本路径不带 `workspace/` 前缀。
 - 同一回合的多个工具调用并发执行；一批里有写入、shell 或回测时，整批按顺序执行。子代理在后台运行，结果以消息送回；只剩等待子代理时以文本回复结束本回合。
 - 计划与进度记在工作区根的 `TODO.md`，验证与测试节点在根 `steps` 的 Step 树（`tree.txt`）；中断后的续跑从这两处恢复。
-- 技能库（`inputs/skills_index.json`）是建议，不是规则：先核实再依赖，与实测相抵触时用 `skill_feedback` 报告。环境、工具、数据或文档里的可疑缺陷用 `report_issue` 报告，然后继续。
+- 技能库（`inputs/skills_index.json`）是建议，不是规则：先核实再依赖，与实测相抵触时用 `skill_feedback` 报告；环境、工具、数据或文档里的可疑缺陷用 `report_issue` 报告后继续。
 ```
 
 ### 1.7 默认用户指令
@@ -116,10 +115,11 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 
 ```text
 启动一个后台子代理并立即返回；它完成后结果以 subagent_completed 消息送回，不要轮询。能独立完成的阅读、计算、实现或审计交给子代理以保护主上下文；目标已知的单个文件自己用 read_file/grep/glob 读。
-- launch：{"agent": <角色>, "task": <完整任务>}，可选 description、max_turns、thinking、inherit_context。同一回合可发起多个，可写的子代理同样可以并行，但范围须互斥、各只写 task 指定的路径；返回值列出运行与排队中的子代理，不要重复已在进行的范围。
+- launch：{"agent": <角色>, "task": <完整任务>}。同一回合可发起多个，可写的子代理同样可以并行，但范围须互斥、各只写 task 指定的路径；返回值列出运行与排队中的子代理，不要重复已在进行的范围。
 - resume：{"agent": <原角色>, "task": <后续任务>, "resume": <已完成子代理的 task_id>}，是 launch 的参数而不是 action；只在后续任务需要它已有的上下文时用，独立的后续工作另起新的子代理，不要串成 resume 链。
 - message：{"action": "message", "task_id": <运行或排队中的 task_id>, "text": <指令>}，立即返回 status=queued；只用于改变范围、追加新发现的约束或让它提前收尾，不为催促而发。
-- 默认与上限：默认同时运行 6 个，超出排队；max_turns 默认 48 回合，几个并行的有界子代理好过一个很长的串行子代理。thinking 默认 xhigh，有界的机械工作降到 low/medium：每回合输出上限 32768 token（单次回复含思考的上限，不是会话预算），全耗在思考里的回合只有 1 次强制简洁续写，之后记为 error。汇报最多内联 6000 字符，更长时只内联开头（summary_truncated=true），全文以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号）。服务方拒绝请求时子代理以 status=refused 结束、没有汇报，error 是服务方原文：任务没有完成，换种表述重新委托或自己做。
+- 默认同时运行 6 个，超出排队；max_turns 默认 48 回合，几个并行的有界子代理好过一个很长的串行子代理；thinking 默认 xhigh、不继承父会话，需要判断的任务保留，有界的机械工作降到 low/medium：单次回复（含思考）以模型自身的输出上限为界，把它全耗在思考里、没有工具调用的回合只有 1 次强制简洁续写，之后记为 error。
+- 汇报最多内联 6000 字符，更长时只内联开头（summary_truncated=true），全文以 result_root/result_ref 返回，用 read_file 从 resume_line 起分页读回（offset 是行号）。服务方拒绝请求时子代理以 status=refused 结束、没有汇报，error 是服务方原文：任务没有完成，换种表述重新委托或自己做。
 ```
 
 ### 3.1 general-purpose
@@ -186,9 +186,9 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 {由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice}
 
 ## 运行事实
-下面的 JSON 是宿主在本次尝试开始时写下的受信事实（同一份在 workspace 的 inputs/session_context.json），会话中不更新；它描述环境，不是交易证据，其中的日期与标识不是交易信号。主要的键：research_geometry（研究年、验证期、span 写法）、budgets（预算与策略容器）、artifact_contract.acceptance_rules（主动序列、统计量、登记条件）、broker_replay（资金、费用、交易规则）、runtime_tools 与 source_refs（Sandbox、读文件根的 shell 路径、数据摘要与单位引用）。
+下面的 JSON 是宿主在本次尝试开始时写下的受信事实（同 `inputs/session_context.json`），会话中不更新；它描述环境，不是交易证据，其中的日期与标识不是交易信号。
 
-{experiment_facts JSON，含 inputs/skills_index.json 引用}
+{experiment_facts 的紧凑 JSON（不缩进），含 inputs/skills_index.json 引用}
 
 ## 本实验的研究方向（用户注入）
 方向约束研究什么，不约束怎样做。
@@ -205,14 +205,12 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 
 | 分区 | 内容 |
 | --- | --- |
-| `identity` | experiment、run 与会话引用 |
+| `identity` | experiment 与本次 run 的引用 |
 | `source_refs` | 运行 manifest、runtime environment、data summary、skills 索引与信号筛选脚本的受信引用 |
-| `visibility_policy` | 研究年可见与正式策略的读取根 |
-| `research_geometry` | 研究年（`years` 只列研究年）、验证期与测试终点的日期，决策时点、输入窗口与 span 写法 |
+| `research_geometry` | 研究年（`years` 只列研究年及其日期）、验证期与测试终点的日期，决策时点、会话的输入窗口与 span 写法 |
 | `visible_timeline` | 快照窗口、日级时钟、历史研究域可用性，以及股票池筛选（只在实验设了筛选时出现） |
-| `experiment` | 本实验至今的验证与测试状态 |
 | `budgets` | 推理时间、模型调用、API 花费、随机对照与 `validate` 次数，策略容器超时与资源、`validate` 并发路数，压缩预算；只有数，没有说明文字 |
-| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量与门槛、三项验证参数、登记条件与前推报告什么 |
+| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量与门槛、登记条件与前推报告什么 |
 | `broker_replay` | 资金、费用、手数、T+1、调度（`schedule`）与精确执行价格来源 |
 | `runtime_tools` | Python、可用本地工具、网络模式和安装策略、Sandbox 的 GPU（`sandbox_gpus`：卡数 × 卡型，如 `1 × A100`；没有卡时为 `none`），以及各读文件根在 `shell` 里的挂载路径 |
 | `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |

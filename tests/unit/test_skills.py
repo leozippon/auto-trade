@@ -440,6 +440,7 @@ def test_install_workspace_skills_copies_bytes_and_writes_index(tmp_path: Path) 
         source / "schema-notes" / "SKILL.md"
     ).read_bytes()
     index = json.loads((workspace / "inputs" / "skills_index.json").read_text())
-    assert index["count"] == 1
+    assert [entry["name"] for entry in index["skills"]] == ["schema-notes"]
+    assert index["skill_library"] == []
     assert not any("sha" in key.lower() for key in index)
     assert os.access(workspace / "skills", os.W_OK)

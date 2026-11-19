@@ -87,11 +87,12 @@ def test_the_session_facts_hold_values_and_leave_the_prompts_prose_out() -> None
         budgets={**CONTAINER, "deadline_seconds": 43800.0, "batch_validate_max_concurrency": 3}
     )
     assert "research_scope" not in facts
-    assert facts["visibility_policy"] == {
-        "visible_research_period": True,
-        "formal_strategy_read_roots": ["snapshot_dir", "asof_dir"],
-    }
-    assert "session" not in facts["identity"]
+    # The data view is the run section's, the strategy's read roots the
+    # contract README's, the earlier Validations the Step tree's, and the
+    # session ref rides in every node id.
+    for absent in ("visibility_policy", "experiment"):
+        assert absent not in facts
+    assert set(facts["identity"]) <= {"experiment_id", "run_id"}
     # The budgets are numbers and the compaction map, never a sentence.
     budgets = facts["budgets"]
     assert budgets["batch_validate_max_concurrency"] == 3
@@ -418,9 +419,9 @@ def test_the_orientation_states_the_strategy_limits_as_timeouts() -> None:
 
     hour = _orientation(limits(3600.0, 7200))
     assert hour.endswith(
-        "\n- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 1 小时，"
-        "每次 `fit` 至少 2 小时（运行事实 `budgets` 中的两项上限，并发 `validate` 时按路数放大）。"
-        "它们只拦下失控的调用，不是每天的额度，也不是目标；不必为省时间简化方法，复杂度由研究需要决定。"
+        "\n- 策略单次调用的超时：每个决策日的 `generate_orders` 至少 1 小时，每次 `fit` 至少 2 小时"
+        "（`budgets` 的两项）。它们只拦下失控的调用，不是每天的额度或目标；"
+        "不必为省时间简化方法，复杂度由研究需要决定。"
     )
     assert hour.count("\n- ") == 3
     quarter = _orientation(limits(900, 5400))

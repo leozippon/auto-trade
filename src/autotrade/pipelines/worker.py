@@ -119,7 +119,9 @@ class LLMWorkerSettings:
     timeout_seconds: float
     retry_backoff_seconds: float
     temperature: float
-    max_response_tokens: int
+    # The experiment's ``llm_max_response_tokens``: None = each conversation
+    # role asks for its own model's maximum reply (``max_tokens_for``).
+    max_response_tokens: int | None
     thinking_enabled: bool
     reasoning_effort: str
     compact_enabled: bool
@@ -744,8 +746,9 @@ def build_experiment_pipeline(
             runtime_root=options.work_root / options.experiment_id,
             sandbox_spec=options.agent_sandbox,
             command_runner_factory=command_runner_factory,
-            # One ceiling for the parent conversation and its children.
+            # Each conversation asks for its own model's longest reply.
             max_response_tokens=options.llm.max_tokens_for("main"),
+            subagent_max_response_tokens=options.llm.max_tokens_for("subagent"),
             research_directive=options.experiment.research_directive,
             workspace_reference=options.experiment.workspace_reference,
             skill_library=options.experiment.skill_library,
@@ -1184,7 +1187,7 @@ def _llm_settings(
         temperature=_bounded_float(
             read_param(params, "llm_temperature"), "llm_temperature", 0.0, 2.0
         ),
-        max_response_tokens=_positive_int(
+        max_response_tokens=_optional_positive_int(
             read_param(params, "llm_max_response_tokens"), "llm_max_response_tokens"
         ),
         thinking_enabled=not _strict_bool(read_param(params, "no_thinking"), "no_thinking"),
