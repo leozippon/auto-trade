@@ -28,7 +28,11 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.paper import DailyPaperEngine
-from autotrade.paper.book import SOURCE_HISTORY_NAME, copy_source_history
+from autotrade.paper.book import (
+    SOURCE_HISTORY_NAME,
+    VERDICT_LOG_NAME,
+    copy_source_history,
+)
 from autotrade.paper.engine import PaperAwaitingFills
 from autotrade.paper.orders import order_sheet
 from autotrade.paper.pit import newest_replay_slot
@@ -484,6 +488,25 @@ def test_the_console_opens_a_registered_strategys_book_and_deletes_it_between_ru
     assert client.delete("/api/trading/paper/books/exp").json() == {"env": "paper", "deleted": "exp"}
     assert client.get("/api/trading/paper/books").json()["books"] == []
     assert client.delete("/api/trading/paper/books/exp").status_code == 404
+
+
+def test_an_experiment_is_not_deleted_while_an_account_runs_on_its_image(tmp_path: Path):
+    """Deleting an experiment reclaims its image tags, and every run of a Paper
+    account trading it starts its container on the pinned one. The experiment
+    stays while such an account exists; a killed account runs no container and
+    holds it no longer."""
+
+    experiments = tmp_path / "experiments"
+    build_experiment(experiments, "exp", "registered_with_record")
+    client = TestClient(create_app(tmp_path, experiments))
+    assert client.post("/api/trading/paper/books", json={"experiment_id": "exp"}).json()["book_id"] == "exp"
+    refused = client.delete("/api/experiments/exp", params={"confirm": "exp"})
+    assert refused.status_code == 409
+    assert "has Paper account exp, which runs on its sandbox image" in refused.json()["detail"]
+    assert (experiments / "exp").is_dir()
+    _jsonl(paper_root(tmp_path) / "exp" / VERDICT_LOG_NAME, {"event_id": "terminal", "status": "killed"})
+    assert client.delete("/api/experiments/exp", params={"confirm": "exp"}).status_code == 200
+    assert not (experiments / "exp").exists()
 
 
 def test_the_overview_has_one_row_per_book_read_off_its_panels(tmp_path: Path):

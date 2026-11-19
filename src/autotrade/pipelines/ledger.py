@@ -34,7 +34,7 @@ from collections.abc import Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 
-from autotrade.common.records import write_json_atomic
+from autotrade.common.records import as_mapping, finite_number, write_json_atomic
 from autotrade.environment.runtime import (
     append_versioned_jsonl,
     read_versioned_jsonl,
@@ -223,6 +223,22 @@ def registered_record(records: Sequence[Mapping[str, object]]) -> dict[str, obje
     return rows[0] if rows else None
 
 
+def registered_fingerprint(records: Sequence[Mapping[str, object]]) -> str | None:
+    """The content address (``artifacts.artifact_fingerprint``) the ledger recorded
+    for the registered artifact's bytes: that of the step it was registered from
+    (``registered.source_step_id``), or None without a registration or that step."""
+
+    row = registered_record(records)
+    if row is None:
+        return None
+    step_id = as_mapping(row.get("registered")).get("source_step_id")
+    steps = row.get("steps")
+    for step in steps if isinstance(steps, list) else ():
+        if isinstance(step, Mapping) and step.get("step_id") == step_id:
+            return str(step.get("fingerprint") or "") or None
+    return None
+
+
 def forward_record(records: Sequence[Mapping[str, object]]) -> dict[str, object] | None:
     """The experiment's forward verdict record, or None; an integrity row is not one."""
 
@@ -295,6 +311,67 @@ def paper_candidate(records: Sequence[Mapping[str, object]]) -> dict[str, object
         "output_path": str(block["output_path"]),
         "models_path": str(block.get("models_path") or "") or None,
     }
+
+
+def pass_reading(record: Mapping[str, object]) -> dict[str, object]:
+    """Whether a registered strategy passed, as the console words a
+    ``registered_with_record`` ending (``ENDING_LABELS`` in app.js), and what
+    that was read on.
+
+    ``record`` is the forward record. In each period the session never saw,
+    the Forward year and the Held-out slice (``slices.forward`` and
+    ``slices.heldout``), four conditions must hold, in this order:
+
+    - ``profit``: the account's return after every cost
+      (``raw_readings.strategy_return``, ``verdict.holder_readings``) is above
+      zero;
+    - ``beats_index``: that return is above the benchmark index's over the
+      same days (``raw_readings.benchmark_return``), so it earned more than
+      holding the index;
+    - ``drawdown`` and ``active_drawdown``: the slice's ``max_drawdown`` and
+      ``active_max_drawdown`` are at most the record's
+      ``acceptance_rules.max_drawdown`` and ``acceptance_rules.active_max_drawdown``,
+      the limits past which a Paper account of the strategy kills itself
+      (``paper.verdict``).
+
+    A figure that is missing or not finite fails its condition, so a replay
+    the strategy's own error left without slices fails every one. ``passed``
+    is every condition of both periods; ``periods`` gives each period's
+    figures, limits and condition results. Nothing else is read -- no
+    residual IR, threshold, p-value, lower bound or validation record.
+    Derived, never stored: the stored verdict stays ``registered_with_record``
+    and no record is rewritten. Besides the console's label it is the one gate
+    a new Paper account passes (``paper.book.create_book``); an account
+    opened earlier is never judged by it again."""
+
+    rules = as_mapping(record.get("acceptance_rules"))
+    drawdown_limit = finite_number(rules.get("max_drawdown"))
+    active_limit = finite_number(rules.get("active_max_drawdown"))
+    slices = as_mapping(record.get("slices"))
+    periods: dict[str, dict[str, object]] = {}
+    passed = True
+    for name in ("forward", "heldout"):
+        block = as_mapping(slices.get(name))
+        raw = as_mapping(block.get("raw_readings"))
+        account, index = finite_number(raw.get("strategy_return")), finite_number(raw.get("benchmark_return"))
+        drawdown, active = finite_number(block.get("max_drawdown")), finite_number(block.get("active_max_drawdown"))
+        conditions = {
+            "profit": account is not None and account > 0,
+            "beats_index": account is not None and index is not None and account > index,
+            "drawdown": drawdown is not None and drawdown_limit is not None and drawdown <= drawdown_limit,
+            "active_drawdown": active is not None and active_limit is not None and active <= active_limit,
+        }
+        passed = passed and all(conditions.values())
+        periods[name] = {
+            "account_return": account,
+            "index_return": index,
+            "max_drawdown": drawdown,
+            "max_drawdown_limit": drawdown_limit,
+            "active_max_drawdown": active,
+            "active_max_drawdown_limit": active_limit,
+            "conditions": conditions,
+        }
+    return {"passed": passed, "periods": periods}
 
 
 class ExperimentLedger:

@@ -24,6 +24,8 @@ from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import EXPERIMENT_LABEL, SandboxSpec
 from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
+from autotrade.paper.book import book_status
+from autotrade.paper.books import PAPER_STATE_DIR, experiment_books
 from autotrade.pipelines.agent_inbox import (
     INBOX_NAME,
     InboxError,
@@ -982,6 +984,20 @@ class ExperimentManager:
             if state.get("worker_alive") or state.get("state") == ExperimentState.LAUNCHING:
                 raise ManagerError(
                     f"experiment {experiment_id!r} has a live worker; stop or terminate it before deleting"
+                )
+            # Deleting reclaims the experiment's image tags (below), and every run
+            # of a Paper account trading it starts its container on the pinned one.
+            # A killed account runs no container.
+            paper_root = self.repo_root / PAPER_STATE_DIR
+            books = [
+                book
+                for book in experiment_books(paper_root, experiment_id)
+                if book_status(paper_root / book) != "killed"
+            ]
+            if books:
+                raise ManagerError(
+                    f"experiment {experiment_id!r} has Paper account {', '.join(books)}, which runs on its "
+                    "sandbox image; delete the account before the experiment"
                 )
             removed_work_root: str | None = None
             # Deletion does not depend on params.json being readable: a failed

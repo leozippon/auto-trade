@@ -20,8 +20,10 @@ not fit there. A run refuses unless the last deploy shipped the local HEAD,
 then starts the console (restarting it onto the deployed
 checkout when no experiment runs) and a round launcher in tmux with
 AUTOTRADE_GPU_NAME set, and repeats a `--fill` launcher every ten minutes in
-a session of its own until its round has nothing pending; status and sync
-read and copy back. Beyond that fill loop nothing here schedules, caches an
+a session of its own until its round has nothing pending; status reads, and
+sync copies an experiment back and gives it its pinned sandbox image tag here
+when the instance's image and this host's base bake the same strategy runtime,
+so a passed strategy can be followed on Paper. Beyond that fill loop nothing here schedules, caches an
 endpoint, keeps a secret in the repository or changes how the executor
 isolates a strategy container. See ops/zgca/README.md.
 
@@ -463,6 +465,53 @@ class Workflow:
         logs.mkdir(parents=True, exist_ok=True)
         self.dev("copy", *PRESERVE, f"dev:{REMOTE_ROOT}/logs/workers/{experiment_id}.log", f"{logs / experiment_id}.log")
         say(f"synced experiments/{experiment_id} (without pit_views) and logs/workers/{experiment_id}.log")
+        self.tag_pinned_image(experiment_id, local)
+
+    def tag_pinned_image(self, experiment_id: str, local: Path) -> None:
+        """Give a synced experiment the sandbox image tag it pins on this host, as every local experiment's is made.
+
+        A local experiment's tag is a clone of the base image
+        (``sandbox_images.prepare_experiment_sandbox_image``), and a Paper
+        account runs the experiment's tag; the instance's tag is not here. The
+        tag is made only when the image it names on the instance and this host's
+        base bake the same strategy runtime, each read in one offline container
+        (``contract_fingerprint.read_image_contract``), so the strategy runs here
+        under the rules it was validated by. ``docker tag`` is idempotent, so a
+        sync run again re-points the tag at the base image as it is then.
+        """
+
+        _with_project_src()
+        from autotrade.environment.contract_fingerprint import (
+            SandboxImageContractMismatch,
+            read_image_contract,
+        )
+        from autotrade.environment.sandbox import DEFAULT_IMAGE, SandboxSpec
+        from autotrade.environment.sandbox_images import SANDBOX_IMAGE_STATE_NAME
+
+        state = local / "hitl" / SANDBOX_IMAGE_STATE_NAME
+        if not state.is_file():
+            say(f"experiments/{experiment_id} pins no sandbox image: no tag to make")
+            return
+        try:
+            image = str(json.loads(state.read_text(encoding="utf-8"))["image_ref"])
+            SandboxSpec(image=image)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise WorkflowError(f"experiments/{experiment_id}/hitl/{SANDBOX_IMAGE_STATE_NAME} names no usable image tag: {exc!r}") from exc
+        remote = self.remote("image-runtime", image, capture=True).split()[-1:]
+        try:
+            base = read_image_contract(DEFAULT_IMAGE).runtime
+        except SandboxImageContractMismatch as exc:
+            raise WorkflowError(str(exc)) from exc
+        if remote != [base]:
+            raise WorkflowError(
+                f"experiments/{experiment_id} is synced, but its strategy cannot be followed on Paper here until the "
+                f"images agree: its image {image} bakes strategy runtime {remote[0] if remote else '(none read)'} on the "
+                f"instance, this host's {DEFAULT_IMAGE} bakes {base}; no tag was made"
+            )
+        tagged = subprocess.run(["docker", "tag", DEFAULT_IMAGE, image], stdin=subprocess.DEVNULL, capture_output=True, check=False)
+        if tagged.returncode != 0:
+            raise WorkflowError(f"docker tag {DEFAULT_IMAGE} {image} failed: {tagged.stderr.decode('utf-8', errors='replace').strip()}")
+        say(f"tagged {DEFAULT_IMAGE} as {image}: both bake strategy runtime {base}")
 
     def down(self) -> None:
         # Stopping kills every worker and round launcher on the instance; one
@@ -491,7 +540,7 @@ def main(
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
     run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, experiment ids)")
     commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, deployed commit, console, experiments, image, round log")
-    sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here")
+    sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here, then tag its pinned sandbox image here when the runtimes agree")
     sync.add_argument("experiment_id", help="experiment id")
     commands.add_parser("down", help="instance stop, refused while experiments run: wait for STOPPED")
     options = parser.parse_args(argv)

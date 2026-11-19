@@ -2486,7 +2486,7 @@ def _started_executor(strategy: Path, argv: list[str], config: SandboxConfig):
     """A real DockerStrategyExecutor whose container is a local worker process."""
     with (
         patch.object(DockerStrategyExecutor, "docker_command", return_value=argv),
-        patch("autotrade.environment.executor._require_local_image"),
+        patch("autotrade.environment.executor.require_local_image"),
     ):
         return DockerStrategyExecutor(strategy, config)
 

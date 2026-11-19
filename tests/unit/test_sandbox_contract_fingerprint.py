@@ -41,7 +41,7 @@ from autotrade.environment.contract_fingerprint import (
 from autotrade.environment.executor import (
     IMPORTED_RUNTIME_FINGERPRINT,
     StrategyExecutionError,
-    _require_local_image,
+    require_local_image,
 )
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 
@@ -168,7 +168,7 @@ def test_runtime_drift_stops_every_container_and_every_session(
     edited.write_bytes(edited.read_bytes() + b"\n# superseded loader rule\n")
     _image_reports(monkeypatch, _image_contract(staged))
     with pytest.raises(StrategyExecutionError, match=module):
-        _require_local_image(_container_start(tmp_path))
+        require_local_image(_container_start(tmp_path))
     with pytest.raises(SandboxImageContractMismatch, match=module):
         assert_image_contract_current(
             IMAGE,
@@ -194,7 +194,7 @@ def test_a_readme_edit_is_refused_where_a_session_mounts_it_and_nowhere_else(
     monkeypatch.setattr(contract_fingerprint, "_repository_root", lambda: checkout)
 
     config = _container_start(tmp_path)
-    _require_local_image(config)
+    require_local_image(config)
     with pytest.raises(SandboxImageContractMismatch, match=AGENT_CONTRACT_PATHS[0]):
         assert_image_contract_current(
             IMAGE, runtime=IMPORTED_RUNTIME_FINGERPRINT, readme=readme
@@ -220,17 +220,17 @@ def test_a_container_is_compared_with_the_runtime_its_process_imported(
     monkeypatch.setattr(contract_fingerprint, "_repository_root", lambda: checkout)
     config = _container_start(tmp_path)
     _image_reports(monkeypatch, _image_contract(built))
-    _require_local_image(config)
+    require_local_image(config)
     _image_reports(monkeypatch, _image_contract(checkout))
     with pytest.raises(StrategyExecutionError, match=RUNTIME_CONTRACT_MODULES[1]):
-        _require_local_image(config)
+        require_local_image(config)
 
 
 def test_image_predating_the_recorded_digest_runs_containers_and_stops_a_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _image_reports(monkeypatch, ImageContract(IMPORTED_RUNTIME_FINGERPRINT, ""))
-    _require_local_image(_container_start(tmp_path))
+    require_local_image(_container_start(tmp_path))
     with pytest.raises(SandboxImageContractMismatch) as raised:
         assert_image_contract_current(
             IMAGE,

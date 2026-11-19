@@ -85,6 +85,7 @@ from autotrade.pipelines.ledger import (
     experiment_verdict,
     forward_record,
     paper_candidate,
+    pass_reading,
     recorded_path,
     registered_record,
     research_records,
@@ -425,71 +426,12 @@ def _result_name(reference: object) -> str | None:
     return path.parent.name if path.name == "result.json" else path.name
 
 
-def pass_reading(record: Mapping[str, object]) -> dict[str, object]:
-    """Whether a registered strategy passed, as the console words a
-    ``registered_with_record`` ending (``ENDING_LABELS`` in app.js), and what
-    that was read on.
-
-    ``record`` is the forward record. In each period the session never saw,
-    the Forward year and the Held-out slice (``slices.forward`` and
-    ``slices.heldout``), four conditions must hold, in this order:
-
-    - ``profit``: the account's return after every cost
-      (``raw_readings.strategy_return``, ``verdict.holder_readings``) is above
-      zero;
-    - ``beats_index``: that return is above the benchmark index's over the
-      same days (``raw_readings.benchmark_return``), so it earned more than
-      holding the index;
-    - ``drawdown`` and ``active_drawdown``: the slice's ``max_drawdown`` and
-      ``active_max_drawdown`` are at most the record's
-      ``acceptance_rules.max_drawdown`` and ``acceptance_rules.active_max_drawdown``,
-      the limits past which a Paper account of the strategy kills itself
-      (``paper.verdict``).
-
-    A figure that is missing or not finite fails its condition, so a replay
-    the strategy's own error left without slices fails every one. ``passed``
-    is every condition of both periods; ``periods`` gives each period's
-    figures, limits and condition results. Nothing else is read -- no
-    residual IR, threshold, p-value, lower bound or validation record.
-    Derived for display only: the stored verdict stays
-    ``registered_with_record`` and no record is rewritten."""
-
-    rules = as_mapping(record.get("acceptance_rules"))
-    drawdown_limit = finite_number(rules.get("max_drawdown"))
-    active_limit = finite_number(rules.get("active_max_drawdown"))
-    slices = as_mapping(record.get("slices"))
-    periods: dict[str, dict[str, object]] = {}
-    passed = True
-    for name in ("forward", "heldout"):
-        block = as_mapping(slices.get(name))
-        raw = as_mapping(block.get("raw_readings"))
-        account, index = finite_number(raw.get("strategy_return")), finite_number(raw.get("benchmark_return"))
-        drawdown, active = finite_number(block.get("max_drawdown")), finite_number(block.get("active_max_drawdown"))
-        conditions = {
-            "profit": account is not None and account > 0,
-            "beats_index": account is not None and index is not None and account > index,
-            "drawdown": drawdown is not None and drawdown_limit is not None and drawdown <= drawdown_limit,
-            "active_drawdown": active is not None and active_limit is not None and active <= active_limit,
-        }
-        passed = passed and all(conditions.values())
-        periods[name] = {
-            "account_return": account,
-            "index_return": index,
-            "max_drawdown": drawdown,
-            "max_drawdown_limit": drawdown_limit,
-            "active_max_drawdown": active,
-            "active_max_drawdown_limit": active_limit,
-            "conditions": conditions,
-        }
-    return {"passed": passed, "periods": periods}
-
-
 def _forward_view(
     identity: PublicIdentity, record: Mapping[str, object] | None
 ) -> dict[str, object] | None:
     """The forward record: replay span, slice statistics and readout, as the
     record stores them, and ``pass_reading``, what the console's label reads
-    (:func:`pass_reading`). ``None`` until the record exists, which is also
+    (``ledger.pass_reading``). ``None`` until the record exists, which is also
     when the readout does."""
 
     if record is None:
@@ -511,25 +453,20 @@ def _forward_view(
     }
 
 
-def _paper_openable(
-    directory: Path, params: Mapping[str, object], records: Sequence[Mapping[str, object]]
-) -> bool:
-    """Whether this console can open a Paper account on the experiment: it has a
-    Paper candidate (``ledger.paper_candidate``) and was not created under another
-    experiments root. Opening rebuilds the experiment's settings, which refuse a
-    recorded ``experiments_root`` other than the directory's parent
-    (``pipelines.worker``; a relative one is read against the repository, the
-    experiments root's parent), so a strategy registered on the ZGCA instance and
-    synced back is read here but never offered."""
+def _paper_openable(records: Sequence[Mapping[str, object]]) -> bool:
+    """Whether this console offers to open a Paper account on the experiment: it
+    has a Paper candidate (``ledger.paper_candidate``) marked Passed
+    (``ledger.pass_reading``), the two ledger conditions ``paper.book.create_book``
+    refuses without. Where the experiment was created does not matter: an account
+    resolves from the experiment's directory here, so a strategy registered on the
+    ZGCA instance and synced back is offered like one of this host's."""
 
-    if paper_candidate(records) is None:
-        return False
-    if "experiments_root" not in params:
-        return True
-    root = Path(str(params["experiments_root"]))
-    if not root.is_absolute():
-        root = directory.parents[1] / root
-    return root.resolve() == directory.parent.resolve()
+    forward = forward_record(records)
+    return (
+        forward is not None
+        and paper_candidate(records) is not None
+        and pass_reading(forward)["passed"] is True
+    )
 
 
 def summarize_experiment(directory: Path) -> dict[str, object]:
@@ -569,7 +506,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
                 "ending": ending,
                 "attention": experiment_attention(identity, directory, ending),
                 "forward": forward,
-                "paper_openable": _paper_openable(directory, params, records),
+                "paper_openable": _paper_openable(records),
             }
         )
     except Exception as exc:  # noqa: BLE001 - broken experiments remain inspectable and deletable

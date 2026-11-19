@@ -442,6 +442,26 @@ if experiment in running_experiments(root):
 PY
 }
 
+# The strategy runtime digest an image on the instance bakes
+# (environment.contract_fingerprint), read in one offline container without a
+# GPU: `sync` compares the one a synced experiment's pinned image bakes with
+# this host's base image before giving the experiment its tag there.
+image_runtime() {
+    require_venv
+    docker image inspect "$1" >/dev/null 2>&1 \
+        || die "image $1 is not on the instance (tags are lost across stop/start), so the strategy runtime it baked cannot be read"
+    "$VENV/bin/python" - "$1" <<'PY'
+import sys
+
+from autotrade.environment.contract_fingerprint import SandboxImageContractMismatch, read_image_contract
+
+try:
+    print(read_image_contract(sys.argv[1]).runtime)
+except SandboxImageContractMismatch as exc:
+    sys.exit(f"ERROR: {exc}")
+PY
+}
+
 step=$1
 shift
 case "$step" in
@@ -455,5 +475,6 @@ case "$step" in
     status) status ;;
     deployed-commit) deployed_commit ;;
     experiment-state) [ $# -eq 1 ] || die "experiment-state needs one experiment id"; experiment_state "$1" ;;
+    image-runtime) [ $# -eq 1 ] || die "image-runtime needs one image tag"; image_runtime "$1" ;;
     *) die "unknown remote step: '$step'" ;;
 esac

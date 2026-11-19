@@ -914,7 +914,7 @@ class DockerStrategyExecutor:
         self.close()
 
     def _start(self) -> None:
-        _require_local_image(self.config)
+        require_local_image(self.config)
         try:
             self._process = subprocess.Popen(
                 self.docker_command(),
@@ -1330,14 +1330,15 @@ def _pinned_store(pin: str) -> Path | None:
         raise StrategyExecutionError(str(exc)) from exc
 
 
-def _require_local_image(config: SandboxConfig) -> None:
+def require_local_image(config: SandboxConfig) -> None:
     """Resolve Docker and reject an absent or stale image without any pull attempt.
 
     The image carries its own copy of the strategy loader, so an image baking
     other bytes would enforce superseded rules against a strategy validated by
     this process's loader. That divergence is invisible from inside the
     container, so it is checked here — once per strategy worker start, before
-    the worker exists — against ``IMPORTED_RUNTIME_FINGERPRINT``. The README
+    the worker exists, and once when a Paper account is opened on the image
+    (``paper.book.create_book``) — against ``IMPORTED_RUNTIME_FINGERPRINT``. The README
     half is the research session's check, where it mounts the README; see
     ``contract_fingerprint``.
     """
@@ -1396,6 +1397,7 @@ __all__ = [
     "caused_by",
     "discard_strategy_state",
     "raised_by_strategy",
+    "require_local_image",
     "strategy_resource_usage",
     "strategy_resources_of",
 ]

@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from autotrade.common.records import write_json_atomic
-from autotrade.environment.artifacts import REVISION_MANIFEST_FILE
+from autotrade.environment.artifacts import REVISION_MANIFEST_FILE, artifact_fingerprint
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.style import (
@@ -342,6 +342,12 @@ def build_experiment(
         output = directory / "artifacts/strategy/registered/strategy_research_abc/output"
         output.mkdir(parents=True)
         (output / "main.py").write_text("def generate_orders(context):\n    return []\n", encoding="utf-8")
+        # The nominee's bytes are what registered: its recorded content address is theirs.
+        nominee["fingerprint"] = artifact_fingerprint(output)
+        write_json_atomic(
+            directory / REVISIONS_DIR / nominee["revision_id"] / REVISION_MANIFEST_FILE,
+            {"revision_id": nominee["revision_id"], "fingerprint": nominee["fingerprint"]},
+        )
         registered = {
             "artifact_id": "strategy_research_abc",
             "output_path": str(output),

@@ -3,7 +3,7 @@
 The console lists experiments from whatever is on disk, so a ``params.json``
 naming parameters no parameter declares must degrade to an unreadable row
 instead of taking the listing down; the experiment's verdict reaches the listing once its forward record
-exists, with the Paper action only for an experiment created on this host; and the create form is seeded with the research geometry the worker
+exists, with the Paper action only for a strategy marked Passed, wherever it was created; and the create form is seeded with the research geometry the worker
 actually runs.
 """
 
@@ -87,8 +87,16 @@ def _registration(directory: Path) -> dict[str, object]:
     }
 
 
-def _forward(directory: Path) -> dict[str, object]:
-    """The forward record of that registration, with its readout."""
+def _forward(directory: Path, heldout_return: float = 0.04) -> dict[str, object]:
+    """The forward record of that registration, with its readout: a strategy the
+    console marks passed unless ``heldout_return`` loses money."""
+
+    def period(account: float) -> dict[str, object]:
+        return {
+            "raw_readings": {"strategy_return": account, "benchmark_return": -0.02},
+            "max_drawdown": 0.1,
+            "active_max_drawdown": 0.05,
+        }
 
     return {
         "record_type": "forward",
@@ -99,6 +107,8 @@ def _forward(directory: Path) -> dict[str, object]:
         "session_key": "forward",
         "artifact_id": "strategy_research_abc",
         "status": "ok",
+        "acceptance_rules": {"max_drawdown": 0.55, "active_max_drawdown": 0.3},
+        "slices": {"forward": period(0.08), "heldout": period(heldout_return)},
         "readout": {"state": "registered_with_record", "record": {}, "forward": {}},
     }
 
@@ -122,29 +132,34 @@ def test_the_verdict_reaches_the_listing_once_the_forward_record_exists(tmp_path
     assert detail["verdict"]["status"] == "registered_with_record"
 
 
-def test_a_registered_strategy_synced_from_another_host_is_listed_without_the_paper_action(tmp_path: Path):
-    """Opening a Paper account rebuilds the experiment's settings, which refuse an
-    ``experiments_root`` other than the directory's parent: an experiment created
-    on the ZGCA instance and synced back is read here, but the console does not
-    offer what would fail. Its own experiments, recorded absolute (the console)
-    or repository-relative (the command line), still offer it."""
+def test_the_paper_action_follows_the_passed_mark_wherever_the_strategy_was_registered(tmp_path: Path):
+    """An account resolves from the experiment's directory on this host, so an
+    experiment created on the ZGCA instance and synced back is offered like this
+    host's own, recorded absolute (the console) or repository-relative (the
+    command line); what decides is the console's Passed mark, which a strategy
+    that lost money in the Held-out period does not carry."""
 
     root = tmp_path / "experiments"
-    for experiment_id, recorded in (
-        ("console", str(root)),
-        ("command_line", "experiments"),
-        ("synced", "/personal_fast_storage/auto-trade/experiments"),
+    for experiment_id, recorded, heldout in (
+        ("console", str(root), 0.04),
+        ("command_line", "experiments", 0.04),
+        ("synced", "/personal_fast_storage/auto-trade/experiments", 0.04),
+        ("synced_loss", "/personal_fast_storage/auto-trade/experiments", -0.01),
+        ("console_loss", str(root), -0.01),
     ):
         directory = _experiment(root, experiment_id, {**_CURRENT, "experiments_root": recorded})
         ledger = ExperimentLedger(directory / "ledgers/experiment_ledger.jsonl")
         ledger.append(_registration(directory))
-        ledger.append(_forward(directory))
+        ledger.append(_forward(directory, heldout))
     rows = {row["experiment_id"]: row for row in experiment_listing(root)["experiments"]}
     assert {name: row["ending"]["state"] for name, row in rows.items()} == dict.fromkeys(rows, "registered_with_record")
-    assert {name: row["paper_openable"] for name, row in rows.items()} == {
+    passed = {name: row["forward"]["pass_reading"]["passed"] for name, row in rows.items()}
+    assert {name: row["paper_openable"] for name, row in rows.items()} == passed == {
         "console": True,
         "command_line": True,
-        "synced": False,
+        "synced": True,
+        "synced_loss": False,
+        "console_loss": False,
     }
     # The raw artifact id stays on the host side of the listing.
     assert "strategy_research_abc" not in json.dumps(rows)

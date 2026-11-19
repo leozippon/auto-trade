@@ -13,9 +13,14 @@ book keeps the history its own days continue. A different capital, artifact or
 environment is a new book in a new state root.
 
 A book trades the registered strategy of an experiment with its forward record (the
-experiment's Paper candidate) and is opened by the operator from the console, on
-the experiment page's 读出 view or the best-experiment panel; at most
-``BOOK_CAP`` books are open at once. Creation pins the rules its Paper verdict is read by (``paper/verdict.py``),
+experiment's Paper candidate) that the console marks Passed (``ledger.pass_reading``),
+and is opened by the operator from the console, on the experiment page's 读出 view
+or the best-experiment panel; at most ``BOOK_CAP`` books are open at once. The mark
+is read once, here: a book already open is never judged by it again. The
+experiment may come from another host (the ZGCA instance, synced back): the book
+is resolved from the experiment's directory on this host, its registered bytes
+must be those its ledger recorded and its pinned sandbox image must be on this
+host, baking the strategy runtime this checkout enforces. Creation pins the rules its Paper verdict is read by (``paper/verdict.py``),
 so a later change cannot move a book already trading, and the boards its account
 may buy on, in its Broker profile: those of the experiment's stamp (every board
 when it has none) that the book's own initial cash qualifies for
@@ -31,12 +36,13 @@ from dataclasses import dataclass, replace
 from datetime import datetime, time
 from pathlib import Path
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import as_mapping, read_json_object, write_json_atomic
 from autotrade.common.time import CN_TZ
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.executor import StrategyExecutionError, require_local_image
 from autotrade.environment.replay.curve import result_curve
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
@@ -46,7 +52,9 @@ from autotrade.pipelines.ledger import (
     ExperimentLedger,
     forward_record,
     paper_candidate,
+    pass_reading,
     recorded_path,
+    registered_fingerprint,
 )
 from autotrade.pipelines.worker import (
     resolve_worker_options,
@@ -99,6 +107,11 @@ VERDICT_LOG_NAME = "verdict.jsonl"
 # creation so the book keeps it after the experiment is archived.
 SOURCE_HISTORY_NAME = "source_history.json"
 SOURCE_HISTORY_SCHEMA_VERSION = 1
+# The experiment parameters naming where the host that ran it kept its
+# experiments and its sandboxes. No book reads either, and an experiment synced
+# from the ZGCA instance names that host's, which the research worker's checks
+# refuse here; a book is resolved without them.
+HOST_PATH_PARAMS = ("experiments_root", "work_root")
 
 
 @dataclass(frozen=True)
@@ -138,20 +151,23 @@ def create_book(
     The book trades the experiment's Paper candidate, copies the replay its forward
     record names and buys on the experiment's stamped boards (every board when the
     experiment has none). It starts with ``initial_cash``, not the experiment's own,
-    and keeps only the boards that capital qualifies for. A book is refused while
-    ``BOOK_CAP`` other books beside it are not killed, and, before anything is
-    written, when the experiment reads fundamentals and the PIT fundamental events
-    audit does not cover the book's first decision view
-    (``pit.require_audited_fundamentals``).
+    and keeps only the boards that capital qualifies for. Before anything is
+    written, a book is refused when the strategy is not marked Passed, while
+    ``BOOK_CAP`` other books beside it are not killed, when the registered bytes
+    are not those the ledger recorded for the step they were registered from, when
+    the experiment reads fundamentals and the PIT fundamental events audit does not
+    cover the book's first decision view (``pit.require_audited_fundamentals``),
+    and when its pinned sandbox image is not on this host or bakes another strategy
+    runtime than this process enforces (``executor.require_local_image``). The
+    experiment's ``HOST_PATH_PARAMS`` are not read.
     """
 
     root = Path(state_root).resolve()
     if root.exists() and any(root.iterdir()):
         raise FileExistsError(f"Paper state root is not empty; a new book needs a new state root: {root}")
     experiment = Path(experiment_dir).resolve(strict=True)
-    candidate = paper_candidate(
-        ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
-    )
+    records = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
+    candidate = paper_candidate(records)
     if candidate is None:
         raise ValueError(f"{experiment.name} has no Paper candidate: no registered strategy with a forward record")
     if artifact_id != candidate["artifact_id"]:
@@ -159,15 +175,36 @@ def create_book(
             f"{artifact_id} is not the Paper candidate of {experiment.name}; "
             f"choose {candidate['artifact_id']}"
         )
+    reading = pass_reading(forward_record(records) or {})
+    if reading["passed"] is not True:
+        failed = [
+            f"{period} {condition}"
+            for period, block in as_mapping(reading["periods"]).items()
+            for condition, held in as_mapping(as_mapping(block).get("conditions")).items()
+            if not held
+        ]
+        raise ValueError(
+            f"{experiment.name} is not marked Passed ({', '.join(failed)} failed): a Paper account follows only "
+            "a strategy that, in both the Forward and the Held-out period, made money after costs, beat its "
+            "benchmark index and stayed within its drawdown limits"
+        )
     require_book_place(root.parent, root.name)
     source = experiment / "artifacts" / "strategy" / "registered" / artifact_id
     if not (source / "output" / "main.py").is_file():
         raise FileNotFoundError(f"registered artifact has no output/main.py: {source}")
+    recorded = registered_fingerprint(records)
+    held = artifact_fingerprint(source / "output", source / "models" if (source / "models").is_dir() else None)
+    if held != recorded:
+        raise ValueError(
+            f"registered artifact {artifact_id} of {experiment.name} holds other bytes than the ledger recorded for "
+            f"the step it was registered from (fingerprint {held}, recorded {recorded or 'none'}); refusing to follow it"
+        )
 
     params = read_json_object(experiment / "hitl" / "params.json", missing_ok=True)
     if not params:
         raise ValueError(f"missing experiment params: {experiment / 'hitl' / 'params.json'}")
-    params = {**params, "initial_cash": initial_cash}
+    params = {key: value for key, value in params.items() if key not in HOST_PATH_PARAMS}
+    params["initial_cash"] = initial_cash
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo_root, preflight=True)
     if options.data_backend != "pit":
         raise ValueError("Paper accounts trade on the PIT research release only")
@@ -189,6 +226,15 @@ def create_book(
     if image:
         # The image the experiment's formal replays actually ran.
         sandbox = replace(sandbox, spec=replace(sandbox.spec, image=str(image)))
+    try:
+        # Every run of the book starts its container on this check; a book that
+        # would fail every run is not opened.
+        require_local_image(sandbox)
+    except StrategyExecutionError as exc:
+        raise ValueError(
+            f"{experiment.name} cannot run its strategy on this host: {exc}. An experiment synced from the "
+            f"ZGCA instance gets its image tag from `python ops/zgca/zgca.py sync {experiment.name}`"
+        ) from exc
 
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     copy = root / STRATEGY_COPY_NAME

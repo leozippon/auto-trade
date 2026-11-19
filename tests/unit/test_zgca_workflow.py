@@ -57,8 +57,22 @@ if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir>
         print(os.environ.get("MOCK_LOCAL_DISK", "0 100000000000000"))
     if step == "deployed-commit":
         print(os.environ.get("MOCK_DEPLOYED_COMMIT", ""))
+    if step == "image-runtime":  # the runtime an image on the instance bakes
+        print(os.environ.get("MOCK_REMOTE_RUNTIME", ""))
     sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + step.replace("-", "_").upper(), "0")))
 sys.exit(int(os.environ.get("MOCK_DEV_EXIT_" + args[0].upper(), "0")))
+"""
+# This host's Docker: `run` is contract_fingerprint.read_image_contract's one
+# offline container, answering the runtime the image bakes; the image is logged.
+MOCK_DOCKER = r"""#!/usr/bin/env python3
+import json, os, sys
+args = sys.argv[1:]
+logged = ["run", args[args.index("--entrypoint") + 2]] if args[:1] == ["run"] else args
+with open(os.environ["MOCK_LOG"], "a") as log:
+    log.write(json.dumps({"tool": "docker", "args": logged}) + "\n")
+if args[:1] == ["run"]:
+    print(json.dumps({"runtime": os.environ.get("MOCK_LOCAL_RUNTIME", ""), "contract": ""}))
+sys.exit(int(os.environ.get("MOCK_DOCKER_EXIT_" + args[0].upper(), "0")))
 """
 PROXY = "https://proxy.invalid/"
 MOCK_CURL = r"""#!/usr/bin/env python3
@@ -73,7 +87,7 @@ if answer == "fail":
 with open(args[args.index("-o") + 1], "wb") as out:
     out.write(b"another release\n" if answer == "wrong" else os.environ.get("MOCK_CURL_BODY", "").encode())
 """
-TOOLS = {"instance": MOCK_INSTANCE, "dev": MOCK_DEV, "curl": MOCK_CURL}
+TOOLS = {"instance": MOCK_INSTANCE, "dev": MOCK_DEV, "curl": MOCK_CURL, "docker": MOCK_DOCKER}
 # A local .env as the host keeps it: data tokens beside the model gateway keys.
 LOCAL_ENV = (
     "TUSHARE_TOKEN=tushare-relay\nTUSHARE_TOKEN_TMP=tushare-official\nHF_TOKEN=hf\n"
@@ -615,6 +629,62 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertNotIn("--delete", pull)
                 self.assertEqual(dev[2]["args"][-2:], [f"dev:{zgca.REMOTE_ROOT}/logs/workers/{experiment}.log", f"{self.repo / 'logs' / 'workers' / experiment}.log"])
                 self.log.unlink()
+
+    def test_sync_tags_the_pinned_image_here_only_when_both_images_bake_one_runtime(self) -> None:
+        """After the copy, the experiment's pinned tag is made here as a clone of the
+        base image, exactly as a local experiment's is, but only when the image it
+        names on the instance and this host's base bake the same strategy runtime.
+        Otherwise the records are synced and the command fails saying why, with no
+        tag; a sync run again does the same again."""
+
+        experiment = "experiment_zgca"
+        copied = self.repo / "experiments" / experiment / "hitl"
+        copied.mkdir(parents=True)
+        (copied / "params.json").write_text(json.dumps({"experiments_root": f"{zgca.REMOTE_ROOT}/experiments"}), encoding="utf-8")
+        image = f"autotrade-sandbox:{experiment}-base-11111111-1111-4111-8111-111111111111"
+        (copied / "sandbox_image.json").write_text(json.dumps({"experiment_id": experiment, "image_ref": image}), encoding="utf-8")
+        runtime, other = "a" * 64, "b" * 64
+
+        code, err = self.run_main("sync", experiment, MOCK_REMOTE_RUNTIME=runtime, MOCK_LOCAL_RUNTIME=other)
+        self.assertEqual(code, 1)
+        self.assertIn(f"cannot be followed on Paper here until the images agree: its image {image} bakes strategy runtime {runtime}", err)
+        self.assertEqual([self.step(call) for call in self.calls("dev")], ["experiment-state", "copy", "copy", "image-runtime"])
+        self.assertEqual(self.remote(self.calls("dev")[-1]), ["image-runtime", image])
+        self.assertEqual([call["args"] for call in self.calls("docker")], [["run", "autotrade-sandbox:latest"]])
+        for attempt in (1, 2):
+            with self.subTest(attempt=attempt):
+                self.log.unlink()
+                code, err = self.run_main("sync", experiment, MOCK_REMOTE_RUNTIME=runtime, MOCK_LOCAL_RUNTIME=runtime)
+                self.assertEqual(code, 0, err)
+                self.assertEqual([call["args"] for call in self.calls("docker")],
+                                 [["run", "autotrade-sandbox:latest"], ["tag", "autotrade-sandbox:latest", image]])
+        # An image the instance no longer has cannot say what it baked.
+        self.log.unlink()
+        code, err = self.run_main("sync", experiment, MOCK_STEP_EXIT_IMAGE_RUNTIME="1")
+        self.assertEqual(code, 1)
+        self.assertIn("remote step image-runtime failed", err)
+        self.assertFalse(self.calls("docker"))
+
+    def test_the_image_runtime_step_reads_an_image_on_the_instance_or_refuses_an_absent_one(self) -> None:
+        root = Path(self.temp.name) / "instance"
+        venv = root / ".venv"
+        (venv / "bin").mkdir(parents=True)
+        (venv / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        (venv / "bin" / "python").chmod(0o700)
+        stubs = Path(self.temp.name) / "stubs"
+        stubs.mkdir()
+        (stubs / "docker").write_text(
+            '#!/bin/sh\nif [ "$1" = image ]; then [ "$3" = "$PRESENT" ]; exit; fi\n'
+            'echo \'{"runtime": "r" , "contract": ""}\'\n', encoding="utf-8",
+        )
+        (stubs / "docker").chmod(0o700)
+        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "PYTHONPATH": str(REPO / "src")}
+        image = "autotrade-sandbox:experiment-base-11111111-1111-4111-8111-111111111111"
+        absent = self.remote_step(root, "image-runtime", image, env=env)
+        self.assertEqual(absent.returncode, 1)
+        self.assertIn(f"image {image} is not on the instance", absent.stderr)
+        shown = self.remote_step(root, "image-runtime", image, env=env | {"PRESENT": image})
+        self.assertEqual((shown.returncode, shown.stdout), (0, "r\n"), shown.stderr)
 
     def test_sync_stops_before_any_transfer_when_the_experiment_state_step_refuses(self) -> None:
         code, err = self.run_main("sync", "experiment_running", MOCK_STEP_EXIT_EXPERIMENT_STATE="1")

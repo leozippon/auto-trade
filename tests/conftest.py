@@ -65,6 +65,17 @@ def _hermetic_pretrained_store(_fixture_pretrained_store: Path, monkeypatch: pyt
 
 
 @pytest.fixture(autouse=True)
+def _paper_image_on_host(monkeypatch: pytest.MonkeyPatch):
+    """A Paper account a test opens finds its pinned sandbox image on the host:
+    opening one asks Docker (``paper.book.create_book``), which a test host may
+    lack or hold at another strategy runtime. The tests of that refusal put the
+    real check back."""
+    from autotrade.paper import book
+
+    monkeypatch.setattr(book, "require_local_image", lambda _config: None)
+
+
+@pytest.fixture(autouse=True)
 def _restore_tmp_path_writable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     nested = tmp_path / "tmp"
     nested.mkdir()

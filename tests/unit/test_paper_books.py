@@ -5,7 +5,9 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import re
 import stat
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
@@ -17,14 +19,21 @@ from autotrade.common.records import (
     write_json_atomic,
 )
 from autotrade.data_sources.tushare.cron_update import resolve_job_start_date
+from autotrade.environment import contract_fingerprint
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import (
     DailyBroker,
     default_permitted_boards,
 )
 from autotrade.environment.broker_core import board_of
+from autotrade.environment.contract_fingerprint import ImageContract
+from autotrade.environment.executor import (
+    IMPORTED_RUNTIME_FINGERPRINT,
+    require_local_image,
+)
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ
+from autotrade.paper import book as paper_book
 from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_CAP,
@@ -38,6 +47,7 @@ from autotrade.paper.book import (
     create_book,
     load_book,
     require_book_place,
+    verify_book_artifact,
 )
 from autotrade.paper.books import (
     delete_book,
@@ -50,6 +60,7 @@ from autotrade.paper.books import (
 )
 from autotrade.paper.engine import PaperWriterBusy
 from autotrade.paper.storage import append_jsonl_once
+from autotrade.pipelines.worker import resolve_worker_options
 from tests.unit.paper_book_fixture import (
     FAILING_STRATEGY,
     engine_book,
@@ -168,6 +179,125 @@ def test_a_registered_strategy_opens_its_book_once_and_an_experiment_without_one
     with pytest.raises(ValueError, match="no registered strategy with a forward record"):
         open_registered_book(tmp_path, loser)
     assert list_books(root) == ["exp"] and not (root / "loser").exists()
+
+
+def _rewrite_ledger(experiment: Path, change: Callable[[dict], None]) -> None:
+    path = experiment / "ledgers/experiment_ledger.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    for row in rows:
+        change(row)
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _lose_heldout(row: dict) -> None:
+    if row["record_type"] == "forward":
+        row["slices"]["heldout"]["raw_readings"]["strategy_return"] = -0.01
+
+
+def test_only_a_strategy_marked_passed_opens_a_book_and_an_open_book_is_not_judged_again(tmp_path: Path):
+    """The console's Passed mark (``ledger.pass_reading``) is the gate: a strategy
+    that lost money in the Held-out period is refused, naming what failed,
+    before anything is written. A book is judged once, when it is opened: one
+    already open stays open, loads and verifies its bytes, whatever its
+    experiment's mark reads afterwards."""
+
+    experiment = build_experiment(tmp_path / "experiments", "exp", "registered_with_record")
+    ledger = (experiment / "ledgers/experiment_ledger.jsonl").read_text(encoding="utf-8")
+    _rewrite_ledger(experiment, _lose_heldout)
+    with pytest.raises(ValueError, match=r"exp is not marked Passed \(heldout profit"):
+        open_registered_book(tmp_path, experiment)
+    assert not paper_root(tmp_path).exists()  # nothing written
+
+    (experiment / "ledgers/experiment_ledger.jsonl").write_text(ledger, encoding="utf-8")
+    assert open_registered_book(tmp_path, experiment) == "exp"
+    opened = _book_files(paper_root(tmp_path) / "exp")
+    _rewrite_ledger(experiment, _lose_heldout)
+    assert open_registered_book(tmp_path, experiment) == "exp"
+    assert _book_files(paper_root(tmp_path) / "exp") == opened
+    verify_book_artifact(load_book(paper_root(tmp_path) / "exp"))
+
+
+def test_registered_bytes_other_than_the_ledger_recorded_are_refused_before_anything_is_written(tmp_path: Path):
+    """The book trades the bytes research approved: the registered copy must hold
+    the content address the ledger recorded for the step it was registered from,
+    as a copy synced from another host must too."""
+
+    experiment = build_experiment(tmp_path / "experiments", "exp", "registered_with_record")
+    main = experiment / "artifacts/strategy/registered/strategy_research_abc/output/main.py"
+    main.write_text(main.read_text(encoding="utf-8") + "# edited after registration\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="holds other bytes than the ledger recorded for the step it was registered from"):
+        open_registered_book(tmp_path, experiment)
+    assert not paper_root(tmp_path).exists()
+
+
+def test_a_strategy_synced_from_the_zgca_instance_opens_from_its_directory_here(tmp_path: Path):
+    """An experiment run on the instance names that host's experiments root and
+    sandbox root in its parameters and its paths in its ledger. The research
+    worker's resolver still refuses those roots here, but a book reads neither:
+    it opens from the experiment's directory, and its record names nothing of
+    the other host."""
+
+    instance = tmp_path / "personal_fast_storage/auto-trade/experiments"
+    build_experiment(instance, "exp", "registered_with_record")
+    experiment = instance.rename(tmp_path / "experiments") / "exp"
+    stamped = {
+        **read_json_object(experiment / "hitl/params.json"),
+        "experiments_root": "/personal_fast_storage/auto-trade/experiments",
+        "work_root": "/personal_fast_storage/auto-trade/.runtime/sandboxes",
+    }
+    write_json_atomic(experiment / "hitl/params.json", stamped)
+    with pytest.raises(ValueError, match="experiments_root does not match the experiment directory parent"):
+        resolve_worker_options(stamped, experiment_dir=experiment, repo_root=tmp_path, preflight=True)
+    without_root = {key: value for key, value in stamped.items() if key != "experiments_root"}
+    with pytest.raises(ValueError, match="work_root must stay inside the repository"):
+        resolve_worker_options(without_root, experiment_dir=experiment, repo_root=tmp_path, preflight=True)
+
+    assert open_registered_book(tmp_path, experiment) == "exp"
+    book = paper_root(tmp_path) / "exp"
+    assert "personal_fast_storage" not in (book / BOOK_NAME).read_text(encoding="utf-8")
+    assert read_json_object(book / "source_history.json")["series"]
+    verify_book_artifact(load_book(book))
+
+
+def test_a_book_is_refused_on_an_image_it_could_not_run_before_anything_is_written(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Every run starts the book's container on the experiment's pinned image,
+    after the executor's own check. A tag this host lacks (a synced
+    experiment's, until sync makes it) or an image baking another strategy
+    runtime than this process enforces would fail every run, so opening runs
+    that check first: Docker here is a stub naming the images on the host, and
+    the runtime the image reports is answered as the one Docker call."""
+
+    monkeypatch.setattr(paper_book, "require_local_image", require_local_image)  # the real check
+    experiment = build_experiment(tmp_path / "experiments", "exp", "registered_with_record")
+    pinned = "autotrade-sandbox:exp-base-11111111-1111-4111-8111-111111111111"
+    write_json_atomic(experiment / "hitl/sandbox_image.json", {"experiment_id": "exp", "image_ref": pinned})
+    stubs = tmp_path / "stubs"
+    stubs.mkdir()
+    (stubs / "docker").write_text(
+        '#!/bin/sh\n[ "$1 $2" = "image inspect" ] && [ "$3" = "$PRESENT_IMAGE" ] && exit 0\n'
+        'echo "Error: No such image: $3" >&2\nexit 1\n',
+        encoding="utf-8",
+    )
+    (stubs / "docker").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{stubs}{os.pathsep}{os.environ['PATH']}")
+
+    with pytest.raises(ValueError, match=f"sandbox image is unavailable locally: {re.escape(pinned)}"):
+        open_registered_book(tmp_path, experiment)
+    assert not paper_root(tmp_path).exists()
+    monkeypatch.setenv("PRESENT_IMAGE", pinned)
+    reported = {"runtime": "0" * 64}
+    monkeypatch.setattr(
+        contract_fingerprint, "read_image_contract", lambda image, **_kwargs: ImageContract(reported["runtime"], "")
+    )
+    with pytest.raises(ValueError, match="bakes a different strategy runtime than this process enforces"):
+        open_registered_book(tmp_path, experiment)
+    assert not paper_root(tmp_path).exists()
+
+    reported["runtime"] = IMPORTED_RUNTIME_FINGERPRINT
+    assert open_registered_book(tmp_path, experiment) == "exp"
+    assert load_book(paper_root(tmp_path) / "exp").sandbox.spec.image == pinned
 
 
 def test_deleting_a_book_removes_its_read_only_tree_and_frees_its_id(tmp_path: Path):

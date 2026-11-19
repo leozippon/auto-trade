@@ -31,7 +31,7 @@ const OUTCOME_LABELS = {
 // words it the same way on the card, the page header, the process list, the
 // 读出 view and the best-experiment panel. A registered strategy with its readout
 // is worded by the server's pass reading (`forward.pass_reading.passed`,
-// registry.pass_reading) rather than by its stored state (endingKey).
+// ledger.pass_reading) rather than by its stored state (endingKey).
 const ENDING_LABELS = {
   passed: "通过",
   failed: "未通过",
@@ -3336,11 +3336,11 @@ function readoutStagePanel(detail) {
    stamped rules (registry._verdict_thresholds): the research years, the
    validation period and its step, the threshold a record over the whole
    period is held to at the experiment's level, and the label's rule
-   (PASS_RULE, registry.pass_reading). */
+   (PASS_RULE, ledger.pass_reading), which is also the Paper gate. */
 function readoutRule(t) {
   return (
     `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录（整段残差 IR 的门槛约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）；` +
-    `${PASS_RULE}写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}，只是读法，不把关任何事`
+    `${PASS_RULE}写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}；只有${ENDING_LABELS.passed}的策略能建立模拟账户`
   );
 }
 
@@ -3375,8 +3375,8 @@ function readoutBlock(readout, total) {
 const PAPER_ENV = "paper";
 
 /* The Paper handoff: the experiment's book once one exists, else, for a registered
-   strategy with its forward record, a button that opens one within the cap
-   the server enforces. Nothing opens a book by itself. */
+   strategy labelled passed, a button that opens one within the cap and the
+   checks the server enforces. Nothing opens a book by itself. */
 function paperHandoff(detail) {
   const title = el("h4", { class: "subsection-title" }, "Paper 建账户");
   const button = el(
@@ -3401,7 +3401,8 @@ function paperHandoff(detail) {
     "建立模拟账户",
   );
   // Only an experiment this console can open a book on (its Paper candidate,
-  // created on this host) offers the button; any experiment shows the book it has.
+  // labelled passed: registry._paper_openable) offers the button, wherever it
+  // was created; any experiment shows the book it has.
   const host = el(
     "div",
     { class: "section-gap", hidden: detail.paper_openable ? null : "" },

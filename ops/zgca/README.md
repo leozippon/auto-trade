@@ -39,7 +39,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 `status` 先用 `instance show` 打印实例状态与卡时；实例在运行时再用 `dev report` 打印 GPU、根盘与个人存储余量和 tmux 会话，然后打印最近一次部署的提交、控制台健康（含空闲槽位与空闲 GPU）、每条在跑实验的状态、阶段与心跳距今的秒数（worker 已不在却没有结束的实验单独标出）、沙箱镜像，最近一份 `create_round_*` 启动器日志的末尾三行（镜像构建日志也在同一目录，不算在内），以及填充循环：会话 `autotrade-fill` 是否在跑、最近一份填充日志的最后一行汇总，结束了的还有它的 `round-exit`。
 
-`sync <实验 id>` 把开发机上这个实验的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<实验>.log` 用 `dev copy` 拉回本仓库。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的实验一律拒绝覆盖。同步前先打印实验当前的状态；实验还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status`、`deploy`、`down` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_experiments`）。
+`sync <实验 id>` 把开发机上这个实验的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<实验>.log` 用 `dev copy` 拉回本仓库。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的实验一律拒绝覆盖。同步前先打印实验当前的状态；实验还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status`、`deploy`、`down` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_experiments`）。拷贝完成后，`sync` 再让实验钉住的沙箱镜像 tag（`hitl/sandbox_image.json` 的 `image_ref`）在本机存在，做法与本机实验建 tag 相同：把本机的 `autotrade-sandbox:latest` 打上这个 tag。前提是开发机上这个 tag 的镜像与本机 `autotrade-sandbox:latest` 内置的策略运行时指纹相同，两边各用一个离线、不占 GPU 的容器读出（开发机一侧是 `remote.sh` 的 `image-runtime` 步骤）；指纹不同，或开发机上已没有这个 tag（停机再开可能丢 tag），就不打 tag、以错误退出，说明这个策略在两边镜像一致之前不能在本机跟随。没钉镜像的实验没有 tag 可打。重复 `sync` 同一个实验结果相同。
 
 `down` 就是 `instance stop`：等到 STOPPED 后打印卡时。实例在运行时先做与 `deploy` 相同的检查，有实验或启动器在跑就拒绝，因为停机会结束它们；确要放弃这些实验，直接用 `~/zgca-compute/instance stop <平台实例 id>`。
 
@@ -79,6 +79,6 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 只有在某个对话角色跑在本机模型上时 worker 才要求，开发机上没有这个网关，所以用不上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几个实验写在同一棵目录里，续跑换了进程号的旧文件也无从按实验认出，一条 gpt-6 实验就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有实验在跑时目录仍在增长，所以不用 `dev copy` 比对）。
 
-在实例上定版的策略同步回本机后只供阅读，不能从本机开 Paper 账户跟随：建账户要按实验自己的参数重建设置，而同步来的实验记着的是实例的实验根，钉住的沙箱镜像 tag 本机也没有，所以本机控制台不为它显示建账户的按钮。
+在实例上定版、同步回本机的策略和本机的一样可以开 Paper 账户跟随：建账户只按本机的实验目录重建设置，不读参数里记着的实例实验根和沙箱根；控制台对标为“通过”的策略显示建账户的按钮。建账户时本机还要核对两件事，缺一就拒绝且什么都不写：注册的策略字节与账本为它记下的指纹一致，钉住的镜像 tag 在本机存在并内置本机代码要求的策略运行时，这个 tag 由上面的 `sync` 打上。
 
-开发机上的容器遥测缺少峰值内存和 GPU 峰值，开发机上的一切又都以 root 运行，原因见工具包 README 的“火山平台 Docker”；所以在开发机宿主上跑单元测试时，依赖目录权限位的测试会失败，Docker 沙箱以 uid 61000 运行，不受影响。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance` 和 `dev`，不访问网络也不启停实例；那些入口本身的测试在 `~/zgca-compute/tests`。
+开发机上的容器遥测缺少峰值内存和 GPU 峰值，开发机上的一切又都以 root 运行，原因见工具包 README 的“火山平台 Docker”；所以在开发机宿主上跑单元测试时，依赖目录权限位的测试会失败，Docker 沙箱以 uid 61000 运行，不受影响。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance`、`dev` 和本机 `docker`，不访问网络也不启停实例；那些入口本身的测试在 `~/zgca-compute/tests`。
