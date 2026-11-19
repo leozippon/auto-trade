@@ -84,7 +84,6 @@ def test_the_curated_library_is_a_valid_skill_tree_of_operational_entries() -> N
         "deterministic-fit",
         "offline-readings",
         "pretrained-costs",
-        "refit-snapshot-rescore",
         "replay-state",
         "residual-label-benchmark",
         "validation-readings",
@@ -102,7 +101,8 @@ def test_a_new_experiment_mounts_the_curated_library(tmp_path: Path) -> None:
     mounted = {entry["name"]: entry for entry in index["skill_library"]}
     assert set(mounted) == set(skill_library_entries(LIBRARY))
     entry = mounted["offline-readings"]
-    assert entry["origin"] == "curated"
+    # Where it is and what it is about; sizes and origin tags are the console's.
+    assert set(entry) == {"name", "path", "title", "summary"}
     assert entry["path"] == f"memory/{CURATED_MEMORY_SOURCE}/offline-readings/SKILL.md"
     assert (workspace / entry["path"]).read_bytes() == (
         LIBRARY / "offline-readings" / "SKILL.md"

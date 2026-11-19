@@ -31,7 +31,7 @@ The current strategies are still too simplistic and do not make sufficient use o
 | Global Optimization | 在全部可见数据上重新求解的训练，例如按日程从头重训；本臂里它是对照 |
 | continual memory adaptation | 模型带着学到的状态逐日走过一场回放，按每天新到期的证据更新，而不是按日程从头重训 |
 | arrives rapidly and in large volumes | 研究年里每个交易日新到约 2,500（第一个研究年）到 4,700（最后一个研究年）只股票的日线行，一年约 54 万到 76 万条公告标题 |
-| daily updates are challenging | 每天都有新到期的结局要学，一场研究年回放约 1,701 个决策日；每次 `fit` 有时限（运行事实 `budgets`），回放的墙钟不计入会话预算（`refs/README.md` 的「规模与时间」） |
+| daily updates are challenging | 每天都有新到期的结局要学，一场研究年回放约 1,701 个决策日；每次 `fit` 有时限（运行事实 `budgets`） |
 | temporal structure | 交易日的节奏、结局的期限滞后、研究年里市场状态的切换；切换发生在哪些时期，由会话自己从可见的数据里找 |
 | memory systems | 任何把学到的东西从一次决策带到下一次的状态：参数、注意力读取的键值条目、缓存的样本 |
 | more extensive use of GPU compute | 注意力模型跨整个截面与时间、在卡上用全部可见的历史训练，大小由卡装得下多少决定（`refs/README.md` 的「算力」） |
