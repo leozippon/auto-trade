@@ -29,6 +29,7 @@ BLOCKS = {
         "# BEGIN ADM-Cube housekeeping",
         "# END ADM-Cube housekeeping",
     ),
+    "zgca": (REPO_ROOT / "ops/cron/zgca_sync.cron", "# BEGIN ADM-Cube ZGCA sync", "# END ADM-Cube ZGCA sync"),
 }
 BACKUP_DIR = REPO_ROOT / ".runtime" / "crontab"
 # Every install backs up the whole table, so the newest few cover any rollback.

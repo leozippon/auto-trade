@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The ZGCA A100 development instance, end to end: up, deploy, run, status, sync, down.
+"""The ZGCA A100 development instance, end to end: up, deploy, run, status, sync, sync-rounds, down.
 
 Every step goes through the platform layer in ~/zgca-compute (`instance` to
 show, start and stop the instance as idempotent intents; `dev` to reach it:
@@ -23,18 +23,23 @@ AUTOTRADE_GPU_NAME set, and repeats a `--fill` launcher every ten minutes in
 a session of its own until its round has nothing pending; status reads, and
 sync copies an experiment back and gives it its pinned sandbox image tag here
 when the instance's image and this host's base bake the same strategy runtime,
-so a passed strategy can be followed on Paper. Beyond that fill loop nothing here schedules, caches an
-endpoint, keeps a secret in the repository or changes how the executor
-isolates a strategy container. See ops/zgca/README.md.
+so a passed strategy can be followed on Paper; sync-rounds is one pass of the
+sync cron (ops/cron/zgca_sync.cron), which syncs, once, every experiment of
+the named rounds that has ended on the instance. Beyond that fill loop and
+that cron nothing here schedules, caches an endpoint, keeps a secret in the
+repository or changes how the executor isolates a strategy container. See
+ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> |
-       run <round file> [launcher args...] | status | sync <experiment id> | down
+       run <round file> [launcher args...] | status | sync <experiment id> |
+       sync-rounds [round file...] | down
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -97,6 +102,13 @@ PRETRAINED_MANIFEST = "MANIFEST.sha256"
 TRACKED_LIST_NAME = "tracked.txt"
 # The commit whose tracked files the last deploy shipped; remote.sh's status shows it.
 DEPLOYED_COMMIT_NAME = "deployed_commit"
+# One marker per experiment `sync` brought back, in the state directory: it
+# says `copied` once both copies are verified and `synced` once the tag step
+# has succeeded too. A sync removes it before it copies, so an interrupted copy
+# leaves none; sync-rounds skips an experiment whose marker says `synced`.
+SYNCED_DIR_NAME = "synced"
+# What a sync-rounds pass counts, in its summary line's order.
+SYNC_COUNTS = ("synced", "untagged", "running", "interrupted", "pending", "failed")
 GIB = 2**30
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Every transfer keeps contents, times and modes; the instance's root owns what lands there.
@@ -195,6 +207,13 @@ def _tree_bytes(root: Path) -> int:
     )
 
 
+def _said(completed: subprocess.CompletedProcess[bytes]) -> str:
+    """': <the last line a captured stderr said>', or nothing."""
+
+    lines = (completed.stderr or b"").decode("utf-8", errors="replace").strip().splitlines()
+    return f": {lines[-1]}" if lines else ""
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -225,38 +244,42 @@ class Workflow:
     # ----- platform entries -----
 
     def call(
-        self, tool: str, *args: str, capture: bool = False, data: bytes | None = None
+        self, tool: str, *args: str, capture: bool = False, data: bytes | None = None, quiet: bool = False
     ) -> subprocess.CompletedProcess[bytes]:
-        """One run of a ~/zgca-compute entry (`instance`, `dev`), pointed at this workflow's instance; ``data`` is its stdin."""
+        """One run of a ~/zgca-compute entry (`instance`, `dev`), pointed at this workflow's instance; ``data`` is its stdin, ``quiet`` captures its stderr."""
         env = {**os.environ, "ZGCA_INSTANCE": self.instance}
         return subprocess.run(
             [str(self.tools / tool), *args],
             stdin=subprocess.DEVNULL if data is None else None, input=data,
-            stdout=subprocess.PIPE if capture else None, env=env, check=False,
+            stdout=subprocess.PIPE if capture else None, stderr=subprocess.PIPE if quiet else None, env=env, check=False,
         )
 
-    def lifecycle(self, command: str, *, capture: bool = False) -> str:
-        """`instance <command> <id>`, which verifies its own result and says why on stderr when it cannot."""
-        completed = self.call("instance", command, self.instance, capture=capture)
+    def lifecycle(self, command: str, *, capture: bool = False, quiet: bool = False) -> str:
+        """`instance <command> <id>`, which verifies its own result and says why on stderr when it cannot (in the error, when quiet)."""
+        completed = self.call("instance", command, self.instance, capture=capture, quiet=quiet)
         if completed.returncode != 0:
-            raise WorkflowError(f"instance {command} {self.instance} failed (exit {completed.returncode})")
+            raise WorkflowError(f"instance {command} {self.instance} failed (exit {completed.returncode})" + _said(completed))
         return (completed.stdout or b"").decode("utf-8", errors="replace").strip()
 
-    def require_running(self) -> None:
-        state = self.lifecycle("state", capture=True)
+    def require_running(self, *, quiet: bool = False) -> None:
+        state = self.lifecycle("state", capture=True, quiet=quiet)
         if state != "RUNNING":
             raise WorkflowError(f"instance {self.instance} is {state}, not RUNNING: run `up` first")
 
     # ----- instance shell and transfers -----
 
-    def remote(self, step: str, *args: str, capture: bool = False) -> str:
-        """Run one step of remote.sh on the instance, in a login shell for the platform's environment, told the instance's layout; its output when captured."""
+    def remote_run(self, step: str, *args: str, capture: bool = False, quiet: bool = False) -> subprocess.CompletedProcess[bytes]:
+        """Run one step of remote.sh on the instance, in a login shell for the platform's environment, told the instance's layout."""
         script = REMOTE_SCRIPT.read_text(encoding="utf-8")
-        completed = self.call(
-            "dev", "bash", "-lc", script, "remote.sh", REMOTE_ROOT, REMOTE_VENV, LOCAL_ROOT, step, *args, capture=capture,
+        return self.call(
+            "dev", "bash", "-lc", script, "remote.sh", REMOTE_ROOT, REMOTE_VENV, LOCAL_ROOT, step, *args, capture=capture, quiet=quiet,
         )
+
+    def remote(self, step: str, *args: str, capture: bool = False, quiet: bool = False) -> str:
+        """One remote step that must succeed; its output when captured, and what it said on stderr in the error when quiet."""
+        completed = self.remote_run(step, *args, capture=capture, quiet=quiet)
         if completed.returncode != 0:
-            raise WorkflowError(f"remote step {step} failed (exit {completed.returncode})")
+            raise WorkflowError(f"remote step {step} failed (exit {completed.returncode})" + _said(completed))
         return (completed.stdout or b"").decode("utf-8", errors="replace")
 
     def dev(self, command: str, *args: str, data: bytes | None = None) -> None:
@@ -447,6 +470,15 @@ class Workflow:
             self.remote("status")
 
     def sync(self, experiment_id: str) -> None:
+        local = self.sync_target(experiment_id)
+        self.require_running()
+        self.remote("experiment-state", experiment_id)
+        self.copy_back(experiment_id, local)
+        self.tag_pinned_image(experiment_id, local)
+        self.sync_marker(experiment_id).write_text("synced\n", encoding="utf-8")
+
+    def sync_target(self, experiment_id: str) -> Path:
+        """Where a sync of ``experiment_id`` lands: never over an experiment of this host."""
         if not SAFE_ID.fullmatch(experiment_id):
             raise WorkflowError(f"not an experiment id: {experiment_id!r}")
         local = self.repo_root / "experiments" / experiment_id
@@ -457,15 +489,111 @@ class Workflow:
                 raise WorkflowError(f"experiments/{experiment_id} exists here and its hitl/params.json cannot say where it was created ({exc}); refusing to overwrite it") from exc
             if created_under != f"{REMOTE_ROOT}/experiments":
                 raise WorkflowError(f"experiments/{experiment_id} is an experiment of this host (created under {created_under}), not a copy from the instance; refusing to overwrite it")
-        self.require_running()
-        self.remote("experiment-state", experiment_id)
+        return local
+
+    def sync_marker(self, experiment_id: str) -> Path:
+        return self.state_dir / SYNCED_DIR_NAME / experiment_id
+
+    def sync_stage(self, experiment_id: str) -> str:
+        """What the marker says (`copied`, `synced`), or nothing; anything else is no completed stage."""
+        marker = self.sync_marker(experiment_id)
+        return marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+
+    def copy_back(self, experiment_id: str, local: Path) -> None:
+        """Copy the experiment without pit_views and its worker log; the marker is gone meanwhile and says `copied` once both copies are verified."""
+        marker = self.sync_marker(experiment_id)
+        marker.unlink(missing_ok=True)
         local.parent.mkdir(parents=True, exist_ok=True)
         self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{REMOTE_ROOT}/experiments/{experiment_id}/", f"{local}/")
         logs = self.repo_root / "logs" / "workers"
         logs.mkdir(parents=True, exist_ok=True)
         self.dev("copy", *PRESERVE, f"dev:{REMOTE_ROOT}/logs/workers/{experiment_id}.log", f"{logs / experiment_id}.log")
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text("copied\n", encoding="utf-8")
         say(f"synced experiments/{experiment_id} (without pit_views) and logs/workers/{experiment_id}.log")
-        self.tag_pinned_image(experiment_id, local)
+
+    def round_experiments(self, round_file: str) -> list[str]:
+        """The experiment ids a round file defines (``ROUND.experiments``), in file order."""
+        path = self.repo_root / round_file
+        spec = importlib.util.spec_from_file_location(f"zgca_round_{path.stem}", path)
+        if not path.is_file() or spec is None or spec.loader is None:
+            raise WorkflowError(f"{round_file} is not a round file of {self.repo_root}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return list(module.ROUND.experiments)
+
+    def sync_rounds(self, round_files: Sequence[str]) -> bool:
+        """One pass of the sync cron: sync every experiment of these rounds that has ended on the instance and is not back.
+
+        An experiment whose marker says `synced` costs nothing; any other asks
+        the instance one cheap question first (`experiment-state`), and only
+        one in an ended state is copied, then tagged; one copied but not tagged
+        is only tagged again. Each failure is one line and leaves the next
+        experiment to go ahead, and the pass ends with one summary line. False
+        when an experiment failed or is untagged, or the instance could not be asked.
+        """
+
+        _with_project_src()
+        from autotrade.pipelines.hitl_state import ENDED_STATES
+
+        experiments = [experiment for round_file in round_files for experiment in self.round_experiments(round_file)]
+        counts = dict.fromkeys(SYNC_COUNTS, 0)
+        unsynced = []
+        for experiment in experiments:
+            if self.sync_stage(experiment) == "synced":
+                counts["synced"] += 1
+            else:
+                unsynced.append(experiment)
+        problem = ""
+        if unsynced:
+            try:
+                self.require_running(quiet=True)
+            except WorkflowError as exc:
+                problem = str(exc)
+        for experiment in [] if problem else unsynced:
+            try:
+                counts[self.sync_ended(experiment, ENDED_STATES)] += 1
+            except WorkflowError as exc:
+                say(f"{experiment}: failed, retried next pass: {exc}")
+                counts["failed"] += 1
+        names = ", ".join(Path(round_file).stem for round_file in round_files) or "no round"
+        line = f"{datetime.now().astimezone().isoformat(timespec='seconds')} zgca sync {names}: {len(experiments)} experiments: "
+        line += ", ".join(f"{counts[name]} {name}" for name in SYNC_COUNTS)
+        if problem:
+            line += f", {len(unsynced)} not checked ({problem})"
+        print(line, flush=True)
+        return not (problem or counts["failed"] or counts["untagged"])
+
+    def sync_ended(self, experiment_id: str, ended_states: frozenset[str]) -> str:
+        """Bring one experiment back if it has ended; what the pass counts it as."""
+        local = self.sync_target(experiment_id)
+        if self.sync_stage(experiment_id) != "copied":
+            completed = self.remote_run("experiment-state", experiment_id, capture=True, quiet=True)
+            shown = (completed.stdout or b"").decode("utf-8", errors="replace").splitlines()
+            said = (completed.stderr or b"").decode("utf-8", errors="replace")
+            line = next((text for text in shown if text.startswith(f"{experiment_id}: state ")), "")
+            if completed.returncode != 0:
+                if f"no experiment {experiment_id} on the instance" in said:
+                    return "pending"
+                if line and f"{experiment_id} is still running" in said:
+                    return "running"
+                raise WorkflowError(f"remote step experiment-state failed (exit {completed.returncode})" + _said(completed))
+            state = re.match(rf"{re.escape(experiment_id)}: state (\S+?), ", line)
+            if state is None:
+                raise WorkflowError(f"remote step experiment-state showed no state for {experiment_id}")
+            if state.group(1) not in ended_states:
+                say(f"{line}: not ended, yet no worker runs it (the console shows it interrupted); "
+                    f"not synced, `zgca.py sync {experiment_id}` copies it as it is")
+                return "interrupted"
+            say(f"{line}: ended, syncing")
+            self.copy_back(experiment_id, local)
+        try:
+            self.tag_pinned_image(experiment_id, local)
+        except WorkflowError as exc:
+            say(f"{experiment_id}: copied, not tagged, tried again next pass: {exc}")
+            return "untagged"
+        self.sync_marker(experiment_id).write_text("synced\n", encoding="utf-8")
+        return "synced"
 
     def tag_pinned_image(self, experiment_id: str, local: Path) -> None:
         """Give a synced experiment the sandbox image tag it pins on this host, as every local experiment's is made.
@@ -497,7 +625,7 @@ class Workflow:
             SandboxSpec(image=image)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise WorkflowError(f"experiments/{experiment_id}/hitl/{SANDBOX_IMAGE_STATE_NAME} names no usable image tag: {exc!r}") from exc
-        remote = self.remote("image-runtime", image, capture=True).split()[-1:]
+        remote = self.remote("image-runtime", image, capture=True, quiet=True).split()[-1:]
         try:
             base = read_image_contract(DEFAULT_IMAGE).runtime
         except SandboxImageContractMismatch as exc:
@@ -542,6 +670,8 @@ def main(
     commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, deployed commit, console, experiments, image, round log")
     sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here, then tag its pinned sandbox image here when the runtimes agree")
     sync.add_argument("experiment_id", help="experiment id")
+    sync_rounds = commands.add_parser("sync-rounds", help="one pass of the sync cron: sync, once, every experiment of these rounds that has ended on the instance; one summary line")
+    sync_rounds.add_argument("round_files", nargs="*", help="scripts/experiments/create_round_*.py")
     commands.add_parser("down", help="instance stop, refused while experiments run: wait for STOPPED")
     options = parser.parse_args(argv)
     try:
@@ -560,6 +690,8 @@ def main(
             workflow.status()
         elif options.command == "sync":
             workflow.sync(options.experiment_id)
+        elif options.command == "sync-rounds":
+            return 0 if workflow.sync_rounds(options.round_files) else 1
         else:
             workflow.down()
     except WorkflowError as exc:

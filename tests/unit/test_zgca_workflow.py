@@ -53,6 +53,11 @@ with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps(record) + "\n")
 if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir> <step> ...
     step = args[args.index("remote.sh") + 4]
+    root = os.environ.get("MOCK_REMOTE_ROOT")
+    if step == "experiment-state" and root:  # the real step, against a temporary instance root
+        import subprocess
+        at = args.index("remote.sh")
+        sys.exit(subprocess.run(["bash", "-c", args[at - 1], "remote.sh", root, root + "/.venv", root + "/../ebs", *args[at + 4:]]).returncode)
     if step == "local-disk":  # bytes already in the store's directory, bytes free on its disk
         print(os.environ.get("MOCK_LOCAL_DISK", "0 100000000000000"))
     if step == "deployed-commit":
@@ -141,17 +146,18 @@ class ZgcaWorkflowTest(unittest.TestCase):
         return remote[0] if remote is not None else call["args"][0]
 
     def run_main(self, *argv: str, **env: str) -> tuple[int, str]:
-        """Run the CLI against the mocks; (exit code, stderr)."""
+        """Run the CLI against the mocks; (exit code, stderr), and its stdout in ``self.out``."""
         saved = dict(os.environ)
         os.environ.clear()
         os.environ.update(self.env | env)
-        err = io.StringIO()
+        err, out = io.StringIO(), io.StringIO()
         try:
-            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
                 code = zgca.main(argv, repo_root=self.repo, tools=self.tools)
         finally:
             os.environ.clear()
             os.environ.update(saved)
+        self.out = out.getvalue()
         return code, err.getvalue()
 
     # ----- instance lifecycle -----
@@ -691,6 +697,147 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("remote step experiment-state failed", err)
         self.assertEqual([self.step(call) for call in self.calls("dev")], ["experiment-state"])
+
+    def _sync_round(self, experiments: dict[str, object], name: str = "create_round_test") -> tuple[Path, str]:
+        """A temporary instance root whose venv runs this interpreter, holding the status of each experiment
+        given one (a string is written as is), and a round file here listing them all, in order."""
+        root = Path(self.temp.name) / "instance"
+        (root / ".venv" / "bin").mkdir(parents=True, exist_ok=True)
+        (root / ".venv" / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        (root / ".venv" / "bin" / "python").chmod(0o700)
+        for experiment, record in experiments.items():
+            if record is not None:
+                (root / "experiments" / experiment / "hitl").mkdir(parents=True, exist_ok=True)
+                (root / "experiments" / experiment / "hitl" / "status.json").write_text(
+                    record if isinstance(record, str) else json.dumps(record), encoding="utf-8")
+        round_file = self.repo / "scripts" / "experiments" / f"{name}.py"
+        round_file.parent.mkdir(parents=True, exist_ok=True)
+        round_file.write_text(f"from types import SimpleNamespace\nROUND = SimpleNamespace(experiments=dict.fromkeys({list(experiments)!r}))\n", encoding="utf-8")
+        return root, round_file.relative_to(self.repo).as_posix()
+
+    def marker(self, experiment: str) -> str | None:
+        path = self.repo / ".runtime" / "zgca" / zgca.SYNCED_DIR_NAME / experiment
+        return path.read_text(encoding="utf-8") if path.exists() else None
+
+    def test_sync_rounds_brings_back_each_ended_experiment_once(self) -> None:
+        """One cron pass against the real experiment-state step on a temporary instance root:
+        only an ended experiment is copied, then tagged and marked; a running, interrupted or
+        absent one costs one query and nothing is copied; a failure is one line and the next
+        experiment goes ahead; a refused tag is tried again without a new copy; an experiment
+        marked synced is never asked about again."""
+        from autotrade.pipelines.hitl_state import proc_start_ticks
+
+        live = {"state": "running_session", "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid())}
+        root, round_file = self._sync_round({
+            "exp_broken": "{",  # a status the instance cannot read: the query fails
+            "exp_done": {"state": "completed", "verdict": {"status": "registered_with_record"}, "pid": None},
+            "exp_live": live,
+            "exp_gone": {**live, "pid_start_ticks": live["pid_start_ticks"] + 1},
+            "exp_image": {"state": "failed", "pid": None},
+            "exp_absent": None,
+        })
+        # The mock copy moves nothing, so exp_image's records are here already, pinning an image.
+        hitl = self.repo / "experiments" / "exp_image" / "hitl"
+        hitl.mkdir(parents=True)
+        (hitl / "params.json").write_text(json.dumps({"experiments_root": f"{zgca.REMOTE_ROOT}/experiments"}), encoding="utf-8")
+        image = "autotrade-sandbox:exp_image-base-11111111-1111-4111-8111-111111111111"
+        (hitl / "sandbox_image.json").write_text(json.dumps({"experiment_id": "exp_image", "image_ref": image}), encoding="utf-8")
+        env = {"MOCK_REMOTE_ROOT": str(root), "MOCK_REMOTE_RUNTIME": "a" * 64}
+
+        def ran() -> list[list[str]]:
+            return [self.remote(call)[:2] if self.remote(call) else call["args"][-1:] for call in self.calls("dev")]
+
+        code, err = self.run_main("sync-rounds", round_file, **env, MOCK_LOCAL_RUNTIME="b" * 64)
+        self.assertEqual(code, 1, err)
+        local = self.repo / "experiments"
+        self.assertEqual(ran(), [
+            ["experiment-state", "exp_broken"],
+            ["experiment-state", "exp_done"], [f"{local}/exp_done/"], [f"{self.repo}/logs/workers/exp_done.log"],
+            ["experiment-state", "exp_live"], ["experiment-state", "exp_gone"],
+            ["experiment-state", "exp_image"], [f"{local}/exp_image/"], [f"{self.repo}/logs/workers/exp_image.log"],
+            ["image-runtime", image],
+            ["experiment-state", "exp_absent"],
+        ])
+        self.assertEqual([call["args"] for call in self.calls("instance")], [["state", INSTANCE]])
+        lines = self.out.splitlines()
+        self.assertTrue(lines[-1].endswith(
+            " zgca sync create_round_test: 6 experiments: 1 synced, 1 untagged, 1 running, 1 interrupted, 1 pending, 1 failed"), lines[-1])
+        self.assertIn("exp_broken: failed, retried next pass: remote step experiment-state failed (exit 1): json.decoder.JSONDecodeError", self.out)
+        self.assertIn("exp_gone: state running_session, verdict -, sessions None/None: not ended, yet no worker runs it", self.out)
+        self.assertIn(f"exp_image: copied, not tagged, tried again next pass: experiments/exp_image is synced, but its strategy cannot "
+                      f"be followed on Paper here until the images agree: its image {image}", self.out)
+        self.assertEqual({experiment: self.marker(experiment) for experiment in ("exp_broken", "exp_done", "exp_live", "exp_gone", "exp_image", "exp_absent")},
+                         {"exp_broken": None, "exp_done": "synced\n", "exp_live": None, "exp_gone": None, "exp_image": "copied\n", "exp_absent": None})
+
+        # Once the images agree the copied experiment is only tagged; the synced one is not asked about.
+        self.log.unlink()
+        code, err = self.run_main("sync-rounds", round_file, **env, MOCK_LOCAL_RUNTIME="a" * 64)
+        self.assertEqual(code, 1, err)
+        self.assertEqual(ran(), [["experiment-state", "exp_broken"], ["experiment-state", "exp_live"], ["experiment-state", "exp_gone"],
+                                 ["image-runtime", image], ["experiment-state", "exp_absent"]])
+        self.assertEqual([call["args"] for call in self.calls("docker")], [["run", "autotrade-sandbox:latest"], ["tag", "autotrade-sandbox:latest", image]])
+        self.assertTrue(self.out.splitlines()[-1].endswith(": 6 experiments: 2 synced, 0 untagged, 1 running, 1 interrupted, 1 pending, 1 failed"))
+        self.assertEqual(self.marker("exp_image"), "synced\n")
+
+        # A round whose experiments are all back asks neither the platform nor the instance anything.
+        _, synced_round = self._sync_round({"exp_done": None, "exp_image": None}, name="create_round_back")
+        self.log.unlink()
+        code, err = self.run_main("sync-rounds", synced_round, **env)
+        self.assertEqual(code, 0, err)
+        self.assertFalse(self.calls())
+        self.assertTrue(self.out.splitlines()[-1].endswith(" zgca sync create_round_back: 2 experiments: 2 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"))
+        # No round at all is the steady state between rounds; a round file that is not there fails the pass.
+        self.assertEqual(self.run_main("sync-rounds")[0], 0)
+        self.assertTrue(self.out.splitlines()[-1].endswith(" zgca sync no round: 0 experiments: 0 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"))
+        code, err = self.run_main("sync-rounds", "scripts/experiments/create_round_missing.py")
+        self.assertEqual(code, 1)
+        self.assertIn("create_round_missing.py is not a round file", err)
+        self.assertFalse(self.calls())
+
+    def test_sync_rounds_retries_what_a_pass_could_not_finish_and_never_marks_a_partial_copy(self) -> None:
+        """A failed copy leaves no marker and the next pass copies again; a sync run by hand
+        removes the marker before it copies, so a copy it does not finish is synced by the
+        next pass; a stopped or unreachable instance is one summary line and nothing is asked."""
+        root, round_file = self._sync_round({
+            "exp_one": {"state": "completed", "pid": None},
+            "exp_two": {"state": "stopped", "pid": None},
+            "exp_absent": None,
+        })
+        env = {"MOCK_REMOTE_ROOT": str(root)}
+        code, err = self.run_main("sync-rounds", round_file, **env, MOCK_DEV_EXIT_COPY="1")
+        self.assertEqual(code, 1, err)
+        self.assertEqual([self.step(call) for call in self.calls("dev")],
+                         ["experiment-state", "copy", "experiment-state", "copy", "experiment-state"])
+        self.assertIn("exp_one: failed, retried next pass: dev copy failed (exit 1)", self.out)
+        self.assertIn("exp_two: failed, retried next pass: dev copy failed (exit 1)", self.out)
+        self.assertTrue(self.out.splitlines()[-1].endswith(": 3 experiments: 0 synced, 0 untagged, 0 running, 0 interrupted, 1 pending, 2 failed"))
+        self.assertEqual([self.marker("exp_one"), self.marker("exp_two")], [None, None])
+        code, err = self.run_main("sync-rounds", round_file, **env)
+        self.assertEqual(code, 0, err)
+        self.assertTrue(self.out.splitlines()[-1].endswith(": 3 experiments: 2 synced, 0 untagged, 0 running, 0 interrupted, 1 pending, 0 failed"))
+        self.assertEqual([self.marker("exp_one"), self.marker("exp_two")], ["synced\n", "synced\n"])
+
+        # A sync by hand that dies in its copy takes the marker with it.
+        code, err = self.run_main("sync", "exp_one", **env, MOCK_DEV_EXIT_COPY="1")
+        self.assertEqual(code, 1)
+        self.assertIsNone(self.marker("exp_one"))
+        self.log.unlink()
+        self.assertEqual(self.run_main("sync-rounds", round_file, **env)[0], 0)
+        self.assertEqual([self.remote(call) or call["args"][:1] for call in self.calls("dev")][:3],
+                         [["experiment-state", "exp_one"], ["copy"], ["copy"]])
+        self.assertEqual(self.marker("exp_one"), "synced\n")
+
+        # The instance cannot be asked: one line, no query, the next pass tries again.
+        for env_case, reason in (({"MOCK_STATE": "STOPPED"}, f"instance {INSTANCE} is STOPPED, not RUNNING"),
+                                 ({"MOCK_INSTANCE_EXIT_STATE": "1"}, f"instance state {INSTANCE} failed (exit 1)")):
+            with self.subTest(reason=reason):
+                self.log.unlink()
+                code, err = self.run_main("sync-rounds", round_file, **env, **env_case)
+                self.assertEqual(code, 1)
+                self.assertFalse(self.calls("dev"))
+                self.assertEqual(len(self.out.splitlines()), 1)
+                self.assertIn(": 3 experiments: 2 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed, 1 not checked "
+                              f"({reason}", self.out)
 
     def test_the_experiment_state_and_idle_steps_refuse_while_a_worker_runs(self) -> None:
         """The console's own notion of a running experiment decides, run for real against a temporary root."""

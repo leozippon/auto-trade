@@ -1,6 +1,6 @@
 # ZGCA A100 工作流
 
-`ops/zgca/zgca.py` 把在 ZGCA A100 开发机上跑一轮研究的整个周期做成六个子命令：`up`、`deploy`、`run`、`status`、`sync`、`down`。它只调用 `~/zgca-compute` 的平台入口：`instance` 查看与启停实例，`dev` 经跳板登录开发机，并用它的四个原语补装基础工具（`bootstrap`）、做带比对的传输（`copy`）、写仅属主可读的文件（`put`）和报告 GPU、磁盘与 tmux（`report`）。实例生命周期、传输吞吐、个人存储和火山 Docker 这些与项目无关的平台事实只记在 `~/zgca-compute`（规则在 `README.md`，带日期的观察在 `PLATFORM_RECORDS.md`），这里只写本项目的步骤。沙箱隔离按执行器原样：平台提供的 rootless Docker、`--network none`、非 root 的 agent 用户、只读的策略挂载，这里一概不动。开发机那一侧的步骤都在 `remote.sh` 里，每次调用把本地这份脚本原样发过去，在登录 shell 里执行，开发机上不会留下过期副本。
+`ops/zgca/zgca.py` 把在 ZGCA A100 开发机上跑一轮研究的整个周期做成七个子命令：`up`、`deploy`、`run`、`status`、`sync`、`sync-rounds`、`down`。它只调用 `~/zgca-compute` 的平台入口：`instance` 查看与启停实例，`dev` 经跳板登录开发机，并用它的四个原语补装基础工具（`bootstrap`）、做带比对的传输（`copy`）、写仅属主可读的文件（`put`）和报告 GPU、磁盘与 tmux（`report`）。实例生命周期、传输吞吐、个人存储和火山 Docker 这些与项目无关的平台事实只记在 `~/zgca-compute`（规则在 `README.md`，带日期的观察在 `PLATFORM_RECORDS.md`），这里只写本项目的步骤。沙箱隔离按执行器原样：平台提供的 rootless Docker、`--network none`、非 root 的 agent 用户、只读的策略挂载，这里一概不动。开发机那一侧的步骤都在 `remote.sh` 里，每次调用把本地这份脚本原样发过去，在登录 shell 里执行，开发机上不会留下过期副本。
 
 ```bash
 python ops/zgca/zgca.py up
@@ -8,11 +8,12 @@ python ops/zgca/zgca.py deploy data/pit_views_seed_research_10y_fundanns_2026111
 python ops/zgca/zgca.py run scripts/experiments/create_round_<轮次>.py --dry-run
 python ops/zgca/zgca.py status
 python ops/zgca/zgca.py sync <实验 id>
+python ops/zgca/zgca.py sync-rounds scripts/experiments/create_round_<轮次>.py
 python ops/zgca/zgca.py down
 python ops/zgca/zgca.py --instance <平台实例 id> status
 ```
 
-在本机的 `quant` 环境里运行。`deploy` 要读种子记下的快照配置，这部分模块依赖 numpy 与 pandas；其余子命令只用标准库，系统 `python3` 也能跑。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（平台 id `mpo06t71crmmtdsrb98ckwk29`；2026-11-02 起是一张 A100-80G，名字沿用建时的两卡）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的布局不随实例改变：仓库根目录是 `/personal_fast_storage/auto-trade`，控制台和 worker 用的 venv 在它旁边的 `/personal_fast_storage/envs/quant`，预训练模型库在实例自己的盘上（见[存储布局](#存储布局)）；这些路径只写在 `zgca.py` 里，每次调用时传给 `remote.sh`。
+在本机的 `quant` 环境里运行。`deploy` 要读种子记下的快照配置，`sync-rounds` 要导入轮次文件，这些模块依赖 numpy、pandas 等第三方包；其余子命令不需要它们，系统 `python3` 也能跑。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（平台 id `mpo06t71crmmtdsrb98ckwk29`；2026-11-02 起是一张 A100-80G，名字沿用建时的两卡）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的布局不随实例改变：仓库根目录是 `/personal_fast_storage/auto-trade`，控制台和 worker 用的 venv 在它旁边的 `/personal_fast_storage/envs/quant`，预训练模型库在实例自己的盘上（见[存储布局](#存储布局)）；这些路径只写在 `zgca.py` 里，每次调用时传给 `remote.sh`。
 
 ## 各子命令
 
@@ -39,7 +40,9 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 `status` 先用 `instance show` 打印实例状态与卡时；实例在运行时再用 `dev report` 打印 GPU、根盘与个人存储余量和 tmux 会话，然后打印最近一次部署的提交、控制台健康（含空闲槽位与空闲 GPU）、每条在跑实验的状态、阶段与心跳距今的秒数（worker 已不在却没有结束的实验单独标出）、沙箱镜像，最近一份 `create_round_*` 启动器日志的末尾三行（镜像构建日志也在同一目录，不算在内），以及填充循环：会话 `autotrade-fill` 是否在跑、最近一份填充日志的最后一行汇总，结束了的还有它的 `round-exit`。
 
-`sync <实验 id>` 把开发机上这个实验的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<实验>.log` 用 `dev copy` 拉回本仓库。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的实验一律拒绝覆盖。同步前先打印实验当前的状态；实验还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status`、`deploy`、`down` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_experiments`）。拷贝完成后，`sync` 再让实验钉住的沙箱镜像 tag（`hitl/sandbox_image.json` 的 `image_ref`）在本机存在，做法与本机实验建 tag 相同：把本机的 `autotrade-sandbox:latest` 打上这个 tag。前提是开发机上这个 tag 的镜像与本机 `autotrade-sandbox:latest` 内置的策略运行时指纹相同，两边各用一个离线、不占 GPU 的容器读出（开发机一侧是 `remote.sh` 的 `image-runtime` 步骤）；指纹不同，或开发机上已没有这个 tag（停机再开可能丢 tag），就不打 tag、以错误退出，说明这个策略在两边镜像一致之前不能在本机跟随。没钉镜像的实验没有 tag 可打。重复 `sync` 同一个实验结果相同。
+`sync <实验 id>` 把开发机上这个实验的实验目录（不含 `pit_views/`，那是可从种子重建的 12 GB 缓存）和 `logs/workers/<实验>.log` 用 `dev copy` 拉回本仓库。本地已有同名目录时，只有它的 `hitl/params.json` 记着开发机的实验根（即以前从开发机同步来的副本）才会更新，本机自己的实验一律拒绝覆盖。同步前先打印实验当前的状态；实验还在跑时拒绝同步，因为它的 `status.json` 每几秒改写一次、日志不断增长，拷贝过不了比对，等它结束再同步。“在跑”与 `status`、`deploy`、`down` 和镜像重建的判定都用控制台自己的规则（`hitl_state.running_experiments`）。拷贝完成后，`sync` 再让实验钉住的沙箱镜像 tag（`hitl/sandbox_image.json` 的 `image_ref`）在本机存在，做法与本机实验建 tag 相同：把本机的 `autotrade-sandbox:latest` 打上这个 tag。前提是开发机上这个 tag 的镜像与本机 `autotrade-sandbox:latest` 内置的策略运行时指纹相同，两边各用一个离线、不占 GPU 的容器读出（开发机一侧是 `remote.sh` 的 `image-runtime` 步骤）；指纹不同，或开发机上已没有这个 tag（停机再开可能丢 tag），就不打 tag、以错误退出，说明这个策略在两边镜像一致之前不能在本机跟随。没钉镜像的实验没有 tag 可打。`sync` 把进度记在 `.runtime/zgca/synced/<实验 id>`：开始拷贝前删掉，两次拷贝都核对无误后写 `copied`，打 tag 这一步也成功（或没有 tag 要打）后写 `synced`，所以中途被打断的拷贝不留标记。重复 `sync` 同一个实验结果相同。
+
+`sync-rounds [轮次文件...]` 是定时同步的一遍，由本机 cron（`ops/cron/zgca_sync.cron`，安装用 `install_cron.py --block zgca`）每 30 分钟跑一次，`flock -n` 让拷贝没完时到点的那几遍跳过，输出追加到 `logs/zgca/sync_cron.log`。它读出这些轮次文件定义的实验：标记已是 `synced` 的算已同步，不碰平台；其余的先确认实例在运行，再逐个用 `experiment-state` 问一次。开发机上还没有的算待建，worker 还在跑的算在跑，都不拷贝；worker 已不在却没到结束状态（completed、failed、stopped 之外，例如被终止）的算中断，每遍记一行、不同步，要取回就手工 `sync`；到了结束状态的才像 `sync` 一样拷贝、打 tag。标记是 `copied` 的（拷贝完了、tag 被拒）每遍只重试打 tag、不重新拷贝，并记一行原因，直到两边镜像一致。实例没在运行或平台查询失败时这一遍只记一行，下一遍再试；某个实验失败只记它一行，后面的照常进行。每遍最后一行是汇总，已同步、未打 tag、在跑、中断、待建、失败各几个（实例问不到时另加未检查的个数与原因），所以 `tail -1` 就是现状；有失败、未打 tag 或实例问不到时以 1 退出。它不开 Paper 账户。cron 文件里的 `ROUNDS` 列出还有实验要取回的 ZGCA 轮次文件：轮次关闭后仍留在里面，直到它的实验都同步回来，并在轮次文件离开仓库之前移出。
 
 `down` 就是 `instance stop`：等到 STOPPED 后打印卡时。实例在运行时先做与 `deploy` 相同的检查，有实验或启动器在跑就拒绝，因为停机会结束它们；确要放弃这些实验，直接用 `~/zgca-compute/instance stop <平台实例 id>`。
 
@@ -79,6 +82,8 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 只有在某个对话角色跑在本机模型上时 worker 才要求，开发机上没有这个网关，所以用不上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几个实验写在同一棵目录里，续跑换了进程号的旧文件也无从按实验认出，一条 gpt-6 实验就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有实验在跑时目录仍在增长，所以不用 `dev copy` 比对）。
 
-在实例上定版、同步回本机的策略和本机的一样可以开 Paper 账户跟随：建账户只按本机的实验目录重建设置，不读参数里记着的实例实验根和沙箱根；控制台对标为“通过”的策略显示建账户的按钮。建账户时本机还要核对两件事，缺一就拒绝且什么都不写：注册的策略字节与账本为它记下的指纹一致，钉住的镜像 tag 在本机存在并内置本机代码要求的策略运行时，这个 tag 由上面的 `sync` 打上。
+在实例上定版、同步回本机的策略和本机的一样可以开 Paper 账户跟随：建账户只按本机的实验目录重建设置，不读参数里记着的实例实验根和沙箱根；控制台对标为“通过”的策略显示建账户的按钮。建账户时本机还要核对两件事，缺一就拒绝且什么都不写：注册的策略字节与账本为它记下的指纹一致，钉住的镜像 tag 在本机存在并内置本机代码要求的策略运行时，这个 tag 由上面的 `sync` 或定时同步打上。
+
+定时同步对每个实验只取回一次：标为 `synced` 的实验之后若在开发机上续跑，结束后要手工 `sync` 才会再取回（手工 `sync` 也重写标记）。
 
 开发机上的容器遥测缺少峰值内存和 GPU 峰值，开发机上的一切又都以 root 运行，原因见工具包 README 的“火山平台 Docker”；所以在开发机宿主上跑单元测试时，依赖目录权限位的测试会失败，Docker 沙箱以 uid 61000 运行，不受影响。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance`、`dev` 和本机 `docker`，不访问网络也不启停实例；那些入口本身的测试在 `~/zgca-compute/tests`。

@@ -176,6 +176,43 @@ class CronInstallerTest(unittest.TestCase):
             log = (root / "logs/research/cron.log").read_text(encoding="utf-8")
             self.assertTrue(log.endswith("fill first\nfill refused\nfill last\n"), log)
 
+    def test_the_zgca_sync_block_runs_one_pass_over_its_rounds_under_its_own_lock(self) -> None:
+        """The block installs beside the others without touching them, its one job
+        runs every 30 minutes under its own lock into its own log, every round it
+        lists is a round file here (closed ones too: their experiments may still be
+        on the instance), and the job line hands all of them to one sync-rounds pass."""
+        import subprocess
+
+        template, begin, end = installer.BLOCKS["zgca"]
+        block = installer.build_managed_block(template, begin, end)
+        others = [installer.build_managed_block(*installer.BLOCKS[name]) for name in ("paper", "housekeeping", "research")]
+        once = installer.replace_managed_block("0 1 * * * unrelated\n\n" + "\n".join(others), block, begin=begin, end=end)
+        self.assertEqual(installer.replace_managed_block(once, block, begin=begin, end=end), once)
+        for other in others:
+            self.assertIn(other, once)
+        lines = template.read_text(encoding="utf-8").splitlines()
+        jobs = [line for line in lines if line[:1] == "*" or line[:1].isdigit()]
+        self.assertEqual(len(jobs), 1)
+        self.assertEqual(jobs[0].split()[:5], ["*/30", "*", "*", "*", "*"])
+        self.assertIn("flock -n .runtime/zgca/sync_cron.lock", jobs[0])
+        self.assertTrue(jobs[0].endswith(" >> logs/zgca/sync_cron.log 2>&1"), jobs[0])
+        rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
+        for round_file in rounds.split():
+            self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
+            self.assertTrue(importlib.import_module("scripts.experiments." + Path(round_file).stem).ROUND.experiments, round_file)
+        command = jobs[0].split(None, 5)[5]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            python = root / "python"
+            python.write_text('#!/bin/bash\necho "pass: $*"\nexit 1\n', encoding="utf-8")
+            python.chmod(0o755)
+            for listed, expected in (("", "pass: ops/zgca/zgca.py sync-rounds"), ("first second", "pass: ops/zgca/zgca.py sync-rounds first second")):
+                with self.subTest(rounds=listed):
+                    env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ROUNDS": listed}
+                    run = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
+                    self.assertEqual(run.returncode, 1)
+                    self.assertEqual((root / "logs/zgca/sync_cron.log").read_text(encoding="utf-8").splitlines()[-1], expected)
+
     def test_the_housekeeping_job_compresses_only_old_conversation_logs(self) -> None:
         """The weekly job line itself, run by bash in a stand-in repository: a
         conversation log older than 14 days becomes a .zst that reads back byte
