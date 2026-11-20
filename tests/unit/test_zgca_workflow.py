@@ -51,8 +51,8 @@ if args[:1] == ["put"]:  # stdin is the file
     record["stdin"] = sys.stdin.buffer.read().decode()
 with open(os.environ["MOCK_LOG"], "a") as log:
     log.write(json.dumps(record) + "\n")
-if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir> <step> ...
-    step = args[args.index("remote.sh") + 4]
+if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir> <storage> <quota> <floor> <step> ...
+    step = args[args.index("remote.sh") + 7]
     root = os.environ.get("MOCK_REMOTE_ROOT")
     if step == "experiment-state" and root:  # the real step, against a temporary instance root
         import subprocess
@@ -60,6 +60,8 @@ if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir>
         sys.exit(subprocess.run(["bash", "-c", args[at - 1], "remote.sh", root, root + "/.venv", root + "/../ebs", *args[at + 4:]]).returncode)
     if step == "local-disk":  # bytes already in the store's directory, bytes free on its disk
         print(os.environ.get("MOCK_LOCAL_DISK", "0 100000000000000"))
+    if step == "storage":  # the storage line, and whether the floor is free
+        print(os.environ.get("MOCK_STORAGE", "storage: 56.2 of 100 GiB used, 43.8 free (du of /personal_fast_storage)"))
     if step == "deployed-commit":
         print(os.environ.get("MOCK_DEPLOYED_COMMIT", ""))
     if step == "image-runtime":  # the runtime an image on the instance bakes
@@ -132,12 +134,14 @@ class ZgcaWorkflowTest(unittest.TestCase):
     def remote(call: dict[str, object]) -> list[str] | None:
         """The remote.sh step and its arguments of a `dev bash -lc <script> remote.sh <layout> ...` call, else None."""
         args = call["args"]
-        return args[args.index("remote.sh") + 4:] if "remote.sh" in args else None
+        return args[args.index("remote.sh") + 7:] if "remote.sh" in args else None
 
     @staticmethod
     def remote_step(root: Path, *args: str, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-        """remote.sh run for real against a temporary layout: ``root``, its venv in root/.venv, the local directory root/../ebs."""
-        return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), str(root), str(root / ".venv"), str(root.parent / "ebs"), *args],
+        """remote.sh run for real against a temporary layout: ``root``, its venv in root/.venv, the local directory
+        root/../ebs, and root's parent as the storage under zgca.py's quota and floor."""
+        layout = (root, root / ".venv", root.parent / "ebs", root.parent, zgca.STORAGE_QUOTA, zgca.STORAGE_FLOOR)
+        return subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), *map(str, layout), *args],
                               env=env, capture_output=True, text=True, check=False)
 
     def step(self, call: dict[str, object]) -> str:
@@ -320,13 +324,14 @@ class ZgcaWorkflowTest(unittest.TestCase):
         dev = self.calls("dev")
         self.assertTrue(all(call["instance"] == INSTANCE for call in dev))
         # Each remote step is this checkout's script in a login shell, told the
-        # instance's layout: the root, its venv, and the root's directory on
-        # the instance's own disk.
+        # instance's layout: the root, its venv, the root's directory on the
+        # instance's own disk, and the storage with its quota and floor in bytes.
         remote, local = zgca.REMOTE_ROOT, "/ebs/auto-trade"
         script = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
         for call in dev:
             if self.remote(call) is not None:
-                self.assertEqual(call["args"][:7], ["bash", "-lc", script, "remote.sh", remote, "/personal_fast_storage/envs/quant", local])
+                self.assertEqual(call["args"][:10], ["bash", "-lc", script, "remote.sh", remote, "/personal_fast_storage/envs/quant", local,
+                                                     "/personal_fast_storage", str(100 * 2**30), str(40 * 2**30)])
         # No experiment runs, then the base tools; then transfers (by
         # destination) and remote steps in the order they ran: the tracked
         # list lands before the `tracked` step prunes by it, and both come
@@ -604,6 +609,204 @@ class ZgcaWorkflowTest(unittest.TestCase):
         (root / ".runtime" / "zgca" / zgca.DEPLOYED_COMMIT_NAME).write_text(head + "\n", encoding="utf-8")
         shown = self.remote_step(root, "deployed-commit")
         self.assertEqual((shown.returncode, shown.stdout), (0, head + "\n"), shown.stderr)
+
+    def test_resume_restarts_an_unfinished_experiment_under_runs_preconditions_and_drops_its_marker(self) -> None:
+        """Before anything changes, `resume` refuses an id that is none, an instance on another
+        commit, an experiment that is running, absent or completed, and a storage below the floor;
+        otherwise it brings the console up as `run` does, drops the sync marker so the experiment is
+        copied again when it ends, and sends the console's resume, whose refusal is the command's."""
+        from autotrade.pipelines.hitl_state import (
+            ENDED_STATES,
+            ExperimentState,
+            proc_start_ticks,
+        )
+
+        # zgca.py names the states sync and resume decide by (importing hitl_state needs numpy); they are the console's.
+        self.assertEqual(zgca.COMPLETED, ExperimentState.COMPLETED)
+        self.assertEqual(set(zgca.NOT_RESUMED), ENDED_STATES - {ExperimentState.FAILED})
+        self._tracked_repo()
+        head = self._head()
+        live = {"state": "running_session", "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid())}
+        root, _ = self._sync_round({
+            "exp_failed": {"state": "failed", "pid": None},
+            "exp_terminated": {"state": "terminated", "pid": None},
+            "exp_done": {"state": "completed", "pid": None},
+            "exp_live": live,
+            "exp_absent": None,
+        }, name="create_round_resume")
+        markers = self.repo / ".runtime" / "zgca" / zgca.SYNCED_DIR_NAME
+        markers.mkdir(parents=True)
+        for experiment in ("exp_failed", "exp_done"):
+            (markers / experiment).write_text("synced\n", encoding="utf-8")
+        env = {"MOCK_REMOTE_ROOT": str(root), "MOCK_DEPLOYED_COMMIT": head}
+        below = "storage: 61.0 of 100 GiB used, 39.0 free (du of /personal_fast_storage), below the 40 GiB floor"
+        for experiment, extra, said, ran in (
+            ("../exp_failed", {}, "not an experiment id", []),
+            ("exp_failed", {"MOCK_DEPLOYED_COMMIT": "0" * 40}, "deploy this commit first", ["deployed-commit"]),
+            ("exp_done", {}, "exp_done ended completed: resume restarts a failed, terminated or interrupted experiment",
+             ["deployed-commit", "experiment-state"]),
+            ("exp_live", {}, "exp_live is still running", ["deployed-commit", "experiment-state"]),
+            ("exp_absent", {}, "no experiment exp_absent on the instance", ["deployed-commit", "experiment-state"]),
+            ("exp_failed", {"MOCK_STORAGE": below, "MOCK_STEP_EXIT_STORAGE": "1"},
+             f"{below}; nothing is started on the instance while less than 40 GiB is free under the quota",
+             ["deployed-commit", "experiment-state", "storage"]),
+        ):
+            with self.subTest(experiment=experiment, refused=said):
+                self.log.unlink(missing_ok=True)
+                code, err = self.run_main("resume", experiment, **env | extra)
+                self.assertEqual(code, 1)
+                self.assertIn(said, err)
+                self.assertEqual([self.step(call) for call in self.calls("dev")], ran)
+                self.assertEqual(self.marker("exp_failed"), "synced\n")
+        for experiment in ("exp_failed", "exp_terminated"):
+            with self.subTest(experiment=experiment):
+                self.log.unlink()
+                code, err = self.run_main("resume", experiment, **env)
+                self.assertEqual(code, 0, err)
+                self.assertEqual([self.remote(call) for call in self.calls("dev")],
+                                 [["deployed-commit"], ["experiment-state", experiment], ["storage"], ["console-up"], ["resume", experiment]])
+                self.assertIn("storage: 56.2 of 100 GiB used, 43.8 free (du of /personal_fast_storage)", self.out)
+                self.assertIsNone(self.marker(experiment))
+        # A resume the console refuses fails the command; the marker is gone already, so the next sync pass copies it again.
+        (markers / "exp_failed").write_text("synced\n", encoding="utf-8")
+        code, err = self.run_main("resume", "exp_failed", **env, MOCK_STEP_EXIT_RESUME="1")
+        self.assertEqual(code, 1)
+        self.assertIn("remote step resume failed (exit 1)", err)
+        self.assertIsNone(self.marker("exp_failed"))
+        self.assertEqual(self.marker("exp_done"), "synced\n")
+
+    def _copy_here(self, experiment: str, state: str, image: str = "") -> None:
+        """The copy a sync left here (the mock copy moves nothing): created on the instance, in ``state``, pinning ``image``."""
+        hitl = self.repo / "experiments" / experiment / "hitl"
+        hitl.mkdir(parents=True)
+        (hitl / "params.json").write_text(json.dumps({"experiments_root": f"{zgca.REMOTE_ROOT}/experiments"}), encoding="utf-8")
+        (hitl / "status.json").write_text(json.dumps({"schema_version": 1, "state": state}), encoding="utf-8")
+        if image:
+            (hitl / "sandbox_image.json").write_text(json.dumps({"experiment_id": experiment, "image_ref": image}), encoding="utf-8")
+
+    def test_only_a_synced_copy_of_a_completed_experiment_is_released_on_the_instance(self) -> None:
+        """The release follows the verified copy: one synced and completed is released (one synced
+        before releases existed included) and marked `released`, which costs nothing afterwards; a
+        synced copy of a failed experiment and one copied but not tagged release nothing; a refused
+        release is one line and is tried again next pass; a sync by hand releases as a pass does."""
+        image = "autotrade-sandbox:exp_copied-base-11111111-1111-4111-8111-111111111111"
+        root, round_file = self._sync_round({
+            "exp_done": {"state": "completed", "pid": None},
+            "exp_old": {"state": "completed", "pid": None},
+            "exp_failed": {"state": "failed", "pid": None},
+            "exp_copied": {"state": "completed", "pid": None},
+        })
+        for experiment, state in (("exp_done", "completed"), ("exp_old", "completed"), ("exp_failed", "failed")):
+            self._copy_here(experiment, state)
+        self._copy_here("exp_copied", "completed", image)
+        markers = self.repo / ".runtime" / "zgca" / zgca.SYNCED_DIR_NAME
+        markers.mkdir(parents=True)
+        for experiment, stage in (("exp_old", "synced"), ("exp_failed", "synced"), ("exp_copied", "copied")):
+            (markers / experiment).write_text(stage + "\n", encoding="utf-8")
+        env = {"MOCK_REMOTE_ROOT": str(root), "MOCK_REMOTE_RUNTIME": "a" * 64}
+
+        def ran() -> list[list[str]]:
+            return [self.remote(call) or call["args"][-1:] for call in self.calls("dev")]
+
+        code, err = self.run_main("sync-rounds", round_file, **env, MOCK_LOCAL_RUNTIME="b" * 64)
+        self.assertEqual(code, 1, err)
+        self.assertEqual(ran(), [
+            ["experiment-state", "exp_done"], [f"{self.repo}/experiments/exp_done/"], [f"{self.repo}/logs/workers/exp_done.log"],
+            ["release", "exp_done"], ["release", "exp_old"], ["image-runtime", image],
+        ])
+        self.assertTrue(self.out.splitlines()[-1].endswith(": 4 experiments: 3 synced, 1 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"))
+        self.assertEqual({experiment: self.marker(experiment) for experiment in ("exp_done", "exp_old", "exp_failed", "exp_copied")},
+                         {"exp_done": "released\n", "exp_old": "released\n", "exp_failed": "synced\n", "exp_copied": "copied\n"})
+
+        # The instance refuses a release (it does not show the experiment completed and finished for good).
+        (markers / "exp_old").write_text("synced\n", encoding="utf-8")
+        self.log.unlink()
+        code, err = self.run_main("sync-rounds", round_file, **env, MOCK_LOCAL_RUNTIME="b" * 64, MOCK_STEP_EXIT_RELEASE="1")
+        self.assertEqual(code, 1)
+        self.assertEqual(ran(), [["release", "exp_old"], ["image-runtime", image]])
+        self.assertIn("exp_old: failed, retried next pass: remote step release failed (exit 1)", self.out)
+        self.assertTrue(self.out.splitlines()[-1].endswith(": 4 experiments: 2 synced, 1 untagged, 0 running, 0 interrupted, 0 pending, 1 failed"))
+        self.assertEqual(self.marker("exp_old"), "synced\n")
+
+        # Released next pass; the copied one, tagged once the images agree, is released in the same pass.
+        self.log.unlink()
+        code, err = self.run_main("sync-rounds", round_file, **env, MOCK_LOCAL_RUNTIME="a" * 64)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(ran(), [["release", "exp_old"], ["image-runtime", image], ["release", "exp_copied"]])
+        self.assertTrue(self.out.splitlines()[-1].endswith(": 4 experiments: 4 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"))
+        self.assertEqual([self.marker(experiment) for experiment in ("exp_old", "exp_copied", "exp_failed")], ["released\n", "released\n", "synced\n"])
+        # Now the pass asks neither the platform nor the instance anything.
+        self.log.unlink()
+        self.assertEqual(self.run_main("sync-rounds", round_file, **env)[0], 0)
+        self.assertFalse(self.calls())
+
+        # By hand: a failed copy keeps everything; a completed one is released again, which frees what is left, if anything.
+        for experiment, after in (("exp_failed", [["experiment-state", "exp_failed"], ["copy"], ["copy"]]),
+                                  ("exp_done", [["experiment-state", "exp_done"], ["copy"], ["copy"], ["release", "exp_done"]])):
+            with self.subTest(sync=experiment):
+                self.log.unlink(missing_ok=True)
+                code, err = self.run_main("sync", experiment, **env)
+                self.assertEqual(code, 0, err)
+                self.assertEqual([self.remote(call) or call["args"][:1] for call in self.calls("dev")], after)
+                self.assertEqual(self.marker(experiment), "synced\n" if experiment == "exp_failed" else "released\n")
+
+    def test_the_release_step_frees_a_completed_experiments_bulk_once_and_refuses_anything_else(self) -> None:
+        """Run for real against a temporary instance root, with prune_pit_views.py deciding: a completed
+        experiment loses its PIT views, sandbox work root and archived session workspaces and keeps its
+        directory with every record; a second release frees nothing. A failed experiment, an id that is
+        none, an absent experiment and a tree reached through a link are refused, and nothing is deleted."""
+        from tests.unit.webui_research_experiment import build_experiment
+
+        root = Path(self.temp.name) / "instance"
+        (root / ".venv" / "bin").mkdir(parents=True)
+        (root / ".venv" / "bin" / "python").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+        (root / ".venv" / "bin" / "python").chmod(0o700)
+        (root / "scripts").symlink_to(REPO / "scripts", target_is_directory=True)
+        bulk = {}
+        for experiment, stage in (("exp_done", "registered_with_record"), ("exp_failed", "broken")):
+            directory = build_experiment(root / "experiments", experiment, stage)
+            bulk[experiment] = [directory / "pit_views" / "decision" / "daily.parquet",
+                                directory / "artifacts" / "run_research_1" / "workspace" / "notes" / "notes.md",
+                                root / ".runtime" / "sandboxes" / experiment / "research" / "agent" / "notes.md"]
+            for path in bulk[experiment]:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"x" * 65536)
+            (directory / "artifacts" / "run_research_1" / "run_manifest.json").write_text("{}", encoding="utf-8")
+        done = root / "experiments" / "exp_done"
+        records = sorted(path for path in done.rglob("*") if path.is_file() and not any(path.is_relative_to(tree.parents[1]) for tree in bulk["exp_done"][:2]))
+        self.assertIn(done / "artifacts" / "run_research_1" / "run_manifest.json", records)
+
+        def release(experiment: str) -> subprocess.CompletedProcess[str]:
+            return self.remote_step(root, "release", experiment)
+
+        link = done / "artifacts" / "run_research_2"
+        link.symlink_to(root / "experiments" / "exp_failed" / "artifacts" / "run_research_1", target_is_directory=True)
+        for experiment, said in (
+            ("exp_failed", "exp_failed is kept whole, state 'failed' is not completed: a resume continues in its workspace"),
+            ("..", "not an experiment id: '..'"),
+            ("../exp_done", "not an experiment id: '../exp_done'"),
+            ("exp_absent", "no experiment directory experiments/exp_absent on the instance"),
+            ("exp_done", f"{Path('experiments/exp_done/artifacts/run_research_2')} is a symbolic link; nothing of exp_done was released"),
+        ):
+            with self.subTest(experiment=experiment):
+                refused = release(experiment)
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn(said, refused.stderr)
+                self.assertTrue(all(path.is_file() for paths in bulk.values() for path in paths))
+        link.unlink()
+
+        freed = release("exp_done")
+        self.assertEqual(freed.returncode, 0, freed.stderr)
+        self.assertRegex(freed.stdout, r"^exp_done: released on the instance, freed \d+\.\d\d GiB \(pit_views \d+\.\d\d GiB, sandbox \d+\.\d\d GiB, "
+                                       r"run_research_1/workspace \d+\.\d\d GiB\); its records stay\n$")
+        self.assertFalse((done / "pit_views").exists())
+        self.assertFalse((done / "artifacts" / "run_research_1" / "workspace").exists())
+        self.assertFalse((root / ".runtime" / "sandboxes" / "exp_done").exists())
+        self.assertEqual(sorted(path for path in done.rglob("*") if path.is_file()), records)
+        self.assertTrue(all(path.is_file() for path in bulk["exp_failed"]))
+        again = release("exp_done")
+        self.assertEqual((again.returncode, again.stdout),
+                         (0, "exp_done: released on the instance, freed 0.00 GiB, nothing was left; its records stay\n"), again.stderr)
 
     def test_sync_pulls_an_instance_experiment_and_refuses_to_overwrite_a_local_one(self) -> None:
         local = self.repo / "experiments" / "experiment_local"
@@ -936,45 +1139,105 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log", shown.stdout)
         self.assertIn(f"fill: no session; last log logs/zgca/{fill.name}\n  fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\n  round-exit 0", shown.stdout)
 
-    def test_a_fill_repeats_until_nothing_is_pending_and_ends_at_a_failed_pass(self) -> None:
-        """The round step's --fill loop, run for real against a temporary root with
-        tmux, sleep and the launcher stubbed: every pass appends to one log, the
-        loop sleeps between passes and ends at the first pass that reports 0
-        pending, or at the first that exits non-zero, which is never retried."""
+    FILL_HELD = "fill create_round_test: slots; queue 1: 0 skipped (created already), 0 created, 0 refused, 1 pending (1 by the free GPUs)"
+    FILL_DONE = FILL_HELD.replace("0 created", "1 created").replace("1 pending", "0 pending")
+
+    def _fill(self, plan: list[str], du: list[str] | None = None) -> tuple[list[str], list[str]]:
+        """One round step with --fill, run for real against a temporary root with tmux, sleep,
+        the launcher and (given ``du``) du stubbed: each launcher pass prints and exits as its
+        ``<exit>|<line>`` in ``plan`` says, each du answers its line of ``du`` (bytes used,
+        or ``fail``). The fill log's lines and the seconds slept between passes."""
         temp = Path(self.temp.name)
         root, stubs = temp / "instance", temp / "stubs"
         for directory in (root / ".venv" / "bin", root / "scripts" / "experiments", root / "logs" / "zgca", stubs):
-            directory.mkdir(parents=True)
+            directory.mkdir(parents=True, exist_ok=True)
         (root / "scripts" / "experiments" / "create_round_test.py").write_text("", encoding="utf-8")
         scripts = {
             # The console's health probe answers; each launcher pass prints and exits as planned.
             root / ".venv" / "bin" / "python": '#!/bin/sh\n[ "$1" = -c ] && { echo "{}"; exit 0; }\n'
             'n=$(($(cat "$PASSES" 2>/dev/null || echo 0) + 1)); echo $n >"$PASSES"\n'
             'line=$(sed -n "${n}p" "$PLAN"); echo "${line#*|}"; exit "${line%%|*}"\n',
-            # No session exists yet; a new one runs its command at once, in its directory.
+            # No session exists yet; a new one runs its command at once, in its directory, under sh.
             stubs / "tmux": '#!/bin/sh\n[ "$1" = new-session ] || exit 1\n'
             'while [ $# -gt 1 ]; do [ "$1" = -c ] && { shift; cd "$1"; }; shift; done\nexec sh -c "$1"\n',
             stubs / "sleep": '#!/bin/sh\necho "$1" >>"$SLEPT"\n',
         }
+        if du is not None:  # du -sxB1 <storage>: the planned total, or a failure as du reports one
+            scripts[stubs / "du"] = ('#!/bin/sh\nn=$(($(cat "$MEASURED" 2>/dev/null || echo 0) + 1)); echo $n >"$MEASURED"\n'
+                                     'line=$(sed -n "${n}p" "$DU_PLAN")\n'
+                                     '[ "$line" = fail ] && { printf "%s\\n" "du: cannot read directory \'$2/x\': Permission denied" >&2; exit 1; }\n'
+                                     'printf "%s\\t%s\\n" "$line" "$2"\n')
+            (temp / "du_plan").write_text("\n".join(du) + "\n", encoding="utf-8")
         for script, body in scripts.items():
             script.write_text(body, encoding="utf-8")
             script.chmod(0o700)
-        held = "fill create_round_test: slots; queue 1: 0 skipped (created already), 0 created, 0 refused, 1 pending (1 by the free GPUs)"
-        done = held.replace("0 created", "1 created").replace("1 pending", "0 pending")
-        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}",
-               "PLAN": str(temp / "plan"), "PASSES": str(temp / "passes"), "SLEPT": str(temp / "slept")}
-        for plan, ending in (([f"0|{held}", f"0|{held}", f"0|{done}"], "round-exit 0"),
-                             ([f"0|{held}", "1|experiment_one: refused, HTTP 400"], "round-exit 1")):
+        for leftover in (temp / "passes", temp / "slept", temp / "measured", *(root / "logs" / "zgca").glob("*.log")):
+            leftover.unlink(missing_ok=True)
+        (temp / "plan").write_text("\n".join(plan) + "\n", encoding="utf-8")
+        env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "PLAN": str(temp / "plan"), "PASSES": str(temp / "passes"),
+               "SLEPT": str(temp / "slept"), "DU_PLAN": str(temp / "du_plan"), "MEASURED": str(temp / "measured")}
+        shown = self.remote_step(root, "round", "scripts/experiments/create_round_test.py", "--fill", env=env)
+        self.assertEqual(shown.returncode, 0, shown.stderr)
+        self.assertIn("fill launcher started in tmux session autotrade-fill", shown.stdout)
+        self.assertIn("each held while less than 40 GiB is free under the storage quota", shown.stdout)
+        (log,) = (root / "logs" / "zgca").glob("fill_create_round_test_*.log")
+        slept = temp / "slept"
+        return log.read_text(encoding="utf-8").splitlines(), slept.read_text(encoding="utf-8").split() if slept.exists() else []
+
+    def test_a_fill_repeats_until_nothing_is_pending_and_ends_at_a_failed_pass(self) -> None:
+        """The round step's --fill loop: every pass appends to one log, the loop sleeps between
+        passes and ends at the first pass that reports 0 pending, or at the first that exits
+        non-zero, which is never retried. The storage here is a small temporary tree, measured by
+        the real du, so no pass is held."""
+        for plan, ending in (([f"0|{self.FILL_HELD}", f"0|{self.FILL_HELD}", f"0|{self.FILL_DONE}"], "round-exit 0"),
+                             ([f"0|{self.FILL_HELD}", "1|experiment_one: refused, HTTP 400"], "round-exit 1")):
             with self.subTest(ending=ending):
-                for leftover in (temp / "passes", temp / "slept", *(root / "logs" / "zgca").glob("*.log")):
-                    leftover.unlink(missing_ok=True)
-                (temp / "plan").write_text("\n".join(plan) + "\n", encoding="utf-8")
-                shown = self.remote_step(root, "round", "scripts/experiments/create_round_test.py", "--fill", env=env)
+                lines, slept = self._fill(plan)
+                self.assertEqual(lines, [step.split("|", 1)[1] for step in plan] + [ending])
+                self.assertEqual(slept, ["600"] * (len(plan) - 1))
+
+    def test_a_fill_pass_is_held_while_the_storage_floor_is_not_free_or_unmeasured(self) -> None:
+        """No launcher runs in a pass whose du fails or leaves less than the floor free under the
+        quota: the pass logs one line saying so and the next pass measures again; the first pass
+        that finds the floor free runs the launcher."""
+        storage = Path(self.temp.name)
+        below = zgca.STORAGE_QUOTA - zgca.STORAGE_FLOOR + 2**30  # a GiB short of the floor
+        lines, slept = self._fill([f"0|{self.FILL_DONE}"], du=["fail", str(below), str(zgca.STORAGE_QUOTA - zgca.STORAGE_FLOOR)])
+        self.assertEqual(len(lines), 4, lines)
+        self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d fill held, no experiment is created this pass: ")
+        self.assertTrue(lines[0].endswith(f"storage: unknown, du of {storage} failed (exit 1): "
+                                          f"du: cannot read directory '{storage}/x': Permission denied"), lines[0])
+        self.assertTrue(lines[1].endswith(f"fill held, no experiment is created this pass: storage: 61.0 of 100 GiB used, 39.0 free "
+                                          f"(du of {storage}), below the 40 GiB floor"), lines[1])
+        self.assertEqual(lines[2:], [self.FILL_DONE, "round-exit 0"])
+        self.assertEqual(slept, ["600", "600"])
+
+    def test_the_storage_step_measures_the_quota_by_du_and_status_shows_it(self) -> None:
+        """The storage line against the quota, exit 0 only with the floor free; a failed du is no
+        measure and never free. `status` shows the same line whatever it says, before anything else."""
+        temp = Path(self.temp.name)
+        root, stubs = temp / "instance", temp / "stubs"
+        stubs.mkdir()
+        (stubs / "du").write_text('#!/bin/sh\n[ -n "$USED" ] || { echo "du: cannot access \'$2\': Stale file handle" >&2; exit 1; }\n'
+                                  'printf "%s\\t%s\\n" "$USED" "$2"\n', encoding="utf-8")
+        (stubs / "docker").write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        for stub in stubs.iterdir():
+            stub.chmod(0o700)
+        cases = (
+            (str(int(56.2 * 2**30)), 0, f"storage: 56.2 of 100 GiB used, 43.8 free (du of {temp})"),
+            (str(zgca.STORAGE_QUOTA - zgca.STORAGE_FLOOR), 0, f"storage: 60.0 of 100 GiB used, 40.0 free (du of {temp})"),
+            (str(zgca.STORAGE_QUOTA - zgca.STORAGE_FLOOR + 1), 1,
+             f"storage: 60.0 of 100 GiB used, 40.0 free (du of {temp}), below the 40 GiB floor"),
+            ("", 1, f"storage: unknown, du of {temp} failed (exit 1): du: cannot access '{temp}': Stale file handle"),
+        )
+        for used, code, line in cases:
+            with self.subTest(used=used or "du fails"):
+                env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "USED": used}
+                measured = self.remote_step(root, "storage", env=env)
+                self.assertEqual((measured.returncode, measured.stdout), (code, line + "\n"), measured.stderr)
+                shown = self.remote_step(root, "status", env=env)
                 self.assertEqual(shown.returncode, 0, shown.stderr)
-                self.assertIn("fill launcher started in tmux session autotrade-fill", shown.stdout)
-                (log,) = (root / "logs" / "zgca").glob("fill_create_round_test_*.log")
-                self.assertEqual(log.read_text(encoding="utf-8").splitlines(), [step.split("|", 1)[1] for step in plan] + [ending])
-                self.assertEqual((temp / "slept").read_text(encoding="utf-8").split(), ["600"] * (len(plan) - 1))
+                self.assertEqual(shown.stdout.splitlines()[:2], [line, f"repository: not deployed at {root}"])
 
     def test_console_up_restarts_an_idle_console_onto_the_checkout_and_keeps_a_busy_one(self) -> None:
         """A console serves the code it was started with: with no experiment running an
@@ -1034,10 +1297,14 @@ class ZgcaWorkflowTest(unittest.TestCase):
         remote = self.remote_step(root, "bogus")
         self.assertEqual(remote.returncode, 1)
         self.assertIn("unknown remote step", remote.stderr)
-        # The layout comes from zgca.py on every call; a step without it is refused.
+        # The layout comes from zgca.py on every call; a step without it is refused, and so is a quota that is no byte count.
         bare = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), "status"], capture_output=True, text=True, check=False)
         self.assertEqual(bare.returncode, 1)
-        self.assertIn("usage: remote.sh <root> <venv> <local dir> <step>", bare.stderr)
+        self.assertIn("usage: remote.sh <root> <venv> <local dir> <storage> <quota bytes> <floor bytes> <step>", bare.stderr)
+        garbled = subprocess.run(["bash", str(zgca.REMOTE_SCRIPT), str(root), str(root / ".venv"), str(root.parent / "ebs"),
+                                  str(root.parent), "100GiB", str(zgca.STORAGE_FLOOR), "storage"], capture_output=True, text=True, check=False)
+        self.assertEqual(garbled.returncode, 1)
+        self.assertIn("the storage quota and floor are byte counts", garbled.stderr)
         # The build verifies and serves the shipped release files, so prepare takes their digests.
         prepare = self.remote_step(root, "prepare", "0" * 64)
         self.assertEqual(prepare.returncode, 1)

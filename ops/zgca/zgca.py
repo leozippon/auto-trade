@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""The ZGCA A100 development instance, end to end: up, deploy, run, status, sync, sync-rounds, down.
+"""The ZGCA A100 development instance, end to end: up, deploy, run, resume, status, sync, sync-rounds, down.
 
 Every step goes through the platform layer in ~/zgca-compute (`instance` to
 show, start and stop the instance as idempotent intents; `dev` to reach it:
@@ -20,10 +20,14 @@ not fit there. A run refuses unless the last deploy shipped the local HEAD,
 then starts the console (restarting it onto the deployed
 checkout when no experiment runs) and a round launcher in tmux with
 AUTOTRADE_GPU_NAME set, and repeats a `--fill` launcher every ten minutes in
-a session of its own until its round has nothing pending; status reads, and
-sync copies an experiment back and gives it its pinned sandbox image tag here
-when the instance's image and this host's base bake the same strategy runtime,
-so a passed strategy can be followed on Paper; sync-rounds is one pass of the
+a session of its own until its round has nothing pending, holding each pass
+while less than STORAGE_FLOOR is free under the storage quota; resume restarts
+a failed, terminated or interrupted experiment through the console under the
+same preconditions and that floor; status reads, the storage against its quota
+included, and sync copies an experiment back and gives it its pinned sandbox
+image tag here when the instance's image and this host's base bake the same
+strategy runtime, so a passed strategy can be followed on Paper, then releases
+the bulk of a completed one on the instance; sync-rounds is one pass of the
 sync cron (ops/cron/zgca_sync.cron), which syncs, once, every experiment of
 the named rounds that has ended on the instance. Beyond that fill loop and
 that cron nothing here schedules, caches an endpoint, keeps a secret in the
@@ -31,8 +35,8 @@ repository or changes how the executor isolates a strategy container. See
 ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> |
-       run <round file> [launcher args...] | status | sync <experiment id> |
-       sync-rounds [round file...] | down
+       run <round file> [launcher args...] | resume <experiment id> | status |
+       sync <experiment id> | sync-rounds [round file...] | down
 """
 
 from __future__ import annotations
@@ -57,6 +61,7 @@ from pathlib import Path
 INSTANCE_ID = "mpo06t71crmmtdsrb98ckwk29"
 # The platform's own shape for an instance id (~/zgca-compute/dev).
 INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+GIB = 2**30
 # The instance's layout, stated here alone: remote.sh receives it on every
 # call. The repository root is on the instance's persistent personal storage,
 # the only place code, the .env, seeds and releases go (~/zgca-compute/README.md,
@@ -64,8 +69,20 @@ INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 # beside it. The pretrained store lives in <LOCAL_ROOT>/pretrained on the
 # instance's own disk, which also holds its root and Docker's images
 # (~/zgca-compute/README.md, 火山平台 Docker); the root's data/pretrained links to it.
-REMOTE_ROOT = "/personal_fast_storage/auto-trade"
-REMOTE_VENV = "/personal_fast_storage/envs/quant"
+STORAGE = "/personal_fast_storage"
+REMOTE_ROOT = f"{STORAGE}/auto-trade"
+REMOTE_VENV = f"{STORAGE}/envs/quant"
+# That storage is a GPFS fileset under a hard byte quota. df and statvfs there
+# show the whole shared file system, so neither they nor anything reading them
+# (the console's create check, the agent tools' floor) sees the quota, and the
+# container has no quota tool: remote.sh measures it as du of the whole tree,
+# which counts a hard link once, as the quota does (about a second on 2026-11-20).
+# Filling it on 2026-11-20 killed a session 18 hours in with EDQUOT.
+STORAGE_QUOTA = 100 * GIB
+# Free room under the quota below which the fill loop creates no experiment and
+# `resume` starts none: a session's workspace reached 20 GiB in its sandbox, and
+# the end of each session copies the workspace whole into the experiment's artifacts.
+STORAGE_FLOOR = 40 * GIB
 LOCAL_DISK = "/ebs"
 LOCAL_ROOT = f"{LOCAL_DISK}/auto-trade"
 # Left free on that disk beside the store: the new layers of an image rebuild
@@ -103,13 +120,22 @@ TRACKED_LIST_NAME = "tracked.txt"
 # The commit whose tracked files the last deploy shipped; remote.sh's status shows it.
 DEPLOYED_COMMIT_NAME = "deployed_commit"
 # One marker per experiment `sync` brought back, in the state directory: it
-# says `copied` once both copies are verified and `synced` once the tag step
-# has succeeded too. A sync removes it before it copies, so an interrupted copy
-# leaves none; sync-rounds skips an experiment whose marker says `synced`.
+# says `copied` once both copies are verified, `synced` once the tag step has
+# succeeded too, and `released` once a copy of a completed experiment has had
+# its bulk released on the instance. A sync removes it before it copies, so an
+# interrupted copy leaves none, and so does `resume`, so a resumed experiment is
+# copied again when it ends; sync-rounds skips an experiment whose marker says
+# `released`, or `synced` with a copy that is not of a completed experiment.
 SYNCED_DIR_NAME = "synced"
+# The experiment states (autotrade.pipelines.hitl_state.ExperimentState) sync
+# and resume decide by, named here because importing that module needs numpy,
+# which neither otherwise does: only a copy of a completed experiment is
+# released on the instance, and an experiment that ended any other way than
+# failed is not resumed.
+COMPLETED = "completed"
+NOT_RESUMED = ("completed", "stopped")
 # What a sync-rounds pass counts, in its summary line's order.
 SYNC_COUNTS = ("synced", "untagged", "running", "interrupted", "pending", "failed")
-GIB = 2**30
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Every transfer keeps contents, times and modes; the instance's root owns what lands there.
 PRESERVE = ("-a", "--no-owner", "--no-group")
@@ -214,6 +240,14 @@ def _said(completed: subprocess.CompletedProcess[bytes]) -> str:
     return f": {lines[-1]}" if lines else ""
 
 
+def shown_state(experiment_id: str, shown: str) -> tuple[str, str]:
+    """The line remote.sh's experiment-state step showed for ``experiment_id`` and the state it names; "" for either it lacks."""
+
+    line = next((text for text in shown.splitlines() if text.startswith(f"{experiment_id}: state ")), "")
+    state = re.match(rf"{re.escape(experiment_id)}: state (\S+?), ", line)
+    return line, state.group(1) if state else ""
+
+
 def _sha256(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
@@ -272,7 +306,8 @@ class Workflow:
         """Run one step of remote.sh on the instance, in a login shell for the platform's environment, told the instance's layout."""
         script = REMOTE_SCRIPT.read_text(encoding="utf-8")
         return self.call(
-            "dev", "bash", "-lc", script, "remote.sh", REMOTE_ROOT, REMOTE_VENV, LOCAL_ROOT, step, *args, capture=capture, quiet=quiet,
+            "dev", "bash", "-lc", script, "remote.sh", REMOTE_ROOT, REMOTE_VENV, LOCAL_ROOT,
+            STORAGE, str(STORAGE_QUOTA), str(STORAGE_FLOOR), step, *args, capture=capture, quiet=quiet,
         )
 
     def remote(self, step: str, *args: str, capture: bool = False, quiet: bool = False) -> str:
@@ -450,18 +485,61 @@ class Workflow:
         )
         if tracked.returncode != 0 or not (self.repo_root / round_file).is_file():
             raise WorkflowError(f"{round_file} is not a tracked file of the repository, so deploy would not have carried it")
-        head = self.git("rev-parse", "HEAD").decode("ascii").strip()
         self.require_running()
-        # The instance runs the tree the last deploy shipped, which the checks
-        # above say nothing about; the console and the launcher must run this one.
+        self.require_deployed_head()
+        self.remote("console-up")
+        self.remote("round", round_file, *args)
+
+    def require_deployed_head(self) -> None:
+        """Refuse unless the last deploy shipped this checkout's HEAD.
+
+        The instance runs the tree the last deploy shipped, which no local check
+        says anything about; the console and what it starts must run this one.
+        """
+        head = self.git("rev-parse", "HEAD").decode("ascii").strip()
         deployed = self.remote("deployed-commit", capture=True).split()[-1:]
         if deployed != [head]:
             raise WorkflowError(
                 f"the instance runs commit {deployed[0] if deployed else '(none recorded)'}, not this checkout's HEAD {head}: "
                 "deploy this commit first"
             )
+
+    def resume(self, experiment_id: str) -> None:
+        """Restart, through the console's own `resume`, an experiment whose worker is gone before it completed.
+
+        Under `run`'s preconditions (the instance runs this checkout's HEAD; the
+        console is brought up as `run` brings it up), for an experiment that
+        ended `failed` or was left terminated or interrupted, and only while
+        the storage floor is free. The marker goes before the request, so the
+        experiment is copied back again when it ends; a refused request only
+        costs the next sync pass a copy that changes nothing.
+        """
+
+        if not SAFE_ID.fullmatch(experiment_id):
+            raise WorkflowError(f"not an experiment id: {experiment_id!r}")
+        self.require_running()
+        self.require_deployed_head()
+        line, state = shown_state(experiment_id, self.remote("experiment-state", experiment_id, capture=True, quiet=True))
+        if not state:
+            raise WorkflowError(f"remote step experiment-state showed no state for {experiment_id}")
+        say(line)
+        if state in NOT_RESUMED:
+            raise WorkflowError(f"{experiment_id} ended {state}: resume restarts a failed, terminated or interrupted experiment")
+        self.require_storage()
         self.remote("console-up")
-        self.remote("round", round_file, *args)
+        self.sync_marker(experiment_id).unlink(missing_ok=True)
+        self.remote("resume", experiment_id)
+
+    def require_storage(self) -> None:
+        """Refuse unless the storage floor is free under the quota; an unmeasured storage is not free."""
+        completed = self.remote_run("storage", capture=True, quiet=True)
+        line = (completed.stdout or b"").decode("utf-8", errors="replace").strip()
+        if completed.returncode != 0:
+            raise WorkflowError(
+                (line or "storage: unmeasured" + _said(completed))
+                + f"; nothing is started on the instance while less than {STORAGE_FLOOR / GIB:.0f} GiB is free under the quota"
+            )
+        say(line)
 
     def status(self) -> None:
         self.lifecycle("show")
@@ -476,6 +554,7 @@ class Workflow:
         self.copy_back(experiment_id, local)
         self.tag_pinned_image(experiment_id, local)
         self.sync_marker(experiment_id).write_text("synced\n", encoding="utf-8")
+        self.release_completed(experiment_id, local)
 
     def sync_target(self, experiment_id: str) -> Path:
         """Where a sync of ``experiment_id`` lands: never over an experiment of this host."""
@@ -495,9 +574,31 @@ class Workflow:
         return self.state_dir / SYNCED_DIR_NAME / experiment_id
 
     def sync_stage(self, experiment_id: str) -> str:
-        """What the marker says (`copied`, `synced`), or nothing; anything else is no completed stage."""
+        """What the marker says (`copied`, `synced`, `released`), or nothing; anything else is no completed stage."""
         marker = self.sync_marker(experiment_id)
         return marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+
+    @staticmethod
+    def completed_copy(local: Path) -> bool:
+        """Whether the copy here is of a completed experiment, by the status it copied; an unreadable one is not."""
+        try:
+            state = json.loads((local / "hitl" / "status.json").read_text(encoding="utf-8")).get("state")
+        except (OSError, ValueError, AttributeError):
+            return False
+        return state == COMPLETED
+
+    def release_completed(self, experiment_id: str, local: Path) -> None:
+        """Release a synced experiment's bulk on the instance when the verified copy here is of it completed.
+
+        The `release` step frees its PIT views, sandbox work root and archived
+        session workspaces and keeps its directory with the records; it refuses,
+        whatever the copy says, an experiment the instance does not show completed
+        and finished for good. A copy of any other state releases nothing: a
+        failed, terminated or interrupted experiment resumes in its workspace.
+        """
+        if self.completed_copy(local):
+            self.remote("release", experiment_id, quiet=True)
+            self.sync_marker(experiment_id).write_text("released\n", encoding="utf-8")
 
     def copy_back(self, experiment_id: str, local: Path) -> None:
         """Copy the experiment without pit_views and its worker log; the marker is gone meanwhile and says `copied` once both copies are verified."""
@@ -525,12 +626,16 @@ class Workflow:
     def sync_rounds(self, round_files: Sequence[str]) -> bool:
         """One pass of the sync cron: sync every experiment of these rounds that has ended on the instance and is not back.
 
-        An experiment whose marker says `synced` costs nothing; any other asks
-        the instance one cheap question first (`experiment-state`), and only
-        one in an ended state is copied, then tagged; one copied but not tagged
-        is only tagged again. Each failure is one line and leaves the next
-        experiment to go ahead, and the pass ends with one summary line. False
-        when an experiment failed or is untagged, or the instance could not be asked.
+        An experiment whose marker says `released`, or `synced` with a copy
+        that is not of a completed experiment, costs nothing; a synced copy of a
+        completed one is only released on the instance (so one synced before
+        releases existed is released by the next pass); any other asks the
+        instance one cheap question first (`experiment-state`), and only one in
+        an ended state is copied, then tagged, then released when completed; one
+        copied but not tagged is only tagged again. Each failure is one line and
+        leaves the next experiment to go ahead, and the pass ends with one
+        summary line. False when an experiment failed or is untagged, or the
+        instance could not be asked.
         """
 
         _with_project_src()
@@ -540,7 +645,8 @@ class Workflow:
         counts = dict.fromkeys(SYNC_COUNTS, 0)
         unsynced = []
         for experiment in experiments:
-            if self.sync_stage(experiment) == "synced":
+            stage = self.sync_stage(experiment)
+            if stage == "released" or (stage == "synced" and not self.completed_copy(self.repo_root / "experiments" / experiment)):
                 counts["synced"] += 1
             else:
                 unsynced.append(experiment)
@@ -565,34 +671,35 @@ class Workflow:
         return not (problem or counts["failed"] or counts["untagged"])
 
     def sync_ended(self, experiment_id: str, ended_states: frozenset[str]) -> str:
-        """Bring one experiment back if it has ended; what the pass counts it as."""
+        """Bring one experiment back if it has ended, and release it there once it is back completed; what the pass counts it as."""
         local = self.sync_target(experiment_id)
-        if self.sync_stage(experiment_id) != "copied":
+        stage = self.sync_stage(experiment_id)
+        if stage not in ("copied", "synced"):
             completed = self.remote_run("experiment-state", experiment_id, capture=True, quiet=True)
-            shown = (completed.stdout or b"").decode("utf-8", errors="replace").splitlines()
+            line, state = shown_state(experiment_id, (completed.stdout or b"").decode("utf-8", errors="replace"))
             said = (completed.stderr or b"").decode("utf-8", errors="replace")
-            line = next((text for text in shown if text.startswith(f"{experiment_id}: state ")), "")
             if completed.returncode != 0:
                 if f"no experiment {experiment_id} on the instance" in said:
                     return "pending"
                 if line and f"{experiment_id} is still running" in said:
                     return "running"
                 raise WorkflowError(f"remote step experiment-state failed (exit {completed.returncode})" + _said(completed))
-            state = re.match(rf"{re.escape(experiment_id)}: state (\S+?), ", line)
-            if state is None:
+            if not state:
                 raise WorkflowError(f"remote step experiment-state showed no state for {experiment_id}")
-            if state.group(1) not in ended_states:
+            if state not in ended_states:
                 say(f"{line}: not ended, yet no worker runs it (the console shows it interrupted); "
-                    f"not synced, `zgca.py sync {experiment_id}` copies it as it is")
+                    f"not synced, `zgca.py resume {experiment_id}` restarts it, `zgca.py sync {experiment_id}` copies it as it is")
                 return "interrupted"
             say(f"{line}: ended, syncing")
             self.copy_back(experiment_id, local)
-        try:
-            self.tag_pinned_image(experiment_id, local)
-        except WorkflowError as exc:
-            say(f"{experiment_id}: copied, not tagged, tried again next pass: {exc}")
-            return "untagged"
-        self.sync_marker(experiment_id).write_text("synced\n", encoding="utf-8")
+        if stage != "synced":
+            try:
+                self.tag_pinned_image(experiment_id, local)
+            except WorkflowError as exc:
+                say(f"{experiment_id}: copied, not tagged, tried again next pass: {exc}")
+                return "untagged"
+            self.sync_marker(experiment_id).write_text("synced\n", encoding="utf-8")
+        self.release_completed(experiment_id, local)
         return "synced"
 
     def tag_pinned_image(self, experiment_id: str, local: Path) -> None:
@@ -667,10 +774,12 @@ def main(
     run = commands.add_parser("run", help="refuse unless the instance runs this checkout's HEAD; start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
     run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, experiment ids)")
-    commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, deployed commit, console, experiments, image, round log")
-    sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here, then tag its pinned sandbox image here when the runtimes agree")
+    resume = commands.add_parser("resume", help="refuse unless the instance runs this checkout's HEAD and the storage floor is free; restart a failed, terminated or interrupted experiment through the console and drop its sync marker")
+    resume.add_argument("experiment_id", help="experiment id")
+    commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, storage against its quota, deployed commit, console, experiments, image, round log")
+    sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here, tag its pinned sandbox image here when the runtimes agree, then release a completed one's bulk on the instance")
     sync.add_argument("experiment_id", help="experiment id")
-    sync_rounds = commands.add_parser("sync-rounds", help="one pass of the sync cron: sync, once, every experiment of these rounds that has ended on the instance; one summary line")
+    sync_rounds = commands.add_parser("sync-rounds", help="one pass of the sync cron: sync, once, every experiment of these rounds that has ended on the instance, releasing the completed ones there; one summary line")
     sync_rounds.add_argument("round_files", nargs="*", help="scripts/experiments/create_round_*.py")
     commands.add_parser("down", help="instance stop, refused while experiments run: wait for STOPPED")
     options = parser.parse_args(argv)
@@ -686,6 +795,8 @@ def main(
             workflow.deploy(options.seed)
         elif options.command == "run":
             workflow.run(options.round_file, options.args)
+        elif options.command == "resume":
+            workflow.resume(options.experiment_id)
         elif options.command == "status":
             workflow.status()
         elif options.command == "sync":

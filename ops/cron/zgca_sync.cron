@@ -3,9 +3,11 @@
 #
 # Experiments run on the ZGCA instance (ops/zgca/README.md). Each run is one
 # `zgca.py sync-rounds` pass over the experiments of the round files below: an
-# experiment already back (its marker in .runtime/zgca/synced/ says `synced`)
-# costs nothing, any other costs one remote query, and only one that has ended
-# is copied and then given its pinned sandbox image tag, as `zgca.py sync` does.
+# experiment already settled (its marker in .runtime/zgca/synced/ says
+# `released`, or `synced` for one that did not complete) costs nothing, any
+# other costs one remote query, and only one that has ended is copied, given its
+# pinned sandbox image tag and, when it completed, released on the instance (its
+# bulk freed under the storage quota, its records kept), as `zgca.py sync` does.
 # A running or not yet created experiment is left alone; one copied whose tag
 # was refused is only tagged again, every run, until the images agree; a failure
 # is one line and the next experiment still goes ahead; a stopped or
