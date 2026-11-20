@@ -318,7 +318,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         self.assertIn("stats.benchmark.tracking_error", registration["tracking_mandate"])
         self.assertIn("exactly one line changed", registration["seed_replicates"])
         self.assertNotIn("never a gate", statistic["threshold"])
-        self.assertIn("multiplied by 3.0", facts["forward"]["reported"])
+        self.assertIn("less what 3.0x slippage adds on the book's turnover", facts["forward"]["reported"])
         self.assertIn("deciding nothing", facts["forward"]["reported"])
         text = json.dumps(facts)
         self.assertNotRegex(text, r"20\d{6}")

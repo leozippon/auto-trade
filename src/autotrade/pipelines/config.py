@@ -440,8 +440,8 @@ class AcceptanceRules:
                     "after the session, on data it never sees: the registered book and its "
                     "seed replicates replayed and read on the active series (the "
                     f"{self.forward_confidence:.0%} block-bootstrap lower bound of active "
-                    f"excess, the active excess with slippage multiplied by "
-                    f"{self.cost_stress_multiplier}, drawdowns, turnover, the residual "
+                    f"excess, the active excess less what {self.cost_stress_multiplier}x "
+                    "slippage adds on the book's turnover, drawdowns, turnover, the residual "
                     "statistic); deciding nothing"
                 ),
             },
