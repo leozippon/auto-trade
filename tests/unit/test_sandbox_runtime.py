@@ -51,10 +51,12 @@ from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB, GpuUnavailableErr
 from autotrade.environment.replay import DailyMarketData
 from autotrade.environment.replay.stats import compute_return_stats
 from autotrade.environment.sandbox import (
+    ARCHIVE_MAX_FILE_BYTES,
     EXPERIMENT_LABEL,
     SCREENING_TOOL_MOUNT,
     SCREENING_TOOL_SOURCE,
     STRATEGY_TMPFS_SIZE,
+    WORKSPACE_OMITTED_NAME,
     DockerSandbox,
     GpuMode,
     LocalSandbox,
@@ -2464,6 +2466,37 @@ def test_layout_has_no_decoy_output_siblings_and_collects_the_workspace(tmp_path
         '{"src": "workspace"}\n'
     )
     assert not (dest / "output").exists() and not (dest / "models").exists()
+    # Nothing was left out, so nothing says anything was.
+    assert not (dest / WORKSPACE_OMITTED_NAME).exists()
+
+
+def test_collect_leaves_large_workspace_files_out_and_lists_them(tmp_path: Path):
+    """The archived workspace keeps code, notes, results and the directory
+    structure; a file over the size cap is not copied but listed beside the
+    archive with its size, and a link to it stays a link."""
+    local = LocalSandbox(tmp_path / "session")
+    workspace = local.prepare_layout().workspace
+    (workspace / "output").mkdir()
+    (workspace / "output" / "main.py").write_text("code\n", encoding="utf-8")
+    (workspace / "notes" / "data" / "empty").mkdir(parents=True)
+    (workspace / "notes" / "result.md").write_text("finding\n", encoding="utf-8")
+    with (workspace / "notes" / "data" / "embeddings.npy").open("wb") as handle:
+        handle.truncate(ARCHIVE_MAX_FILE_BYTES + 1)  # sparse: no bytes are written
+    (workspace / "notes" / "latest.npy").symlink_to("data/embeddings.npy")
+
+    dest = local.collect_artifacts(tmp_path / "collected")
+
+    archived = dest / "workspace"
+    assert (archived / "output" / "main.py").read_text(encoding="utf-8") == "code\n"
+    assert (archived / "notes" / "result.md").read_text(encoding="utf-8") == "finding\n"
+    assert (archived / "notes" / "data" / "empty").is_dir()
+    assert not os.path.lexists(archived / "notes" / "data" / "embeddings.npy")
+    assert os.readlink(archived / "notes" / "latest.npy") == "data/embeddings.npy"
+    assert json.loads((dest / WORKSPACE_OMITTED_NAME).read_text(encoding="utf-8")) == {
+        "max_file_bytes": ARCHIVE_MAX_FILE_BYTES,
+        "omitted": [{"path": "notes/data/embeddings.npy", "bytes": ARCHIVE_MAX_FILE_BYTES + 1}],
+    }
+    assert not (dest / "workspace.collect_error.txt").exists()
 
 
 def _worker_argv(strategy: Path, *, boot_delay: float = 0.0) -> list[str]:

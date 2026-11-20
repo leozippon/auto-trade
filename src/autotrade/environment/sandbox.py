@@ -17,6 +17,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import subprocess
 import uuid
 from collections.abc import Iterator, Mapping, Sequence
@@ -546,12 +547,27 @@ class LocalSandbox:
             _copy_path(self.paths.host_run_manifest, dest_dir / "host_run_manifest.json")
         # ``workspace`` is collected best-effort — a single unreadable/special
         # file there is skipped and logged instead of aborting the collection.
+        # A file over ARCHIVE_MAX_FILE_BYTES is left out and listed instead.
         workspace_source = self.paths.agent / _AGENT_WORKSPACE
         if workspace_source.exists():
+            omitted: dict[str, int] = {}
             try:
-                _copy_path(workspace_source, dest_dir / _AGENT_WORKSPACE)
+                shutil.copytree(
+                    workspace_source, dest_dir / _AGENT_WORKSPACE, symlinks=True,
+                    ignore=_archive_ignore(workspace_source, omitted),
+                )
             except (OSError, shutil.Error) as exc:
                 _record_collect_skip(dest_dir, _AGENT_WORKSPACE, exc)
+            if omitted:
+                write_json_atomic(
+                    dest_dir / WORKSPACE_OMITTED_NAME,
+                    {
+                        "max_file_bytes": ARCHIVE_MAX_FILE_BYTES,
+                        "omitted": [
+                            {"path": path, "bytes": size} for path, size in sorted(omitted.items())
+                        ],
+                    },
+                )
         chmod_tree(dest_dir, file_mode=0o644, dir_mode=0o755)
         return dest_dir
 
@@ -776,12 +792,52 @@ _COLLECT_IGNORE = shutil.ignore_patterns(
 # The single agent-writable tree under /mnt/agent.
 _AGENT_WORKSPACE = "workspace"
 
+# A workspace file larger than this stays out of the session's archived
+# workspace and is listed, by its path in the workspace and its size, in
+# WORKSPACE_OMITTED_NAME beside it; nothing is written when nothing is left
+# out. Agents keep multi-GiB derived arrays in the workspace (title
+# embeddings, feature panels, caches): archived whole at the end of every
+# attempt they were stored twice under the instance's hard quota and crossed
+# the sync link with the experiment. Every file over 8 MiB in the 2026-11
+# archives was such an array (.npy, .parquet, .npz, .pt) and none was under
+# output/, models/ or skills/; the archive's readers need none of them (the
+# formal strategy is its revision in the artifact store, the skills tree is
+# capped far below this, a resume continues in the live session root).
+ARCHIVE_MAX_FILE_BYTES = 64 * 2**20
+WORKSPACE_OMITTED_NAME = f"{_AGENT_WORKSPACE}.omitted.json"
+
 
 def _copy_path(source: Path, dest: Path) -> None:
     if source.is_dir():
         shutil.copytree(source, dest, symlinks=True, ignore=_COLLECT_IGNORE)
     else:
         shutil.copy2(source, dest)
+
+
+def _archive_ignore(root: Path, omitted: dict[str, int]):
+    """``_COLLECT_IGNORE`` plus every regular file over ARCHIVE_MAX_FILE_BYTES,
+    each of which is recorded in ``omitted`` by its path under ``root``.
+
+    A symbolic link or a special file is not measured: the copy keeps the
+    link and records a special file as a collection error, as before.
+    """
+
+    def ignore(directory: str, names: list[str]) -> set[str]:
+        ignored = set(_COLLECT_IGNORE(directory, names))
+        for name in names:
+            if name in ignored:
+                continue
+            path = Path(directory) / name
+            try:
+                status = path.lstat()
+            except OSError:
+                continue  # gone or unreadable: the copy itself reports it
+            if stat.S_ISREG(status.st_mode) and status.st_size > ARCHIVE_MAX_FILE_BYTES:
+                ignored.add(name)
+                omitted[path.relative_to(root).as_posix()] = status.st_size
+        return ignored
+
+    return ignore
 
 
 def _record_collect_skip(dest_dir: Path, name: str, exc: Exception) -> None:
@@ -815,12 +871,14 @@ def _validate_explicit_image_tag(image: str) -> None:
 
 
 __all__ = [
+    "ARCHIVE_MAX_FILE_BYTES",
     "DEFAULT_IMAGE",
     "EXPERIMENT_LABEL",
     "MAX_CONTAINER_THREADS",
     "PRETRAINED_SESSION_MOUNT",
     "SCREENING_TOOL_MOUNT",
     "SCREENING_TOOL_SOURCE",
+    "WORKSPACE_OMITTED_NAME",
     "DockerSandbox",
     "GpuMode",
     "LocalSandbox",
