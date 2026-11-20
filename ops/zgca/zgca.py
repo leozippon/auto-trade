@@ -81,7 +81,8 @@ REMOTE_VENV = f"{STORAGE}/envs/quant"
 STORAGE_QUOTA = 100 * GIB
 # Free room under the quota below which the fill loop creates no experiment and
 # `resume` starts none: a session's workspace reached 20 GiB in its sandbox, and
-# the end of each session copies the workspace whole into the experiment's artifacts.
+# the end of each attempt archives that workspace, less its files over 64 MiB,
+# into the experiment's artifacts.
 STORAGE_FLOOR = 40 * GIB
 LOCAL_DISK = "/ebs"
 LOCAL_ROOT = f"{LOCAL_DISK}/auto-trade"

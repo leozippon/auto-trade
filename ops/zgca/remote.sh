@@ -427,13 +427,15 @@ PY
         echo "image: docker unavailable"
     fi
     # The newest launcher log `round` wrote (named after its create_round_*
-    # file); image build logs sit beside them.
-    local latest
+    # file; image build logs sit beside them), only when it is newer than the
+    # newest fill log: an older one is a past round's, not what runs now.
+    local latest fill_log
+    fill_log=$(ls -t logs/zgca/fill_create_round_*.log 2>/dev/null | head -n 1 || true)
     latest=$(ls -t logs/zgca/create_round_*.log 2>/dev/null | head -n 1 || true)
-    if [ -n "$latest" ]; then echo "round log: $latest"; tail -n 3 "$latest" | sed 's/^/  /'; fi
+    if [ -n "$latest" ] && [ "$latest" -nt "$fill_log" ]; then echo "round log: $latest"; tail -n 3 "$latest" | sed 's/^/  /'; fi
     # The fill loop: whether its session runs, and the newest fill log's last
     # pass summary and, once it has ended, how.
-    latest=$(ls -t logs/zgca/fill_create_round_*.log 2>/dev/null | head -n 1 || true)
+    latest=$fill_log
     if tmux has-session -t "$FILL_SESSION" 2>/dev/null; then
         echo "fill: running in tmux session $FILL_SESSION${latest:+; log $latest}"
     else
@@ -509,8 +511,9 @@ PY
 
 # Free what a completed experiment no longer needs once `sync` holds its
 # verified copy: its PIT views, its sandbox work root and the session
-# workspaces its runs archived (artifacts/run_*/workspace, each a whole copy of
-# a session's workspace), every path built from the id and a fixed sub-path.
+# workspaces its runs archived (artifacts/run_*/workspace, each a copy of a
+# session's workspace without its files over 64 MiB), every path built from the
+# id and a fixed sub-path.
 # Its directory stays with the records, so the fill loop still counts it as
 # created and the console still lists it. prune_pit_views.py decides "finished
 # for good" and deletes as it does; on top of that only a status of completed

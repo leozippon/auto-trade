@@ -1126,7 +1126,8 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log\n  smoke\n  experiments created\n  round-exit 0", shown.stdout)
         self.assertNotIn(build.name, shown.stdout)
         self.assertIn("fill: no session\n", shown.stdout)
-        # A fill log is newer but is not the round log; its last pass and its end are shown.
+        # A fill log is not the round log; its last pass and its end are shown,
+        # and a round log older than it is a past round's, so it is not.
         fill = logs / "fill_create_round_test_20261019T210000Z.log"
         fill.write_text("fill create_round_test: slots; queue 1: 0 created, 1 pending (...)\n"
                         "fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\nround-exit 0\n", encoding="utf-8")
@@ -1136,8 +1137,14 @@ class ZgcaWorkflowTest(unittest.TestCase):
         shown = self.remote_step(root, "status", env=env)
         self.assertEqual(shown.returncode, 0, shown.stderr)
         self.assertIn("deployed commit: 0123abcd\n", shown.stdout)
-        self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log", shown.stdout)
+        self.assertNotIn("round log:", shown.stdout)
         self.assertIn(f"fill: no session; last log logs/zgca/{fill.name}\n  fill create_round_test: slots; queue 1: 1 created, 0 pending (...)\n  round-exit 0", shown.stdout)
+        # A round launched after the fill loop is shown beside it.
+        os.utime(fill, (2, 2))
+        os.utime(logs / "create_round_test_20261019T190000Z.log", (3, 3))
+        shown = self.remote_step(root, "status", env=env)
+        self.assertIn("round log: logs/zgca/create_round_test_20261019T190000Z.log", shown.stdout)
+        self.assertIn(f"fill: no session; last log logs/zgca/{fill.name}", shown.stdout)
 
     FILL_HELD = "fill create_round_test: slots; queue 1: 0 skipped (created already), 0 created, 0 refused, 1 pending (1 by the free GPUs)"
     FILL_DONE = FILL_HELD.replace("0 created", "1 created").replace("1 pending", "0 pending")
