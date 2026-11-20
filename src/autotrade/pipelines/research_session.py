@@ -659,7 +659,9 @@ class LLMResearchDeveloper:
                 replicates,
                 reason,
                 finish_reason,
-            ) = self._run_agent(runner, request, resume=resume, used=used, run_ref=run_ref)
+            ) = self._run_agent(
+                runner, request, backtest=backtest, resume=resume, used=used, run_ref=run_ref
+            )
             return self._collect_result(
                 request,
                 local=local,
@@ -1178,6 +1180,7 @@ class LLMResearchDeveloper:
         runner: AgentSessionRunner,
         request: ResearchSessionRequest,
         *,
+        backtest: SessionValidations,
         resume: SessionResume | None,
         used: BudgetUsed,
         run_ref: str,
@@ -1217,10 +1220,13 @@ class LLMResearchDeveloper:
                 else []
             )
             instruction = build_resume_instruction(
-                attempt=resume.attempt,
                 interrupted_at=resume.interrupted_at,
                 error=resume.error,
-                has_summary=bool(resume.compaction_summary),
+                summary_at=(
+                    (resume.compaction_summary_at or "未知时间")
+                    if resume.compaction_summary
+                    else None
+                ),
                 transcripts=resume.transcripts,
                 used=used.to_record(),
                 totals={
@@ -1229,6 +1235,9 @@ class LLMResearchDeveloper:
                     "null_controls": request.max_null_controls,
                     "api_spend_usd": request.max_api_spend_usd,
                 },
+                # The ledger's test_step rows this attempt continues from,
+                # as a test result returns them.
+                record=backtest.record_reading() if backtest.tests else None,
             )
         try:
             result = runner.run(

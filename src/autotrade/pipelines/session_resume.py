@@ -176,6 +176,7 @@ def resume_state(
     budget = BudgetUsed()
     spent: set[str] = set()
     summary: str | None = None
+    summary_at: str | None = None
     interrupted_at = ""
     transcripts: list[str] = []
     for attempt in attempts:
@@ -201,6 +202,7 @@ def resume_state(
                 and event["summary"].strip()
             ):
                 summary = str(event["summary"])
+                summary_at = str(event.get("ts") or "") or None
             interrupted_at = str(event.get("ts") or interrupted_at)
         if run_ref:
             transcripts.append(f"{run_ref}.txt")
@@ -218,6 +220,7 @@ def resume_state(
         # The note this becomes is Agent-visible; the ledger keeps the raw text.
         error=redact_host_paths(str(last.get("error") or "")),
         compaction_summary=summary,
+        compaction_summary_at=summary_at,
         budget_used=budget,
         transcripts=tuple(transcripts),
     )

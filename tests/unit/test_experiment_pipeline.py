@@ -621,6 +621,8 @@ def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_pa
     assert request.resume.error == "RuntimeError: session container died: [host_path]"
     assert HOST_WORK_ROOT in str(ledger.read()[0]["error"])
     assert request.resume.compaction_summary == "## 目标\n继续动量腿"
+    # When the summary was written, which the note states: it may predate later work.
+    assert request.resume.compaction_summary_at == "2026-09-15T01:20:00+00:00"
     assert request.resume.transcripts == ("run_ref_first.txt",)
     assert request.budget_used.to_record() == {
         "inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2,

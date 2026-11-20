@@ -628,6 +628,14 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         assert max(DATE.findall(content)) == row["test_horizon"], row["step"]
 
 
+def _trace_events(experiment: Path, run_id: str, event_type: str) -> list[dict[str, object]]:
+    """The events of one type in a run's host trace."""
+
+    path = experiment / "artifacts" / "traces" / f"{run_id}.jsonl"
+    events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    return [event for event in events if event.get("event_type") == event_type]
+
+
 def _resume_script_summary() -> str:
     return (
         "## 策略现状\noutput/ 是模板策略，已完成一次完整研究期验证（working_copy）。\n## 决定\n"
@@ -685,6 +693,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert len(list((experiment / "artifacts" / "strategy" / "revisions").iterdir())) == 1
     transcripts = sorted((experiment / "artifacts" / "transcripts").glob("run_ref_*.txt"))
     assert len(transcripts) == 1 and "compact" in transcripts[0].read_text(encoding="utf-8")
+    [compaction] = _trace_events(experiment, failed["run_id"], "context_compaction")
 
     second_llm = _NominatingLLM(
         [
@@ -721,10 +730,13 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert checkpoint["summary_kind"] == "resume" and checkpoint["summary"] == summary
     assert checkpoint["trace"]["root"] == "trace"
     note = opening[2].content
-    assert "第 2 次尝试" in note and "language model unavailable" in note
+    assert note.startswith("本次续接本实验中断的研究会话：") and "第 2 次" not in note
+    assert "language model unavailable" in note
     assert "模型调用 5/" in note and transcripts[0].name in note
     assert "回测年" not in note
-    assert "上面是中断前最近一次压缩的摘要" in note
+    # The note dates the summary it carries, and says no step is tested yet.
+    assert f"上面是中断前最近一次压缩的摘要，写于 {compaction['ts']}；" in note
+    assert note.endswith("验证期还没有测试过任何一步。")
     facts = json.loads(opening[0].content.split("```json\n", 1)[1].split("\n```", 1)[0])
     # What earlier attempts used and validated is the note's and the Step
     # tree's, not a second copy in the facts.
@@ -750,9 +762,11 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
 def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
-    """The first attempt validates the working copy, tests it and then loses
-    its model: the step it recorded stays in the ledger. The second worker
-    start resumes the session at the test horizon that step reached -- on the
+    """The first attempt validates the working copy, tests it, compacts and
+    then loses its model: the step it recorded stays in the ledger. The second
+    worker start resumes the session at the test horizon that step reached,
+    its note dating the summary and carrying the record as the test returned
+    it -- on the
     same view at the research year's end, with facts that state the steps
     tested, and a revealed span, as well as the reading every full-span
     validate now carries, that replays the window the first attempt's test
@@ -760,7 +774,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     completes the record from the tested candidate, not from the Validations
     the resumed attempt added."""
 
-    from autotrade.environment.llm import ProviderResponse
+    from autotrade.environment.llm import ProviderResponse, ToolCall
     from tests.unit.test_interactive_worker_local import (
         TEST_WORKING_COPY,
         VALIDATE_REVEALED,
@@ -770,7 +784,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     )
 
     repo, experiment = make_experiment(
-        tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=6
+        tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=7
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
@@ -778,6 +792,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
         [
             ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
             ProviderResponse(tool_calls=(TEST_WORKING_COPY,)),
+            ProviderResponse(tool_calls=(ToolCall("c", "compact", {"summary": _resume_script_summary()}),)),
             # The script ends: three consecutive model failures end the attempt.
         ]
     )
@@ -792,6 +807,10 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     )
     assert failed["record_type"] == "attempt_failed"
     tested_node = tested["candidate"]["step_id"]
+    [compaction] = _trace_events(experiment, failed["run_id"], "context_compaction")
+    [tested_call] = [
+        event for event in _trace_events(experiment, failed["run_id"], "tool_call") if event.get("tool") == "test"
+    ]
 
     second_llm = _NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_REVEALED, VALIDATE_WORKING_COPY))])
     result = run_local_interactive_worker(
@@ -832,8 +851,8 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     assert (record["attempts"], record["outcome"], record["finish_reason"]) == (
         2, "deadline", "llm_call_budget_exhausted"
     )
-    # Five calls of the first attempt (two scripted, three failed), one of the second.
-    assert record["budget_used"]["llm_calls"] == 6 and record["budget_used"]["test_replays"] == 1
+    # Six calls of the first attempt (three scripted, three failed), one of the second.
+    assert record["budget_used"]["llm_calls"] == 7 and record["budget_used"]["test_replays"] == 1
     assert [row["step_id"] for row in record["steps"]] != [tested_node]
     assert record["registered"]["source_step_id"] == tested_node != record["steps"][-1]["step_id"]
     completion = records[2:5]
@@ -858,7 +877,16 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     geometry = facts["research_geometry"]
     assert (geometry["test_horizon"], geometry["steps_tested"], geometry["steps"]) == ("20230930", 1, 4)
     assert "experiment" not in facts and "used_before_this_attempt" not in facts["budgets"]
-    assert "第 2 次尝试" in opening[1].content
+    # The summary, then the note: it dates the summary and ends on the record
+    # exactly as the interrupted attempt's test returned it.
+    assert json.loads(opening[1].content)["summary_kind"] == "resume"
+    note = opening[2].content
+    assert note.startswith("本次续接本实验中断的研究会话：")
+    assert f"写于 {compaction['ts']}；此后到中断的工作只在 transcript 里。" in note
+    shown = json.loads(note.rsplit("\n", 1)[1])
+    returned = tested_call["result"]["value"]
+    assert shown == {"record": returned["record"], "significance": returned["significance"]}
+    assert [(row["step"], row["end"]) for row in shown["record"]] == [(1, "20230930")]
 
 
 def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone(
@@ -915,8 +943,9 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     opening = second_llm.calls[0]["messages"]
     assert [message.role for message in opening] == ["system", "user", "user"]
     note = opening[1].content
-    assert "第 2 次尝试" in note and "language model unavailable" in note
+    assert note.startswith("本次续接本实验中断的研究会话：") and "language model unavailable" in note
     assert "中断前没有压缩摘要" in note and "模型调用 3/4" in note
+    assert note.endswith("验证期还没有测试过任何一步。")
     # The shared call count opens past 75% of its cap, so the notice for it
     # follows the note.
     notice = json.loads(opening[2].content)

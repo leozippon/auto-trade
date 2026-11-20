@@ -702,6 +702,23 @@ class SessionValidations:
             ]
         return row
 
+    def record_reading(self) -> dict[str, object]:
+        """The validation record as a test result returns it and the resume
+        note of an interrupted session carries it: every recorded step
+        (:meth:`record_row`) and the record's significance test. Read off the
+        ledger's ``test_step`` rows alone; at least one must be recorded."""
+
+        significance = record_significance([row["entry"] for row in self.tests], alpha=self.rules.alpha)
+        return {
+            "record": [self.record_row(row) for row in self.tests],
+            "significance": _rounded_row(
+                {
+                    **{key: significance[key] for key in SIGNIFICANCE_KEYS if key in significance},
+                    **({"unmeasured": significance["unmeasured"]} if significance.get("unmeasured") else {}),
+                }
+            ),
+        }
+
     @property
     def session_ref(self) -> str:
         """The opaque session ref this session's Step nodes carry."""
@@ -2622,7 +2639,6 @@ class TestTool(SessionTimeBudgetAware):
         active = active_reading(analysis, evaluation.summary, rules=backtest.rules)
         # The record's own threshold is the one significance reads.
         active.pop("threshold", None)
-        significance = record_significance([row["entry"] for row in backtest.tests], alpha=backtest.rules.alpha)
         value: dict[str, object] = {
             "status": "step_recorded",
             "step": step,
@@ -2651,13 +2667,7 @@ class TestTool(SessionTimeBudgetAware):
                 if compared
                 else {}
             ),
-            "record": [backtest.record_row(row) for row in backtest.tests],
-            "significance": _rounded_row(
-                {
-                    **{key: significance[key] for key in SIGNIFICANCE_KEYS if key in significance},
-                    **({"unmeasured": significance["unmeasured"]} if significance.get("unmeasured") else {}),
-                }
-            ),
+            **backtest.record_reading(),
         }
         if finished:
             value.update(

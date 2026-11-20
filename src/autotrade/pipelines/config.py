@@ -972,6 +972,8 @@ class SessionResume:
     # The last successful compaction's summary, the checkpoint the new attempt
     # starts from; None when the interrupted attempts never compacted.
     compaction_summary: str | None
+    # When the trace recorded that summary (its event's time); None with it.
+    compaction_summary_at: str | None
     budget_used: BudgetUsed
     # Transcript file names of the earlier attempts under the ``trace`` root.
     transcripts: tuple[str, ...]

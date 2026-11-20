@@ -150,7 +150,7 @@ EXPERIMENT_FACTS_HEADER = """\
 """
 
 RESUME_INSTRUCTION = """\
-本次是本实验研究会话的第 {attempt} 次尝试：上一次尝试在 {interrupted_at} 中断（{error}）。已用预算：推理 {used_minutes:g}/{total_minutes:g} 分钟、模型调用 {used_calls}/{total_calls}、API 花费 ${used_usd:.2f}/${total_usd:.2f}、随机对照 {used_nulls}/{total_nulls}。工作区、`output/`、`TODO.md`、skills、Step 树与验证记录都保持中断时的状态，测试终点与已测试的步数见「环境」；之前尝试的 transcript 在根 `trace` 下（{transcripts}）。{summary_note}先读 `TODO.md` 与 Step 树（根 `steps` 的 `tree.txt`），核对工作区现状后继续，不要重做已经验证过的工作。\
+本次续接本实验中断的研究会话：上一次尝试在 {interrupted_at} 中断（{error}）。已用预算：推理 {used_minutes:g}/{total_minutes:g} 分钟、模型调用 {used_calls}/{total_calls}、API 花费 ${used_usd:.2f}/${total_usd:.2f}、随机对照 {used_nulls}/{total_nulls}。工作区、`output/`、`TODO.md`、skills、Step 树与验证记录都保持中断时的状态；之前尝试的 transcript 在根 `trace` 下（{transcripts}）。{summary_note}先读 `TODO.md` 与 Step 树（根 `steps` 的 `tree.txt`），核对工作区现状后继续，不要重做已经验证过的工作。{record_note}\
 """
 
 WRAP_UP_PROMPT = """\
@@ -193,23 +193,35 @@ def build_exploration_section(exploration_directive: str) -> str:
 
 def build_resume_instruction(
     *,
-    attempt: int,
     interrupted_at: str,
     error: str,
-    has_summary: bool,
+    summary_at: str | None,
     transcripts: Sequence[str],
     used: Mapping[str, object],
     totals: Mapping[str, object],
+    record: Mapping[str, object] | None,
 ) -> str:
-    """The opening message of an attempt that continues an interrupted one."""
+    """The opening message of an attempt that continues an interrupted one.
+
+    ``summary_at`` is when the carried summary was written (None: there is
+    none), and ``record`` the validation record as a test result returns it
+    (``session_tools.SessionValidations.record_reading``; None: no step is
+    tested). The summary may predate tests the record holds, so the note
+    says which one is authoritative.
+    """
 
     summary_note = (
-        "上面是中断前最近一次压缩的摘要，从它继续。"
-        if has_summary
+        f"上面是中断前最近一次压缩的摘要，写于 {summary_at}；此后到中断的工作只在 transcript 里。"
+        if summary_at is not None
         else "中断前没有压缩摘要：从 transcript 的末尾往前读，恢复计划。"
     )
+    record_note = (
+        "验证期还没有测试过任何一步。"
+        if record is None
+        else "\n\n验证记录（同 `test` 返回的 `record` 与 `significance`；摘要或 `TODO.md` 与它不符时以它为准）：\n"
+        + json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+    )
     return RESUME_INSTRUCTION.format(
-        attempt=attempt,
         interrupted_at=interrupted_at or "未知时间",
         error=error or "未记录原因",
         used_minutes=round(float(used.get("inference_seconds", 0.0)) / 60.0, 1),
@@ -222,6 +234,7 @@ def build_resume_instruction(
         total_nulls=int(totals.get("null_controls", 0)),
         transcripts="、".join(transcripts) if transcripts else "尚无",
         summary_note=summary_note,
+        record_note=record_note,
     )
 
 
