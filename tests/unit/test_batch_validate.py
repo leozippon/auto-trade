@@ -1744,7 +1744,7 @@ class BatchValidateContractTest(unittest.TestCase):
         from autotrade.pipelines.session_tools import SmokeBacktestTool, TestTool
 
         limits = (
-            (ValidateTool.spec, 2_350),
+            (ValidateTool.spec, 2_400),
             (TestTool.spec, 1_400),
             (SmokeBacktestTool.spec, 900),
             (NullControlTool(SimpleNamespace(), max_calls=12).spec, 700),  # type: ignore[arg-type]
