@@ -54,6 +54,7 @@ from autotrade.pipelines.ledger import (
     RunMarkers,
     experiment_verdict,
     forward_record,
+    link_head,
     paper_candidate,
     registered_record,
     research_over,
@@ -457,15 +458,36 @@ def test_a_budget_that_ends_before_any_test_registers_the_last_registrable_candi
 HOST_WORK_ROOT = f"{Path(__file__).resolve().parents[2]}/.runtime/sandboxes/experiment/research"
 
 
+def _refusing_attempt_failed(append):
+    """``append`` on a disk past its quota, which refuses an attempt's
+    ``attempt_failed`` row (the business rows before it were written)."""
+
+    def refusing(record):
+        if record.get("record_type") == "attempt_failed":
+            raise OSError(122, "Disk quota exceeded")
+        return append(record)
+
+    return refusing
+
+
 def _interrupted_attempt(
-    pipeline, ledger, *, summary: str | None, test_replays: int, node: bool, capped: bool = False
+    pipeline,
+    ledger,
+    *,
+    summary: str | None,
+    test_replays: int,
+    node: bool,
+    capped: bool = False,
+    recorded: bool = True,
 ) -> str | None:
     """Leave what an interrupted attempt leaves: an attempt_failed row, a
     trace with budget checkpoints (and a compaction), a published tree node
     with its host sidecar and its revision in the store.
 
     ``capped`` leaves instead what an attempt that filled its trace leaves:
-    the terminal marker, and nothing of what it spent afterwards."""
+    the terminal marker, and nothing of what it spent afterwards.
+    ``recorded=False`` leaves its run marker instead of its attempt_failed
+    row, as a full disk that also refuses that row does."""
 
     from autotrade.environment.step_tree import StepTree
     from autotrade.environment.trace import agent_trace_path
@@ -480,10 +502,21 @@ def _interrupted_attempt(
 
     keep = pipeline.developer
     pipeline.developer = crash
-    with pytest.raises(RuntimeError):
-        pipeline.run_research_session()
+    if recorded:
+        with pytest.raises(RuntimeError):
+            pipeline.run_research_session()
+        run_id = str(ledger.read()[-1]["run_id"])
+    else:
+        markers = set(RunMarkers(pipeline.config.experiment_dir).root.glob("*.json"))
+        ledger.append = _refusing_attempt_failed(ledger.append)
+        try:
+            with pytest.raises(OSError, match="quota"):
+                pipeline.run_research_session()
+        finally:
+            del ledger.append
+        [marker] = set(RunMarkers(pipeline.config.experiment_dir).root.glob("*.json")) - markers
+        run_id = marker.stem
     pipeline.developer = keep
-    run_id = str(ledger.read()[-1]["run_id"])
     trace = agent_trace_path(pipeline.config.experiment_dir / "artifacts", run_id)
     trace.parent.mkdir(parents=True, exist_ok=True)
     events = [
@@ -533,6 +566,39 @@ def _interrupted_attempt(
 def _request_span(pipeline):
     _decision, years = pipeline.research_inputs()
     return research_span(years, FULL_SPAN)
+
+
+def _record_tests(pipeline, ledger, node_id: str, *, run_id: str, through: int) -> None:
+    """Append the ``test`` steps 1..``through`` run ``run_id`` recorded on the
+    interrupted attempt's node: its candidate replayed from the validation
+    start, each step's entry read off that replay."""
+
+    from autotrade.pipelines.session_resume import load_recorded_steps
+
+    [earlier] = load_recorded_steps(pipeline.config.experiment_dir)
+    steps = pipeline.validation_steps()
+    replayed = pipeline.evaluator.evaluate(
+        pipeline.validation_span(pipeline.research_inputs()[1]).request(
+            pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
+        )
+    )
+    replay, analysis = replay_and_analysis(replayed.result_ref)
+    head = {"experiment_id": "experiment", "epoch_id": "research", "fold_id": "research", "run_id": run_id, "session_key": "research"}
+    candidate = {"step_id": node_id, "revision_id": earlier.revision_id, "fingerprint": earlier.fingerprint, "seed_replicates": []}
+    for step in range(1, through + 1):
+        first, last = steps.window(step)
+        ledger.append(
+            validation_record.test_step_record(
+                head=head,
+                steps=steps,
+                step=step,
+                candidate=candidate,
+                replay={"start": steps.start, "end": last, "result_ref": replayed.result_ref},
+                entry=validation_record.step_entry(replay, analysis, start=first, end=last),
+                registration={"passed": True, "reasons": []},
+                source=validation_record.SOURCE_TEST,
+            )
+        )
 
 
 def test_a_resumed_attempt_continues_from_the_trace_and_the_recorded_node(tmp_path: Path):
@@ -591,40 +657,13 @@ def test_a_resumed_attempt_continues_from_the_test_horizon_and_the_record(tmp_pa
     Validation the attempt added -- and completes only the record's remaining
     steps."""
 
-    pipeline, snapshots, evaluator, developer, ledger = _pipeline(
+    pipeline, snapshots, _evaluator, developer, ledger = _pipeline(
         tmp_path, {1: ([0.0012], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
     )
-    from autotrade.pipelines.session_resume import load_recorded_steps
-
     node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=1, node=True)
-    [earlier] = load_recorded_steps(pipeline.config.experiment_dir)
+    _record_tests(pipeline, ledger, node_id, run_id=str(ledger.read()[0]["run_id"]), through=1)
     steps = pipeline.validation_steps()
-    first, test_horizon = steps.window(1)
-    # The step the interrupted attempt tested: its candidate replayed from the
-    # validation start to the first test horizon.
-    replayed = evaluator.evaluate(
-        pipeline.validation_span(pipeline.research_inputs()[1]).request(
-            pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
-        )
-    )
-    replay, analysis = replay_and_analysis(replayed.result_ref)
-    ledger.append(
-        validation_record.test_step_record(
-            head={"experiment_id": "experiment", "epoch_id": "research", "fold_id": "research", "run_id": "run_ref_first", "session_key": "research"},
-            steps=steps,
-            step=1,
-            candidate={
-                "step_id": node_id,
-                "revision_id": earlier.revision_id,
-                "fingerprint": earlier.fingerprint,
-                "seed_replicates": [],
-            },
-            replay={"start": steps.start, "end": test_horizon, "result_ref": replayed.result_ref},
-            entry=validation_record.step_entry(replay, analysis, start=first, end=test_horizon),
-            registration={"passed": True, "reasons": []},
-            source=validation_record.SOURCE_TEST,
-        )
-    )
+    _first, test_horizon = steps.window(1)
 
     record = pipeline.run_research_session()
 
@@ -655,33 +694,9 @@ def test_an_attempt_that_died_after_its_last_test_completes_without_a_session(tm
     last tested candidate as a ``completed`` session, completing nothing."""
 
     pipeline, _snapshots, evaluator, _developer, ledger = _pipeline(tmp_path, {})
-    from autotrade.pipelines.session_resume import load_recorded_steps
-
     node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=4, node=True)
-    [earlier] = load_recorded_steps(pipeline.config.experiment_dir)
     steps = pipeline.validation_steps()
-    replayed = evaluator.evaluate(
-        pipeline.validation_span(pipeline.research_inputs()[1]).request(
-            pipeline.artifacts.revision(earlier.revision_id), schedule=CONFIG_SCHEDULE, broker_profile=CONFIG_PROFILE
-        )
-    )
-    replay, analysis = replay_and_analysis(replayed.result_ref)
-    head = {"experiment_id": "experiment", "epoch_id": "research", "fold_id": "research", "run_id": "run_ref_first", "session_key": "research"}
-    candidate = {"step_id": node_id, "revision_id": earlier.revision_id, "fingerprint": earlier.fingerprint, "seed_replicates": []}
-    for step in range(1, steps.count + 1):
-        first, last = steps.window(step)
-        ledger.append(
-            validation_record.test_step_record(
-                head=head,
-                steps=steps,
-                step=step,
-                candidate=candidate,
-                replay={"start": steps.start, "end": last, "result_ref": replayed.result_ref},
-                entry=validation_record.step_entry(replay, analysis, start=first, end=last),
-                registration={"passed": True, "reasons": []},
-                source=validation_record.SOURCE_TEST,
-            )
-        )
+    _record_tests(pipeline, ledger, node_id, run_id=str(ledger.read()[0]["run_id"]), through=steps.count)
 
     def no_session(_request):
         raise AssertionError("a session whose record is complete opened a conversation")
@@ -1152,6 +1167,99 @@ def test_a_session_keeps_its_marker_when_its_failure_cannot_be_recorded(tmp_path
         (INTERRUPTED_RUN_ERROR, "research")
     ]
     assert markers.recover(ledger) == []
+
+
+def test_a_tested_run_whose_end_the_disk_refused_resumes_from_its_spend_and_transcript(tmp_path: Path):
+    """The 20261119 incident: a run recorded a test, then the disk past its
+    quota refused its attempt_failed row, and two instant retries began, spent
+    nothing and were refused likewise. The next worker start records the run
+    as one failed attempt although its test step is in the ledger, a second
+    start records nothing, and the continued session carries the run's spend
+    -- not reset by the retries recorded after it -- and names its transcript."""
+
+    from autotrade.environment.trace import agent_trace_path
+    from autotrade.pipelines.session_resume import resume_state
+
+    pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
+        tmp_path, {1: ([0.0012], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
+    )
+    experiment = pipeline.config.experiment_dir
+    markers = RunMarkers(experiment)
+    node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=1, node=True, recorded=False)
+    [marker] = markers.root.glob("*.json")
+    run_id = marker.stem
+    _record_tests(pipeline, ledger, node_id, run_id=run_id, through=1)
+    # Each retry began its run and wrote one stage event before the disk
+    # refused it too; both ids sort after the run's, the order that could reset.
+    retries = ["run_zz_retry_1", "run_zz_retry_2"]
+    for retry in retries:
+        markers.begin({**link_head("experiment", "research", retry), "phase": "research"})
+        event = {"event_type": "environment_stage", "ts": "2026-09-15T02:00:00+00:00", "run_id": f"run_ref_{retry}", "stage": "pit_snapshot"}
+        agent_trace_path(experiment / "artifacts", retry).write_text(json.dumps(event) + "\n", encoding="utf-8")
+
+    appended = markers.recover(ledger)
+
+    assert [(row["run_id"], row["phase"], row["error"]) for row in appended] == [
+        (run_id, "research", INTERRUPTED_RUN_ERROR),
+        *((retry, "research", INTERRUPTED_RUN_ERROR) for retry in retries),
+    ]
+    rows = ledger.read()
+    assert [row["record_type"] for row in rows] == ["test_step"] + ["attempt_failed"] * 3
+    assert markers.recover(ledger) == [] and ledger.read() == rows
+    spent = {
+        "inference_seconds": 900.0, "llm_calls": 9, "main_calls": 7, "subagent_calls": 2,
+        "compact_calls": 0, "test_replays": 1, "null_controls": 1, "api_spend_usd": 0.0,
+    }
+    resume = resume_state(experiment, rows)
+    assert resume is not None and resume.budget_used.to_record() == spent
+    assert resume.transcripts == ("run_ref_first.txt", "run_ref_run_zz_retry_1.txt", "run_ref_run_zz_retry_2.txt")
+
+    record = pipeline.run_research_session()
+
+    request = developer.requests[-1]
+    assert request.resume == resume and request.budget_used.to_record() == spent
+    assert [row["step"] for row in request.tests_before] == [1]
+    assert record["registered"]["source_step_id"] == node_id and record["attempts"] == 4
+
+
+def test_a_marker_of_a_run_whose_end_is_recorded_is_dropped_without_a_record(tmp_path: Path):
+    """A run that died between the row that ended it and its marker cleanup:
+    its marker goes and the ledger is untouched, tests of the run included."""
+
+    pipeline, *_rest, ledger = _pipeline(tmp_path, {})
+    node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=1, node=True)
+    [failed] = ledger.read()
+    _record_tests(pipeline, ledger, node_id, run_id=str(failed["run_id"]), through=1)
+    markers = RunMarkers(pipeline.config.experiment_dir)
+    markers.begin({**link_head("experiment", "research", str(failed["run_id"])), "phase": "research"})
+    rows = ledger.read()
+
+    assert markers.recover(ledger) == []
+    assert ledger.read() == rows and list(markers.root.glob("*.json")) == []
+
+
+def test_a_resume_refuses_tests_whose_spend_no_failed_attempt_holds(tmp_path: Path):
+    """A recorded test proves its run spent budget. Without the run's
+    attempt_failed row (its marker lost) or without its trace, that spend is
+    unknown, and the session refuses to resume rather than start without it."""
+
+    from autotrade.environment.trace import agent_trace_path
+
+    pipeline, _snapshots, _evaluator, developer, ledger = _pipeline(
+        tmp_path, {1: ([0.0012], "deadline", {"finish_reason": "llm_call_budget_exhausted"})}
+    )
+    experiment = pipeline.config.experiment_dir
+    node_id = _interrupted_attempt(pipeline, ledger, summary=None, test_replays=1, node=True, recorded=False)
+    [marker] = RunMarkers(experiment).root.glob("*.json")
+    _record_tests(pipeline, ledger, node_id, run_id=marker.stem, through=1)
+    with pytest.raises(RuntimeError, match="unknown spend"):
+        pipeline.run_research_session()
+    RunMarkers(experiment).recover(ledger)
+    agent_trace_path(experiment / "artifacts", marker.stem).unlink()
+    with pytest.raises(RuntimeError, match="unknown spend"):
+        pipeline.run_research_session()
+    assert developer.requests == []
+    assert [row["record_type"] for row in ledger.read()] == ["test_step", "attempt_failed"]
 
 
 def test_an_unreadable_run_marker_becomes_one_attempt_failed_and_is_cleared(tmp_path: Path):

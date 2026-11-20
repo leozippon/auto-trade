@@ -12,9 +12,9 @@ One JSONL file per experiment. The pipeline writes three record types:
 - ``attempt_failed``: a session or replay that raised before its business
   record. It carries the error evidence and is ignored by every reader of the
   business types, so the attempt is re-runnable but auditable. A run killed
-  outright cannot append it itself, so every run also leaves a host-only
-  marker (:class:`RunMarkers`) that the next worker start turns into the
-  missing ``attempt_failed``.
+  outright cannot append it itself, nor can one whose own append fails, so
+  every run also leaves a host-only marker (:class:`RunMarkers`) that the
+  next worker start turns into the missing ``attempt_failed``.
 
 Every record carries the link keys ``experiment_id``, ``epoch_id``, ``fold_id``
 and ``run_id``: ``epoch_id`` names the stage (``research`` or ``forward``) and
@@ -93,19 +93,22 @@ LINK_KEYS = ("experiment_id", "epoch_id", "fold_id", "run_id")
 STRATEGY_ERROR = "strategy_error"
 DURABLE_SUCCESS_TYPES = ("research_session", "forward")
 _INTEGRITY_RECORD_TYPES = frozenset({"forward"})
+# The records that end a run: its business record (an integrity row
+# included) or its ``attempt_failed``. A ``test_step`` is appended on the way.
+RUN_END_RECORD_TYPES = (*DURABLE_SUCCESS_TYPES, "attempt_failed")
 
 # Host-only, never mounted into a sandbox and never Agent-visible.
 RUN_MARKER_DIR = ".host/runs"
 INTERRUPTED_RUN_ERROR = (
-    "RunInterrupted: the run process exited before it wrote a ledger record"
+    "RunInterrupted: the run process exited before it recorded its end in the ledger"
 )
 # The marker exists to survive exactly the events that can also tear it (the
 # atomic write renames without fsync, so a SIGKILL/OOM/host reset can leave a
 # zero-length or truncated file). Such a marker still proves a run died, so it
 # becomes an ``attempt_failed`` too, with its unknown link keys named as unknown.
 UNREADABLE_RUN_MARKER_ERROR = (
-    "RunMarkerUnreadable: the run process exited before it wrote a ledger "
-    "record and its run marker could not be read back"
+    "RunMarkerUnreadable: the run process exited before it recorded its end "
+    "in the ledger and its run marker could not be read back"
 )
 UNKNOWN_MARKER_LINK_KEY = "unknown"
 
@@ -424,11 +427,11 @@ class RunMarkers:
 
     Research sessions and the forward replay append ``attempt_failed``
     themselves when they catch an exception, but a SIGKILL, an OOM kill or a host reset leaves no
-    code to run: the trace file stops mid-event and the ledger under-reports the
-    attempt. Each run therefore writes a marker holding its link keys before it
-    starts and deletes it once its ledger record — a business record or an
-    ``attempt_failed`` — is durable, so a leftover marker is exactly the
-    evidence of a run that died silently.
+    code to run, and a full disk can refuse that append itself: the ledger then
+    under-reports the attempt. Each run therefore writes a marker holding its
+    link keys before it starts and deletes it once the record that ends it
+    (:data:`RUN_END_RECORD_TYPES`) is durable, so a leftover marker is exactly
+    the evidence of a run whose end the ledger lacks.
     """
 
     def __init__(self, experiment_dir: str | Path) -> None:
@@ -450,13 +453,16 @@ class RunMarkers:
         (self.root / f"{run_id}.json").unlink(missing_ok=True)
 
     def recover(self, ledger: ExperimentLedger) -> list[dict[str, object]]:
-        """Record every run that died before its ledger record, then forget it.
+        """Record every run that died before the record that ends it, then forget it.
 
         Called once when an experiment worker starts, the only moment at which
-        no run of this experiment is in flight. A marker whose run already
-        reached the ledger (the process died between the append and the marker
-        cleanup) is dropped without a second record, and every handled marker is
-        removed, so repeated restarts never duplicate a record.
+        no run of this experiment is in flight. A marker whose run's end
+        already reached the ledger (the process died between that append and
+        the marker cleanup) is dropped without a second record; the
+        ``test_step`` rows a run appends on its way do not end it, so its spend
+        is still recorded (``session_resume.resume_state`` reads it from the
+        trace). Every handled marker is removed, so repeated restarts never
+        duplicate a record.
 
         An unreadable marker is handled the same way: it is still the evidence
         of a dead run, and it must never be able to fail every later worker
@@ -466,16 +472,16 @@ class RunMarkers:
         """
         if not self.root.is_dir():
             return []
-        recorded = {
+        ended = {
             str(record.get("run_id"))
             for record in ledger.read()
-            if record.get("run_id")
+            if record.get("record_type") in RUN_END_RECORD_TYPES
         }
         appended: list[dict[str, object]] = []
         for path in sorted(self.root.glob("*.json")):
             marker, unreadable = _read_run_marker(path)
             run_id = str(marker.get("run_id") or path.stem)
-            if run_id not in recorded:
+            if run_id not in ended:
                 record = {
                     **marker,
                     "record_type": "attempt_failed",

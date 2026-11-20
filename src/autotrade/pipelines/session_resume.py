@@ -33,7 +33,8 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.trace import TraceEvent, agent_trace_path
 
 from .config import BudgetUsed, EvaluationResult, SessionResume, StepResult
-from .ledger import SessionKind, recorded_path
+from .ledger import TEST_STEP_RECORD_TYPE, SessionKind, recorded_path
+from .validation_record import SOURCE_TEST
 
 # Host-only, beside the run markers: never mounted and never Agent-visible.
 STEP_SIDECAR_DIR = ".host/steps"
@@ -151,6 +152,11 @@ def resume_state(
     event that crossed the cap, so its last block can understate the spend and
     seeding from it could let the experiment run past its own budget; the cap
     is reached only by a runaway writer, so that is refused here instead.
+
+    A run that recorded a session ``test`` spent budget before it, so a ledger
+    whose failed attempts' traces hold no ``budget_used`` block of that run
+    (its ``attempt_failed`` row or its trace is missing) is refused as well,
+    rather than resumed at a spend that leaves it out.
     """
 
     attempts = [
@@ -159,9 +165,16 @@ def resume_state(
         if record.get("record_type") == "attempt_failed"
         and record.get("phase") == SessionKind.RESEARCH
     ]
-    if not attempts:
+    tested = {
+        str(record.get("run_id"))
+        for record in records
+        if record.get("record_type") == TEST_STEP_RECORD_TYPE
+        and record.get("source") == SOURCE_TEST
+    }
+    if not attempts and not tested:
         return None
     budget = BudgetUsed()
+    spent: set[str] = set()
     summary: str | None = None
     interrupted_at = ""
     transcripts: list[str] = []
@@ -180,6 +193,7 @@ def resume_state(
             used = event.get("budget_used")
             if isinstance(used, Mapping):
                 budget = BudgetUsed.from_record(used)
+                spent.add(run_id)
             if (
                 event.get("event_type") == TraceEvent.CONTEXT_COMPACTION
                 and event.get("status") == "ok"
@@ -190,6 +204,13 @@ def resume_state(
             interrupted_at = str(event.get("ts") or interrupted_at)
         if run_ref:
             transcripts.append(f"{run_ref}.txt")
+    unknown = sorted(tested - spent)
+    if unknown:
+        raise RuntimeError(
+            f"run {', '.join(unknown)} recorded tests, but no failed attempt's "
+            "trace holds what it spent (its attempt_failed row or its trace is "
+            "missing); the session cannot resume at an unknown spend"
+        )
     last = attempts[-1]
     return SessionResume(
         attempt=len(attempts) + 1,
