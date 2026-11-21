@@ -214,29 +214,21 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
     """Run a strategy directory (the working copy by default) through the real
     replay for a few days.
 
-    Hand-rolled shell smoke tests are what let seven of nine official backtests
-    die on day one: a script that sets ``ctx.asof_dir = "/mnt/snapshot"`` and
-    fakes an account object exercises the flat frozen snapshot and a dict-like
-    account, while the replay hands the strategy a rolling directory-per-domain
-    as-of view and a real ``AccountSnapshot``. This tool removes the reason to
-    hand-roll one: same executor, same per-decision wall clock
-    (``SandboxConfig.timeout_seconds``), same as-of layout, same account
-    object, same modification gate — only the window is short.
+    Same executor, same per-decision wall clock
+    (``SandboxConfig.timeout_seconds``), same rolling directory-per-domain
+    as-of view, same ``AccountSnapshot``, same modification gate as a
+    Validation; only the window is short. A shell test against the flat frozen
+    snapshot and a stand-in account exercises none of these.
 
     It is deliberately NOT an evaluation: no revision is committed, no step-tree
     node is written and nothing here can be tested or registered.
 
-    Like every other replay tool it pauses the session's thinking clock. A
-    5-day rehearsal is dominated by the same full ``fit`` a Validation runs,
-    so charging it to the one budget the session cannot refill priced the
-    cheap rehearsal the prompt requires before every batch in the scarce
-    currency while the expensive verdict stayed free: 9.5 h across 48 audited
-    sessions, three hour-long smokes dying at the fit cap costing one session
-    ~3 h of its 10.17 h. The rehearsal still costs real host wall clock; it no
-    longer costs the Agent its time to think. A sub-agent shares this tool
-    object and this budget, so a smoke it starts pauses the parent's clock
-    too -- the same union-of-pauses semantics an in-flight sub-agent already
-    gets while the parent's own Validation is paused.
+    Like every other replay tool it pauses the session's thinking clock: a
+    rehearsal is dominated by the same full ``fit`` a Validation runs, and
+    costs host wall clock, not the Agent's time to think. A sub-agent shares
+    this tool object and this budget, so a smoke it starts pauses the parent's
+    clock too, the same union-of-pauses semantics an in-flight sub-agent gets
+    while the parent's own Validation is paused.
     """
 
     spec = ToolSpec(
@@ -1021,14 +1013,12 @@ BATCH_NAME_MAX_CHARS = 40
 # every other Agent-written justification, by what one such statement needs
 # rather than by what one line is.
 BATCH_HYPOTHESIS_MAX_CHARS = AGENT_JUSTIFICATION_MAX_CHARS
-# Repeated identical rejections. A refused batch is free by design -- nothing
-# is committed and no interval call is spent -- so one audited session spent
-# 3.89 h of 10.17 h on 128 consecutive rejections carrying the same error, 393
-# parent LLM calls apart. A rejection is counted per session by its signature
-# (error type plus the target it names, never the message text, which carries
-# digests and so changes with the file); the third identical one says so and
-# names the recovery for that signature. The model-call and time budgets bound
-# the loop.
+# Repeated identical rejections. A refused batch is free by design (nothing is
+# committed and no interval call is spent), so nothing else breaks a loop of
+# the same refusal. A rejection is counted per session by its signature (error
+# type plus the target it names, never the message text, which carries digests
+# and so changes with the file); the third identical one says so and names the
+# recovery for that signature. The model-call and time budgets bound the loop.
 BATCH_REJECTION_ESCALATE_AT = 3
 # What a failed candidate's replay measured. ``StrategyRaised``
 # (``environment.executor``, read off the whole cause chain by
@@ -1042,14 +1032,12 @@ BATCH_FAILURE_STRATEGY = "strategy"
 BATCH_FAILURE_ENVIRONMENT = "environment"
 # A span the host cannot replay. A batch that failed on the environment is free
 # to resend, which is right for a transient fault (a clock lost to load, a card
-# another process took) and leaves nothing to stop the loop when the host
-# fails the span every time: in round 20261015 every replay crossing
-# 2022-07-01 failed in the host's as-of merge, and two experiments resent 6 and 4 such
-# batches (2.1 h and 1.5 h of wall time), although nothing past that date had
-# been tested. A batch in which every candidate failed on the environment
-# measured nothing; the second such batch on the same span in one attempt ends
-# the attempt (``EnvironmentBlocked``). A batch in which any candidate
-# completed or raised in its own code proved the span runs, and does not count.
+# another process took) but leaves nothing to stop the loop when the host fails
+# the span every time. A batch in which every candidate failed on the
+# environment measured nothing; the second such batch on the same span in one
+# attempt ends the attempt (``EnvironmentBlocked``). A batch in which any
+# candidate completed or raised in its own code proved the span runs, and does
+# not count.
 ENVIRONMENT_BLOCKED_BATCHES = 2
 
 
@@ -1430,24 +1418,14 @@ def _batch_replay_timeouts(evaluator: EvaluationBackend, workers: int) -> Iterat
     """Widen both strategy deadlines to the replay width this batch creates.
 
     ``SandboxConfig.fit_timeout_seconds`` and ``timeout_seconds`` are
-    runaway guards measured on host wall clock. Fanning ``workers`` replays
-    out over the same host makes the same ``fit(context)`` and the same
-    ``generate_orders(context)`` take longer without the strategy doing
-    anything different, so a fixed cap makes the verdict depend on how many
-    siblings a candidate happened to be batched with — the failure mode that
-    cost one experiment four Validations to fits solo reruns finished in
-    1,550-2,027 s. Scaling both caps by ``workers`` keeps the guards (a
-    runaway fit or decision still dies) while removing that dependence.
-
-    The inference cap was deliberately left fixed when the fit cap was
-    scaled, on the argument that a Validation makes hundreds of decision
-    calls and widening the per-call cap would stretch a slow batch instead of
-    failing it. Three experiments then filed the counter-example on one day: a
-    candidate measured at ~2.0 s/day over 243 serial decision days died at
-    ``strategy inference exceeded 180s`` on one rebalance day inside a 2-way
-    batch. Both caps bound ONE call, so both are equally distorted by the
-    fan-out, and the whole-replay runaway is bounded elsewhere (the session's
-    own deadline).
+    runaway guards on one call, measured on host wall clock. Fanning
+    ``workers`` replays out over the same host makes the same ``fit(context)``
+    and the same ``generate_orders(context)`` take longer without the strategy
+    doing anything different, so a fixed cap would make the verdict depend on
+    how many siblings a candidate is batched with. Scaling both caps by
+    ``workers`` keeps the guards (a runaway fit or decision still dies) while
+    removing that dependence; the whole-replay runaway is bounded by the
+    session's own deadline.
 
     The batch owns the evaluator's config for the pool's lifetime, so
     mutating and restoring it here is safe: the parent runs its replaying

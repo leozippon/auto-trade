@@ -137,11 +137,8 @@ def build_experiment_facts(
             max_llm_calls=max_llm_calls,
             context_compaction=context_compaction,
         ),
-        # No "paths" table and no per-file "data_profile": every production
-        # consumer of this object is the prompt renderer, which dropped both
-        # unconditionally (the same information lives in data_summary.json and
-        # the fixed mount layout) — building always-dropped sections was shaping
-        # work with no reader.
+        # No paths table and no per-file data profile: data_summary.json and
+        # the fixed mount layout carry both.
         "artifact_contract": _artifact_contract_facts(
             manifest, model_artifacts_empty=model_artifacts_empty
         ),
@@ -272,6 +269,10 @@ def _budget_facts(
             # Host null controls the session may request before it selects,
             # minutes of replay each; every run_null_control result says what is left.
             "max_null_controls": budgets.get("max_null_controls"),
+            # The time, call, spend and null-control totals above are the
+            # experiment's, spent across every attempt of its one session; what
+            # earlier attempts used of them is the resumed attempt's opening
+            # message (``prompts.RESUME_INSTRUCTION``).
             # The formal executor's per-trading-day inference wall clock; a
             # slower generate_orders fails the whole backtest.
             "strategy_inference_timeout_seconds": budgets.get(
@@ -287,17 +288,11 @@ def _budget_facts(
             # the authoritative device fact: a per-session GPU override moves
             # only the session's own container, never this number.
             "strategy_gpu_count": budgets.get("strategy_gpu_count"),
-            # The totals above are the experiment's, spent across every attempt
-            # of its one session; what earlier attempts used of them is the
-            # resumed attempt's opening message (``prompts.RESUME_INSTRUCTION``).
             # CPU quota that same container is started with, from which its
-            # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read
-            # from the run manifest, which carries the evaluator's own
-            # strategy SandboxSpec -- the experiment's, and the single source the executor
-            # builds the `--cpus` flag from -- so a strategy that sets its own
-            # thread count has the real number instead of a guess: a session
-            # that guessed low spent two backtest slots on fit timeouts it had
-            # the cores to avoid.
+            # OMP/MKL/OPENBLAS/NUMEXPR thread variables are derived. Read from
+            # the run manifest, which carries the evaluator's own strategy
+            # SandboxSpec (the single source of the executor's `--cpus` flag),
+            # so a strategy that sets its own thread count uses the real number.
             "strategy_cpus": budgets.get("strategy_cpus"),
             # The memory ceiling of that same container, in the unit a replay
             # reports its measured peak in (``resources.peak_memory_bytes``).

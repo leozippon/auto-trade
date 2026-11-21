@@ -89,12 +89,10 @@ _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 6
 # Global default child turn budget (the last tier of the launch precedence:
 # call argument > role default > this). A child has the parent's context
-# window and compaction, so the turn cap bounds work, not memory: under the
-# earlier cap of 24, one child in eleven hit the wrap-up notice while still
-# issuing tool calls every turn at 25k-144k prompt tokens, i.e. bounded work
-# was cut short, not wandering. The last ``SUBAGENT_GRACE_TURNS`` turns start
-# with a wrap-up notice (Pi's grace-turn pattern); an explicit ``max_turns``
-# is honoured as given.
+# window and compaction, so the turn cap bounds work, not memory, and is set
+# for bounded work to finish rather than to cut wandering short. The last
+# ``SUBAGENT_GRACE_TURNS`` turns start with a wrap-up notice (Pi's grace-turn
+# pattern); an explicit ``max_turns`` is honoured as given.
 DEFAULT_SUBAGENT_MAX_TURNS = 48
 SUBAGENT_GRACE_TURNS = 2
 # Global default thinking level; a child never inherits the parent's level.
@@ -131,12 +129,9 @@ OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 # A reply that spent its whole completion budget on reasoning (no content, no
 # tool call) gets a forced concise continuation — the same observation the
 # parent conversation receives — at most this many times per child before the
-# launch is reported as failed instead of terminated as ``completed``. One:
-# at a 12k cap 1-3 turns per session were cut and the single observed
-# continuation succeeded at once; at a 32k cap a cut turn was rare and cost
-# ~15 min, and the limit is now the model's own, so a second consecutive
-# all-reasoning turn after an explicit "be concise" instruction is a stuck
-# loop, not an unfinished answer.
+# launch is reported as failed instead of terminated as ``completed``: a
+# second all-reasoning turn after an explicit "be concise" instruction is a
+# stuck loop, not an unfinished answer.
 SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
 # The forced final summary came back with no content (a reply that spent its
 # budget on reasoning). The whole child run is not worth discarding over the

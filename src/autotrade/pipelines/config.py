@@ -32,41 +32,12 @@ from .skills import DEFAULT_SKILL_LIBRARY
 
 ExecutionMode = Literal["sandbox", "trusted"]
 
-# Increment only when the cached snapshot/replay on-disk contract changes.
-# Source revisions are intentionally not cache inputs: harmless code changes
-# should not invalidate every expensive data view.
-# v6: events/macro unions carry the full configured-dataset schema (typed
-# zero-row contributions for datasets without visible rows in the window).
-# v7: the snapshot manifest carries dataset_columns for the unit reference.
-# v8: incomplete/unusable vendor columns are dropped from the union domains
-# (SNAPSHOT_EXCLUDED_COLUMNS in environment.data.snapshot), so a v7 view still
-# carries fields the Agent must no longer see.
-# v9: the daily join drops its duplicate close_basic/pre_close_limit columns.
-# v10: same-day macro tables carry the close contract stamp
-# (MACRO_DATASET_CONTRACTS) instead of the raw date-EOD placeholder, so a v9
-# macro view shows T rows a trading day later than a v10 one.
-# v11: daily.is_suspended counts only suspend_d halts (suspend_type "S"); v10
-# also flagged resumption rows ("R"), i.e. normally traded sessions.
-# v12: cyq_perf.his_high (a proven post-decision price leak) and its unverified
-# same-source his_low leave the events union (SNAPSHOT_EXCLUDED_COLUMNS), so a
-# v11 decision/replay view still carries his_high. A cached view, or a PIT view
-# seed, built under v11 must be rebuilt; SNAPSHOT_CACHE_FORMAT_VERSION is the
-# only reuse gate and nothing rebuilds a stale view automatically.
-# v13: top_list.name leaves the events union (SNAPSHOT_EXCLUDED_COLUMNS). It is
-# the name as of the vendor's pull, not the day's, so a v12 view that loads
-# top_list carries later names and ST marks into history.
-# v14: a row whose key the raw lake first held after its vendor-date stamp
-# becomes visible only from that first-seen time, so a v13 view shows rows the
-# vendor added after the fact from their vendor date.
-# v15: a fina_indicator_vip row is visible no earlier than the latest statement
-# announcement of its period (the vendor files restated indicators under the
-# original ann_date); a v14 view shows restated indicators up to years early.
-# The stamp lives in the PIT event index a release clones, so only a view built
-# from a release whose index this code wrote carries it.
-# v16: one anns_d text-index row per filing (ts_code + cninfo id); a midnight rec_time now stamps date-only (via the restamped lake).
-# v17: a disclosure_date row's realised actual_date is a second version of the
-# schedule, visible from that date; a v16 view shows it from the schedule notice,
-# a median 34 days before the disclosure happened.
+# The cached snapshot/replay on-disk contract: the only gate on reusing a
+# cached view, a PIT view seed or an as-of stash, which nothing rebuilds
+# automatically. Increment it whenever that contract changes, and only then:
+# source revisions are not cache inputs, so harmless code changes keep every
+# expensive data view. What each version changed is listed in the parameters
+# reference.
 SNAPSHOT_CACHE_FORMAT_VERSION = 17
 
 # Trailing wrap-up grace added to the research session budget. Not a console or
@@ -95,15 +66,14 @@ BATCH_VALIDATE_MIN_CANDIDATES = 1
 BATCH_VALIDATE_MAX_CANDIDATES = 6
 # Concurrent replays per batch, the experiment's ``batch_validate_max_concurrency``
 # (1 up to the candidate cap; more workers than candidates run nothing). Each
-# replay holds its own result/as-of directory and its own strategy container —
-# two when the candidate declares fit, whose read-write state bind needs a
-# second worker — and the Timeview stash serializes part publication across
-# evaluations, so the bound is host capacity (up to two containers per replay
-# at the strategy container's CPUs (SandboxSpec.cpus), and on a GPU experiment every one of them on the experiment's own
-# cards), not correctness — which only holds because both strategy deadlines
-# scale with the batch's own width (``session_tools._batch_replay_timeouts``);
-# a fixed clock made the outcome depend on how many siblings happened to share
-# the host.
+# replay holds its own result and as-of directory and its own strategy
+# container (two when the candidate declares fit, whose read-write state bind
+# needs a second worker), and the Timeview stash serializes part publication
+# across evaluations, so the bound is host capacity: up to two containers per
+# replay at the strategy container's CPUs, on a GPU experiment each on the
+# experiment's own cards. A replay's outcome does not depend on the width
+# because both strategy deadlines scale with it
+# (``session_tools._batch_replay_timeouts``).
 DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY = 3
 
 # Research on ten August-July years, a twelve-month forward test after them,

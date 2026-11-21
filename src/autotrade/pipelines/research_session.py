@@ -1674,14 +1674,13 @@ def install_workspace_reference(
 ) -> None:
     """Copy the optional reference workspace into ``workspace/refs/`` before sandbox start.
 
-    The reference workspace lands writable like everything else under the Agent's workspace
-    mount. It was installed 0o444/0o555 once, to keep the reference copy from
-    drifting; what that actually bought was a papercut in every experiment, because
-    ``cp`` reproduces the source's mode and the copies it seeds -- a candidate
-    directory, a working file under ``output/`` -- came out unwritable for the
-    typed writers, which run as the host user and cannot chmod a file the
-    sandbox user owns. Drift costs nothing instead: every session start removes
-    this tree and re-copies it from the checked-in reference workspace.
+    The reference workspace lands writable like everything else under the
+    Agent's workspace mount: ``cp`` reproduces the source's mode, and the
+    copies it seeds (a candidate directory, a working file under ``output/``)
+    must stay writable for the typed writers, which run as the host user and
+    cannot chmod a file the sandbox user owns. Drift costs nothing: every
+    session start removes this tree and re-copies it from the checked-in
+    reference workspace.
 
     A paper Pack's payload (``pack_payload``) is verified against its
     manifest first and then lands beside the tracked files at the paths the
