@@ -74,6 +74,7 @@ from .experiment_params import (
     session_models,
 )
 from .hitl_state import (
+    MAX_GPU_COUNT,
     SCHEDULE_NAME,
     WEB_INTERNAL_PARAMS,
     ExperimentState,
@@ -1314,10 +1315,9 @@ def _required_text(params: dict[str, object], key: str) -> str:
 
 
 def _gpu_count(value: object) -> int:
-    """Per-session GPU allocation shares this range with `set_gpu_count`."""
     count = nonnegative_int(value, "gpu_count")
-    if count > 4:
-        raise ValueError("gpu_count must be between 0 and 4")
+    if count > MAX_GPU_COUNT:
+        raise ValueError(f"gpu_count must be between 0 and {MAX_GPU_COUNT}")
     return count
 
 

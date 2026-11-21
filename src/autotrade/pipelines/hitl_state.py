@@ -32,6 +32,10 @@ SCHEDULE_NAME = "schedule.json"
 # (webui.manager.start_worker). That worker attaches exactly these to every
 # container it starts, and they are held while it lives (``gpu_claims``).
 GPU_CLAIM_NAME = "gpu_claim.json"
+# The most GPUs an experiment's containers, or one session's override, may
+# attach: the worker's ``gpu_count``, the session context's
+# ``sandbox_gpu_count`` and the console's ``set_gpu_count`` share this range.
+MAX_GPU_COUNT = 4
 # The marker the operator's archive (scripts/experiments/archive_experiment.py) writes
 # in an experiment's hitl/ directory, recording when and why; removing it restores the
 # experiment. Archiving is the operator's final word that the experiment is over: the console

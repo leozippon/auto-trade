@@ -66,6 +66,7 @@ from .config import (
     research_span,
     session_deadline_seconds,
 )
+from .hitl_state import MAX_GPU_COUNT
 from .ledger import (
     ENVIRONMENT_BLOCKED,
     STRATEGY_ERROR,
@@ -139,9 +140,9 @@ class SessionContext:
     def __post_init__(self) -> None:
         count = self.sandbox_gpu_count
         if count is not None and (
-            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4
+            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= MAX_GPU_COUNT
         ):
-            raise ValueError("sandbox_gpu_count override must be an integer in 0..4")
+            raise ValueError(f"sandbox_gpu_count override must be an integer in 0..{MAX_GPU_COUNT}")
         if self.progress_hook is not None and not callable(self.progress_hook):
             raise TypeError("progress_hook must be callable")
 
