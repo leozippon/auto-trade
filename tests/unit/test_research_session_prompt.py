@@ -65,7 +65,7 @@ def _contract_texts() -> dict[str, str]:
 
 
 def test_the_contract_quotes_no_forward_figure_and_names_only_real_row_fields() -> None:
-    from .test_batch_validate import _Session, _strategy
+    from tests.unit.validate_session_fixture import _Session, _strategy
 
     texts = _contract_texts()
     for name, text in texts.items():

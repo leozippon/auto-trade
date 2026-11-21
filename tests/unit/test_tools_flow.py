@@ -2094,8 +2094,7 @@ def _validate_tool(
     )
     from autotrade.pipelines.ledger import ExperimentLedger
     from autotrade.pipelines.session_tools import SessionValidations, ValidateTool
-
-    from .test_batch_validate import _write_style_sidecar
+    from tests.unit.validate_session_fixture import _write_style_sidecar
 
     paths, _, _ = build_sandbox(tmp)
     output = paths.agent / "output"

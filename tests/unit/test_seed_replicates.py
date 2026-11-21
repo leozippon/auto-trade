@@ -30,10 +30,7 @@ from autotrade.pipelines.config import (
     acceptance_for,
     research_span,
 )
-from autotrade.pipelines.experiment import (
-    ExperimentPipeline,
-    check_registration,
-)
+from autotrade.pipelines.experiment import ExperimentPipeline, check_registration
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
     experiment_verdict,
@@ -42,7 +39,7 @@ from autotrade.pipelines.ledger import (
 )
 from scripts.dev.check_verdicts import check_experiment
 from tests.unit.acceptance_fixture import REQUIRED_RULES
-from tests.unit.test_experiment_pipeline import (
+from tests.unit.pipeline_fixture import (
     CONFIG_PROFILE,
     CONFIG_SCHEDULE,
     DAYS,

@@ -51,15 +51,12 @@ from autotrade.pipelines.research_session import (
     SessionCallBudget,
     session_role_quotas,
 )
-from autotrade.pipelines.session_tools import (
-    SessionValidations,
-    ValidateTool,
-)
+from autotrade.pipelines.session_tools import SessionValidations, ValidateTool
 from tests.unit.acceptance_fixture import RULES
 from tests.unit.agent_fixture import TerminalTool, make_engine, make_runner
+from tests.unit.validate_session_fixture import _write_style_sidecar
 
 from .fixtures_sandbox import PassingModificationCheck
-from .test_batch_validate import _write_style_sidecar
 
 
 class FakeClock:
