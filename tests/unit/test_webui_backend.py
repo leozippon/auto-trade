@@ -1043,52 +1043,22 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(len(purges), 2)
         self.assertFalse(directory.exists())
 
-    def test_delete_rejects_derived_sandbox_symlink_without_touching_target(
-        self,
-    ) -> None:
-        directory = self._build_hitl_experiment("exp_sandbox_link")
-        write_json_atomic(
-            directory / "hitl/status.json",
-            {"schema_version": 1, "pid": 999_999_999, "state": "failed"},
-        )
-        external = self.repo_root / "external-sandbox"
-        external.mkdir()
-        marker = external / "keep.txt"
-        marker.write_text("keep", encoding="utf-8")
-        expected = self.repo_root / ".runtime/sandboxes/exp_sandbox_link"
-        expected.parent.mkdir(parents=True)
-        expected.symlink_to(external, target_is_directory=True)
-
-        with patch("autotrade.webui.manager._remove_sandbox_tree") as remove:
-            response = self.client.delete(
-                "/api/experiments/exp_sandbox_link",
-                params={"confirm": "exp_sandbox_link"},
-            )
-
-        self.assertEqual(response.status_code, 500, response.text)
-        self.assertIn("symbolic link", response.json()["detail"])
-        remove.assert_not_called()
-        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
-        self.assertTrue(directory.exists())
-
-    def test_delete_rejects_symlinked_sandbox_root_without_touching_external_tree(
-        self,
-    ) -> None:
-        experiment_id = "exp_sandbox_root_link"
+    def _assert_delete_refused_through_a_symlink(self, experiment_id: str, link: str, detail: str) -> None:
+        """A sandbox path that runs through a symbolic link at ``link`` (here
+        to a tree outside the repository) is refused with ``detail`` before
+        anything is removed, and the tree it points at stays."""
         directory = self._build_hitl_experiment(experiment_id)
         write_json_atomic(
             directory / "hitl/status.json",
             {"schema_version": 1, "pid": 999_999_999, "state": "failed"},
         )
-        runtime_root = self.repo_root / ".runtime"
-        runtime_root.mkdir()
         with tempfile.TemporaryDirectory() as external_tmp:
             external = Path(external_tmp)
-            outside = external / experiment_id
-            outside.mkdir()
-            marker = outside / "keep.txt"
+            marker = external / Path(".runtime/sandboxes", experiment_id).relative_to(link) / "keep.txt"
+            marker.parent.mkdir(parents=True, exist_ok=True)
             marker.write_text("keep", encoding="utf-8")
-            (runtime_root / "sandboxes").symlink_to(external, target_is_directory=True)
+            (self.repo_root / link).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo_root / link).symlink_to(external, target_is_directory=True)
 
             with patch("autotrade.webui.manager._remove_sandbox_tree") as remove:
                 response = self.client.delete(
@@ -1097,95 +1067,57 @@ class WebuiBackendTest(unittest.TestCase):
                 )
 
             self.assertEqual(response.status_code, 500, response.text)
-            self.assertIn("symbolic-link sandbox root", response.json()["detail"])
+            self.assertIn(detail, response.json()["detail"])
             remove.assert_not_called()
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
             self.assertTrue(directory.exists())
 
-    def test_delete_rejects_symlinked_runtime_root_without_touching_external_tree(
-        self,
-    ) -> None:
-        experiment_id = "exp_runtime_root_link"
+    def test_delete_rejects_derived_sandbox_symlink_without_touching_target(self) -> None:
+        self._assert_delete_refused_through_a_symlink(
+            "exp_sandbox_link", ".runtime/sandboxes/exp_sandbox_link", "symbolic link"
+        )
+
+    def test_delete_rejects_symlinked_sandbox_root_without_touching_external_tree(self) -> None:
+        self._assert_delete_refused_through_a_symlink(
+            "exp_sandbox_root_link", ".runtime/sandboxes", "symbolic-link sandbox root"
+        )
+
+    def test_delete_rejects_symlinked_runtime_root_without_touching_external_tree(self) -> None:
+        self._assert_delete_refused_through_a_symlink(
+            "exp_runtime_root_link", ".runtime", "symbolic-link runtime root"
+        )
+
+    def _assert_delete_uses_only_the_derived_sandbox(self, experiment_id: str, *, unreadable: bool) -> None:
+        """A failed worker can leave params.json corrupt or unreadable; its
+        work_root is then never adopted, and only the derived sandbox goes."""
         directory = self._build_hitl_experiment(experiment_id)
-        write_json_atomic(
-            directory / "hitl/status.json",
-            {"schema_version": 1, "pid": 999_999_999, "state": "failed"},
-        )
-        with tempfile.TemporaryDirectory() as external_tmp:
-            external = Path(external_tmp)
-            outside = external / "sandboxes" / experiment_id
-            outside.mkdir(parents=True)
-            marker = outside / "keep.txt"
-            marker.write_text("keep", encoding="utf-8")
-            (self.repo_root / ".runtime").symlink_to(external, target_is_directory=True)
-
-            with patch("autotrade.webui.manager._remove_sandbox_tree") as remove:
-                response = self.client.delete(
-                    f"/api/experiments/{experiment_id}",
-                    params={"confirm": experiment_id},
-                )
-
-            self.assertEqual(response.status_code, 500, response.text)
-            self.assertIn("symbolic-link runtime root", response.json()["detail"])
-            remove.assert_not_called()
-            self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
-            self.assertTrue(directory.exists())
-
-    def test_delete_with_corrupt_params_uses_only_derived_sandbox_path(self) -> None:
-        directory = self._build_hitl_experiment("exp_corrupt_params")
-        write_json_atomic(
-            directory / "hitl/status.json",
-            {"schema_version": 1, "pid": 999_999_999, "state": "failed"},
-        )
-        explicit = self.repo_root / "explicit-work-root"
-        explicit.mkdir()
-        marker = explicit / "keep.txt"
-        marker.write_text("keep", encoding="utf-8")
-        (directory / "hitl/params.json").write_text(
-            f'{{"work_root": {json.dumps(str(explicit))}, broken',
-            encoding="utf-8",
-        )
-        sandbox = self.repo_root / ".runtime/sandboxes/exp_corrupt_params"
-        sandbox.mkdir(parents=True)
-        (sandbox / "runtime.txt").write_text("remove", encoding="utf-8")
-
-        response = self.client.delete(
-            "/api/experiments/exp_corrupt_params",
-            params={"confirm": "exp_corrupt_params"},
-        )
-
-        self.assertEqual(response.status_code, 200, response.text)
-        self.assertFalse(directory.exists())
-        self.assertFalse(sandbox.exists())
-        self.assertEqual(response.json()["removed_work_root"], str(sandbox))
-        self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
-
-    def test_delete_with_unreadable_params_uses_only_derived_sandbox_path(self) -> None:
-        directory = self._build_hitl_experiment("exp_unreadable_params")
         write_json_atomic(
             directory / "hitl/status.json",
             {"schema_version": 1, "pid": 999_999_999, "state": "failed"},
         )
         params_path = directory / "hitl/params.json"
-        explicit = self.repo_root / "unreadable-explicit-work-root"
+        explicit = self.repo_root / f"{experiment_id}-explicit-work-root"
         explicit.mkdir()
         marker = explicit / "keep.txt"
         marker.write_text("keep", encoding="utf-8")
-        write_json_atomic(params_path, {"work_root": str(explicit)})
-        sandbox = self.repo_root / ".runtime/sandboxes/exp_unreadable_params"
+        sandbox = self.repo_root / ".runtime/sandboxes" / experiment_id
         sandbox.mkdir(parents=True)
         (sandbox / "runtime.txt").write_text("remove", encoding="utf-8")
+        if unreadable:
+            write_json_atomic(params_path, {"work_root": str(explicit)})
+        else:
+            params_path.write_text(f'{{"work_root": {json.dumps(str(explicit))}, broken', encoding="utf-8")
         original_read_text = Path.read_text
 
         def deny_params(path: Path, *args, **kwargs):
-            if path == params_path:
+            if unreadable and path == params_path:
                 raise PermissionError("params unreadable")
             return original_read_text(path, *args, **kwargs)
 
         with patch.object(Path, "read_text", new=deny_params):
             response = self.client.delete(
-                "/api/experiments/exp_unreadable_params",
-                params={"confirm": "exp_unreadable_params"},
+                f"/api/experiments/{experiment_id}",
+                params={"confirm": experiment_id},
             )
 
         self.assertEqual(response.status_code, 200, response.text)
@@ -1193,6 +1125,12 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertFalse(sandbox.exists())
         self.assertEqual(response.json()["removed_work_root"], str(sandbox))
         self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
+
+    def test_delete_with_corrupt_params_uses_only_derived_sandbox_path(self) -> None:
+        self._assert_delete_uses_only_the_derived_sandbox("exp_corrupt_params", unreadable=False)
+
+    def test_delete_with_unreadable_params_uses_only_derived_sandbox_path(self) -> None:
+        self._assert_delete_uses_only_the_derived_sandbox("exp_unreadable_params", unreadable=True)
 
     def test_delete_removes_console_sandbox_tree_under_shared_work_root(self) -> None:
         # Console-created experiments record the shared sandbox root in
@@ -1647,15 +1585,8 @@ class WebuiBackendTest(unittest.TestCase):
         self.assertEqual(again["blocks"], [])
         self.assertEqual(again["next_offset"], first["next_offset"])
 
-    def test_trace_run_id_traversal_is_rejected(self) -> None:
-        for run_id in ("../run_s1", "run_s1/../..", "/etc/passwd"):
-            response = self.client.get(
-                "/api/experiments/exp_hitl/trace/blocks", params={"run_id": run_id}
-            )
-            # Never served, and never distinguishable from an absent trace.
-            self.assertIn(response.status_code, (400, 404), run_id)
-            self.assertNotIn("etc", response.text)
-        # A traversing result name is never joined onto a path.
+    def test_a_traversing_result_name_is_never_joined_onto_a_path(self) -> None:
+        # A traversing trace run_id is refused in test_webui_trace_stats.
         self.assertEqual(
             self.client.get(
                 "/api/experiments/exp_hitl/results/..%2F..%2Fhitl/style"
