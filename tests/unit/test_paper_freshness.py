@@ -14,7 +14,8 @@ from unittest.mock import patch
 import pandas as pd
 import pytest
 
-from autotrade.data_sources.tushare import common, cron_update, download, versions
+from autotrade.data_sources.tushare import client as tushare_client
+from autotrade.data_sources.tushare import cron_update, download, versions
 from autotrade.data_sources.tushare import generation as raw_generation
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.strategy import CN_TZ
@@ -99,7 +100,7 @@ class _DailyClient:
             raise versions.DefectiveAnswer(f"{api_name} answered without requested fields ['adj_factor']")
         columns = fields.split(",")
         row = [params.get("trade_date") if c == "trade_date" else "000001.SZ" if c == "ts_code" else 1.0 for c in columns]
-        return common.ApiResult(columns, [row])
+        return tushare_client.ApiResult(columns, [row])
 
 
 class _FailingClient:

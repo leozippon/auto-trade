@@ -19,10 +19,8 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from autotrade.common.time import CN_TZ
-from autotrade.data_sources.tushare.common import (
-    NO_MUTATION_FAILURE_EXIT_CODE,
-    OFFICIAL_TOKEN_ENV,
-)
+from autotrade.data_sources.tushare.client import OFFICIAL_TOKEN_ENV
+from autotrade.data_sources.tushare.common import NO_MUTATION_FAILURE_EXIT_CODE
 from autotrade.data_sources.tushare.cron_update import (
     DEFAULT_CONFIG,
     load_config,

@@ -35,18 +35,25 @@ from autotrade.environment.data.pit import (
 
 from . import common as core
 from . import versions
+from .client import (
+    MIN_REQUEST_INTERVAL_SECONDS,
+    OFFICIAL_TOKEN_ENV,
+    ApiResult,
+    TuShareClient,
+    frame,
+    load_token,
+    official_client,
+    query_paged,
+)
 from .common import (
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
-    OFFICIAL_TOKEN_ENV,
     PHYSICAL_IDENTITY_COLUMNS,
     REVISION_EVENTS_PATH,
     SHARE_FLOAT_ROW_LIMIT,
     SHARE_FLOAT_UNLOCK_TITLE_PATTERN,
     WRITTEN_OUTCOMES,
-    ApiResult,
-    TuShareClient,
     active_year_windows,
     as_datetime_window,
     augment_board_frame,
@@ -56,14 +63,12 @@ from .common import (
     augment_text_frame,
     date_range_days,
     format_yyyymmdd,
-    frame,
     history_floor,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
     load_minute_universe,
     load_sse_open_dates,
     load_stock_codes,
-    load_token,
     margin_exchange_column,
     margin_family_missing_exchanges,
     minute_datetime,
@@ -72,11 +77,9 @@ from .common import (
     normalize_stk_mins_by_date_frame,
     normalized_date_keys,
     normalized_holder_keys,
-    official_client,
     parse_yyyymmdd,
     physical_identity_index,
     quarter_periods,
-    query_paged,
     resolve_revision_ledger,
     safe_partition_value,
     select_datasets,
@@ -3184,7 +3187,7 @@ def set_download_defaults(args: argparse.Namespace) -> None:
         # One rate for every tier: the vendor cooldown is global, so the old
         # per-tier table (0.12s on reference, 0.18s on daily) only meant the
         # lighter tiers tripped it first.
-        args.min_interval_seconds = core.MIN_REQUEST_INTERVAL_SECONDS
+        args.min_interval_seconds = MIN_REQUEST_INTERVAL_SECONDS
     if args.timeout_seconds is None:
         args.timeout_seconds = 120 if args.tier == "intraday" else 90 if args.tier in {"fundamental", "event_flow", "board_trading", "text_evidence", "macro", "global"} else 60
     if args.page_limit is None:
@@ -3373,7 +3376,7 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
 
 def update_data(args: argparse.Namespace) -> int:
     if args.min_interval_seconds is None:
-        args.min_interval_seconds = core.MIN_REQUEST_INTERVAL_SECONDS
+        args.min_interval_seconds = MIN_REQUEST_INTERVAL_SECONDS
     if args.timeout_seconds is None:
         args.timeout_seconds = 120
     summary: list[dict[str, Any]] = []
@@ -3566,7 +3569,7 @@ def add_auction_recheck_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--landing-job", default="cn_evening_auction_backfill")
     parser.add_argument("--page-limit", type=int, default=TRADE_DATE_PAGE_LIMIT)
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    parser.add_argument("--min-interval-seconds", type=float, default=core.MIN_REQUEST_INTERVAL_SECONDS)
+    parser.add_argument("--min-interval-seconds", type=float, default=MIN_REQUEST_INTERVAL_SECONDS)
     parser.add_argument("--timeout-seconds", type=int, default=60)
 
 
@@ -3581,7 +3584,7 @@ def add_auction_capture_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--min-rows", type=int, default=AUCTION_CAPTURE_MIN_ROWS_FLOOR)
     parser.add_argument("--min-previous-day-ratio", type=float, default=AUCTION_CAPTURE_MIN_PREVIOUS_DAY_RATIO)
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=30)
+    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=30)
 
 def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     compact = sub.add_parser("compact-intraday-by-date", help="build final full-market daily minute files from stock-year source partitions")
@@ -3599,7 +3602,7 @@ def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     update.add_argument("--retry-delay-seconds", type=float, default=5.0)
     update.add_argument("--page-limit", type=int)
     update.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    core.add_runtime_args(update, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
+    core.add_runtime_args(update, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
     # Only update's open-window refresh forces a trailing tail.
     update.set_defaults(force_from=None)
 
@@ -3626,7 +3629,7 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--write-union", action="store_true")
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=90)
+    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=90)
     parser.add_argument("--output", help="Optional process report path. No status file is written by default; event-flow audit checks the union artifact.")
 
 def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:

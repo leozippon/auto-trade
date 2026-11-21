@@ -38,6 +38,13 @@ from autotrade.environment.data.units import (
 )
 
 from . import common as core
+from .client import (
+    MIN_REQUEST_INTERVAL_SECONDS,
+    TuShareClient,
+    frame,
+    load_token,
+    query_paged,
+)
 from .common import (
     BOARD_TRADING_STATUS_PATH,
     CORE_MARKET_STATUS_PATH,
@@ -47,24 +54,20 @@ from .common import (
     MACRO_CONTEXT_STATUS_PATH,
     SHARE_FLOAT_ROW_LIMIT,
     TEXT_EVIDENCE_STATUS_PATH,
-    TuShareClient,
     active_year_windows,
     augment_board_frame,
     augment_event_frame,
     cli_values,
-    frame,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
     load_minute_universe,
     load_sse_open_dates,
     load_stock_codes,
-    load_token,
     margin_exchange_column,
     margin_family_missing_exchanges,
     month_end_from_yyyymm,
     month_windows,
     quarter_periods,
-    query_paged,
     safe_partition_value,
     select_datasets,
     selected_board_hot_is_new,
@@ -2677,7 +2680,7 @@ def add_core_market_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--end-date")
     parser.add_argument("--datasets", nargs="+", choices=DAILY_REQUIRED_DATASETS)
     parser.add_argument("--sample-limit", type=int, default=10)
-    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
+    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {core.CORE_MARKET_STATUS_PATH}.")
 
 
@@ -2690,7 +2693,7 @@ def add_fundamental_raw_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--fundamental-end-date")
     parser.add_argument("--fundamental-datasets", nargs="+", choices=FUNDAMENTAL_DATASETS, dest="fundamental_datasets")
     parser.add_argument("--sample-limit", type=int, default=10)
-    core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
+    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {core.FUNDAMENTAL_RAW_STATUS_PATH}.")
 
 def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
@@ -2717,7 +2720,7 @@ def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     auction.add_argument("--output-dataset", default=STK_MINS_BY_DATE_DATASET)
     auction.add_argument("--max-trade-dates", type=int, default=8, help="Use the latest N open dates in the requested window; <=0 means all.")
     auction.add_argument("--output", help="Defaults to results/data_quality/process/auction_alignment_status.json.")
-    core.add_runtime_args(auction, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
+    core.add_runtime_args(auction, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event = sub.add_parser("event-flow", help="audit only event/flow raw data")
@@ -2772,7 +2775,7 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision.add_argument("--revision-ledger", default=core.REVISION_EVENTS_PATH)
     revision.add_argument("--output", default=core.REVISION_SUMMARY_PATH)
     revision.add_argument("--fail-on-revision", action="store_true", help="Return nonzero when source revisions are found.")
-    core.add_runtime_args(revision, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
+    core.add_runtime_args(revision, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)

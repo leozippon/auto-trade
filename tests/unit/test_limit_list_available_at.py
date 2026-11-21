@@ -10,6 +10,7 @@ from unittest.mock import patch
 import pandas as pd
 
 from autotrade.data_sources.tushare import audit, specs
+from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import common as core
 
 
@@ -44,7 +45,7 @@ class LimitListAvailableAtStampTest(unittest.TestCase):
                 names = fields.split(",") if fields else []
                 values = {"trade_date": (params or {}).get("trade_date", ""), "ts_code": "000001.SZ",
                           "close": 10.0, "limit": "U"}
-                return core.ApiResult(names, [[values.get(name) for name in names]])
+                return tushare_client.ApiResult(names, [[values.get(name) for name in names]])
 
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

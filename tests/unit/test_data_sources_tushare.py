@@ -31,6 +31,7 @@ from autotrade.data_sources.tushare import (
     specs,
     versions,
 )
+from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.data_sources.tushare import lock as tushare_lock
 from autotrade.environment.data.fundamental_events import (
@@ -53,7 +54,7 @@ def commit_generation(raw_dir: Path) -> dict:
 
 class EmptyMinuteClient:
     def query(self, api_name, params=None, fields="", retries=5):
-        return common.ApiResult(fields.split(",") if fields else [], [])
+        return tushare_client.ApiResult(fields.split(",") if fields else [], [])
 
 
 class CountingMacroClient:
@@ -80,7 +81,7 @@ class CountingMacroClient:
                 row.append(api_name)
             else:
                 row.append("")
-        return common.ApiResult(result_fields, [row])
+        return tushare_client.ApiResult(result_fields, [row])
 
 
 class BoardClient:
@@ -123,7 +124,7 @@ class BoardClient:
                 row.append("[]")
             else:
                 row.append(1.0)
-        return common.ApiResult(result_fields, [row])
+        return tushare_client.ApiResult(result_fields, [row])
 
 
 class NoQueryClient:
@@ -160,7 +161,7 @@ class ReferenceClient:
             rows = [["000300.SH" if field == "ts_code" else "sample" for field in result_fields]]
         elif api_name == "index_weight":
             rows = [[params.get("index_code", "") if field == "index_code" else "000001.SZ" if field == "con_code" else "20260630" if field == "trade_date" else "1.0" for field in result_fields]]
-        return common.ApiResult(result_fields, rows)
+        return tushare_client.ApiResult(result_fields, rows)
 
 
 class TradeCalClient:
@@ -182,7 +183,7 @@ class TradeCalClient:
                 ""
                 for field in result_fields
             ]]
-        return common.ApiResult(result_fields, rows)
+        return tushare_client.ApiResult(result_fields, rows)
 
 
 class EmptyReferenceClient:
@@ -192,7 +193,7 @@ class EmptyReferenceClient:
     def query(self, api_name, params=None, fields="", retries=5):
         params = params or {}
         self.calls.append((api_name, dict(params)))
-        return common.ApiResult(fields.split(",") if fields else [], [])
+        return tushare_client.ApiResult(fields.split(",") if fields else [], [])
 
 
 class DailyMarketClient:
@@ -213,7 +214,7 @@ class DailyMarketClient:
                 row.append(1.0)
             else:
                 row.append(0)
-        return common.ApiResult(result_fields, [row])
+        return tushare_client.ApiResult(result_fields, [row])
 
 
 class FundamentalClient:
@@ -232,7 +233,7 @@ class FundamentalClient:
         else:
             result_fields = ["ts_code"]
             row = ["000001.SZ"]
-        return common.ApiResult(result_fields, [row])
+        return tushare_client.ApiResult(result_fields, [row])
 
 
 class CalendarEventClient:
@@ -256,7 +257,7 @@ class CalendarEventClient:
                     row.append("20260603")
                 else:
                     row.append("")
-            return common.ApiResult(result_fields, [row])
+            return tushare_client.ApiResult(result_fields, [row])
         if api_name == "margin_secs":
             rows = []
             for ts_code, exchange in (("600000.SH", "SSE"), ("000001.SZ", "SZSE"), ("830000.BJ", "BSE")):
@@ -273,8 +274,8 @@ class CalendarEventClient:
                     else:
                         row.append("")
                 rows.append(row)
-            return common.ApiResult(result_fields, rows)
-        return common.ApiResult(result_fields, [])
+            return tushare_client.ApiResult(result_fields, rows)
+        return tushare_client.ApiResult(result_fields, [])
 
 
 class EmptyTradeDateClient:
@@ -284,7 +285,7 @@ class EmptyTradeDateClient:
     def query(self, api_name, params=None, fields="", retries=5):
         params = params or {}
         self.calls.append((api_name, dict(params)))
-        return common.ApiResult(fields.split(",") if fields else [], [])
+        return tushare_client.ApiResult(fields.split(",") if fields else [], [])
 
 
 class ErrorTradeDateClient:
@@ -296,7 +297,7 @@ class RepeatingPagedClient:
     def query(self, api_name, params=None, fields="", retries=5):
         result_fields = fields.split(",") if fields else ["trade_date", "ts_code"]
         row = ["20200102" if field == "trade_date" else "000001.SZ" for field in result_fields]
-        return common.ApiResult(result_fields, [row])
+        return tushare_client.ApiResult(result_fields, [row])
 
 
 class TieUnstablePagingClient:
@@ -314,7 +315,7 @@ class TieUnstablePagingClient:
         served = [row for row in self.rows if params["start_date"] <= row["ann_date"] <= params["end_date"]]
         served.sort(key=lambda row: row["ts_code"], reverse=bool(params["offset"]))
         page = served[params["offset"]:params["offset"] + params["limit"]]
-        return common.ApiResult(names, [[row.get(name, "") for name in names] for row in page])
+        return tushare_client.ApiResult(names, [[row.get(name, "") for name in names] for row in page])
 
 
 class EndlessPagedClient:
@@ -326,10 +327,10 @@ class EndlessPagedClient:
 
     def query(self, api_name, params=None, fields="", retries=5):
         offset, limit = params["offset"], params["limit"]
-        if offset > common.VENDOR_MAX_OFFSET:
-            raise RuntimeError(f"{api_name} answered code 50101: offset不能大于{common.VENDOR_MAX_OFFSET}")
+        if offset > tushare_client.VENDOR_MAX_OFFSET:
+            raise RuntimeError(f"{api_name} answered code 50101: offset不能大于{tushare_client.VENDOR_MAX_OFFSET}")
         self.offsets.append(offset)
-        return common.ApiResult(["trade_date", "ts_code"], [["20261103", str(offset + index)] for index in range(limit)])
+        return tushare_client.ApiResult(["trade_date", "ts_code"], [["20261103", str(offset + index)] for index in range(limit)])
 
 
 class FetchStrategyTest(unittest.TestCase):
@@ -425,14 +426,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_query_paged_rejects_repeated_full_pages(self):
         with self.assertRaisesRegex(RuntimeError, "returned a repeated page"):
-            common.query_paged(RepeatingPagedClient(), "daily", {"trade_date": "20200102"}, "trade_date,ts_code", page_limit=1)
+            tushare_client.query_paged(RepeatingPagedClient(), "daily", {"trade_date": "20200102"}, "trade_date,ts_code", page_limit=1)
 
     def test_query_paged_never_requests_past_the_vendor_offset_cap(self):
         # A day of 105,452 rows needs offset 104000 at 8,000 rows a page; the
         # vendor refuses it, and five retries cannot change that.
         client = EndlessPagedClient()
         with self.assertRaisesRegex(RuntimeError, "runs past the vendor's offset cap 100000"):
-            common.query_paged(client, "top_list", {"trade_date": "20261103"}, "trade_date,ts_code", page_limit=8000)
+            tushare_client.query_paged(client, "top_list", {"trade_date": "20261103"}, "trade_date,ts_code", page_limit=8000)
         self.assertEqual(client.offsets, list(range(0, 96001, 8000)))
 
     def test_trade_cal_helpers_normalize_date_strings(self):
@@ -567,7 +568,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                         continue
                     for bar in ("2020-01-02 09:30:00", "2020-01-02 15:00:00"):
                         items.append([code, bar, 1.0, 1.0, 1.0, 1.0, 100.0, 100.0])
-                return common.ApiResult(fields.split(","), items)
+                return tushare_client.ApiResult(fields.split(","), items)
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=BatchMinuteClient()):
             self.assertEqual(download.update_intraday_by_date(self._minute_update_args("20200102", "20200102")), 0)
@@ -593,7 +594,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 if day == "2020-01-03":
                     raise RuntimeError("stk_mins failed after 5 attempts: 您今日stk_min额定额度已用完，请明日再试。")
                 items = [[code, f"{day} 09:30:00", 1.0, 1.0, 1.0, 1.0, 100.0, 100.0] for code in str(params["ts_code"]).split(",")]
-                return common.ApiResult(fields.split(","), items)
+                return tushare_client.ApiResult(fields.split(","), items)
 
         output = io.StringIO()
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=QuotaMinuteClient()), redirect_stdout(output):
@@ -1149,7 +1150,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         class ShrunkClient:
             def query(self, api_name, params=None, fields="", retries=5):
-                return common.ApiResult(
+                return tushare_client.ApiResult(
                     specs.SHARE_FLOAT_FIELDS.split(","),
                     [["000000.SZ", "20200101", "20200102", "h0", "type", 1.0, 0.1]])
 
@@ -1207,7 +1208,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         class CappedNewIpoClient:
             def query(self, api_name, params=None, fields="", retries=5):
-                return common.ApiResult(
+                return tushare_client.ApiResult(
                     specs.SHARE_FLOAT_FIELDS.split(","),
                     [["301716.SZ", day, "20200103", 1.0, 0.1, f"n{index}", "type"]
                      for index in range(common.SHARE_FLOAT_ROW_LIMIT)])
@@ -1256,7 +1257,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         class ShrunkClient:
             def query(self, api_name, params=None, fields="", retries=5):
-                return common.ApiResult(fields.split(",") if isinstance(fields, str) else list(fields),
+                return tushare_client.ApiResult(fields.split(",") if isinstance(fields, str) else list(fields),
                                         [["999999.SZ", params["ann_date"], "20200102", "hZ", "type", 1.0, 0.1]])
 
         args = argparse.Namespace(
@@ -1291,7 +1292,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 self.calls.append(dict(params))
                 code = f"3000{params['ann_date'][-2:]}.SZ"
                 rows = 1 if "ts_code" in params else common.SHARE_FLOAT_ROW_LIMIT
-                return common.ApiResult(
+                return tushare_client.ApiResult(
                     specs.SHARE_FLOAT_FIELDS.split(","),
                     [[code, params["ann_date"], "20200301", 1.0, 0.1, f"h{index}", "type"] for index in range(rows)])
 
@@ -1412,7 +1413,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         for month in ("202604", "202605"):
             path = self.raw_dir / "cn_schedule" / f"month={month}.parquet"
             frame = common.augment_macro_frame(
-                common.frame(CountingMacroClient().query("cn_schedule", {"m": month}, spec.fields)), spec
+                tushare_client.frame(CountingMacroClient().query("cn_schedule", {"m": month}, spec.fields)), spec
             )
             tushare_io.write_parquet(
                 path,
@@ -1462,7 +1463,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                            "PMI010100", *(name.upper() for name in series)]
                 row = [553, "202607", "2026-09-03 12:39:39", None, "2026-09-03 12:39:39", None,
                        49.1, *(50.0 + index for index in range(len(series)))]
-                return common.ApiResult(columns, [row])
+                return tushare_client.ApiResult(columns, [row])
 
         with redirect_stdout(io.StringIO()):
             download.download_macro_month_once(
@@ -1484,7 +1485,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # that carries no date column at all must fail the write, not land.
         class NoMonthClient:
             def query(self, api_name, params=None, fields="", retries=5):
-                return common.ApiResult(["ID", "PMI010000"], [[553, 49.8]])
+                return tushare_client.ApiResult(["ID", "PMI010000"], [[553, 49.8]])
 
         with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "returned no 'month' column"):
             download.download_macro_month_once(
@@ -1593,7 +1594,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 month = result.fields.index("month")
                 first = list(result.items[0])
                 first[month] = params["start_m"]
-                return common.ApiResult(result.fields, [first, *result.items])
+                return tushare_client.ApiResult(result.fields, [first, *result.items])
 
         client = RangeClient()
 
@@ -2061,7 +2062,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     "issue_date": "20221019",
                     "ballot": "0.03",
                 }
-                return common.ApiResult(
+                return tushare_client.ApiResult(
                     columns,
                     [[values.get(column, "") for column in columns]])
 
@@ -2270,7 +2271,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 limit = min(int(params["limit"]), 7000)  # source-side clamp
                 offset = int(params["offset"])
                 page = rows[offset:offset + limit]
-                return common.ApiResult(
+                return tushare_client.ApiResult(
                     fields=["index_code", "con_code", "trade_date", "weight"],
                     items=page)
 
@@ -2442,7 +2443,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
 
         def result(items):
-            return common.ApiResult(fields, items)
+            return tushare_client.ApiResult(fields, items)
 
         full = [
             ["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0],
@@ -2511,7 +2512,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         original_bytes = target.read_bytes()
         fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
-        partial = common.ApiResult(
+        partial = tushare_client.ApiResult(
             fields,
             [["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0]])
         args = argparse.Namespace(
@@ -2545,7 +2546,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         items = [
             ["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0],
         ]
-        result = common.ApiResult(fields, items)
+        result = tushare_client.ApiResult(fields, items)
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
             trade_date="20260713",
@@ -2684,7 +2685,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ]
 
         def result(items, tag):
-            return common.ApiResult(fields, items)
+            return tushare_client.ApiResult(fields, items)
 
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -2791,7 +2792,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def fake_query(client, api_name, params, fields_, page_limit):
             day = params["trade_date"]
             queried.append(day)
-            return common.ApiResult(fields, day_rows(day)), 1
+            return tushare_client.ApiResult(fields, day_rows(day)), 1
 
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -2841,7 +2842,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def fake_query(client, api_name, params, fields_, page_limit):
             day = params["trade_date"]
             queried.append(day)
-            return common.ApiResult(fields, day_rows(day)), 1
+            return tushare_client.ApiResult(fields, day_rows(day)), 1
 
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -3291,17 +3292,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with (
             chdir(self.root),
             patch.dict(os.environ, env, clear=True),
-            patch.object(common.requests, "post", side_effect=post),
+            patch.object(tushare_client.requests, "post", side_effect=post),
             redirect_stdout(io.StringIO()),
         ):
             self.assertEqual(download.download_text(self._text_args(["anns_d", "cctv_news", "report_rc"])), 0)
         routes = {(url.rsplit("/", 1)[0], api, token) for url, api, token in sent}
         self.assertEqual(routes, {
-            (common.OFFICIAL_TUSHARE_URL, "anns_d", "official-dummy"),
-            (common.OFFICIAL_TUSHARE_URL, "cctv_news", "official-dummy"),
+            (tushare_client.OFFICIAL_TUSHARE_URL, "anns_d", "official-dummy"),
+            (tushare_client.OFFICIAL_TUSHARE_URL, "cctv_news", "official-dummy"),
             ("https://relay.example", "report_rc", "relay-dummy"),
         })
-        self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
+        self.assertTrue(tushare_client.OFFICIAL_TUSHARE_URL.startswith("https://"))
         self.assertTrue((self.raw_dir / "anns_d" / "month=202610.parquet").is_file())
 
     def test_refused_official_token_exits_77_before_any_write_and_never_prints_it(self):
@@ -3317,8 +3318,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with (
             chdir(self.root),  # no .env here: the relay token is never needed
             patch.dict(os.environ, {"TUSHARE_TOKEN_TMP": token}, clear=True),
-            patch.object(common.requests, "post", side_effect=post),
-            patch.object(common.time, "sleep"),
+            patch.object(tushare_client.requests, "post", side_effect=post),
+            patch.object(tushare_client.time, "sleep"),
             redirect_stdout(out),
         ):
             code = download.download_text(self._text_args(["anns_d"]))
@@ -3326,7 +3327,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(sent, ["anns_d"] * 5)  # the one-row proof, retried; no page request
         self.assertFalse((self.raw_dir / "anns_d").exists())
         self.assertIn("OfficialAccessError: anns_d", out.getvalue())
-        self.assertIn(common.OFFICIAL_TOKEN_ENV, out.getvalue())
+        self.assertIn(tushare_client.OFFICIAL_TOKEN_ENV, out.getvalue())
         self.assertNotIn(token, out.getvalue())
 
     def test_missing_official_token_exits_77_naming_the_variable(self):
@@ -4765,7 +4766,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     ]
                     for i in range(40)
                 ]
-                return common.ApiResult(columns, rows)
+                return tushare_client.ApiResult(columns, rows)
 
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -4928,7 +4929,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                      for column in columns]
                     for index in range(keep)
                 ]
-                return common.ApiResult(columns, rows)
+                return tushare_client.ApiResult(columns, rows)
 
         return ShrinkingClient()
 
@@ -5121,7 +5122,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     item for item in self.rows
                     if params["start_date"] <= item[fields.split(",").index("end_date")] <= params["end_date"]
                 ]
-                return common.ApiResult(fields.split(","), served)
+                return tushare_client.ApiResult(fields.split(","), served)
 
         client = ReportPeriodClient([
             row("301575.SZ", "20260916", "20260911", 1.0),
@@ -5309,7 +5310,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 self.calls.append((api_name, dict(params or {})))
                 columns = fields.split(",")
                 row = ["20260529" if col == "trade_date" else "SSE" if col == "exchange_id" else "1.0" for col in columns]
-                return common.ApiResult(columns, [row])
+                return tushare_client.ApiResult(columns, [row])
 
         self._write_trade_cal_with_stamping_window("20260529")
         args = argparse.Namespace(
@@ -5392,7 +5393,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 self.calls.append((api_name, dict(params or {})))
                 columns = fields.split(",")
                 row = ["20260529" if col == "trade_date" else "600000.SH" if col == "ts_code" else "1.0" for col in columns]
-                return common.ApiResult(columns, [row])
+                return tushare_client.ApiResult(columns, [row])
 
         written, zero_skipped = download.download_event_trade_date_dataset(
             ShOnlyDetailClient(), self.raw_dir, specs.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], True, None,
@@ -5451,7 +5452,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     ["20260529" if col == "trade_date" else exchange if col == "exchange" else "600000.SH" for col in columns]
                     for exchange in ("SSE", "SZSE")
                 ]
-                return common.ApiResult(columns, rows)
+                return tushare_client.ApiResult(columns, rows)
 
         written, zero_skipped = download.download_event_trade_date_dataset(
             NoBseSecsClient(), self.raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260529"], True, None
@@ -5633,7 +5634,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 self.calls.append((api_name, dict(params or {})))
                 columns = keys + ["bz_sales"]
                 rows = [[f"{col}{i}" if col in keys else "2.0" for col in columns] for i in range(3)]
-                return common.ApiResult(columns, rows)
+                return tushare_client.ApiResult(columns, rows)
 
         ledger = self.root / "fundamental_revision_events.jsonl"
         with redirect_stdout(io.StringIO()):
@@ -5661,7 +5662,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                     ["20260601" if col == "trade_date" else code if col == "ts_code" else exch if col == "exchange" else "x" for col in columns]
                     for code, exch in (("600000.SH", "SSE"), ("000001.SZ", "SZSE"), ("830000.BJ", "BSE"))
                 ]
-                return common.ApiResult(columns, rows)
+                return tushare_client.ApiResult(columns, rows)
 
         client = ThreeExchangeSecsClient()
         written, zero_skipped = download.download_event_trade_date_dataset(
@@ -5727,7 +5728,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 self.calls.append((api_name, dict(params or {})))
                 columns = fields.split(",") if fields else ["trade_date", "ts_code", "limit"]
                 row = ["20200102" if col == "trade_date" else "000001.SZ" if col == "ts_code" else "U" if col == "limit" else "x" for col in columns]
-                return common.ApiResult(columns, [row])
+                return tushare_client.ApiResult(columns, [row])
 
         client = LimitClient()
         with redirect_stdout(io.StringIO()):
@@ -5761,7 +5762,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             class RowClient(EmptyTradeDateClient):
                 def query(self, api_name, params=None, fields="", retries=5, answer=row, names=columns):
                     self.calls.append((api_name, dict(params or {})))
-                    return common.ApiResult(names, [answer])
+                    return tushare_client.ApiResult(names, [answer])
 
             client = RowClient()
             with redirect_stdout(io.StringIO()):
@@ -5780,7 +5781,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             def query(self, api_name, params=None, fields="", retries=5):
                 columns = fields.split(",")
                 row = ["20200102" if col == "trade_date" else "000001.SZ" if col == "ts_code" else "U" for col in columns]
-                return common.ApiResult(columns, [row])
+                return tushare_client.ApiResult(columns, [row])
 
         def run() -> str:
             out = io.StringIO()
@@ -5804,7 +5805,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             def query(self, api_name, params=None, fields="", retries=5):
                 self.calls.append((api_name, dict(params or {})))
                 columns = fields.split(",") if isinstance(fields, str) else list(fields)
-                return common.ApiResult(columns, [["000001.SZ", "20200101", "20200102", 1.0, 0.1, "h1", "type"]])
+                return tushare_client.ApiResult(columns, [["000001.SZ", "20200101", "20200102", 1.0, 0.1, "h1", "type"]])
 
         client = FloatClient()
         with redirect_stdout(io.StringIO()):
@@ -5835,7 +5836,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         class PeriodClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
                 self.calls.append((api_name, dict(params or {})))
-                return common.ApiResult(keys, [answer])
+                return tushare_client.ApiResult(keys, [answer])
 
         client = PeriodClient()
         with redirect_stdout(io.StringIO()):
@@ -5886,9 +5887,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 columns = fields.split(",")
                 exchange = (params or {}).get("exchange", "")
                 if exchange != "CFFEX":
-                    return common.ApiResult(columns, [])
+                    return tushare_client.ApiResult(columns, [])
                 row = ["IF2001.CFX" if col == "ts_code" else "20191018" if col == "list_date" else exchange if col == "exchange" else "x" for col in columns]
-                return common.ApiResult(columns, [row])
+                return tushare_client.ApiResult(columns, [row])
 
         client = RegistryClient()
         spec = specs.MACRO_SPECS["fut_basic"]
@@ -6013,7 +6014,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                         ["20200102" if col == "trade_date" else exchange if col == "exchange_id" else 1.0 for col in columns]
                         for exchange in ("SSE", "SZSE")
                     ]
-                    return common.ApiResult(columns, rows)
+                    return tushare_client.ApiResult(columns, rows)
                 return super().query(api_name, params, fields, retries)
 
         args = argparse.Namespace(
@@ -6047,7 +6048,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                         ["20200102" if col == "trade_date" else exchange if col == "exchange_id" else 1.0 for col in columns]
                         for exchange in ("SSE", "SZSE")
                     ]
-                    return common.ApiResult(columns, rows)
+                    return tushare_client.ApiResult(columns, rows)
                 return super().query(api_name, params, fields, retries)
 
         args = argparse.Namespace(
@@ -6739,7 +6740,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 self.rows = rows
 
             def query(self, api_name, params=None, fields="", retries=5):
-                return common.ApiResult(fields.split(","), list(self.rows))
+                return tushare_client.ApiResult(fields.split(","), list(self.rows))
 
         with redirect_stdout(io.StringIO()):
             download.download_text_day(DayClient([]), self.raw_dir, spec, ["20260809"], True)
@@ -7641,17 +7642,17 @@ class TuShareClientTest(unittest.TestCase):
         env = {"TUSHARE_TOKEN": "relay-dummy", "TUSHARE_TOKEN_TMP": "official-dummy",
                "TUSHARE_RELAY_URL": "https://relay.example"}
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, env, clear=True):
-            client = common.official_client(Path(tmp), 0, 5)
-        self.assertEqual(client.endpoint, common.OFFICIAL_TUSHARE_URL)
+            client = tushare_client.official_client(Path(tmp), 0, 5)
+        self.assertEqual(client.endpoint, tushare_client.OFFICIAL_TUSHARE_URL)
         self.assertEqual(client._token, "official-dummy")
-        self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
+        self.assertTrue(tushare_client.OFFICIAL_TUSHARE_URL.startswith("https://"))
         self.assertEqual(
             [n for n, s in specs.TEXT_SPECS.items() if not s.official], ["report_rc"]
         )
 
     def test_a_request_carries_the_sdk_payload_to_the_pinned_endpoint(self) -> None:
         _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"], "items": [["000001.SZ", 10.5]]}})]
-        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        client = tushare_client.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
         result = client.query("daily", {"trade_date": "20261023"}, "ts_code,close")
         self.assertEqual((result.fields, result.items), (["ts_code", "close"], [["000001.SZ", 10.5]]))
         path, payload = _VendorStub.requests[0]
@@ -7667,8 +7668,8 @@ class TuShareClientTest(unittest.TestCase):
         # The SDK answered any status >= 400 with an empty frame, which a
         # writer cannot tell from a genuinely empty partition.
         _VendorStub.answers = [(502, {"error": "bad gateway"}), (500, {"error": "boom"})]
-        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
-        with patch.object(common.time, "sleep"), self.assertRaisesRegex(RuntimeError, "daily failed after 2 attempts: daily answered HTTP 500"):
+        client = tushare_client.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        with patch.object(tushare_client.time, "sleep"), self.assertRaisesRegex(RuntimeError, "daily failed after 2 attempts: daily answered HTTP 500"):
             client.query("daily", {"trade_date": "20261023"}, "ts_code,close", retries=2)
         self.assertEqual(len(_VendorStub.requests), 2)
 
@@ -7677,8 +7678,8 @@ class TuShareClientTest(unittest.TestCase):
             (200, {"code": 0, "msg": "", "data": None}),
             (200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"]}}),
         ]
-        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
-        with patch.object(common.time, "sleep"), self.assertRaisesRegex(RuntimeError, "daily answered code 0 without a data block"):
+        client = tushare_client.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        with patch.object(tushare_client.time, "sleep"), self.assertRaisesRegex(RuntimeError, "daily answered code 0 without a data block"):
             client.query("daily", {"trade_date": "20261023"}, "ts_code,close", retries=2)
         # A genuinely empty answer still carries its fields and an empty list.
         _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code", "close"], "items": []}})]
@@ -7686,7 +7687,7 @@ class TuShareClientTest(unittest.TestCase):
 
     def test_an_answer_without_a_requested_field_is_defective(self) -> None:
         _VendorStub.answers = [(200, {"code": 0, "msg": "", "data": {"fields": ["ts_code"], "items": [["000001.SZ"]]}})]
-        client = common.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
+        client = tushare_client.TuShareClient("secret", min_interval=0, timeout=5, endpoint=self.endpoint)
         with self.assertRaisesRegex(versions.DefectiveAnswer, r"without requested fields \['close'\]"):
             client.query("daily", {"trade_date": "20261023"}, "ts_code,close")
         # Casing alone is not a defect: the macro tier maps vendor casing.
@@ -7697,17 +7698,17 @@ class TuShareClientTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {}, clear=True):
             env_file = Path(tmp, ".env")
             env_file.write_text("TUSHARE_TOKEN_TMP=official-dummy\nTUSHARE_TOKEN=relay-dummy\n", encoding="utf-8")
-            self.assertEqual(common.load_token(Path(tmp)), "relay-dummy")
-            self.assertEqual(common.load_token(Path(tmp), common.OFFICIAL_TOKEN_ENV), "official-dummy")
+            self.assertEqual(tushare_client.load_token(Path(tmp)), "relay-dummy")
+            self.assertEqual(tushare_client.load_token(Path(tmp), tushare_client.OFFICIAL_TOKEN_ENV), "official-dummy")
             env_file.write_text("TUSHARE_TOKEN=relay-dummy\n", encoding="utf-8")
             with self.assertRaisesRegex(RuntimeError, "^TUSHARE_TOKEN_TMP is not set") as caught:
-                common.load_token(Path(tmp), common.OFFICIAL_TOKEN_ENV)
+                tushare_client.load_token(Path(tmp), tushare_client.OFFICIAL_TOKEN_ENV)
             self.assertNotIn("relay-dummy", str(caught.exception))
 
     def test_token_never_reaches_an_error_or_its_traceback(self) -> None:
         token = "official-dummy-5f3a"
         _VendorStub.answers = [(500, {"msg": f"vendor echoed {token} for anns_d"})]
-        client = common.TuShareClient(token, min_interval=0, timeout=5, endpoint=self.endpoint)
+        client = tushare_client.TuShareClient(token, min_interval=0, timeout=5, endpoint=self.endpoint)
         with self.assertRaises(RuntimeError) as caught:
             client.query("anns_d", {"ann_date": "20230301"}, retries=1)
         rendered = "".join(traceback.format_exception(caught.exception))
@@ -7716,14 +7717,14 @@ class TuShareClientTest(unittest.TestCase):
 
     def test_the_relay_is_the_default_endpoint_and_the_environment_overrides_it(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertEqual(common.TuShareClient("secret", timeout=17).endpoint, common.DEFAULT_TUSHARE_RELAY_URL)
+            self.assertEqual(tushare_client.TuShareClient("secret", timeout=17).endpoint, tushare_client.DEFAULT_TUSHARE_RELAY_URL)
         with patch.dict(os.environ, {"TUSHARE_RELAY_URL": "https://relay.example/"}):
-            self.assertEqual(common.TuShareClient("secret").endpoint, "https://relay.example")
+            self.assertEqual(tushare_client.TuShareClient("secret").endpoint, "https://relay.example")
 
     def test_timeout_must_be_positive_integer(self) -> None:
         for timeout in (0, -1, True, 1.5):
             with self.subTest(timeout=timeout), self.assertRaisesRegex(ValueError, "positive integer"):
-                common.TuShareClient("secret", timeout=timeout)  # type: ignore[arg-type]
+                tushare_client.TuShareClient("secret", timeout=timeout)  # type: ignore[arg-type]
 
     def test_download_cli_keeps_real_sdk_timeout_option(self) -> None:
         args = download.build_parser().parse_args(["download", "--tier", "daily", "--timeout-seconds", "23"])
