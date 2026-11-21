@@ -4,7 +4,9 @@ The mock `instance` (the shared lifecycle entry) and the mock `dev` (whose
 copy, put, bootstrap and report primitives verify their own results) record
 their arguments and the instance they were pointed at, and answer from the
 environment; both are tested for real in ~/zgca-compute, and the workflow
-reaches the API through those two alone. The remote script's steps run for real against a temporary layout (a root with its
+reaches the API through those two alone. The mock copy moves nothing or,
+given a stand-in of the instance's file system, is a real rsync verified by a
+dry run as `dev copy` verifies. The remote script's steps run for real against a temporary layout (a root with its
 venv inside, a local directory beside it), with stubs for the venv's python,
 docker, tmux and sleep where a step would reach them.
 """
@@ -67,7 +69,18 @@ if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir>
     if step == "image-runtime":  # the runtime an image on the instance bakes
         print(os.environ.get("MOCK_REMOTE_RUNTIME", ""))
     sys.exit(int(os.environ.get("MOCK_STEP_EXIT_" + step.replace("-", "_").upper(), "0")))
-sys.exit(int(os.environ.get("MOCK_DEV_EXIT_" + args[0].upper(), "0")))
+if args[:1] == ["copy"] and os.environ.get("MOCK_RSYNC"):  # a real rsync, dev:<path> being MOCK_RSYNC<path>, verified as dev copy verifies
+    import subprocess
+    paths = [os.environ["MOCK_RSYNC"] + arg[4:] if arg.startswith("dev:") else arg for arg in args[1:]]
+    if os.environ.get("MOCK_RSYNC_CUT"):  # the link drops once rsync is past artifacts/: hitl/ never arrives
+        subprocess.run(["rsync", "--exclude=/hitl/", *paths], check=True)
+        sys.exit(12)
+    subprocess.run(["rsync", *paths], check=True)
+    sys.exit(1 if subprocess.run(["rsync", "--dry-run", "--itemize-changes", *paths], capture_output=True, check=True).stdout else 0)
+code = int(os.environ.get("MOCK_DEV_EXIT_" + args[0].upper(), "0"))
+if args[:1] == ["copy"] and not code and args[-1].endswith("/") and not args[-1].startswith("dev:"):
+    os.makedirs(args[-1], exist_ok=True)  # it moves nothing, yet leaves the directory it copied into, as rsync does
+sys.exit(code)
 """
 # This host's Docker: `run` is contract_fingerprint.read_image_contract's one
 # offline container, answering the runtime the image bakes; the image is logged.
@@ -832,8 +845,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 dev = self.calls("dev")
                 self.assertEqual([self.step(call) for call in dev], ["experiment-state", "copy", "copy"])
                 self.assertEqual(self.remote(dev[0]), ["experiment-state", experiment])
+                # A first copy is made in the state directory and enters experiments/ once verified; a copy over one is made in place.
+                landing = self.repo / ".runtime" / "zgca" / zgca.INCOMING_DIR_NAME if experiment == "experiment_new" else self.repo / "experiments"
                 pull = dev[1]["args"]
-                self.assertEqual(pull[-2:], [f"dev:{zgca.REMOTE_ROOT}/experiments/{experiment}/", f"{self.repo / 'experiments' / experiment}/"])
+                self.assertEqual(pull[-2:], [f"dev:{zgca.REMOTE_ROOT}/experiments/{experiment}/", f"{landing / experiment}/"])
+                self.assertTrue((self.repo / "experiments" / experiment).is_dir())
+                self.assertFalse((self.repo / ".runtime" / "zgca" / zgca.INCOMING_DIR_NAME / experiment).exists())
                 self.assertEqual(pull[pull.index("--exclude") + 1], "/pit_views/")
                 self.assertNotIn("--delete", pull)
                 self.assertEqual(dev[2]["args"][-2:], [f"dev:{zgca.REMOTE_ROOT}/logs/workers/{experiment}.log", f"{self.repo / 'logs' / 'workers' / experiment}.log"])
@@ -952,10 +969,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
 
         code, err = self.run_main("sync-rounds", round_file, **env, MOCK_LOCAL_RUNTIME="b" * 64)
         self.assertEqual(code, 1, err)
-        local = self.repo / "experiments"
+        local, incoming = self.repo / "experiments", self.repo / ".runtime" / "zgca" / zgca.INCOMING_DIR_NAME
         self.assertEqual(ran(), [
             ["experiment-state", "exp_broken"],
-            ["experiment-state", "exp_done"], [f"{local}/exp_done/"], [f"{self.repo}/logs/workers/exp_done.log"],
+            ["experiment-state", "exp_done"], [f"{incoming}/exp_done/"], [f"{self.repo}/logs/workers/exp_done.log"],
             ["experiment-state", "exp_live"], ["experiment-state", "exp_gone"],
             ["experiment-state", "exp_image"], [f"{local}/exp_image/"], [f"{self.repo}/logs/workers/exp_image.log"],
             ["image-runtime", image],
@@ -1020,7 +1037,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertTrue(self.out.splitlines()[-1].endswith(": 3 experiments: 2 synced, 0 untagged, 0 running, 0 interrupted, 1 pending, 0 failed"))
         self.assertEqual([self.marker("exp_one"), self.marker("exp_two")], ["synced\n", "synced\n"])
 
-        # A sync by hand that dies in its copy takes the marker with it.
+        # A sync by hand that dies in its copy takes the marker with it (the mock copy moved nothing: the records it brought stand here).
+        (self.repo / "experiments" / "exp_one" / "hitl").mkdir()
+        (self.repo / "experiments" / "exp_one" / "hitl" / "params.json").write_text(
+            json.dumps({"experiments_root": f"{zgca.REMOTE_ROOT}/experiments"}), encoding="utf-8")
         code, err = self.run_main("sync", "exp_one", **env, MOCK_DEV_EXIT_COPY="1")
         self.assertEqual(code, 1)
         self.assertIsNone(self.marker("exp_one"))
@@ -1041,6 +1061,84 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(len(self.out.splitlines()), 1)
                 self.assertIn(": 3 experiments: 2 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed, 1 not checked "
                               f"({reason}", self.out)
+
+    def test_a_copy_cut_short_is_continued_by_the_next_pass_and_a_directory_of_another_origin_is_still_refused(self) -> None:
+        """Real rsync copies from a stand-in of the instance's file system, cut as a dropped link cuts them:
+        rsync passes artifacts/ before hitl/, so the bulk arrives and hitl/params.json does not. A first
+        copy cut short waits in the state directory, unmarked, and nothing is in experiments/; a directory
+        that appears there meanwhile under the same id, of unknown origin or a local experiment, is refused
+        and neither it nor the waiting copy is touched; the next pass continues the copy, verifies it and
+        renames it into place. A copy over an earlier one, cut short in place, keeps that copy's
+        hitl/params.json and is continued by the next pass too."""
+        root, round_file = self._sync_round({"exp_cut": {"state": "failed", "pid": None}})
+        remote = root / "experiments" / "exp_cut"
+        (remote / "hitl" / "params.json").write_text(json.dumps({"experiments_root": f"{zgca.REMOTE_ROOT}/experiments"}), encoding="utf-8")
+        for name, size in (("artifacts/run_001/workspace/model.bin", 1 << 20), ("artifacts/run_001/result.json", 100), ("pit_views/view.parquet", 100)):
+            (remote / name).parent.mkdir(parents=True, exist_ok=True)
+            (remote / name).write_bytes(os.urandom(size))
+        (root / "logs" / "workers").mkdir(parents=True)
+        (root / "logs" / "workers" / "exp_cut.log").write_text("worker log\n", encoding="utf-8")
+        # The instance's file system, whose repository root is the instance root above.
+        fs = Path(self.temp.name) / "instance_fs"
+        (fs / zgca.REMOTE_ROOT.lstrip("/")).parent.mkdir(parents=True)
+        (fs / zgca.REMOTE_ROOT.lstrip("/")).symlink_to(root)
+        env = {"MOCK_REMOTE_ROOT": str(root), "MOCK_RSYNC": str(fs)}
+        local = self.repo / "experiments" / "exp_cut"
+        waiting = self.repo / ".runtime" / "zgca" / zgca.INCOMING_DIR_NAME / "exp_cut"
+
+        def tree(path: Path) -> dict[str, bytes]:
+            return {file.relative_to(path).as_posix(): file.read_bytes() for file in sorted(path.rglob("*")) if file.is_file()}
+
+        def copied() -> dict[str, bytes]:
+            return {name: data for name, data in tree(remote).items() if not name.startswith("pit_views/")}
+
+        code, err = self.run_main("sync-rounds", round_file, **env, MOCK_RSYNC_CUT="1")
+        self.assertEqual(code, 1, err)
+        self.assertIn("exp_cut: failed, retried next pass: dev copy failed (exit 12)", self.out)
+        self.assertFalse(local.exists())
+        self.assertEqual(sorted(tree(waiting)), ["artifacts/run_001/result.json", "artifacts/run_001/workspace/model.bin"])
+        self.assertIsNone(self.marker("exp_cut"))
+
+        for origin, params in (("unknown", None), ("this host", {"experiments_root": str(self.repo / "experiments")})):
+            with self.subTest(origin=origin):
+                (local / "hitl").mkdir(parents=True)
+                if params:
+                    (local / "hitl" / "params.json").write_text(json.dumps(params), encoding="utf-8")
+                (local / "notes.txt").write_text("not from the instance\n", encoding="utf-8")
+                foreign, kept = tree(local), tree(waiting)
+                self.log.unlink()
+                code, err = self.run_main("sync-rounds", round_file, **env)
+                self.assertEqual(code, 1)
+                self.assertRegex(self.out, r"exp_cut: failed, retried next pass: experiments/exp_cut .*; refusing to overwrite it")
+                self.assertFalse(self.calls("dev"))
+                self.assertEqual((tree(local), tree(waiting)), (foreign, kept))
+                shutil.rmtree(local)
+
+        self.log.unlink()
+        code, err = self.run_main("sync-rounds", round_file, **env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual([self.step(call) for call in self.calls("dev")], ["experiment-state", "copy", "copy"])
+        self.assertEqual(tree(local), copied())
+        self.assertFalse(waiting.exists())
+        self.assertEqual((self.repo / "logs" / "workers" / "exp_cut.log").read_text(encoding="utf-8"), "worker log\n")
+        self.assertEqual(self.marker("exp_cut"), "synced\n")
+
+        # Resumed and ended again: a sync by hand cut short in place keeps the copy's params.json, and the next pass finishes it.
+        (remote / "artifacts" / "run_002").mkdir()
+        (remote / "artifacts" / "run_002" / "result.json").write_bytes(os.urandom(100))
+        (remote / "hitl" / "status.json").write_text(json.dumps({"state": "failed", "pid": None, "attempts": 2}), encoding="utf-8")
+        code, err = self.run_main("sync", "exp_cut", **env, MOCK_RSYNC_CUT="1")
+        self.assertEqual(code, 1)
+        self.assertIn("dev copy failed (exit 12)", err)
+        self.assertIsNone(self.marker("exp_cut"))
+        self.assertIn("artifacts/run_002/result.json", tree(local))
+        self.assertNotEqual(tree(local), copied())
+        self.assertEqual((local / "hitl" / "params.json").read_bytes(), (remote / "hitl" / "params.json").read_bytes())
+        code, err = self.run_main("sync-rounds", round_file, **env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(tree(local), copied())
+        self.assertFalse(waiting.exists())
+        self.assertEqual(self.marker("exp_cut"), "synced\n")
 
     def test_the_experiment_state_and_idle_steps_refuse_while_a_worker_runs(self) -> None:
         """The console's own notion of a running experiment decides, run for real against a temporary root."""

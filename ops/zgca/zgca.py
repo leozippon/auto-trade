@@ -128,6 +128,16 @@ DEPLOYED_COMMIT_NAME = "deployed_commit"
 # copied again when it ends; sync-rounds skips an experiment whose marker says
 # `released`, or `synced` with a copy that is not of a completed experiment.
 SYNCED_DIR_NAME = "synced"
+# Where the first copy of an experiment is made, in the state directory, under
+# its id: it enters experiments/ by one rename once verified. rsync copies an
+# experiment's artifacts/ before its hitl/, so a first copy cut short there (a
+# dropped link, the sync cron's time limit) would leave a directory whose
+# hitl/params.json has not arrived, which sync_target cannot tell from one of
+# unknown origin and refuses; cut short here it is continued by the next sync.
+# A copy over an earlier one is made in place, where that copy's params.json
+# stays throughout: without --delete rsync removes nothing, and it replaces a
+# file by renaming a finished temporary over it.
+INCOMING_DIR_NAME = "incoming"
 # The experiment states (autotrade.pipelines.hitl_state.ExperimentState) sync
 # and resume decide by, named here because importing that module needs numpy,
 # which neither otherwise does: only a copy of a completed experiment is
@@ -602,11 +612,21 @@ class Workflow:
             self.sync_marker(experiment_id).write_text("released\n", encoding="utf-8")
 
     def copy_back(self, experiment_id: str, local: Path) -> None:
-        """Copy the experiment without pit_views and its worker log; the marker is gone meanwhile and says `copied` once both copies are verified."""
+        """Copy the experiment without pit_views and its worker log; the marker is gone meanwhile and says `copied` once both copies are verified.
+
+        A first copy is made in the incoming directory and renamed into place once verified (INCOMING_DIR_NAME).
+        """
         marker = self.sync_marker(experiment_id)
         marker.unlink(missing_ok=True)
-        local.parent.mkdir(parents=True, exist_ok=True)
-        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{REMOTE_ROOT}/experiments/{experiment_id}/", f"{local}/")
+        target = local if local.exists() else self.state_dir / INCOMING_DIR_NAME / experiment_id
+        target.parent.mkdir(parents=True, exist_ok=True)
+        self.dev("copy", *PRESERVE, "--exclude", "/pit_views/", f"dev:{REMOTE_ROOT}/experiments/{experiment_id}/", f"{target}/")
+        if target != local:
+            local.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.rename(local)
+            except OSError as exc:
+                raise WorkflowError(f"the verified copy in {target} cannot enter experiments/{experiment_id}: {exc}") from exc
         logs = self.repo_root / "logs" / "workers"
         logs.mkdir(parents=True, exist_ok=True)
         self.dev("copy", *PRESERVE, f"dev:{REMOTE_ROOT}/logs/workers/{experiment_id}.log", f"{logs / experiment_id}.log")
