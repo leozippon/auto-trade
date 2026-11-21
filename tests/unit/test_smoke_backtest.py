@@ -191,11 +191,13 @@ def test_smoke_runs_the_real_replay_over_a_short_window(tmp_path: Path) -> None:
     # The report is a projection: no echo of the request, no constant prose,
     # no raw host instrumentation.
     assert list(value) == [
-        "path", "status", "start", "replayed_trade_days", "orders", "reject_counts",
-        "seconds_per_day", "window_build_seconds", "asof_date_ranges",
+        "path", "status", "start", "last_day", "replayed_trade_days", "orders",
+        "reject_counts", "seconds_per_day", "window_build_seconds", "asof_date_ranges",
     ]
-    # The replay really was truncated, not the whole 12-day window.
+    # The replay really was truncated, not the whole 12-day window, and says
+    # which day it replayed to.
     assert value["replayed_trade_days"] == 3
+    assert value["last_day"] == DAYS[2]
     assert all(set(counts) == {"filled", "rejected"} for counts in value["orders"].values())
     assert sum(sum(counts.values()) for counts in value["orders"].values()) >= 1
     # Per-day timing is the number the 30 s per-decision cap is judged against,
@@ -368,6 +370,7 @@ def test_start_probes_a_later_window_inside_the_research_period(tmp_path: Path) 
     assert value["status"] == "ok", value
     assert value["start"] == DAYS[10]
     assert value["replayed_trade_days"] == 2
+    assert value["last_day"] == DAYS[11]
     # The default window opens at the start of the research period.
     assert tool.invoke({"days": 2}).value["start"] == tool.request.full_span.start
 

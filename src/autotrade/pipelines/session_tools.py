@@ -489,9 +489,15 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         )
         lifecycle = summary.get("order_lifecycle")
         lifecycle = lifecycle if isinstance(lifecycle, Mapping) else {}
+        record = _smoke_record(result_dir)
+        curve = record.get("equity_curve")
+        pit = record.get("pit")
+        pit = pit if isinstance(pit, Mapping) else {}
         report: dict[str, object] = {
             "status": "ok",
             "start": start or self.request.full_span.start,
+            # The last day replayed, the one asof_date_ranges is read on.
+            "last_day": str(curve[-1]["trade_date"]) if isinstance(curve, list) and curve else None,
             "replayed_trade_days": replayed,
             "orders": {
                 side: {key: counts.get(key) for key in ("filled", "rejected")}
@@ -505,7 +511,7 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
                 if "data_view" in phases
                 else {}
             ),
-            "asof_date_ranges": _smoke_pit(result_dir).get("asof_date_ranges") or {},
+            "asof_date_ranges": pit.get("asof_date_ranges") or {},
             # What the rehearsal cost its container, so the Agent sizes a
             # batch on a measurement of the real replay container instead of
             # on the session container it can see from the inside.
@@ -514,16 +520,14 @@ class SmokeBacktestTool(SessionTimeBudgetAware):
         return report
 
 
-def _smoke_pit(result_dir: Path) -> dict[str, object]:
-    """The replay record's ``pit`` block: the domain directory names the
-    replay exposed under asof_dir and, for a smoke run, each one's date range
-    on its last day (``pit_backend.asof_date_ranges``)."""
+def _smoke_record(result_dir: Path) -> dict[str, object]:
+    """The smoke run's replay record: its equity curve, one row per replayed
+    day, and the ``pit`` block with each as-of domain's date range on the
+    last day (``pit_backend.asof_date_ranges``). Empty when none was written."""
     try:
-        record = read_json_object(result_dir / "result.json")
+        return read_json_object(result_dir / "result.json")
     except (OSError, ValueError):
         return {}
-    pit = record.get("pit")
-    return dict(pit) if isinstance(pit, dict) else {}
 
 
 # One Validation's full replay record is attached to its step-tree node, and
