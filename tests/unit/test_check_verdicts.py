@@ -3,8 +3,9 @@ experiment the real worker ran to its readout.
 
 The run over the real experiments reads ``experiments/`` and is made by hand (the
 script's docstring says how); here it reads an experiment small enough for the unit
-suite: every reading the experiment stores reproduces, and a tampered one is named
-and fails the run.
+suite: every reading the experiment stores reproduces, a float that differs only in
+its last bits still does, and a tampered one is named with both values and fails the
+run.
 """
 
 from __future__ import annotations
@@ -112,23 +113,50 @@ def test_a_moved_experiment_is_judged_from_where_it_now_lives(experiment: Path, 
         check_experiment(_copy(experiment, tmp_path / "elsewhere" / "experiments", elsewhere))
 
 
-def test_a_tampered_reading_is_named_and_fails_the_run(experiment: Path, tmp_path: Path) -> None:
-    """One bit of a stored slice, of the readout's record and of a
-    registration's verdict are enough."""
+def _move_floats(records: list[dict], by) -> None:
+    """Move the stored forward slice's lower bound and the readout's residual IR with ``by``."""
+
+    forward = _record(records, "forward")
+    for block, key in (
+        (forward["slices"]["forward"], "lower_bound"),
+        (forward["readout"]["record"], "residual_information_ratio"),
+    ):
+        block[key] = by(block[key])
+
+
+def test_a_float_that_differs_only_in_its_last_bits_reproduces(experiment: Path, tmp_path: Path) -> None:
+    """A reading recorded on another machine differs from today's in the last
+    bits of its floats (at most 139 ulps on the real experiments)."""
+
+    def last_bits(value: float) -> float:
+        for _ in range(200):
+            value = math.nextafter(value, 0.0)
+        return value
+
+    copy = _copy(experiment, tmp_path / "experiments", lambda records: _move_floats(records, last_bits))
+    assert [item.differences for item in check_experiment(copy)] == [[], [], []]
+    assert main(["--experiments", str(copy.parent)]) == 0
+
+
+def test_a_tampered_reading_is_named_with_both_values_and_fails_the_run(
+    experiment: Path, tmp_path: Path
+) -> None:
+    """A float moved by a millionth of itself, and a registration's verdict,
+    are enough."""
 
     def tampered(records: list[dict]) -> None:
         _record(records, "research_session")["registration"]["passed"] = False
-        forward = _record(records, "forward")
-        block = forward["slices"]["forward"]
-        block["lower_bound"] = math.nextafter(block["lower_bound"], 0.0)
-        record = forward["readout"]["record"]
-        record["residual_information_ratio"] = math.nextafter(record["residual_information_ratio"], 0.0)
+        _move_floats(records, lambda value: value * (1 - 1e-6))
 
     copy = _copy(experiment, tmp_path / "experiments", tampered)
+    records = [json.loads(line) for line in (experiment / LEDGER).read_text(encoding="utf-8").splitlines()]
+    forward = _record(records, "forward")
+    bound = forward["slices"]["forward"]["lower_bound"]
+    ratio = forward["readout"]["record"]["residual_information_ratio"]
     judgements = {item.reading: item.differences for item in check_experiment(copy)}
     assert judgements == {
-        "check_registration": ["passed"],
-        "forward": ["forward.lower_bound"],
-        "readout": ["record.residual_information_ratio"],
+        "check_registration": [("passed", False, True)],
+        "forward": [("forward.lower_bound", bound * (1 - 1e-6), bound)],
+        "readout": [("record.residual_information_ratio", ratio * (1 - 1e-6), ratio)],
     }
     assert main(["--experiments", str(copy.parent)]) == 1

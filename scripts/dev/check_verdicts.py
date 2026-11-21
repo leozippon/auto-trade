@@ -5,7 +5,8 @@ The consistency check of the reading code (``pipelines/verdict.py``,
 ``validation_record.py``, ``config.py``, ``experiment.py``). An experiment keeps everything its readings were
 read from -- ``hitl/params.json``, the ledger's Steps with their style
 sidecars and revisions, the replays' results -- so each reading is judged again
-by this code, CPU only, and compared with the ledger key for key:
+by this code, CPU only, and compared with the ledger key for key (floats within
+``REL_TOL``):
 
 - a research session's final registration (``experiment.check_registration``),
 - a forward record's slices, where its forward replay completed
@@ -17,7 +18,8 @@ whose ``experiments/`` holds the experiments, or with ``--experiments``:
 
     python scripts/dev/check_verdicts.py
 
-Exit status 1 on any difference. Nothing is written.
+Exit status 1 on any difference, each printed with its stored and today's
+value. Nothing is written.
 """
 
 from __future__ import annotations
@@ -50,14 +52,31 @@ from autotrade.pipelines.hitl_state import HITL_DIR_NAME, PARAMS_NAME
 from autotrade.pipelines.ledger import ExperimentLedger, recorded_path
 from autotrade.pipelines.validation_record import readout
 
+# Floats are equal within this relative tolerance. A reading recorded on the
+# remote GPU instance and judged again on this host differs in the last bits
+# of its floats: at most 1.6e-14 relative (139 ulps) over the eight such
+# experiments of 2026-11, while those recorded on this host reproduce bit for
+# bit. A real change of a reading is many orders of magnitude larger.
+REL_TOL = 1e-12
+
+
+class _Absent:
+    """The side of a key that only the other side holds."""
+
+    def __repr__(self) -> str:
+        return "absent"
+
+
+_ABSENT = _Absent()
+
 
 class Judgement(NamedTuple):
-    """One stored reading judged again: where it is, and the paths at which
+    """One stored reading judged again: where it is, and the leaves at which
     the stored reading and today's differ (none when it reproduces)."""
 
     experiment: str
     reading: str
-    differences: list[str]
+    differences: list[tuple[str, object, object]]
 
 
 def current_experiments(root: Path) -> list[Path]:
@@ -72,9 +91,11 @@ def _stored(value: object) -> Any:
     return json.loads(json.dumps(value))
 
 
-def differences(stored: object, now: object, path: str = "") -> list[str]:
-    """The paths at which ``now`` does not hold ``stored``: a key on one side
-    only, a value of another type, or another value (NaN equals NaN)."""
+def differences(stored: object, now: object, path: str = "") -> list[tuple[str, object, object]]:
+    """The leaves at which ``now`` does not hold ``stored``, each as ``(path,
+    stored, now)``: a key on one side only (``absent`` on the other), a value of
+    another type, or another value. Floats are equal within ``REL_TOL`` and NaN
+    equals NaN; every other value must be equal exactly."""
 
     def at(key: object) -> str:
         return f"{path}.{key}" if path else str(key)
@@ -83,11 +104,7 @@ def differences(stored: object, now: object, path: str = "") -> list[str]:
         return [
             item
             for key in sorted({*stored, *now}, key=str)
-            for item in (
-                differences(stored[key], now[key], at(key))
-                if key in stored and key in now
-                else [at(key)]
-            )
+            for item in differences(stored.get(key, _ABSENT), now.get(key, _ABSENT), at(key))
         ]
     if isinstance(stored, list) and isinstance(now, list) and len(stored) == len(now):
         return [
@@ -95,8 +112,11 @@ def differences(stored: object, now: object, path: str = "") -> list[str]:
             for index, pair in enumerate(zip(stored, now, strict=True))
             for item in differences(*pair, f"{path}[{index}]")
         ]
-    nan = isinstance(stored, float) and isinstance(now, float) and math.isnan(stored) and math.isnan(now)
-    return [] if type(stored) is type(now) and (stored == now or nan) else [path or "the reading"]
+    if isinstance(stored, float) and isinstance(now, float):
+        same = math.isclose(stored, now, rel_tol=REL_TOL) or (math.isnan(stored) and math.isnan(now))
+    else:
+        same = type(stored) is type(now) and stored == now
+    return [] if same else [(path or "the reading", stored, now)]
 
 
 def _replayed(
@@ -181,7 +201,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         for item in judgements:
             count += 1
             failed += bool(item.differences)
-            detail = f": differs at {item.differences[:20]}" if item.differences else ""
+            detail = "".join(
+                f"\n    {path}: stored {stored!r}, now {now!r}" for path, stored, now in item.differences[:20]
+            )
             print(f"{'different' if item.differences else 'identical':<10} {item.reading:<27} {item.experiment}{detail}")
     print(
         f"{len(experiments)} experiments: "
