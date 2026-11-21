@@ -16,14 +16,8 @@ import pandas as pd
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.stats import (
-    PhaseTimer,
-    attach_cost_sensitivity,
-    attach_sub_window_benchmark,
-    finalize_summary_timing,
-)
+from autotrade.environment.replay.stats import PhaseTimer
 from autotrade.environment.replay.style import (
-    benchmark_summary_block,
     replay_style_analysis,
     warmup_bars,
     write_style_rollup,
@@ -45,7 +39,7 @@ from .config import (
     StepResult,
     StrategyExperimentConfig,
 )
-from .experiment import DailyStrategyPipeline
+from .replay_backend import DailyStrategyPipeline, checked_strategy, finished_summary
 from .skills import assert_skills_absent_from_formal
 
 
@@ -138,16 +132,7 @@ class LocalDailyEvaluationBackend:
         replay path over a short window, never a short window dressed up as a
         full Validation, and a test replays its span up to the test horizon.
         """
-        if max_days is not None and max_days <= 0:
-            raise ValueError("max_days must be a positive integer")
-        if request.mode not in {RESEARCH_PHASE, FORWARD_PHASE}:
-            raise ValueError(f"unsupported local evaluation mode: {request.mode}")
-        strategy_path = Path(request.revision.output_path) / "main.py"
-        if not strategy_path.is_file():
-            raise FileNotFoundError(
-                f"strategy revision has no main.py: {strategy_path}"
-            )
-        validate_strategy_package(strategy_path)
+        strategy_path = checked_strategy(request, max_days)
         started_at = utc_now_iso()
         timer = PhaseTimer()
         with timer.phase("replay_frames"):
@@ -194,17 +179,7 @@ class LocalDailyEvaluationBackend:
                     self._daily[self._daily["trade_date"] < frame["trade_date"].min()]
                 ),
             )
-        summary = record.get("stats")
-        if not isinstance(summary, dict):
-            raise TypeError("daily replay omitted stats")
-        benchmark = benchmark_summary_block(style)
-        if benchmark is not None:
-            summary["benchmark"] = benchmark
-        attach_sub_window_benchmark(summary, style)
-        attach_cost_sensitivity(summary, request.broker_profile.slippage_bps)
-        finalize_summary_timing(
-            summary, started_at=started_at, setup_phases=timer.to_record()
-        )
+        summary = finished_summary(record, style, request, started_at=started_at, timer=timer)
         result_id = f"{request.mode}_{uuid.uuid4().hex}"
         target = self.results_root / result_id / "result.json"
         target.parent.mkdir(parents=True, exist_ok=False)

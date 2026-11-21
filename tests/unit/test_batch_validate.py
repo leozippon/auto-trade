@@ -74,11 +74,11 @@ from autotrade.pipelines.config import (
     StrategySchedule,
 )
 from autotrade.pipelines.experiment import (
-    null_control_seed,
     research_step_record,
     validation_statistics,
 )
 from autotrade.pipelines.ledger import ExperimentLedger
+from autotrade.pipelines.replay_backend import null_control_seed
 from autotrade.pipelines.session_resume import load_recorded_steps
 from autotrade.pipelines.session_tools import (
     BATCH_HYPOTHESIS_MAX_CHARS,

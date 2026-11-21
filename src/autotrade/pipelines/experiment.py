@@ -8,7 +8,6 @@ strategy content; it only prepares, registers, replays and records.
 
 from __future__ import annotations
 
-import hashlib
 import math
 import re
 import sys
@@ -18,9 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from tempfile import TemporaryDirectory, mkdtemp
-
-import pandas as pd
+from tempfile import TemporaryDirectory
 
 from autotrade.common.records import read_json_object
 from autotrade.environment.artifacts import (
@@ -34,19 +31,7 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import (
-    DockerStrategyExecutor,
-    StrategyExecutor,
-    TrustedStrategyExecutor,
-    attach_strategy_resources,
-    discard_strategy_state,
     raised_by_strategy,
-    strategy_resource_usage,
-)
-from autotrade.environment.replay import (
-    ContextDataProvider,
-    ExecutionPriceProvider,
-    ReplayResult,
-    run_daily_replay,
 )
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.stats import window_activity
@@ -77,7 +62,6 @@ from .config import (
     SnapshotBundle,
     SnapshotProvider,
     StepResult,
-    StrategyExperimentConfig,
     research_span,
     session_deadline_seconds,
 )
@@ -98,6 +82,7 @@ from .ledger import (
     registered_record,
     research_over,
 )
+from .replay_backend import null_control_seed
 from .session_resume import (
     REVISIONS_DIR,
     load_recorded_steps,
@@ -160,85 +145,6 @@ def _environment_blocks(records: Sequence[Mapping[str, object]]) -> int:
         and record.get("phase") == SessionKind.RESEARCH
         and str(record.get("error") or "").startswith(prefix)
     )
-
-
-class DailyStrategyPipeline:
-    def __init__(
-        self,
-        config: StrategyExperimentConfig,
-        *,
-        context_data: ContextDataProvider | None = None,
-        execution_price: ExecutionPriceProvider | None = None,
-        executor_factory: Callable[[StrategyExperimentConfig], StrategyExecutor]
-        | None = None,
-    ) -> None:
-        self.config = config
-        self.context_data = context_data
-        self.execution_price = execution_price
-        self.executor_factory = executor_factory
-
-    def run(
-        self,
-        daily: pd.DataFrame | str | Path,
-        corporate_actions: pd.DataFrame | None = None,
-    ) -> ReplayResult:
-        """``corporate_actions`` is the replay slot's ex-date table; the Broker
-        credits its cash dividends on the ex-date (the share leg comes from the
-        daily frame's ``pre_close``). The PIT backend always passes it; None is
-        only for the local ``daily`` development backend and unit tests."""
-
-        frame = pd.read_parquet(daily) if isinstance(daily, (str, Path)) else daily
-        if not isinstance(frame, pd.DataFrame):
-            raise TypeError("daily must be a pandas DataFrame or parquet path")
-        # Every replay starts from an empty state directory: it is created here
-        # and discarded with the run, so nothing an earlier run wrote reaches
-        # it. World-writable for the sandbox's non-root workers.
-        state_dir = Path(mkdtemp(prefix="strategy_state_"))
-        state_dir.chmod(0o777)
-        try:
-            executor = self._create_executor(state_dir)
-            # The executor's own telemetry has to be read while its container
-            # still exists, so it is closed before the usage is taken — on the
-            # failing path too, where the peak and the clock that ran out are
-            # exactly what the failure needs to report.
-            try:
-                try:
-                    replay = run_daily_replay(
-                        daily=frame,
-                        strategy=executor,
-                        schedule=self.config.schedule,
-                        profile=self.config.broker_profile,
-                        context_data=self.context_data,
-                        execution_price=self.execution_price,
-                        corporate_actions=corporate_actions,
-                    )
-                finally:
-                    executor.close()
-            except BaseException as exc:
-                attach_strategy_resources(exc, executor)
-                raise
-            return replace(replay, resources=strategy_resource_usage(executor))
-        finally:
-            discard_strategy_state(state_dir, self.config.sandbox.spec)
-
-    def _create_executor(self, state_dir: Path) -> StrategyExecutor:
-        if self.executor_factory is not None:
-            executor = self.executor_factory(self.config)
-            if not isinstance(executor, StrategyExecutor):
-                raise TypeError("executor_factory must return a StrategyExecutor")
-            return executor
-        if self.config.execution_mode == "trusted":
-            return TrustedStrategyExecutor.from_path(
-                self.config.strategy_path,
-                state_dir=state_dir,
-                models_dir=self.config.models_dir,
-            )
-        return DockerStrategyExecutor(
-            self.config.strategy_path,
-            self.config.sandbox,
-            models_dir=self.config.models_dir,
-            state_dir=state_dir,
-        )
 
 
 class ExperimentPipeline:
@@ -1441,18 +1347,6 @@ def _seed_replicates(
     return {"replicates": entries}
 
 
-def null_control_seed(key: str, role: str) -> int:
-    """A stable 32-bit seed per session (or artifact) and role.
-
-    Stable across processes and runs (``hash`` is not), so a re-run draws the
-    same null and its percentile can be compared with the one the ledger
-    already holds.
-    """
-
-    digest = hashlib.blake2b(f"{key}:{role}".encode(), digest_size=4).digest()
-    return int.from_bytes(digest, "big")
-
-
 # The research session's frozen null block: the session's ``run_null_control``
 # and the registration draw with this one seed, so the block the session read
 # is the one the registration would have drawn.
@@ -1776,12 +1670,10 @@ def _session_budgets(
 
 __all__ = [
     "FROZEN_NULL_SEED",
-    "DailyStrategyPipeline",
     "EnvironmentBlockedAttempt",
     "ExperimentPipeline",
     "check_registration",
     "judged_replay",
-    "null_control_seed",
     "one_line_change",
     "replay_and_analysis",
     "research_step_record",

@@ -64,12 +64,8 @@ from autotrade.environment.replay.null_control import (
 from autotrade.environment.replay.stats import (
     PhaseTimer,
     ReplayResult,
-    attach_cost_sensitivity,
-    attach_sub_window_benchmark,
-    finalize_summary_timing,
 )
 from autotrade.environment.replay.style import (
-    benchmark_summary_block,
     replay_style_analysis,
     slot_benchmark,
     slot_membership,
@@ -85,7 +81,6 @@ from autotrade.environment.runtime import (
 )
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
-from autotrade.environment.strategy_loader import validate_strategy_package
 
 from .calendar import replay_window, yyyymmdd
 from .config import (
@@ -97,12 +92,17 @@ from .config import (
     SnapshotBundle,
     StrategyExperimentConfig,
 )
-from .experiment import DailyStrategyPipeline, null_control_seed
 from .pit_views_seed import (
     PROVIDER_RECORD_ANNOTATIONS,
     contract_identity,
     pit_cache_provider_record,
     seed_pit_views,
+)
+from .replay_backend import (
+    DailyStrategyPipeline,
+    checked_strategy,
+    finished_summary,
+    null_control_seed,
 )
 
 _PHASES = frozenset({RESEARCH_PHASE, FORWARD_PHASE, "paper"})
@@ -965,14 +965,7 @@ class PITDailyEvaluationBackend:
         """
         started_at = utc_now_iso()
         timer = PhaseTimer()
-        if max_days is not None and max_days <= 0:
-            raise ValueError("max_days must be a positive integer")
-        if request.mode not in {RESEARCH_PHASE, FORWARD_PHASE}:
-            raise ValueError(f"unsupported PIT evaluation mode: {request.mode}")
-        strategy_path = Path(request.revision.output_path) / "main.py"
-        if not strategy_path.is_file():
-            raise FileNotFoundError(f"strategy revision has no main.py: {strategy_path}")
-        validate_strategy_package(strategy_path)
+        strategy_path = checked_strategy(request, max_days)
         snapshot_dir = Path(request.snapshot.decision_ref).resolve(strict=True)
         replay_dirs = tuple(
             Path(ref).resolve(strict=True)
@@ -1215,18 +1208,8 @@ class PITDailyEvaluationBackend:
                     permitted_boards=request.broker_profile.permitted_boards,
                     warmup=warmup,
                 )
-            summary = record.get("stats")
-            if not isinstance(summary, dict):
-                raise TypeError("daily replay omitted stats")
-            benchmark = benchmark_summary_block(style)
-            if benchmark is not None:
-                summary["benchmark"] = benchmark
-            attach_sub_window_benchmark(summary, style)
-            attach_cost_sensitivity(summary, request.broker_profile.slippage_bps)
-            finalize_summary_timing(
-                summary,
-                started_at=started_at,
-                setup_phases=timer.to_record(),
+            summary = finished_summary(
+                record, style, request, started_at=started_at, timer=timer
             )
             target = result_dir / "result.json"
             # The host-only slot list goes first: a completed record never

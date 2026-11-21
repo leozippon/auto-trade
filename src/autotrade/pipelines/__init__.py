@@ -15,14 +15,12 @@ from .config import (
     StepResult,
     StrategyExperimentConfig,
 )
-from .experiment import (
-    DailyStrategyPipeline,
-    ExperimentPipeline,
-)
+from .experiment import ExperimentPipeline
 from .ledger import ExperimentLedger
 from .pit_backend import (
     ResearchPITSnapshotProvider,
 )
+from .replay_backend import DailyStrategyPipeline
 
 __all__ = [
     "ArtifactRevision",

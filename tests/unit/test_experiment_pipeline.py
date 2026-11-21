@@ -40,7 +40,6 @@ from autotrade.pipelines.experiment import (
     EnvironmentBlockedAttempt,
     ExperimentPipeline,
     _session_budgets,
-    null_control_seed,
     replay_and_analysis,
     research_step_record,
 )
@@ -59,6 +58,7 @@ from autotrade.pipelines.ledger import (
     registered_record,
     research_over,
 )
+from autotrade.pipelines.replay_backend import null_control_seed
 from tests.unit.acceptance_fixture import REQUIRED_RULES, RULES
 
 GEOMETRY = ResearchGeometry(
