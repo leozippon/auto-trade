@@ -32,6 +32,7 @@ from pathlib import Path
 import pandas as pd
 
 from autotrade.common.time import CN_TZ
+from autotrade.data_sources.tushare.common import sse_calendar
 from autotrade.environment.replay.style import MIN_REGRESSION_DAYS
 
 # Snapshot anchor time of day: close of business, not an intraday moment.
@@ -83,15 +84,12 @@ def replay_window(
 
 
 def load_sse_trading_days(raw_dir: str | Path) -> list[str]:
-    calendar_dir = Path(raw_dir) / "trade_cal" / "exchange=SSE"
-    if not calendar_dir.exists():
-        raise FileNotFoundError(f"missing SSE trade calendar: {calendar_dir}")
-    frames = [pd.read_parquet(path, columns=["cal_date", "is_open"]) for path in sorted(calendar_dir.glob("year=*.parquet"))]
-    if not frames:
-        raise FileNotFoundError(f"no trade calendar partitions under {calendar_dir}")
-    calendar = pd.concat(frames, ignore_index=True)
-    open_days = calendar[calendar["is_open"].astype(str) == "1"]["cal_date"].astype(str)
-    return sorted(set(open_days))
+    """The SSE open days of the lake or release at ``raw_dir``, sorted: a query
+    over the one reader of the calendar, the ingest package's
+    ``sse_calendar``, which raises when ``raw_dir`` holds no usable one."""
+
+    calendar = sse_calendar(Path(raw_dir))
+    return sorted(set(calendar.loc[calendar["is_open"], "cal_date"]))
 
 
 def anchor_before(start: str) -> datetime:

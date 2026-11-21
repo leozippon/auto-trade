@@ -178,10 +178,10 @@ def test_heldout_is_clipped_to_the_release_and_refused_below_what_grading_reads(
 
 def test_the_moved_calendar_helpers_behave_as_before(tmp_path: Path) -> None:
     calendar_dir = tmp_path / "trade_cal" / "exchange=SSE"
-    with pytest.raises(FileNotFoundError, match="missing SSE trade calendar"):
+    with pytest.raises(RuntimeError, match="SSE trade_cal partitions are missing"):
         load_sse_trading_days(tmp_path)
     calendar_dir.mkdir(parents=True)
-    with pytest.raises(FileNotFoundError, match="no trade calendar partitions"):
+    with pytest.raises(RuntimeError, match="SSE trade_cal partitions are missing"):
         load_sse_trading_days(tmp_path)
     pd.DataFrame(
         {"cal_date": ["20251231", "20251230", "20251227"], "is_open": [1, 1, 0]}
