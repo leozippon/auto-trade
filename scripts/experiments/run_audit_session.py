@@ -45,6 +45,7 @@ from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import DEFAULT_IMAGE
 from autotrade.pipelines import ExperimentLedger
+from autotrade.pipelines.experiment import SessionContext
 from autotrade.pipelines.skills import SKILL_LIBRARY_MODES
 from autotrade.pipelines.worker import build_experiment_pipeline
 
@@ -122,7 +123,7 @@ def main() -> int:
         ref_store=AgentRefStore(options.experiment_dir),
     )
     record = pipeline.run_research_session(
-        session_context={"directive": directive} if directive else None,
+        session_context=SessionContext(directive=directive) if directive else None,
     )
     registered = record.get("registered")
     result = {

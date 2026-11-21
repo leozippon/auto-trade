@@ -48,7 +48,6 @@ from autotrade.environment.replay.curve import result_curve
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.strategy_loader import validate_strategy_package
-from autotrade.pipelines.experiment import null_control_seed
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
     forward_record,
@@ -57,6 +56,7 @@ from autotrade.pipelines.ledger import (
     recorded_path,
     registered_fingerprint,
 )
+from autotrade.pipelines.replay_backend import null_control_seed
 from autotrade.pipelines.worker import (
     resolve_worker_options,
     strategy_boundary,

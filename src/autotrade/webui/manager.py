@@ -40,6 +40,7 @@ from autotrade.pipelines.experiment_params import (
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
+    MAX_GPU_COUNT,
     PARAMS_NAME,
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
@@ -839,8 +840,8 @@ class ExperimentManager:
                     count = int(raw)
                 except ValueError as exc:
                     raise ManagerError("GPU 数量必须是整数") from exc
-                if not 0 <= count <= 4:
-                    raise ManagerError("GPU 数量须在 0..4 之间")
+                if not 0 <= count <= MAX_GPU_COUNT:
+                    raise ManagerError(f"GPU 数量须在 0..{MAX_GPU_COUNT} 之间")
                 control.gpu_counts[session_key] = count  # type: ignore[index]
             else:
                 control.gpu_counts.pop(session_key, None)  # type: ignore[arg-type]

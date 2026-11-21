@@ -340,7 +340,7 @@ def _measured(
 
 
 # The series every reading grades, named in each record: the strategy's daily
-# return minus its random-baseline composite (``style.active_analysis``).
+# return minus its random-baseline composite (``stats.active_analysis``).
 GRADED_SERIES = "active"
 
 
@@ -409,7 +409,7 @@ def active_daily(analysis: Mapping[str, object]) -> pd.DataFrame:
     One row per replayed day (``ACTIVE_DAILY_COLUMNS``), every column read off
     the computations every reading runs on this sidecar: the strategy's
     return and the random-baseline composite as stored, the active return
-    :func:`style.active_analysis` grades -- its annualised mean over its
+    :func:`stats.active_analysis` grades -- its annualised mean over its
     annualised standard deviation is the active IR -- its
     :func:`stats.compounded_path` (``active_cumulative`` is the equity minus
     1, ``active_drawdown`` the loss below the running peak, whose largest
