@@ -3,8 +3,6 @@ newest replay slot, and a killed book's run."""
 
 from __future__ import annotations
 
-import importlib.util
-import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -18,36 +16,30 @@ from autotrade.environment.replay.null_control import (
     run_null_control,
 )
 from autotrade.paper import verdict as paper_verdict
-from autotrade.paper.book import (
-    VERDICT_LOG_NAME,
-    Book,
-    create_book,
-)
+from autotrade.paper.book import VERDICT_LOG_NAME, Book
 from autotrade.paper.storage import append_jsonl_once, read_jsonl
 from autotrade.paper.verdict import evidence_reading, paper_reading
 from tests.unit.paper_book_fixture import (
     BOOK_SESSIONS,
+    SYMBOL,
+    _bars,
+    _registered_book,
+    _run_paper,
     paper_root,
     run_days,
 )
-from tests.unit.test_paper_reconcile import PROFILE as RECONCILE_PROFILE
-from tests.unit.test_paper_reconcile import SESSIONS, A, B, _fill, _session
-from tests.unit.test_paper_reconcile import _bars as _two_name_bars
-from tests.unit.test_paper_reconcile import _book as _reconcile_book
-from tests.unit.test_paper_trading import SYMBOL, _bars
-from tests.unit.webui_research_experiment import build_experiment
+from tests.unit.paper_reconcile_fixture import PROFILE as RECONCILE_PROFILE
+from tests.unit.paper_reconcile_fixture import (
+    SESSIONS,
+    A,
+    B,
+    _fill,
+    _session,
+    _write_slot,
+)
+from tests.unit.paper_reconcile_fixture import _book as _reconcile_book
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _registered_book(tmp_path: Path, book_id: str = "exp") -> Book:
-    experiment = build_experiment(tmp_path / "experiments", book_id, "registered_with_record")
-    return create_book(
-        paper_root(tmp_path) / book_id,
-        experiment_dir=experiment,
-        artifact_id="strategy_research_abc",
-        repo_root=tmp_path,
-    )
 
 
 def _kill(root: Path, day: str = "20260105") -> None:
@@ -218,34 +210,6 @@ def test_the_paper_baseline_reads_each_draw_on_the_accounts_own_capital(tmp_path
     assert reading["plain"]["mean"] == pytest.approx((account - baseline).mean() * 244, abs=1e-9)
 
 
-def _write_slot(root: Path, benchmark: str, index_pct: dict[str, float]) -> None:
-    """The replay slot a Paper run leaves (``paper/pit.py``) over the
-    reconcile fixture's bars, with its decision view beside it: the index's
-    daily ``pct_chg`` (percent) and a constituent section in the slot, the
-    section dated before the book's first session in the decision view."""
-
-    views = root / "pit" / "gen_1" / "pit_views"
-    decision, slot = views / "decision" / "20251231T235959", views / "replay" / "paper" / f"{SESSIONS[0]}_{SESSIONS[-1]}_20251231T235959"
-
-    def macro(rows: list[dict[str, object]]) -> pd.DataFrame:
-        columns = ["dataset", "ts_code", "trade_date", "pct_chg", "index_code", "con_code"]
-        return pd.DataFrame([{column: row.get(column) for column in columns} for row in rows]).astype({"pct_chg": float})
-
-    for path in (decision, slot):
-        path.mkdir(parents=True)
-    weight = {"dataset": "index_weight", "index_code": benchmark}
-    macro([{**weight, "trade_date": "20251231", "con_code": code} for code in (A, B)]).to_parquet(decision / "macro.parquet")
-    macro([
-        *({"dataset": "index_daily", "ts_code": benchmark, "trade_date": day, "pct_chg": value} for day, value in index_pct.items()),
-        {**weight, "trade_date": "20260106", "con_code": A},
-    ]).to_parquet(slot / "macro.parquet")
-    _two_name_bars(SESSIONS).to_parquet(slot / "daily.parquet")
-    pd.DataFrame({"symbol": pd.Series(dtype=str), "ex_date": pd.Series(dtype=str), "cash_per_share": pd.Series(dtype=float)}).to_parquet(
-        slot / "corporate_actions.parquet"
-    )
-    (slot / "manifest.json").write_text(json.dumps({"domains": {"corporate_actions": {}}}), encoding="utf-8")
-
-
 def test_a_paper_reading_reads_the_fills_a_real_fill_book_holds_over_its_newest_slot(tmp_path: Path, monkeypatch):
     """End to end through the real engine and a real-fill correction: only the
     book's settled days are read, the random baseline is handed the corrected fill (not
@@ -315,13 +279,6 @@ def test_a_corrected_fill_keeps_the_session_and_limit_price_its_order_named():
     assert [(row["symbol"], row["quantity"], row.get("session"), row.get("limit_price")) for row in corrected] == [
         (B, 200, "intraday", 15.0), (A, 200, None, None)
     ]
-
-
-def _run_paper():
-    spec = importlib.util.spec_from_file_location("run_paper", REPO_ROOT / "scripts/paper/run_paper.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 def test_a_killed_book_writes_its_exit_sheet_decides_nothing_and_is_not_a_failure(tmp_path: Path, monkeypatch):

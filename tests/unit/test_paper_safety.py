@@ -19,10 +19,17 @@ from autotrade.paper.engine import (
 )
 from autotrade.paper.storage import read_jsonl
 from autotrade.webui import trading
-from tests.unit.paper_book_fixture import BOOK_SESSIONS
+from tests.unit.paper_book_fixture import (
+    BOOK_SESSIONS,
+    COUNTER_STRATEGY,
+    PROFILE,
+    _bars,
+    _Data,
+    _registered_book,
+    _run_paper,
+)
+from tests.unit.paper_reconcile_fixture import _write_slot
 from tests.unit.test_paper_titles import _ok, _repo
-from tests.unit.test_paper_trading import COUNTER_STRATEGY, PROFILE, _bars, _Data
-from tests.unit.test_paper_verdict import _registered_book, _run_paper, _write_slot
 
 
 def _setup(tmp_path, monkeypatch, *, losing=False):
