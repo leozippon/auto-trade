@@ -52,6 +52,8 @@ from autotrade.environment.time_budget import (
 from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.environment.trace import TraceEvent
 
+from .prompts import PACK_REREAD_NOTE
+
 if TYPE_CHECKING:
     from autotrade.environment.tools.base import ToolResultStore
 
@@ -71,6 +73,7 @@ COMPACT_SYSTEM_PROMPT = (
     "Agent. Write a Markdown continuation summary with exactly these headings, in "
     "this order: " + " / ".join(COMPACT_SUMMARY_HEADINGS) + ". Keep exact file "
     "paths, commands, error strings, artifact ids, node ids, user constraints, "
+    "the reference pack's (refs/README.md) requirements not yet met, "
     "numbers, and next steps; drop obsolete details; do not invent facts. When a "
     "previous summary is given, update it: keep everything still relevant, move "
     "finished items under 已完成, and add only what the new messages establish. "
@@ -918,7 +921,9 @@ def compaction_summary_message(
 
     ``kind`` says who wrote the summary: ``agent`` (its own ``compact`` call),
     ``model`` (the runtime compactor) or ``resume`` (an interrupted attempt's
-    last summary, handed to the attempt that continues it).
+    last summary, handed to the attempt that continues it). After a
+    compaction the message tells the reader to re-read the reference Pack;
+    a resumed attempt's opening instruction says so instead.
     """
 
     payload: dict[str, object] = {
@@ -928,6 +933,7 @@ def compaction_summary_message(
             "Older messages were replaced by this summary; the summary and the most "
             "recent messages are the retained context."
         ),
+        **({} if kind == "resume" else {"reference_pack": PACK_REREAD_NOTE}),
         "summary": summary_text,
         "files": files if files is not None else {"read": [], "modified": []},
         "trace": {

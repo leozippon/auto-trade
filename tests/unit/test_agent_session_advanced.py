@@ -357,6 +357,49 @@ def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_pat
     assert runner._complete_validation_nodes == {node_id}
 
 
+def test_a_compaction_tells_the_session_to_reread_its_pack():
+    """The Pack's requirements live only in refs/README.md, which the session
+    reads at its start, and no summary is bound to keep them: after either
+    compaction trigger the message beside the summary says to re-read it."""
+
+    from autotrade.agent.compact import compact_with_summary
+    from autotrade.agent.prompts import PACK_REREAD_NOTE
+
+    conversation = [ChatMessage("system", "system")]
+    conversation.extend(ChatMessage("user", f"message {index}") for index in range(6))
+    own = compact_with_summary(conversation, SUMMARY, keep_recent_messages=2)
+    runtime = ContextCompactor(
+        ScriptedLLM([ProviderResponse(content="## 目标\ncontinue\n\n## 下一步\n- finish")]),
+        ContextCompactionConfig(token_threshold=1, min_messages=5, keep_recent_messages=2),
+    ).compact(conversation)
+    assert runtime is not None and runtime.event["status"] == "ok"
+    for result in (own, runtime):
+        assert json.loads(result.messages[1].content or "{}")["reference_pack"] == PACK_REREAD_NOTE
+
+
+def test_a_resumed_attempt_is_told_once_to_reread_its_pack():
+    """The resumed attempt's opening instruction says it after the TODO and
+    Step-tree reading, and the summary carried over from the interrupted
+    attempt does not say it a second time."""
+
+    from autotrade.agent.compact import compaction_summary_message
+    from autotrade.agent.prompts import PACK_REREAD_NOTE, build_resume_instruction
+
+    note = build_resume_instruction(
+        interrupted_at="t",
+        error="e",
+        summary_at="s",
+        transcripts=["run_ref_first.txt"],
+        used={},
+        totals={},
+        record=None,
+    )
+    assert note.count(PACK_REREAD_NOTE) == 1
+    assert note.index("先读 `TODO.md` 与 Step 树") < note.index(PACK_REREAD_NOTE)
+    carried = compaction_summary_message(SUMMARY, kind="resume", trace_ref="run_ref_first")
+    assert PACK_REREAD_NOTE not in (carried.content or "")
+
+
 def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
     finish, node_id = finish_session_tool(tmp_path)
     llm = ScriptedLLM([*shell_turns(2), _compact_call("too short"), _finish_call(node_id)])
