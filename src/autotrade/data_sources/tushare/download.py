@@ -350,26 +350,27 @@ def download_bak_basic(
     force: bool,
     revision_ledger: Path,
 ) -> None:
-    fields = "trade_date,ts_code,name,industry,area,pe,float_share,total_share,total_assets,liquid_assets,fixed_assets,reserved,reserved_pershare,eps,bvps,pb,list_date,undp,per_undp,rev_yoy,profit_yoy,gpr,npr,holder_num"
-    dates = [d for d in trade_dates if d >= start_date]
-    for index, trade_date in enumerate(dates, start=1):
-        path = raw_dir / "bak_basic" / f"trade_date={trade_date}.parquet"
-        if path.exists() and not force:
-            continue
-        params = {"trade_date": trade_date}
-        with answer_defects(path, ledger=revision_ledger):
-            result = client.query("bak_basic", params, fields)
-            publish(
-                path,
-                frame(result),
-                api_name="bak_basic",
-                params=params,
-                fields=result.fields,
-                key_columns=list(BAK_BASIC_SPEC.key_columns),
-                ledger=revision_ledger,
-            )
-        if index % 250 == 0:
-            print(f"bak_basic {index}/{len(dates)}")
+    def pull(part: Partition) -> tuple[bool, int, int]:
+        params = {"trade_date": part.unit}
+        result = client.query("bak_basic", params, BAK_BASIC_SPEC.fields)
+        df = frame(result)
+        outcome = publish(
+            part.path,
+            df,
+            api_name="bak_basic",
+            params=params,
+            fields=result.fields,
+            key_columns=list(BAK_BASIC_SPEC.key_columns),
+            ledger=revision_ledger,
+        )
+        written = outcome in WRITTEN_OUTCOMES
+        return written, len(df) if written else 0, 0
+
+    land(
+        partitions(raw_dir, BAK_BASIC_SPEC, [d for d in trade_dates if d >= start_date]), pull,
+        skip=lambda part: part.path.exists() and not force,
+        revision_ledger=revision_ledger, name="bak_basic", every=250,
+    )
 
 def download_namechange(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> None:
     path = raw_dir / "namechange" / "namechange.parquet"
@@ -519,39 +520,39 @@ def download_index_weight(
     start_date = max(start_date, floor)
     if end_date < start_date:
         return
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for code in DEFAULT_CN_INDEX_CODES:
-        for year in range(int(start_date[:4]), int(end_date[:4]) + 1):
-            year_start = max(start_date, f"{year}0101")
-            year_end = min(end_date, f"{year}1231")
-            path = raw_dir / "index_weight" / f"index_code={safe_partition_value(code)}" / f"year={year}.parquet"
-            params = {"index_code": code, "start_date": year_start, "end_date": year_end}
-            if should_skip_existing_partition(path, force=force, requested_params=params):
-                skipped += 1
-                continue
-            with answer_defects(path, ledger=revision_ledger):
-                result, pages = query_paged(client, "index_weight", params, INDEX_WEIGHT_FIELDS, INDEX_WEIGHT_PAGE_LIMIT)
-                meta_params = dict(params)
-                meta_params["pagination"] = {"page_limit": INDEX_WEIGHT_PAGE_LIMIT, "pages": pages}
-                df = frame(result)
-                did_write, rows = write_window_merged_partition(
-                    path,
-                    df,
-                    api_name="index_weight",
-                    params=meta_params,
-                    fields=list(df.columns) if len(df.columns) else result.fields,
-                    key_columns=["index_code", "con_code", "trade_date"],
-                    date_columns=["trade_date"],
-                    start_date=year_start,
-                    end_date=year_end,
-                    revision_ledger=revision_ledger,
-                )
-                if did_write:
-                    written += 1
-                    total_rows += rows
-    print(f"index_weight done codes={len(DEFAULT_CN_INDEX_CODES)} skipped={skipped} written={written} rows_written={total_rows}")
+
+    def request(part: Partition) -> dict[str, str]:
+        year_start, year_end, _ = part.unit
+        return {**part.dims, "start_date": year_start, "end_date": year_end}
+
+    def pull(part: Partition) -> tuple[bool, int, int]:
+        params = request(part)
+        result, pages = query_paged(client, "index_weight", params, INDEX_WEIGHT_FIELDS, INDEX_WEIGHT_PAGE_LIMIT)
+        df = frame(result)
+        did_write, rows = write_window_merged_partition(
+            part.path,
+            df,
+            api_name="index_weight",
+            params={**params, "pagination": {"page_limit": INDEX_WEIGHT_PAGE_LIMIT, "pages": pages}},
+            fields=list(df.columns) if len(df.columns) else result.fields,
+            key_columns=["index_code", "con_code", "trade_date"],
+            date_columns=["trade_date"],
+            start_date=params["start_date"],
+            end_date=params["end_date"],
+            revision_ledger=revision_ledger,
+        )
+        return did_write, rows, pages
+
+    parts = [
+        Partition(raw_dir / "index_weight" / f"index_code={safe_partition_value(code)}" / f"year={year}.parquet", (year_start, year_end, year), {"index_code": code})
+        for code in DEFAULT_CN_INDEX_CODES
+        for year_start, year_end, year in year_windows(start_date, end_date)
+    ]
+    land(
+        parts, pull,
+        skip=lambda part: should_skip_existing_partition(part.path, force=force, requested_params=request(part)),
+        revision_ledger=revision_ledger, name="index_weight",
+    )
 
 
 def download_daily(args: argparse.Namespace) -> int:
