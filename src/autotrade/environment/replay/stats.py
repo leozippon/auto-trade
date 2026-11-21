@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import TypeVar
 
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.common.time import utc_now
 
 from .market import date_text
 
@@ -868,7 +868,7 @@ def finalize_summary_timing(
         phases[name] = round(phases.get(name, 0.0) + float(seconds), 3)
     summary["phase_seconds"] = {name: phases[name] for name in sorted(phases)}
     summary["started_at"] = started_at
-    summary["finished_at"] = utc_now_iso()
+    summary["finished_at"] = utc_now("auto")
     return summary
 
 

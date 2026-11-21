@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pandas as pd
 
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.stats import PhaseTimer
@@ -22,7 +23,6 @@ from autotrade.environment.replay.style import (
     warmup_bars,
     write_style_rollup,
 )
-from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy_loader import validate_strategy_package
 
@@ -133,7 +133,7 @@ class LocalDailyEvaluationBackend:
         full Validation, and a test replays its span up to the test horizon.
         """
         strategy_path = checked_strategy(request, max_days)
-        started_at = utc_now_iso()
+        started_at = utc_now("auto")
         timer = PhaseTimer()
         with timer.phase("replay_frames"):
             frame = self.frame_between(request.start, request.end)

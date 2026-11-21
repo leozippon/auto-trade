@@ -15,12 +15,12 @@ from pathlib import Path
 
 from autotrade.common.ids import is_experiment_id
 from autotrade.common.records import read_json_object_or_empty, write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.environment import pretrained
 from autotrade.environment.broker import default_permitted_boards
 from autotrade.environment.gpu import GpuUnavailableError, host_min_free_gpu_memory_mib
 from autotrade.environment.identity import AgentRefStore, CorruptExperimentError
 from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
-from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import EXPERIMENT_LABEL, SandboxSpec
 from autotrade.environment.sandbox_images import reclaim_experiment_sandbox_images
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
@@ -429,7 +429,7 @@ class ExperimentManager:
             # pre-flight has just accepted, unless the request named them.
             if merged["permitted_boards"] is None:
                 merged["permitted_boards"] = list(default_permitted_boards(float(merged["initial_cash"])))  # type: ignore[arg-type]
-            merged["_created_at"] = utc_now_iso()
+            merged["_created_at"] = utc_now("auto")
             write_json_atomic(hitl / "params.json", merged)
             write_control(hitl / "control.json", ControlState())
             write_json_atomic(
@@ -630,7 +630,7 @@ class ExperimentManager:
                 _remove_readonly_tree(temp_dir)
             temp_dir.mkdir(parents=True)
             with log_path.open("a", encoding="utf-8") as log:
-                log.write(f"\n===== worker start {utc_now_iso()} =====\n")
+                log.write(f"\n===== worker start {utc_now('auto')} =====\n")
                 log.flush()
                 process = subprocess.Popen(
                     [
@@ -653,7 +653,7 @@ class ExperimentManager:
                     "state": ExperimentState.LAUNCHING,
                     "pid": process.pid,
                     "pid_start_ticks": proc_start_ticks(process.pid),
-                    "launched_at": utc_now_iso(),
+                    "launched_at": utc_now("auto"),
                     # Repo-relative only: status.json is projected to the API and
                     # the console, and the public boundary never carries a host
                     # path. It is a plain location, not an opaque ref.
@@ -897,7 +897,7 @@ class ExperimentManager:
             # and the user cannot tell whether termination worked.
             status = read_json_object_or_empty(status_path)
             status.update(
-                {"state": ExperimentState.TERMINATED, "error": None, "terminated_at": utc_now_iso()}
+                {"state": ExperimentState.TERMINATED, "error": None, "terminated_at": utc_now("auto")}
             )
             write_json_atomic(status_path, status)
         return result

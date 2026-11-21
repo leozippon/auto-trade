@@ -13,6 +13,7 @@ import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
 from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import (
     FilesystemArtifactStore,
 )
@@ -38,7 +39,6 @@ from autotrade.environment.llm import (
 )
 from autotrade.environment.llm.openai_compatible import REASONING_EFFORTS
 from autotrade.environment.pretrained import pretrained_pin
-from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import (
     STRATEGY_TMPFS_SIZE,
     GpuMode,
@@ -862,7 +862,7 @@ def run_local_interactive_worker(
     if result["status"] != "complete":
         return result
     payload = _terminal_status(
-        ledger, {"completed_at": utc_now_iso()}, developer_mode=developer_label
+        ledger, {"completed_at": utc_now("auto")}, developer_mode=developer_label
     )
     # No book opens here: the operator opens a registered strategy's Paper account
     # from the console, on the experiment page's 读出 view or the best-experiment
@@ -975,7 +975,7 @@ def _terminal_status(
         "schema_version": 1,
         "state": ExperimentState.COMPLETED,
         "pid": os.getpid(),
-        "completed_at": source.get("completed_at") or utc_now_iso(),
+        "completed_at": source.get("completed_at") or utc_now("auto"),
         "developer_mode": developer_mode or source.get("developer_mode"),
         "completed_sessions": len(research_records(records))
         + sum(1 for record in records if record.get("record_type") == "forward"),

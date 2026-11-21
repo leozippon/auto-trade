@@ -27,9 +27,9 @@ import json
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from autotrade.common.time import utc_now
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_MIN_TOKENS,
     CONTEXT_OUTPUT_TOKEN_MARGIN,
@@ -257,7 +257,7 @@ class ContextCompactor(SessionTimeBudgetAware):
         if not should_compact:
             return None
 
-        started_at = datetime.now(UTC).isoformat()
+        started_at = utc_now("auto")
         self.compaction_attempts += 1
         compact_messages, request_context_edit = self._fit_compact_request(messages)
         try:
@@ -285,7 +285,7 @@ class ContextCompactor(SessionTimeBudgetAware):
                 "provider": self.llm.provider,
                 "model": self.llm.model,
                 "started_at": started_at,
-                "completed_at": datetime.now(UTC).isoformat(),
+                "completed_at": utc_now("auto"),
                 "error": safe_error_summary(exc),
             }
             if request_context_edit:
@@ -310,7 +310,7 @@ class ContextCompactor(SessionTimeBudgetAware):
             "provider": self.llm.provider,
             "model": response.model,
             "started_at": started_at,
-            "completed_at": datetime.now(UTC).isoformat(),
+            "completed_at": utc_now("auto"),
             "usage": dict(response.usage),
             "messages_before": len(messages),
             "messages_after": len(compacted_messages),

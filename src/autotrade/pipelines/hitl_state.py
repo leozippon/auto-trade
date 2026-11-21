@@ -8,11 +8,11 @@ import threading
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
 from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.environment.gpu import (
     GpuUnavailableError,
     gpus_with_free_memory,
@@ -130,7 +130,7 @@ def read_control(path: str | Path) -> ControlState:
 def write_control(path: str | Path, state: ControlState) -> None:
     """Write the control file, stamping the state with this write's time."""
 
-    state.updated_at = _now()
+    state.updated_at = utc_now("auto")
     write_json_atomic(Path(path), state.to_record())
 
 
@@ -188,7 +188,7 @@ def read_status(path: str | Path) -> dict[str, object]:
 def write_gpu_claim(hitl: str | Path, devices: list[int]) -> None:
     write_json_atomic(
         Path(hitl) / GPU_CLAIM_NAME,
-        {"devices": [int(device) for device in devices], "claimed_at": _now()},
+        {"devices": [int(device) for device in devices], "claimed_at": utc_now("auto")},
     )
 
 
@@ -360,7 +360,7 @@ class StatusReporter:
                 # really a series of short calls plus idle waiting.
                 values.setdefault(
                     "environment_stage_started_at",
-                    _now() if stage else None,
+                    utc_now("auto") if stage else None,
                 )
                 if stage != self._state.get("environment_stage"):
                     # Progress counters belong to one stage instance.
@@ -382,7 +382,7 @@ class StatusReporter:
             {
                 **self._state,
                 "schema_version": HITL_STATE_SCHEMA_VERSION,
-                "heartbeat_at": _now(),
+                "heartbeat_at": utc_now("auto"),
             },
         )
 
@@ -494,5 +494,3 @@ def _object_map(value: object) -> dict[str, dict[str, object]]:
     )
 
 
-def _now() -> str:
-    return datetime.now(UTC).isoformat()

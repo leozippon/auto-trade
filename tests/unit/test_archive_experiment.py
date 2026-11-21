@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.common.time import utc_now
 from autotrade.webui.registry import ARCHIVED_NAME, experiment_listing
 from scripts.dev.check_verdicts import current_experiments
 from tests.unit.paper_book_fixture import paper_root, write_book_record
@@ -106,7 +106,7 @@ def test_an_archived_experiment_stays_in_the_consistency_check(tmp_path: Path) -
     experiment = build_experiment(root, "current", "registered_with_record")
     params = experiment / "hitl/params.json"
     params.write_text(
-        json.dumps({**json.loads(params.read_text(encoding="utf-8")), "_created_at": utc_now_iso()}),
+        json.dumps({**json.loads(params.read_text(encoding="utf-8")), "_created_at": utc_now("auto")}),
         encoding="utf-8",
     )
     archived = _archive(tmp_path, "current", "--reason", "historical")

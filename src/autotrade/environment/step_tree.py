@@ -28,8 +28,9 @@ from autotrade.common.records import (
     write_json_atomic,
     write_text_atomic,
 )
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
-from autotrade.environment.runtime import chmod_tree, sanitize_for_log, utc_now_iso
+from autotrade.environment.runtime import chmod_tree, sanitize_for_log
 
 TREE_FILE = "tree.json"
 # Node subdirectories reserved for the snapshot itself; attachments must not
@@ -194,7 +195,7 @@ class StepTree:
                 "complete_validation": True,
                 "metrics": metrics,
                 "attachments": copied_attachments,
-                "created_at": utc_now_iso(),
+                "created_at": utc_now("auto"),
                 # Why this node exists, when the caller knows: a batch records
                 # the pre-registered hypothesis and its batch id here so the
                 # fan-out stays readable long after the conversation is gone.
@@ -237,7 +238,7 @@ class StepTree:
                 "error": error,
                 "metrics": metrics or {},
                 "attachments": {},
-                "created_at": utc_now_iso(),
+                "created_at": utc_now("auto"),
                 # Same shape as a recorded Step: a batch's dead end keeps its
                 # batch id and hypothesis next to its siblings.
                 **({"metadata": dict(metadata)} if metadata else {}),

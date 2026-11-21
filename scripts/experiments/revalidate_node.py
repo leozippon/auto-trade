@@ -56,9 +56,9 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import ArtifactRevision, FilesystemArtifactStore
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.sandbox import GpuMode
 from autotrade.environment.sandbox_images import (
     SANDBOX_IMAGE_STATE_NAME,
@@ -226,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
         "seed_line": None,
         "slippage_bps": params.get("slippage_bps") if args.slippage_bps is None else args.slippage_bps,
         "gpu_count": params.get("gpu_count") if args.gpus is None else args.gpus,
-        "started_at": utc_now_iso(),
+        "started_at": utc_now("auto"),
         "status": "running",
     }
     write_json_atomic(out / "reading.json", reading)
@@ -275,7 +275,7 @@ def main(argv: list[str] | None = None) -> int:
         reading.update(status="failed", error=f"{type(exc).__name__}: {exc}")
         raise
     finally:
-        reading.update(finished_at=utc_now_iso(), wall_seconds=round(time.monotonic() - started, 1))
+        reading.update(finished_at=utc_now("auto"), wall_seconds=round(time.monotonic() - started, 1))
         write_json_atomic(out / "reading.json", reading)
     stats = result.summary
     benchmark = stats.get("benchmark") or {}

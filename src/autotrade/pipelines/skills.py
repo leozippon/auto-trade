@@ -26,7 +26,8 @@ from autotrade.common.records import (
     write_json_atomic,
     write_text_atomic,
 )
-from autotrade.environment.runtime import chmod_tree, utc_now_iso
+from autotrade.common.time import utc_now
+from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.tools.base import ToolError, ToolResult, ToolSpec
 from autotrade.environment.tools.skills_policy import (
     strict_transferable_content_violation,
@@ -513,7 +514,7 @@ def create_skill_library_snapshot(
         "schema_version": SKILL_LIBRARY_SNAPSHOT_SCHEMA,
         "snapshot_id": uuid.uuid4().hex,
         "mode": resolved,
-        "created_at": utc_now_iso(),
+        "created_at": utc_now("auto"),
         "created_from": created_from,
         "entries": [
             {"origin": source.origin, "source": source.source, "name": name}

@@ -45,9 +45,9 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.common.records import write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.environment.broker_core import board_of
 from autotrade.environment.data.contracts import benchmark_index_label
-from autotrade.environment.runtime import utc_now_iso
 
 from .market import date_text
 from .stats import (
@@ -727,7 +727,7 @@ def replay_style_analysis(
             "size_tilt": tilts.get("size") if isinstance(tilts, Mapping) else None,
             "top_industry_weight": style.get("top_industry_weight"),
         },
-        "created_at": utc_now_iso(),
+        "created_at": utc_now("auto"),
     }
 
 

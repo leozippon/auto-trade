@@ -18,8 +18,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import utc_now
 
-from .runtime import utc_now_iso
 from .sandbox import SandboxSpec, probe_image_runtime
 
 SANDBOX_IMAGE_STATE_NAME = "sandbox_image.json"
@@ -141,7 +141,7 @@ def _write_image_state(
             "kind": kind,
             "runtime": dict(runtime),
             "owned_image_refs": list(dict.fromkeys(owned_image_refs)),
-            "created_at": utc_now_iso(),
+            "created_at": utc_now("auto"),
         },
     )
 

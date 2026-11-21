@@ -21,6 +21,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from autotrade.common.records import read_json_object
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import (
     ArtifactRevision,
     RegisteredArtifact,
@@ -37,7 +38,6 @@ from autotrade.environment.executor import (
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.stats import window_activity
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
-from autotrade.environment.runtime import utc_now_iso
 from autotrade.environment.step_tree import node_handle
 from autotrade.environment.strategy_loader import validate_strategy_package
 from autotrade.environment.trace import agent_trace_path
@@ -389,7 +389,7 @@ class ExperimentPipeline:
                 experiment_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
                 # The worker log is the operator's other place to see it.
                 print(
-                    f"{utc_now_iso()} {self.config.experiment_id} {ENVIRONMENT_BLOCKED}: "
+                    f"{utc_now('auto')} {self.config.experiment_id} {ENVIRONMENT_BLOCKED}: "
                     f"{session.reason}",
                     file=sys.stderr,
                     flush=True,

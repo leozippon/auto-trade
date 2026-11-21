@@ -27,6 +27,7 @@ from autotrade.common.records import (
     write_json_atomic,
     write_text_atomic,
 )
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import (
     READONLY_FILES,
     ArtifactRevision,
@@ -57,7 +58,6 @@ from autotrade.environment.replay.style import FACTOR_SERIES
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     RunManifest,
-    utc_now_iso,
 )
 from autotrade.environment.sandbox import link_copytree
 from autotrade.environment.step_tree import StepTree, node_handle
@@ -1088,7 +1088,7 @@ def record_validation_period_failure(
     directory = Path(experiment_dir) / VALIDATION_PERIOD_FAILURES_DIR
     directory.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     directory.mkdir(exist_ok=True, mode=0o700)
-    recorded_at = utc_now_iso()
+    recorded_at = utc_now("auto")
     write_json_atomic(
         directory / f"{recorded_at.replace(':', '')}_{uuid.uuid4().hex[:8]}.json",
         {

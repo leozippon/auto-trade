@@ -35,11 +35,8 @@ from enum import StrEnum
 from pathlib import Path
 
 from autotrade.common.records import as_mapping, finite_number, write_json_atomic
-from autotrade.environment.runtime import (
-    append_versioned_jsonl,
-    read_versioned_jsonl,
-    utc_now_iso,
-)
+from autotrade.common.time import utc_now
+from autotrade.environment.runtime import append_versioned_jsonl, read_versioned_jsonl
 
 # Stamped on every appended record; bump when the record shape changes. 2: the
 # research session record's ``registration`` and ``registered`` blocks.
@@ -446,7 +443,7 @@ class RunMarkers:
         self.root.mkdir(exist_ok=True, mode=0o700)
         write_json_atomic(
             self.root / f"{attempt['run_id']}.json",
-            {**dict(attempt), "started_at": utc_now_iso()},
+            {**dict(attempt), "started_at": utc_now("auto")},
         )
 
     def finish(self, run_id: str) -> None:

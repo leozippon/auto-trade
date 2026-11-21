@@ -27,9 +27,9 @@ running.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import UTC, datetime
 from pathlib import Path
 
+from autotrade.common.time import utc_now
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.tools.base import SessionInterrupt
 from autotrade.environment.trace import (
@@ -204,7 +204,7 @@ class InteractiveExperimentRunner:
             state=ExperimentState.RUNNING_SESSION,
             session_key=session.session_key,
             session_kind=session.kind,
-            session_started_at=datetime.now(UTC).isoformat(),
+            session_started_at=utc_now("auto"),
             run_id=None,
             environment_stage="preparing_session",
             environment_progress=None,

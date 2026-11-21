@@ -40,7 +40,7 @@ from _bootstrap import add_repo_src
 REPO_ROOT = add_repo_src(__file__)
 
 from autotrade.common.records import read_json_object, write_json_atomic
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.common.time import utc_now
 from autotrade.pipelines.hitl_state import (
     HITL_DIR_NAME,
     STATUS_NAME,
@@ -98,7 +98,7 @@ def main(argv: list[str] | None = None) -> int:
         result = run_local_interactive_worker(options)
         if result.get("status") == "restart":
             print(
-                f"===== worker restart at session boundary {utc_now_iso()} =====",
+                f"===== worker restart at session boundary {utc_now('auto')} =====",
                 flush=True,
             )
             # Never returns; a failure to exec falls through to the handler
@@ -120,7 +120,7 @@ def main(argv: list[str] | None = None) -> int:
                 "schema_version": 1,
                 "state": ExperimentState.TERMINATED,
                 "error": None,
-                "terminated_at": utc_now_iso(),
+                "terminated_at": utc_now("auto"),
             }
         )
         write_json_atomic(status_path, status)
@@ -134,7 +134,7 @@ def main(argv: list[str] | None = None) -> int:
                 "schema_version": 1,
                 "state": ExperimentState.FAILED,
                 "pid": os.getpid(),
-                "failed_at": utc_now_iso(),
+                "failed_at": utc_now("auto"),
                 "error": f"{type(exc).__name__}: {exc}",
             },
         )

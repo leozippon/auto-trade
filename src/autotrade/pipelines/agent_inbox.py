@@ -13,7 +13,7 @@ from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.common.time import utc_now
 from autotrade.pipelines.hitl_state import HITL_DIR_NAME, control_lock
 
 INBOX_NAME = "agent_inbox.jsonl"
@@ -68,7 +68,7 @@ def enqueue_inbox_message(
     if type(interrupt) is not bool:
         raise InboxError("inbox interrupt must be a boolean")
     message_id = uuid.uuid4().hex
-    created_at = utc_now_iso()
+    created_at = utc_now("auto")
     record = {
         "schema_version": INBOX_SCHEMA_VERSION,
         "event": QUEUED_EVENT,
@@ -143,7 +143,7 @@ def consume_inbox_message(
     mid = _require_token(message_id, "message_id")
     key = _require_token(session_key, "session_key")
     actor = _require_token(consumed_by, "consumed_by")
-    consumed_at = utc_now_iso()
+    consumed_at = utc_now("auto")
     with control_lock(target):
         state = _load_state(target)
         message = state.messages.get(mid)
@@ -180,7 +180,7 @@ def expire_session_inbox(
     target = Path(path)
     key = _require_token(session_key, "session_key")
     actor = _require_token(expired_by, "expired_by")
-    expired_at = utc_now_iso()
+    expired_at = utc_now("auto")
     expired_ids: list[str] = []
     with control_lock(target):
         state = _load_state(target)
@@ -243,7 +243,7 @@ def reopen_uncommitted_inbox(
     committed = {
         str(item).strip() for item in committed_run_ids if str(item).strip()
     }
-    reopened_at = utc_now_iso()
+    reopened_at = utc_now("auto")
     reopened_ids: list[str] = []
     with control_lock(target):
         state = _load_state(target)
@@ -342,7 +342,7 @@ def bind_session_inbox(
                     "schema_version": INBOX_SCHEMA_VERSION,
                     "event": SESSION_OPENED_EVENT,
                     "session_key": key,
-                    "opened_at": utc_now_iso(),
+                    "opened_at": utc_now("auto"),
                     "opened_by": actor,
                 },
             )

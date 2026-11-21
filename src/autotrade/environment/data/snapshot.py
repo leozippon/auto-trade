@@ -41,7 +41,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
-from autotrade.common.time import CN_TZ
+from autotrade.common.time import CN_TZ, utc_now
 from autotrade.data_quality import read_quality_report
 from autotrade.environment.broker_core import BOARDS, board_of
 from autotrade.environment.data import PITDataStore, default_tushare_contracts
@@ -94,7 +94,7 @@ from autotrade.environment.data.units import (
     validate_snapshot_units,
 )
 from autotrade.environment.distributions import distribution_record_date
-from autotrade.environment.runtime import new_id, utc_now_iso
+from autotrade.environment.runtime import new_id
 
 SNAPSHOT_DOMAIN_WORKERS = 3
 # Independent event/macro datasets are mostly parquet IO; overlap them so a
@@ -802,7 +802,7 @@ class SnapshotBuilder:
         manifest = {
             "snapshot_id": new_id("snap"),
             "kind": "decision_input",
-            "created_at": utc_now_iso(),
+            "created_at": utc_now("auto"),
             "decision_time": decision_time.isoformat(),
             "window_start": daily_window_start.isoformat(),
             "window_months": config.months_for("daily"),
@@ -1192,7 +1192,7 @@ class SnapshotBuilder:
             "snapshot_id": new_id("replay"),
             "kind": "replay_slot",
             "label": label,
-            "created_at": utc_now_iso(),
+            "created_at": utc_now("auto"),
             "period_start": start_key,
             "period_end": end_key,
             "available_from": anchor.isoformat() if anchor is not None else None,

@@ -16,7 +16,6 @@ import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
@@ -34,7 +33,7 @@ from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
 from autotrade.common.records import read_json_object
-from autotrade.common.time import cn_today
+from autotrade.common.time import cn_today, utc_now
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.gpu import list_gpus
 from autotrade.environment.llm.model_profiles import model_profile
@@ -238,7 +237,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     server_log = logging.getLogger("uvicorn.error")
 
     def log_server_error(request: Request, status: int) -> None:
-        stamp = datetime.now(UTC).isoformat(timespec="seconds")
+        stamp = utc_now()
         server_log.warning("%s %s %s -> %d", stamp, request.method, request.url.path, status)
 
     @app.middleware("http")

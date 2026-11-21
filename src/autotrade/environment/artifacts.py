@@ -28,13 +28,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import utc_now
 
-from .runtime import (
-    RUNTIME_CACHE_DIR_NAMES,
-    RUNTIME_CACHE_SUFFIXES,
-    chmod_tree,
-    utc_now_iso,
-)
+from .runtime import RUNTIME_CACHE_DIR_NAMES, RUNTIME_CACHE_SUFFIXES, chmod_tree
 
 REQUIRED_FILES = ("main.py",)
 ARTIFACT_METADATA_FILES = frozenset({"manifest.json"})
@@ -207,7 +203,7 @@ class FilesystemArtifactStore:
                 {
                     "revision_id": revision_id,
                     "parent_revision_id": parent_revision_id,
-                    "created_at": utc_now_iso(),
+                    "created_at": utc_now("auto"),
                     "fingerprint": fingerprint,
                     "files": self._intern(directory),
                 },

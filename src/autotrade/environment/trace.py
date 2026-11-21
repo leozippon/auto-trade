@@ -16,7 +16,8 @@ from enum import StrEnum
 from pathlib import Path
 
 from autotrade.common.records import redact_host_paths
-from autotrade.environment.runtime import new_id, sanitize_for_log, utc_now_iso
+from autotrade.common.time import utc_now
+from autotrade.environment.runtime import new_id, sanitize_for_log
 from autotrade.environment.tools.base import SessionInterrupt
 
 
@@ -266,7 +267,7 @@ class AgentTraceWriter:
         record = {
             **sanitized,
             "event_type": str(event_type),
-            "ts": utc_now_iso(),
+            "ts": utc_now("auto"),
             "event_id": new_id("event"),
             **self.ids,
         }
@@ -306,7 +307,7 @@ class AgentTraceWriter:
                 current = self.path.stat().st_size if self.path.exists() else 0
                 marker = {
                     "event_type": str(TraceEvent.TRACE_LIMIT_REACHED),
-                    "ts": utc_now_iso(),
+                    "ts": utc_now("auto"),
                     "event_id": new_id("event"),
                     **self.ids,
                     "max_bytes": self.max_bytes,

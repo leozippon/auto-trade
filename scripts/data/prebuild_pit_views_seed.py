@@ -50,7 +50,6 @@ import json
 import shutil
 import sys
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 
@@ -62,6 +61,7 @@ from _bootstrap import add_repo_src
 
 REPO_ROOT = add_repo_src(__file__)
 
+from autotrade.common.time import utc_now
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
@@ -284,7 +284,7 @@ def main(argv: list[str] | None = None) -> int:
         cache_root = seed
         seed.mkdir(parents=True, exist_ok=True)
         (seed / UNFINISHED_BUILD_MARKER).write_text(
-            json.dumps({"started_at": datetime.now(UTC).isoformat(timespec="seconds")}) + "\n",
+            json.dumps({"started_at": utc_now()}) + "\n",
             encoding="utf-8",
         )
     provider = ResearchPITSnapshotProvider(

@@ -26,7 +26,8 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import urlsplit
 
-from autotrade.environment.runtime import new_id, utc_now_iso
+from autotrade.common.time import utc_now
+from autotrade.environment.runtime import new_id
 
 from .conversation_log import (
     ConversationLogConfig,
@@ -588,7 +589,7 @@ class OpenAICompatibleProxy:
         post_index = 0
         while True:
             post_index += 1
-            started_at = utc_now_iso()
+            started_at = utc_now("auto")
             started_perf = time.perf_counter()
             log_path = self._conversation_log_path(started_at)
             include_payload = include_next_payload
@@ -708,7 +709,7 @@ class OpenAICompatibleProxy:
                 config=cast(ConversationLogConfig, self.config),
                 payload=payload,
                 started_at=started_at,
-                completed_at=utc_now_iso(),
+                completed_at=utc_now("auto"),
                 duration_seconds=time.perf_counter() - started_perf,
                 **extra,
             ),

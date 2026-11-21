@@ -9,10 +9,11 @@ from pathlib import Path
 
 import pandas as pd
 
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.data.snapshot import _write_manifest
 from autotrade.environment.data.units import validate_snapshot_units
-from autotrade.environment.runtime import new_id, utc_now_iso
+from autotrade.environment.runtime import new_id
 from autotrade.environment.tools import ToolResult
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -44,7 +45,7 @@ def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[st
     must classify in the unit registry.
     """
     snapshot_dir = Path(snapshot_dir)
-    manifest: dict[str, object] = {"snapshot_id": new_id("snap"), "created_at": utc_now_iso(), **fields}
+    manifest: dict[str, object] = {"snapshot_id": new_id("snap"), "created_at": utc_now("auto"), **fields}
     validate_snapshot_units(snapshot_dir, manifest)
     _write_manifest(snapshot_dir, manifest)
     return manifest

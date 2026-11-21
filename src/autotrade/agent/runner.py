@@ -34,6 +34,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Protocol
 
+from autotrade.common.time import utc_now
 from autotrade.environment.llm import (
     MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS,
     ApiSpendExhausted,
@@ -46,7 +47,7 @@ from autotrade.environment.llm import (
     is_context_overflow_error,
     malformed_tool_call_messages,
 )
-from autotrade.environment.runtime import sanitize_for_log, utc_now_iso
+from autotrade.environment.runtime import sanitize_for_log
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
@@ -1142,7 +1143,7 @@ class AgentSessionRunner:
         pending = tuple(self.inbox.pending())
         if not pending:
             return messages
-        applied_at = utc_now_iso()
+        applied_at = utc_now("auto")
         for item in pending:
             message_id = str(getattr(item, "message_id", "") or "").strip()
             text = str(getattr(item, "text", "") or "")

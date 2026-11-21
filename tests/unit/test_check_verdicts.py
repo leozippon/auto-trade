@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment.runtime import utc_now_iso
+from autotrade.common.time import utc_now
 from autotrade.pipelines import pit_backend, worker
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
@@ -46,7 +46,7 @@ def experiment(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(worker, "ResearchPITSnapshotProvider", SyntheticPITProvider)
-        repo, experiment = make_experiment(tmp_path_factory.mktemp("judged"), _created_at=utc_now_iso())
+        repo, experiment = make_experiment(tmp_path_factory.mktemp("judged"), _created_at=utc_now("auto"))
         result = run_local_interactive_worker(load_worker_options(experiment, repo_root=repo))
     assert result["verdict"] == {"status": "registered_with_record", "reasons": []}
     return experiment

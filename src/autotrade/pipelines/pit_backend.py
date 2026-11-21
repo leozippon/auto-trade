@@ -31,7 +31,7 @@ from autotrade.common.records import (
     read_json_object,
     write_json_atomic,
 )
-from autotrade.common.time import CN_TZ
+from autotrade.common.time import CN_TZ, utc_now
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import (
     benchmark_index_label,
@@ -73,12 +73,7 @@ from autotrade.environment.replay.style import (
     write_style_rollup,
 )
 from autotrade.environment.replay.timeview import ReplayRows, Timeview
-from autotrade.environment.runtime import (
-    chmod_tree,
-    new_id,
-    rmtree_keeping_file_modes,
-    utc_now_iso,
-)
+from autotrade.environment.runtime import chmod_tree, new_id, rmtree_keeping_file_modes
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
 
@@ -963,7 +958,7 @@ class PITDailyEvaluationBackend:
         view the whole span would have built by then: the view rolls every
         slot up to the first decision it is asked for.
         """
-        started_at = utc_now_iso()
+        started_at = utc_now("auto")
         timer = PhaseTimer()
         strategy_path = checked_strategy(request, max_days)
         snapshot_dir = Path(request.snapshot.decision_ref).resolve(strict=True)

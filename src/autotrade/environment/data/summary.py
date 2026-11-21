@@ -7,12 +7,12 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from autotrade.common.records import read_json_object, redact_host_paths
+from autotrade.common.time import utc_now
 from autotrade.environment.data.units import (
     AGENT_UNIT_CONTRACT,
     build_unit_reference,
     snapshot_column_map,
 )
-from autotrade.environment.runtime import utc_now_iso
 
 LARGE_TABLE_ROW_THRESHOLD = 1_000_000
 LARGE_TABLE_SIZE_THRESHOLD_BYTES = 100 * 1024 * 1024
@@ -98,7 +98,7 @@ def write_agent_data_summary(
     demand instead of carrying them in every summary read.
     """
     summary: dict[str, object] = {
-        "generated_at": utc_now_iso(),
+        "generated_at": utc_now("auto"),
         "kind": kind,
         "session_ref": session_ref,
         "unit_contract": AGENT_UNIT_CONTRACT,
@@ -139,7 +139,7 @@ def write_unit_reference(path: Path, views: Mapping[str, tuple[Path, str]]) -> N
             column_map[key] = list(merged)
     records = build_unit_reference(column_map)
     payload = {
-        "generated_at": utc_now_iso(),
+        "generated_at": utc_now("auto"),
         "identity_rule": AGENT_UNIT_CONTRACT["identity_rule"],
         # Without this clause a record reads as a claim about the file: an Agent
         # that measures daily.parquet in CNY and shares sees ``source_unit``

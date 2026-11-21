@@ -22,7 +22,6 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
@@ -34,6 +33,7 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.common.records import write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.paper.books import PAPER_STATE_DIR, experiment_books
 from autotrade.pipelines.hitl_state import ARCHIVED_NAME, HITL_DIR_NAME
 from autotrade.webui.registry import experiment_state, resolve_experiment_dir
@@ -85,7 +85,7 @@ def main() -> int:
         return 2
 
     changed: list[str] = []
-    stamp = datetime.now(UTC).isoformat(timespec="seconds")
+    stamp = utc_now()
     for marker in markers:
         if args.restore and marker.is_file():
             marker.unlink()

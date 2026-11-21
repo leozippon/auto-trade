@@ -31,6 +31,7 @@ from autotrade.common.records import (
     dataclass_record,
     write_json_atomic,
 )
+from autotrade.common.time import utc_now
 
 from .commands import (
     HOST_TIMEOUT_BUFFER_SECONDS,
@@ -49,7 +50,6 @@ from .runtime import (
     link_or_copy,
     new_id,
     rmtree_keeping_file_modes,
-    utc_now_iso,
 )
 
 DEFAULT_IMAGE = "autotrade-sandbox:latest"
@@ -532,7 +532,7 @@ class LocalSandbox:
             raise ValueError(f"unsupported runtime mode: {mode}")
         record = {
             "schema_version": RUNTIME_ENV_SCHEMA_VERSION,
-            "generated_at": utc_now_iso(),
+            "generated_at": utc_now("auto"),
             "mode": mode,
             "network": sandbox_spec.network if sandbox_spec else ("host" if mode == "local" else "none"),
             "sandbox_spec": sandbox_spec.to_record() if sandbox_spec else None,

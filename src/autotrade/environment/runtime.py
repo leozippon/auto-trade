@@ -19,10 +19,10 @@ import threading
 import uuid
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from pathlib import Path
 
 from autotrade.common.records import write_json_atomic
+from autotrade.common.time import utc_now
 from autotrade.environment.identity import AgentRefStore
 
 SECRET_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
@@ -122,10 +122,6 @@ AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS = (
     # generate_orders call, GPU headroom.
     "resources",
 )
-
-
-def utc_now_iso() -> str:
-    return datetime.now(UTC).isoformat()
 
 
 def new_id(prefix: str) -> str:
@@ -348,7 +344,7 @@ class RunManifest:
             data=dict(initial),
             ref_store=ref_store,
         )
-        manifest.data.setdefault("created_at", utc_now_iso())
+        manifest.data.setdefault("created_at", utc_now("auto"))
         manifest.data.setdefault("backtest_summaries", [])
         manifest.save()
         return manifest
@@ -395,7 +391,7 @@ def append_versioned_jsonl(
     payload = {
         **sanitize_for_log(record),
         "schema_version": schema_version,
-        "recorded_at": utc_now_iso(),
+        "recorded_at": utc_now("auto"),
     }
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)

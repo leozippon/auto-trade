@@ -15,11 +15,11 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.executor import StrategyRaised
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME
-from autotrade.environment.runtime import utc_now_iso
 from autotrade.pipelines.config import (
     EvaluationRequest,
     EvaluationResult,
@@ -426,7 +426,7 @@ def test_a_replicate_whose_own_code_raises_is_a_reading(tmp_path: Path):
     # The consistency check reads the same readings off the stored replays.
     experiment = pipeline.config.experiment_dir
     (experiment / "hitl" / "params.json").write_text(
-        json.dumps({**REQUIRED_RULES, "_created_at": utc_now_iso()}), encoding="utf-8"
+        json.dumps({**REQUIRED_RULES, "_created_at": utc_now("auto")}), encoding="utf-8"
     )
     assert [item.differences for item in check_experiment(experiment)] == [[], [], []]
 
