@@ -1,0 +1,37 @@
+[
+  {
+    "slug": "tabm",
+    "title": "TabM: Advancing Tabular Deep Learning with Parameter-Efficient Ensembling",
+    "venue": "ICLR 2025",
+    "paper_url": "https://proceedings.iclr.cc/paper_files/paper/2025/file/c1ba41c694834aeef91ae161711d4939-Paper-Conference.pdf",
+    "arxiv": "2410.24210v3",
+    "repo": "https://github.com/yandex-research/tabm",
+    "commit": "b53fd7cf2d9be2d66b918ca6cf66e0365e4ce11c",
+    "licence": "Apache-2.0",
+    "data_end": null,
+    "strip": [
+      "images",
+      "uv.lock",
+      "paper/pixi.lock",
+      "paper/exp/mlp-periodic*",
+      "paper/exp/tabm-piecewiselinear",
+      "paper/exp/tabm-sharetrainingbatches*",
+      "paper/exp/*/why",
+      "paper/exp/*/churn",
+      "paper/exp/*/california",
+      "paper/exp/*/house",
+      "paper/exp/*/diamond",
+      "paper/exp/*/otto",
+      "paper/exp/*/higgs-small",
+      "paper/exp/*/black-friday",
+      "paper/exp/*/covtype2",
+      "paper/exp/*/microsoft"
+    ],
+    "wheels": [
+      "rtdl_num_embeddings==0.0.12"
+    ],
+    "dataset": [
+      "https://archive.ics.uci.edu/static/public/2/adult.zip"
+    ]
+  }
+]
