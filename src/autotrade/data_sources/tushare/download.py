@@ -21,7 +21,7 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
-from autotrade.common.time import CN_TZ, cn_today
+from autotrade.common.time import CN_TZ, cn_today, utc_now
 from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
     STK_AUCTION_PRICE_ABS_TOLERANCE,
@@ -252,7 +252,7 @@ def merge_trade_cal_partition(path: Path, refreshed: pd.DataFrame) -> pd.DataFra
     # resolved cron end dates), so it must never merge silently. Refuse and
     # leave the decision to a human: verify against the exchange, then delete
     # the year partition to accept the correction.
-    today = datetime.now(CN_TZ).strftime("%Y%m%d")
+    today = cn_today()
     checked = [column for column in ("is_open", "pretrade_date") if column in existing.columns and column in refreshed.columns]
     if checked:
         # Each partition file is single-exchange by construction (exchange=
@@ -2291,7 +2291,7 @@ def download_share_float_complete(args: argparse.Namespace) -> int:
     args.revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     report: dict[str, Any] = {
-        "created_at": datetime.now(UTC).isoformat(),
+        "created_at": utc_now("auto"),
         "raw_dir": str(raw_dir),
         "row_limit": SHARE_FLOAT_ROW_LIMIT,
         "scope": {

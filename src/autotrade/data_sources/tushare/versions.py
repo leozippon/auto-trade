@@ -347,7 +347,7 @@ def revision_event(
     return {
         "schema_version": REVISION_EVENT_SCHEMA_VERSION,
         "event_id": str(uuid.uuid4()),
-        "detected_at": datetime.now(UTC).isoformat(timespec="seconds"),
+        "detected_at": utc_now(),
         "source": source,
         "kind": kind,
         "dataset": dataset,

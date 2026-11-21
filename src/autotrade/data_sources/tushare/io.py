@@ -6,7 +6,6 @@ import json
 import os
 import threading
 import uuid
-from datetime import UTC, datetime
 from fcntl import LOCK_EX, LOCK_UN, flock
 from pathlib import Path
 from typing import Any
@@ -17,6 +16,7 @@ import pyarrow.parquet as pq
 
 # The sidecar read contract and the footer identity are owned by the
 # environment's PIT layer.
+from autotrade.common.time import utc_now
 from autotrade.environment.data.pit import (
     WRITE_ID_METADATA_KEY,
     CorruptSidecarError,
@@ -82,7 +82,7 @@ def write_parquet(
         "fields": list(fields),
         "row_count": len(df),
         "write_id": write_id,
-        "fetched_at": at or datetime.now(UTC).isoformat(),
+        "fetched_at": at or utc_now("auto"),
         "format": "parquet",
     }
     if extra_metadata:
