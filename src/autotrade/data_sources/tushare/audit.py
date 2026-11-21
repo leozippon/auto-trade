@@ -71,6 +71,7 @@ from .common import (
     active_year_windows,
     augment_board_frame,
     augment_event_frame,
+    by_ts_code_universe,
     date_range_days,
     frame,
     intraday_expected_codes_for_day,
@@ -95,7 +96,6 @@ from .common import (
     selected_board_ths_hot_markets,
     selected_board_ths_limit_types,
     selected_board_trading_datasets,
-    selected_cn_index_codes,
     selected_daily_datasets,
     selected_eco_filter_values,
     selected_event_flow_datasets,
@@ -2030,15 +2030,9 @@ def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_
             return {directory / f"{spec.loop_param}={safe_partition_value(value)}.parquet" for value in spec.loop_values}
         return {directory / "full.parquet"}
     if spec.strategy == FetchStrategy.DATE_YEAR_BY_TS_CODE:
-        if spec.api_name == "index_global":
-            codes = selected_index_codes(args)
-        elif spec.api_name in ("index_daily", "index_dailybasic"):
-            codes = selected_cn_index_codes(args)
-        else:
-            codes = selected_fx_codes(args)
         return {
             raw_dir / spec.api_name / f"ts_code={safe_partition_value(ts_code)}" / f"year={year}.parquet"
-            for ts_code in codes
+            for ts_code in by_ts_code_universe(spec.api_name, args)
             for year in range(int(start[:4]), int(end_date[:4]) + 1)
         }
     if spec.strategy == FetchStrategy.ECO_CAL_MONTH:

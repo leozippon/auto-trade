@@ -80,10 +80,11 @@ from .common import (
     augment_macro_frame,
     augment_stk_mins_frame,
     augment_text_frame,
+    by_ts_code_universe,
+    canonical_range_path,
     date_range_days,
     format_yyyymmdd,
     frame,
-    canonical_range_path,
     history_floor,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
@@ -115,12 +116,9 @@ from .common import (
     selected_board_ths_hot_markets,
     selected_board_ths_limit_types,
     selected_board_trading_datasets,
-    selected_cn_index_codes,
     selected_daily_datasets,
     selected_eco_filter_values,
     selected_fundamental_datasets,
-    selected_fx_codes,
-    selected_index_codes,
     selected_intraday_datasets,
     selected_macro_datasets,
     selected_news_sources,
@@ -1138,14 +1136,7 @@ def download_macro(args: argparse.Namespace) -> int:
         elif spec.strategy == FetchStrategy.STATIC_FULL:
             download_macro_static_full(client, raw_dir, spec, spec_page_limit(spec, args.page_limit), revision_ledger)
         elif spec.strategy == FetchStrategy.DATE_YEAR_BY_TS_CODE:
-            if dataset == "index_global":
-                codes = selected_index_codes(args)
-            elif dataset in ("index_daily", "index_dailybasic"):
-                codes = selected_cn_index_codes(args)
-            elif dataset == "fx_daily":
-                codes = selected_fx_codes(args)
-            else:
-                raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
+            codes = by_ts_code_universe(dataset, args)
             download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), codes, revision_ledger)
         elif spec.strategy == FetchStrategy.ECO_CAL_MONTH:
             download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), args, revision_ledger)

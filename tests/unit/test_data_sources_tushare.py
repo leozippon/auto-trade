@@ -1550,6 +1550,18 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(cpi_calls[0]["start_m"], "202001")
         self.assertTrue((self.raw_dir / "cn_cpi" / "range=202001_latest.parquet").exists())
 
+    def test_by_ts_code_universe_is_one_rule_for_download_and_audit(self):
+        # The audit used to expect fx codes for any by-ts_code dataset it did
+        # not know, where the downloader refuses one.
+        args = argparse.Namespace(index_code=None, cn_index_code=None, fx_code=["USDCNH.FXCM"])
+        self.assertEqual(
+            audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["fx_daily"], "20260101", "20260131", args),
+            {self.raw_dir / "fx_daily" / "ts_code=USDCNH.FXCM" / "year=2026.parquet"},
+        )
+        unknown = common.DatasetSpec(api_name="new_by_code", strategy=common.FetchStrategy.DATE_YEAR_BY_TS_CODE)
+        with self.assertRaisesRegex(RuntimeError, "no ts_code universe defined for by-ts_code macro dataset 'new_by_code'"):
+            audit.expected_macro_paths(self.raw_dir, unknown, "20260101", "20260131", args)
+
     def test_rolling_rewrite_keeps_a_range_file_backfilled_below_the_floor(self):
         # A backfill landed cn_cpi from 2014-07. The nightly rewrite asks from
         # the 2020 floor, but must re-request the file's own start and keep its

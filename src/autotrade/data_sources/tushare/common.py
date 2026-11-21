@@ -2097,6 +2097,16 @@ def selected_eco_filter_values(args: argparse.Namespace, attr: str) -> list[str 
     values = [str(value).strip() for value in getattr(args, attr, None) or [] if str(value).strip()]
     return values or [None]
 
+def by_ts_code_universe(dataset: str, args: argparse.Namespace) -> list[str]:
+    """The codes a by-ts_code macro dataset is pulled and audited over."""
+    if dataset == "index_global":
+        return selected_index_codes(args)
+    if dataset in ("index_daily", "index_dailybasic"):
+        return selected_cn_index_codes(args)
+    if dataset == "fx_daily":
+        return selected_fx_codes(args)
+    raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
+
 def write_frame(
     path: Path,
     df: pd.DataFrame,
