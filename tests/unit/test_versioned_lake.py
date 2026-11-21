@@ -16,7 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from autotrade.data_sources.tushare import cron_update, versions
+from autotrade.data_sources.tushare import cron_update, generation, versions
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data import research_release
 from autotrade.environment.data.pit import (
@@ -410,7 +410,7 @@ class RunnerFoldTest(unittest.TestCase):
     def test_partition_issues_open_and_close_and_refresh_needs_a_whole_clean_pull(self) -> None:
         datasets: dict = {}
         issues: list = []
-        cron_update.fold_outcomes(datasets, issues, [
+        generation.fold_outcomes(datasets, issues, [
             self.outcome("anns_d", "month=202609", "appended"),
             self.outcome("anns_d", "month=202610", "defect", "empty answer"),
             self.outcome("anns_d", "", "complete"),
@@ -426,7 +426,7 @@ class RunnerFoldTest(unittest.TestCase):
             [("defect", "anns_d", "month=202610"), ("staged", "repurchase", "month=202610")],
         )
         self.assertEqual(datasets, {"daily": {"refreshed_at": "2026-10-24T15:30:00+00:00"}})
-        cron_update.fold_outcomes(datasets, issues, [
+        generation.fold_outcomes(datasets, issues, [
             self.outcome("anns_d", "month=202610", "unchanged"),
             self.outcome("anns_d", "", "complete"),
         ], at="2026-10-25T15:30:00+00:00")
@@ -491,10 +491,10 @@ class RunnerFoldTest(unittest.TestCase):
 
     def test_a_no_mutation_exit_over_a_crashed_run_commits_a_new_generation(self) -> None:
         with redirect_stdout(io.StringIO()):
-            kept = cron_update.finish_raw_generation_update(
+            kept = generation.finish_raw_generation_update(
                 self.raw, {"state": "committed", "generation_id": "old"}, {"job": "poll"}, commit=False, datasets={}, issues=[],
             )
-            crashed = cron_update.finish_raw_generation_update(
+            crashed = generation.finish_raw_generation_update(
                 self.raw, {"state": "updating", "generation_id": "old"}, {"job": "poll"}, commit=False, datasets={}, issues=[],
             )
         self.assertEqual(kept["generation_id"], "old")

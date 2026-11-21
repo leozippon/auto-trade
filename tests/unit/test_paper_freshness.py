@@ -15,6 +15,7 @@ import pandas as pd
 import pytest
 
 from autotrade.data_sources.tushare import common, cron_update, download, versions
+from autotrade.data_sources.tushare import generation as raw_generation
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.engine import PaperDataNotReady
@@ -131,7 +132,7 @@ def _evening(tmp_path: Path, tiers: list[tuple[str, list[str], object]]) -> dict
                     download.download_selected_tier(args)
                 except RuntimeError:
                     break
-    cron_update.fold_outcomes(generation["datasets"], generation["issues"], cron_update.read_run_report(report), at=FRIDAY_EVENING)
+    raw_generation.fold_outcomes(generation["datasets"], generation["issues"], cron_update.read_run_report(report), at=FRIDAY_EVENING)
     return generation
 
 
@@ -166,7 +167,7 @@ def test_a_defective_new_partition_keeps_its_dataset_unrefreshed_and_open(tmp_pa
         "adj_factor has an open defect in trade_date=20261023 (adj_factor answered without requested fields ['adj_factor'])",
     ]
     # The next complete pull of the partition closes the defect and refreshes.
-    cron_update.fold_outcomes(generation["datasets"], generation["issues"], [
+    raw_generation.fold_outcomes(generation["datasets"], generation["issues"], [
         {"dataset": "adj_factor", "partition": "trade_date=20261023", "outcome": "appended", "at": "t"},
         {"dataset": "adj_factor", "partition": "", "outcome": "complete", "at": "t"},
     ], at="2026-10-24T01:00:00+00:00")

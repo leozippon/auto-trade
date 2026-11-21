@@ -65,14 +65,16 @@ from .cron_update import (
     RUN_LOG_ROOT,
     RunContext,
     acquire_lock,
+    history_repull_policy,
+    load_config,
+    run_history_repull,
+)
+from .generation import (
     begin_raw_generation_update,
     finish_raw_generation_update,
-    history_repull_policy,
     issue_key,
-    load_config,
     read_raw_generation_file,
     record_vintages,
-    run_history_repull,
 )
 from .io import inherited_updater_lock_fd
 from .versions import (

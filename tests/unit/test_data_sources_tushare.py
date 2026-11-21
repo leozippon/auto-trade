@@ -27,6 +27,7 @@ from autotrade.data_sources.tushare import (
     common,
     cron_update,
     download,
+    generation,
     versions,
 )
 from autotrade.data_sources.tushare import io as tushare_io
@@ -43,7 +44,7 @@ from autotrade.environment.data.snapshot import (
 def commit_generation(raw_dir: Path) -> dict:
     """A committed generation record, as a finished mutating job leaves it."""
     with redirect_stdout(io.StringIO()):
-        return cron_update.finish_raw_generation_update(
+        return generation.finish_raw_generation_update(
             raw_dir, {}, {"job": "fixture"}, commit=True, datasets={}, issues=[]
         )
 
@@ -2367,7 +2368,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         second = commit_generation(raw)
         self.assertNotEqual(first["generation_id"], second["generation_id"])
         # A job that vouches it wrote nothing keeps the identity.
-        kept = cron_update.finish_raw_generation_update(
+        kept = generation.finish_raw_generation_update(
             raw, second, {"job": "none"}, commit=False, datasets={}, issues=[]
         )
         self.assertEqual(
@@ -2384,17 +2385,17 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         datasets = {"anns_d": {"refreshed_at": "2026-10-23T15:30:00+00:00", "vintage": "abc"}}
         issues = [{"kind": "staged", "dataset": "repurchase", "partition": "month=202610", "since": "", "detail": "", "version": "v"}]
         with redirect_stdout(io.StringIO()):
-            base = cron_update.finish_raw_generation_update(
+            base = generation.finish_raw_generation_update(
                 raw, {}, {"job": "seed"}, commit=True, datasets=datasets, issues=issues
             )
-        cron_update.begin_raw_generation_update(raw, {"job": "cn_evening_full", "start_date": "", "end_date": ""})
+        generation.begin_raw_generation_update(raw, {"job": "cn_evening_full", "start_date": "", "end_date": ""})
         died = json.loads((raw / ".raw_generation.json").read_text(encoding="utf-8"))
         self.assertEqual((died["state"], died["generation_id"]), ("updating", base["generation_id"]))
 
-        previous = cron_update.begin_raw_generation_update(raw, {"job": "another_job", "start_date": "", "end_date": ""})
+        previous = generation.begin_raw_generation_update(raw, {"job": "another_job", "start_date": "", "end_date": ""})
         self.assertEqual((previous["datasets"], previous["issues"]), (datasets, issues))
         with redirect_stdout(io.StringIO()):
-            committed = cron_update.finish_raw_generation_update(
+            committed = generation.finish_raw_generation_update(
                 raw, previous, {"job": "another_job"}, commit=True, datasets=previous["datasets"], issues=previous["issues"]
             )
         self.assertEqual(committed["state"], "committed")
