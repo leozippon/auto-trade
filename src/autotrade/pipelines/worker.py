@@ -354,7 +354,7 @@ def resolve_worker_options(
     experiment_id = _required_text(params, "experiment_id")
     if directory.name != experiment_id:
         raise ValueError("experiment_id does not match the experiment directory")
-    if "experiments_root" in params:
+    if params.get("experiments_root") is not None:
         configured_root = _path_value(
             params["experiments_root"], repository, "experiments_root"
         )
@@ -1179,7 +1179,9 @@ def _llm_settings(
         subagent_model=subagent_model,
         compact_model=compact_model,
         timeout_seconds=_positive_float(
-            params.get("llm_timeout_seconds", read_param(params, "per_call_timeout_seconds")),
+            params.get("llm_timeout_seconds")
+            if params.get("llm_timeout_seconds") is not None
+            else read_param(params, "per_call_timeout_seconds"),
             "llm_timeout_seconds",
         ),
         retry_backoff_seconds=_positive_float(
@@ -1222,8 +1224,14 @@ def _llm_settings(
     # One boundary with the strategy container: the experiment's strategy CPUs and
     # memory, unless the internal agent_sandbox_* knobs name others; an experiment that
     # names neither keeps the shared default.
-    cpus_key = "agent_sandbox_cpus" if "agent_sandbox_cpus" in params else "strategy_cpus"
-    memory_key = "agent_sandbox_memory" if "agent_sandbox_memory" in params else "strategy_memory"
+    cpus_key = (
+        "agent_sandbox_cpus" if params.get("agent_sandbox_cpus") is not None else "strategy_cpus"
+    )
+    memory_key = (
+        "agent_sandbox_memory"
+        if params.get("agent_sandbox_memory") is not None
+        else "strategy_memory"
+    )
     sandbox = SandboxSpec(
         image=str(read_param_or_default(params, "agent_sandbox_image")),
         cpus=_positive_float(read_param(params, cpus_key), cpus_key),

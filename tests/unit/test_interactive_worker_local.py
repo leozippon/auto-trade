@@ -134,6 +134,28 @@ def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
     assert options.snapshot_config.include_intraday is defaults["include_intraday"]
 
 
+@pytest.mark.parametrize(
+    "key",
+    ["llm_timeout_seconds", "agent_sandbox_cpus", "agent_sandbox_memory", "experiments_root"],
+)
+def test_a_stated_null_host_parameter_reads_as_unset(tmp_path: Path, key: str) -> None:
+    """The params schema accepts null for these host parameters and every
+    reader takes null as unset: the worker resolves such a file exactly as
+    one that leaves the key out."""
+    from autotrade.pipelines.worker import resolve_worker_options
+
+    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
+
+    def resolved(record: dict) -> tuple:
+        options = resolve_worker_options(
+            record, experiment_dir=experiment, repo_root=repo, preflight=True
+        )
+        return options.llm.timeout_seconds, options.agent_sandbox
+
+    assert resolved({**params, key: None}) == resolved(params)
+
+
 def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
     repo, experiment = _experiment(tmp_path, developer_mode="llm")
     with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
