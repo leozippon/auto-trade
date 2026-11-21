@@ -18,14 +18,8 @@ import pandas as pd
 
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ, cn_today
-from autotrade.environment.data.contracts import (
-    BOARD_TRADING_DATASETS,
-)
-from autotrade.environment.data.pit import (
-    concat_rows,
-    first_seen_at,
-    key_strings,
-)
+from autotrade.environment.data.contracts import BOARD_TRADING_DATASETS
+from autotrade.environment.data.pit import concat_rows, first_seen_at, key_strings
 
 from . import common as core
 from . import versions
@@ -80,10 +74,7 @@ from .intraday import (
     download_intraday,
     update_intraday_by_date,
 )
-from .io import (
-    committed_partition_intact,
-    parquet_rows,
-)
+from .io import committed_partition_intact, parquet_rows
 from .layout import (
     Partition,
     directory_name,
@@ -92,9 +83,7 @@ from .layout import (
     refuse_moved_range_start,
 )
 from .lock import manual_production_write
-from .share_float import (
-    download_share_float_complete,
-)
+from .share_float import download_share_float_complete
 from .specs import (
     BAK_BASIC_SPEC,
     BOARD_TRADING_SPECS,
@@ -132,12 +121,7 @@ from .stamps import (
     repair_event_available_at,
     repair_text_available_at,
 )
-from .versions import (
-    DefectiveAnswer,
-    answer_defects,
-    publish,
-    report_complete,
-)
+from .versions import DefectiveAnswer, answer_defects, publish, report_complete
 
 
 def history_floor(floor: str, args: argparse.Namespace) -> str:

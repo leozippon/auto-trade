@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+# Raw-lake research contract values are owned by the environment's PIT layer;
+# the ingest adapter imports them so producer and consumer cannot drift.
 from autotrade.environment.data.contracts import (
     BENCHMARK_INDEXES,
     BOARD_TRADING_DATASETS,

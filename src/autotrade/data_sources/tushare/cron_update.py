@@ -41,10 +41,7 @@ from .generation import (
     record_vintages,
 )
 from .lock import UPDATER_LOCK_FD_ENV, acquire_lock
-from .specs import (
-    EVENT_FLOW_SPECS,
-    FetchStrategy,
-)
+from .specs import EVENT_FLOW_SPECS, FetchStrategy
 from .versions import RUN_REPORT_ENV
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")

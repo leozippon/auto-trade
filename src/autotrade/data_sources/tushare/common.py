@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Shared TuShare constants, schemas, client, and utility helpers."""
+"""What the TuShare ingest modules share: the run's exit codes and revision
+ledger, the SSE trading calendar (read, and extended when a pull needs more of
+it), dataset selection, date windows, the margin family's exchange rule,
+partition names and the common CLI arguments.
+"""
 
 from __future__ import annotations
 
@@ -14,9 +18,6 @@ from urllib.parse import quote
 import pandas as pd
 
 from autotrade.common.time import cn_today
-
-# Raw-lake research contract values are owned by the environment's PIT layer;
-# the ingest adapter imports them so producer and consumer cannot drift.
 from autotrade.environment.data.pit import concat_rows
 
 from .client import TuShareClient, frame

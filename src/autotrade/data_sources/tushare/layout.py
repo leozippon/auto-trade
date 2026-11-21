@@ -33,11 +33,7 @@ from .common import (
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
 )
-from .specs import (
-    BOARD_TRADING_SPECS,
-    DatasetSpec,
-    FetchStrategy,
-)
+from .specs import BOARD_TRADING_SPECS, DatasetSpec, FetchStrategy
 
 
 @dataclass(frozen=True)
