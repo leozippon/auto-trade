@@ -114,6 +114,7 @@ from .common import (
     selected_macro_datasets,
     selected_text_datasets,
     spec_page_limit,
+    sse_calendar,
     stk_mins_by_date_path,
     undated_duplicate_mask,
     validate_stk_mins_by_date_frame,
@@ -126,7 +127,6 @@ from .io import (
     committed_partition_intact,
     manual_production_write,
     parquet_rows,
-    read_many,
     write_parquet,
 )
 from .layout import (
@@ -322,15 +322,11 @@ def download_trade_cal(
     return sorted(sse_open)
 
 def sse_trade_cal_covers(raw_dir: Path, start_date: str, end_date: str) -> bool:
-    files = sorted((raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
-    if not files:
+    try:
+        dates = sse_calendar(raw_dir)["cal_date"]
+    except RuntimeError:
         return False
-    calendar = read_many(files, columns=["cal_date"])
-    if calendar.empty or "cal_date" not in calendar.columns:
-        return False
-    dates = calendar["cal_date"].dropna().map(normalize_date_key)
-    dates = dates[dates != ""]
-    return bool(not dates.empty and dates.min() <= start_date and dates.max() >= end_date)
+    return bool(dates.min() <= start_date and dates.max() >= end_date)
 
 def ensure_trade_cal_coverage(
     client: TuShareClient, raw_dir: Path, start_date: str, end_date: str, *, ledger: Path | str | None

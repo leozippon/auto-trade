@@ -36,10 +36,10 @@ from .common import (
     NO_MUTATION_RETRY_EXIT_CODE,
     FetchStrategy,
     format_yyyymmdd,
-    normalize_date_key,
     parse_yyyymmdd,
+    sse_calendar,
 )
-from .io import UPDATER_LOCK_FD_ENV, read_many
+from .io import UPDATER_LOCK_FD_ENV
 from .versions import RUN_REPORT_ENV, dataset_vintage
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
@@ -169,25 +169,11 @@ def history_repull_command(config: dict, python: str, dataset: str, *, end_date:
 
 
 def resolve_sse_open_on_or_before(repo_root: Path, raw_dir: str, target_date: str) -> str:
-    trade_cal_dir = repo_root / raw_dir / "trade_cal" / "exchange=SSE"
-    files = sorted(trade_cal_dir.glob("year=*.parquet"))
-    if not files:
-        raise RuntimeError(f"SSE trade_cal partitions are missing under {trade_cal_dir}; run reference download first")
-    calendar = read_many(files, columns=["cal_date", "is_open"])
-    if calendar.empty:
-        raise RuntimeError(f"SSE trade_cal is empty under {trade_cal_dir}; refresh reference trade_cal first")
-    calendar["cal_date"] = calendar["cal_date"].map(normalize_date_key)
-    open_dates = sorted(
-        calendar.loc[
-            (calendar["is_open"].astype(str) == "1")
-            & (calendar["cal_date"] != "")
-            & (calendar["cal_date"] <= target_date),
-            "cal_date",
-        ].tolist()
-    )
-    if not open_dates:
+    calendar = sse_calendar(repo_root / raw_dir)
+    open_dates = calendar.loc[calendar["is_open"] & (calendar["cal_date"] <= target_date), "cal_date"]
+    if open_dates.empty:
         raise RuntimeError(f"no SSE open date found on or before {target_date}")
-    return str(open_dates[-1])
+    return str(open_dates.max())
 
 
 def resolve_job_end_date(job: dict, repo_root: Path, raw_dir: str, target_date: str) -> str:
@@ -235,15 +221,11 @@ def resolve_job_start_date(job: dict, config: dict, end_date: str) -> str:
 
 def is_sse_open_date(repo_root: Path, raw_dir: str, target_date: str) -> bool:
     """Whether ``target_date`` itself is open, without silently rolling backward."""
-    files = sorted((repo_root / raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
-    if not files:
-        raise RuntimeError(f"SSE trade_cal partitions are missing under {repo_root / raw_dir}")
-    calendar = read_many(files, columns=["cal_date", "is_open"])
-    dates = calendar["cal_date"].map(normalize_date_key)
-    exact = dates == target_date
+    calendar = sse_calendar(repo_root / raw_dir)
+    exact = calendar["cal_date"] == target_date
     if not exact.any():
         raise RuntimeError(f"SSE trade_cal does not cover target date {target_date}")
-    return bool((exact & (calendar["is_open"].astype(str) == "1")).any())
+    return bool(calendar.loc[exact, "is_open"].any())
 
 
 def resolve_event_flow_audit_end_date(ctx: RunContext) -> str:

@@ -1715,41 +1715,41 @@ def undated_duplicate_mask(frame: pd.DataFrame) -> np.ndarray:
     return mask
 
 
-def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str, *, allow_empty: bool = False) -> list[str]:
-    files = sorted((raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
+def sse_calendar(raw_dir: Path) -> pd.DataFrame:
+    """The lake's SSE trading calendar, the one reader of it in this package:
+    ``cal_date`` (YYYYMMDD) and ``is_open`` (bool), rows without a parseable
+    date dropped. Raises when the lake holds no usable calendar."""
+    files = sorted((Path(raw_dir) / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
     if not files:
-        raise RuntimeError("SSE trade_cal partitions are missing; run download --tier reference first")
+        raise RuntimeError(f"SSE trade_cal partitions are missing under {raw_dir}; run download --tier reference first")
     calendar = read_many(files, columns=["cal_date", "is_open"])
     if calendar.empty:
-        raise RuntimeError("SSE trade_cal is empty; run download --tier reference first")
-    calendar["cal_date"] = calendar["cal_date"].map(normalize_date_key)
-    calendar = calendar[calendar["cal_date"] != ""].copy()
+        raise RuntimeError(f"SSE trade_cal is empty under {raw_dir}; run download --tier reference first")
+    calendar = pd.DataFrame({
+        "cal_date": calendar["cal_date"].map(normalize_date_key),
+        "is_open": calendar["is_open"].astype(str) == "1",
+    })
+    calendar = calendar[calendar["cal_date"] != ""]
     if calendar.empty:
         raise RuntimeError("SSE trade_cal has no parseable cal_date values; refresh reference trade_cal first")
+    return calendar.reset_index(drop=True)
+
+def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str, *, allow_empty: bool = False) -> list[str]:
+    calendar = sse_calendar(raw_dir)
     available_min = str(calendar["cal_date"].min())
     available_max = str(calendar["cal_date"].max())
     if start_date < available_min or end_date > available_max:
         raise RuntimeError(
             f"SSE trade_cal covers {available_min}-{available_max}, not requested {start_date}-{end_date}; refresh reference trade_cal first"
         )
-    mask = (calendar["is_open"].astype(str) == "1") & (calendar["cal_date"] >= start_date) & (calendar["cal_date"] <= end_date)
+    mask = calendar["is_open"] & (calendar["cal_date"] >= start_date) & (calendar["cal_date"] <= end_date)
     dates = sorted(calendar.loc[mask, "cal_date"].tolist())
     if not dates and not allow_empty:
         raise RuntimeError(f"no SSE open dates found for {start_date}-{end_date}")
     return dates
 
 def latest_sse_calendar_date(raw_dir: Path) -> str:
-    files = sorted((raw_dir / "trade_cal" / "exchange=SSE").glob("year=*.parquet"))
-    if not files:
-        raise RuntimeError("SSE trade_cal partitions are missing; run download --tier reference first")
-    calendar = read_many(files, columns=["cal_date"])
-    if calendar.empty:
-        raise RuntimeError("SSE trade_cal is empty; run download --tier reference first")
-    dates = calendar["cal_date"].dropna().map(normalize_date_key)
-    dates = dates[dates != ""]
-    if dates.empty:
-        raise RuntimeError("SSE trade_cal has no parseable cal_date values; refresh reference trade_cal first")
-    return str(dates.max())
+    return str(sse_calendar(raw_dir)["cal_date"].max())
 
 def select_datasets(
     values: Iterable[str] | None,
