@@ -27,6 +27,8 @@ executed. Only a file named in sources.json (the PDF, wheels, weights,
 dataset) may exceed FILE_MAX_BYTES; the whole payload may not exceed
 PACK_MAX_BYTES. A GitHub URL is tried through the proxy prefix
 ZGCA_GITHUB_PROXY names first, as ops/zgca/zgca.py fetches its releases.
+A failed download is tried again after each of RETRY_DELAYS, and so is a PDF
+that does not end with its end-of-file marker (a cut-off transfer).
 
 By default the build must reproduce the Pack's PAYLOAD.sha256 file by file;
 it then replaces data/pack_payloads/<pack>/ by renames (a reader in between
@@ -41,12 +43,14 @@ from __future__ import annotations
 import argparse
 import fnmatch
 import gzip
+import http.client
 import os
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from collections.abc import Callable, Sequence
@@ -79,6 +83,11 @@ FILE_MAX_BYTES = 64 * MIB
 DEFAULT_STRIP = ("*.pt", "*.pth", "*.ckpt", "*.safetensors", "*.bin", "*.h5", "*.hdf5", "*.onnx", "*.tflite", "*.pb")
 # The variable ops/zgca/zgca.py reads (RELEASE_PROXY_ENV): a URL prefix tried before a GitHub URL.
 GITHUB_PROXY_ENV = "ZGCA_GITHUB_PROXY"
+# Seconds waited before the second and the third try of a download; downloads
+# from this host fail intermittently.
+RETRY_DELAYS = (10.0, 60.0)
+# Where a whole PDF carries its end-of-file marker: in its last 1024 bytes.
+PDF_EOF_MARKER, PDF_TAIL_BYTES = b"%%EOF", 1024
 
 Download = Callable[[str, Path], None]
 
@@ -87,8 +96,14 @@ class FetchError(RuntimeError):
     """A payload that could not be built as sources.json and the caps say; the message says why."""
 
 
+class DownloadFailed(FetchError):
+    """A download that did not arrive whole; it is tried again (``_download``)."""
+
+
 def download_url(url: str, dest: Path) -> None:
-    """``url`` into the new file ``dest``, through the GitHub proxy first for a GitHub URL; at most PACK_MAX_BYTES."""
+    """``url`` into the file ``dest``, through the GitHub proxy first for a GitHub URL; at most PACK_MAX_BYTES.
+
+    Raises DownloadFailed when no source answered with the whole file."""
 
     proxy = os.environ.get(GITHUB_PROXY_ENV, "")
     sources = ([proxy + url] if proxy and url.startswith("https://github.com/") else []) + [url]
@@ -104,9 +119,34 @@ def download_url(url: str, dest: Path) -> None:
                         raise FetchError(f"{url} is larger than the {PACK_MAX_BYTES // MIB} MiB a Pack may hold")
                     out.write(chunk)
             return
-        except OSError as exc:  # urllib.error.URLError included
+        except (OSError, http.client.HTTPException) as exc:  # URLError, a cut-off body (IncompleteRead)
             failures.append(f"{source}: {exc}")
-    raise FetchError("no source answered: " + "; ".join(failures))
+    raise DownloadFailed("no source answered: " + "; ".join(failures))
+
+
+def _download(download: Download, url: str, dest: Path, *, pdf: bool = False) -> None:
+    """``download(url, dest)``, tried again after each of RETRY_DELAYS while it raises DownloadFailed.
+
+    With ``pdf`` the file must start as a PDF (else FetchError: the URL serves
+    something else) and end with PDF_EOF_MARKER (else the transfer was cut
+    off, which is tried again like a failed download)."""
+
+    for delay in (*RETRY_DELAYS, None):
+        try:
+            download(url, dest)
+            if pdf:
+                with dest.open("rb") as handle:
+                    if handle.read(5) != b"%PDF-":
+                        raise FetchError(f"{url} did not answer a PDF")
+                    handle.seek(max(0, dest.stat().st_size - PDF_TAIL_BYTES))
+                    if PDF_EOF_MARKER not in handle.read():
+                        raise DownloadFailed(f"{url}: the PDF ends without {PDF_EOF_MARKER.decode()} (cut off)")
+            return
+        except DownloadFailed as exc:
+            if delay is None:
+                raise
+            print(f"{exc}; trying again in {delay:g} s", flush=True)
+            time.sleep(delay)
 
 
 def _stripped(relative: str, globs: Sequence[str]) -> bool:
@@ -169,14 +209,11 @@ def build(pack: Path, payload: Path, work: Path, download: Download) -> None:
         paper = payload / "papers" / slug
         paper.mkdir(parents=True)
         print(f"{slug}: {entry['paper_url']}", flush=True)
-        download(str(entry["paper_url"]), paper / "paper.pdf")
-        with (paper / "paper.pdf").open("rb") as pdf:
-            if pdf.read(5) != b"%PDF-":
-                raise FetchError(f"{slug}: {entry['paper_url']} did not answer a PDF")
+        _download(download, str(entry["paper_url"]), paper / "paper.pdf", pdf=True)
         subprocess.run(["pdftotext", "-layout", str(paper / "paper.pdf"), str(paper / "paper.txt")], check=True)
         if "arxiv" in entry:
             source = work / f"{slug}.arxiv"
-            download(f"https://arxiv.org/e-print/{entry['arxiv']}", source)
+            _download(download, f"https://arxiv.org/e-print/{entry['arxiv']}", source)
             if tarfile.is_tarfile(source):
                 unpack(source, paper / "tex", [], dropped)
             elif source.read_bytes()[:2] == b"\x1f\x8b":  # one gzipped TeX file
@@ -186,7 +223,7 @@ def build(pack: Path, payload: Path, work: Path, download: Download) -> None:
                 print(f"{slug}: arXiv {entry['arxiv']} has no TeX source; tex/ left out", flush=True)
         if entry["repo"] is not None:
             archive = work / f"{slug}.tar.gz"
-            download(f"{entry['repo']}/archive/{entry['commit']}.tar.gz", archive)
+            _download(download, f"{entry['repo']}/archive/{entry['commit']}.tar.gz", archive)
             unpack(archive, paper / "repo", [str(glob) for glob in entry["strip"]], dropped)
         for kind, urls in (("weights", [weight["url"] for weight in entry.get("weights", [])]), ("data", entry.get("dataset", []))):
             for url in urls:
@@ -194,7 +231,7 @@ def build(pack: Path, payload: Path, work: Path, download: Download) -> None:
                 if target.exists():
                     raise FetchError(f"{slug}: two {kind} downloads are named {target.name}")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                download(url, target)
+                _download(download, url, target)
         requirements.extend(str(wheel) for wheel in entry.get("wheels", []))
     if requirements:
         subprocess.run(

@@ -5,7 +5,9 @@ links, strip globs, checkpoint formats and oversized repository files, refuses
 an archive member that would leave its directory and a payload over the Pack
 cap, and puts nothing in place unless the result reproduces the manifest (or
 --write writes it); what it puts in place passes the experiment pre-flight.
-Only the downloader is replaced, by one that serves local files.
+A failed download and a cut-off PDF are tried again a bounded number of
+times, and a PDF that never arrives whole is refused. Only the downloader is
+replaced, by one that serves local files.
 """
 
 from __future__ import annotations
@@ -158,6 +160,55 @@ def test_a_written_manifest_is_reproduced_and_what_lands_passes_the_preflight(la
             fetch.fetch(pack, repo, write=False, download=_serve(urls))
         assert ("poppler" in str(refused.value)) is poppler
         assert payload_digests(repo / STORE, STORE) == before
+    assert not any((repo / ".runtime" / "pack_payloads").iterdir())
+
+
+@needs_pdftotext
+def test_a_failed_or_cut_off_download_is_tried_again_after_a_growing_wait(
+    layout: tuple[Path, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, urls = layout
+    waits: list[float] = []
+    monkeypatch.setattr(fetch.time, "sleep", waits.append)
+    whole = urls[SOURCE["paper_url"]].read_bytes()
+    tries: list[str] = []
+    serve = _serve(urls)
+
+    def flaky(url: str, dest: Path) -> None:
+        if url == SOURCE["paper_url"]:
+            tries.append(url)
+            if len(tries) == 1:
+                raise fetch.DownloadFailed("no source answered: connection reset")
+            if len(tries) == 2:
+                dest.write_bytes(whole[: len(whole) - 8])  # the transfer stopped before %%EOF
+                return
+        serve(url, dest)
+
+    fetch.fetch(repo / PACK, repo, write=True, download=flaky)
+
+    assert len(tries) == 3 and waits == list(fetch.RETRY_DELAYS)
+    assert fetch.RETRY_DELAYS[0] < fetch.RETRY_DELAYS[1]
+    assert (repo / STORE / "papers/demo/paper.pdf").read_bytes() == whole
+
+
+def test_a_pdf_that_never_arrives_whole_is_refused(
+    layout: tuple[Path, dict[str, Path]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, urls = layout
+    monkeypatch.setattr(fetch.time, "sleep", lambda _seconds: None)
+    pdf = urls[SOURCE["paper_url"]]
+    pdf.write_bytes(pdf.read_bytes()[:-8])
+    served: list[str] = []
+    serve = _serve(urls)
+
+    def counting(url: str, dest: Path) -> None:
+        served.append(url)
+        serve(url, dest)
+
+    with pytest.raises(fetch.DownloadFailed, match=r"demo\.pdf: the PDF ends without %%EOF \(cut off\)"):
+        fetch.fetch(repo / PACK, repo, write=True, download=counting)
+    assert served == [SOURCE["paper_url"]] * (len(fetch.RETRY_DELAYS) + 1)
+    assert not (repo / STORE).exists() and not (repo / PACK / PAYLOAD_MANIFEST).exists()
     assert not any((repo / ".runtime" / "pack_payloads").iterdir())
 
 
