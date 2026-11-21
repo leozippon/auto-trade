@@ -17,11 +17,13 @@ each traded name's share of it).
 
 Every function is total: degradation is a structured payload state
 (absent / no_snapshot / unreadable / export_error / stale / ok), never a 500.
-Redaction is whitelist projection — payloads are assembled from named scalar
-fields only, so nothing the writer happens to add can leak through. Each
-figure is computed once, by the code that already defines it: the order sheet
-by ``paper.orders.order_sheet``, returns and statistics by the replay reducer,
-the benchmark series by the style sidecar's slot reader.
+Redaction is whitelist projection: payloads are assembled field by field from
+the book's files, so nothing the writer happens to add can leak through. The
+one record served whole is the stored Paper verdict (``verdict.json``), which
+``run_paper`` writes for the page to show as written. Each figure is computed
+once, by the code that already defines it: the order sheet by
+``paper.orders.order_sheet``, returns and statistics by the replay reducer, the
+benchmark series by the style sidecar's slot reader.
 
 Timestamps: the Paper engine persists Asia/Shanghai stamps (frozen contract).
 This module is the single normalization boundary for the snapshot clock — a
