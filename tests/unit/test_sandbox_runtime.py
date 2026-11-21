@@ -2521,6 +2521,28 @@ def test_collect_leaves_large_workspace_files_out_and_lists_them(tmp_path: Path)
     assert not (dest / "workspace.collect_error.txt").exists()
 
 
+def test_collect_leaves_the_pack_copy_out_and_lists_it(tmp_path: Path):
+    """The workspace's refs/ is re-made from the Pack at every session start,
+    so the archive lists it with the bytes of its files instead of storing
+    it; a refs directory deeper in the workspace is the Agent's and is kept."""
+    local = LocalSandbox(tmp_path / "session")
+    workspace = local.prepare_layout().workspace
+    (workspace / "refs" / "papers").mkdir(parents=True)
+    (workspace / "refs" / "README.md").write_text("direction\n", encoding="utf-8")
+    (workspace / "refs" / "papers" / "a.pdf").write_bytes(b"%PDF-1.4\n%%EOF\n")
+    (workspace / "notes" / "refs").mkdir(parents=True)
+    (workspace / "notes" / "refs" / "mine.md").write_text("kept\n", encoding="utf-8")
+
+    dest = local.collect_artifacts(tmp_path / "collected")
+
+    assert not os.path.lexists(dest / "workspace" / "refs")
+    assert (dest / "workspace" / "notes" / "refs" / "mine.md").read_text(encoding="utf-8") == "kept\n"
+    assert json.loads((dest / WORKSPACE_OMITTED_NAME).read_text(encoding="utf-8")) == {
+        "max_file_bytes": ARCHIVE_MAX_FILE_BYTES,
+        "omitted": [{"path": "refs/", "bytes": len("direction\n") + len(b"%PDF-1.4\n%%EOF\n")}],
+    }
+
+
 def _worker_argv(strategy: Path, *, boot_delay: float = 0.0) -> list[str]:
     """Run the real container-side worker as a local process.
 

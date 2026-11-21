@@ -572,7 +572,8 @@ class LocalSandbox:
             _copy_path(self.paths.host_run_manifest, dest_dir / "host_run_manifest.json")
         # ``workspace`` is collected best-effort — a single unreadable/special
         # file there is skipped and logged instead of aborting the collection.
-        # A file over ARCHIVE_MAX_FILE_BYTES is left out and listed instead.
+        # A file over ARCHIVE_MAX_FILE_BYTES and the Pack copy in
+        # WORKSPACE_REFS_DIR are left out and listed instead.
         workspace_source = self.paths.agent / _AGENT_WORKSPACE
         if workspace_source.exists():
             omitted: dict[str, int] = {}
@@ -814,6 +815,12 @@ _AGENT_WORKSPACE = "workspace"
 # capped far below this, a resume continues in the live session root).
 ARCHIVE_MAX_FILE_BYTES = 64 * 2**20
 WORKSPACE_OMITTED_NAME = f"{_AGENT_WORKSPACE}.omitted.json"
+# The workspace's copy of the experiment's Pack, tracked files and verified
+# payload, re-made from the repository and the payload store at every session
+# start. It stays out of the archive too (a payload is up to 512 MiB of
+# reproducible bytes per attempt) and is listed in WORKSPACE_OMITTED_NAME as
+# "refs/" with the bytes of its files; nothing reads it from an archive.
+WORKSPACE_REFS_DIR = "refs"
 
 
 def _copy_path(source: Path, dest: Path) -> None:
@@ -825,7 +832,9 @@ def _copy_path(source: Path, dest: Path) -> None:
 
 def _archive_ignore(root: Path, omitted: dict[str, int]):
     """``_COLLECT_IGNORE`` plus every regular file over ARCHIVE_MAX_FILE_BYTES,
-    each of which is recorded in ``omitted`` by its path under ``root``.
+    each of which is recorded in ``omitted`` by its path under ``root``, and
+    the directory WORKSPACE_REFS_DIR at the top of ``root``, recorded as
+    ``refs/`` with the bytes of the regular files under it.
 
     A symbolic link or a special file is not measured: the copy keeps the
     link and records a special file as a collection error, as before.
@@ -841,12 +850,31 @@ def _archive_ignore(root: Path, omitted: dict[str, int]):
                 status = path.lstat()
             except OSError:
                 continue  # gone or unreadable: the copy itself reports it
-            if stat.S_ISREG(status.st_mode) and status.st_size > ARCHIVE_MAX_FILE_BYTES:
+            if name == WORKSPACE_REFS_DIR and path.parent == root and stat.S_ISDIR(status.st_mode):
+                ignored.add(name)
+                omitted[f"{name}/"] = _tree_file_bytes(path)
+            elif stat.S_ISREG(status.st_mode) and status.st_size > ARCHIVE_MAX_FILE_BYTES:
                 ignored.add(name)
                 omitted[path.relative_to(root).as_posix()] = status.st_size
         return ignored
 
     return ignore
+
+
+def _tree_file_bytes(root: Path) -> int:
+    """The bytes of the regular files under ``root``; what cannot be read
+    counts nothing."""
+
+    total = 0
+    for directory, _dirs, files in os.walk(root):
+        for name in files:
+            try:
+                status = os.lstat(os.path.join(directory, name))
+            except OSError:
+                continue
+            if stat.S_ISREG(status.st_mode):
+                total += status.st_size
+    return total
 
 
 def _record_collect_skip(dest_dir: Path, name: str, exc: Exception) -> None:
@@ -887,6 +915,7 @@ __all__ = [
     "SCREENING_TOOL_MOUNT",
     "SCREENING_TOOL_SOURCE",
     "WORKSPACE_OMITTED_NAME",
+    "WORKSPACE_REFS_DIR",
     "DockerSandbox",
     "GpuMode",
     "LocalSandbox",

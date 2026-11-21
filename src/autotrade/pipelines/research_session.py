@@ -58,6 +58,7 @@ from autotrade.environment.runtime import (
     rmtree_keeping_file_modes,
 )
 from autotrade.environment.sandbox import (
+    WORKSPACE_REFS_DIR,
     DockerSandbox,
     LocalSandbox,
     SandboxSpec,
@@ -931,7 +932,7 @@ class LLMResearchDeveloper:
                 workspace_root / "skills", inputs_dir / "skills_index.json"
             )
         manifest.update(skills=_skills_record(skills_stats))
-        rmtree_keeping_file_modes(workspace_root / _WORKSPACE_REFS_DIR)
+        rmtree_keeping_file_modes(workspace_root / WORKSPACE_REFS_DIR)
         install_workspace_reference(
             workspace_root,
             self.workspace_reference,
@@ -1592,7 +1593,6 @@ def _completed_candidate(finish: Mapping[str, object]) -> str:
     return node_id
 
 
-_WORKSPACE_REFS_DIR = "refs"
 _WORKSPACE_STARTER_DIR = "starter"
 _REFERENCE_SKIP_NAMES = frozenset({".git", "__pycache__", "node_modules", ".venv"})
 _REFERENCE_PDF_MAX_BYTES = 256 * 1024
@@ -1607,7 +1607,7 @@ def session_workspace_map(workspace: str | Path) -> dict[str, str]:
         "data_summary": DATA_SUMMARY_REF,
         "snapshot_in_sandbox": "/mnt/snapshot",
     }
-    if (Path(workspace) / _WORKSPACE_REFS_DIR).is_dir():
+    if (Path(workspace) / WORKSPACE_REFS_DIR).is_dir():
         mapping["refs"] = "refs/"
     return mapping
 
@@ -1695,7 +1695,7 @@ def install_workspace_reference(
     if seed is None:
         return
     payload = pack_payload(seed, None if repo_root is None else Path(repo_root).resolve())
-    dest = Path(workspace) / _WORKSPACE_REFS_DIR
+    dest = Path(workspace) / WORKSPACE_REFS_DIR
     if dest.exists():
         raise FileExistsError(f"workspace refs directory already exists: {dest}")
     dest.mkdir()
