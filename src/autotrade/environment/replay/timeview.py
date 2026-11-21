@@ -490,7 +490,26 @@ class Timeview:
         return str(self.host_dir), str(self._version)
 
 
-class _DomainView:
+class _SegmentedView:
+    """A view's replay slots: a change to them resets the roll signature."""
+
+    _segments: list[_ReplaySegment]
+    _dataset_names: list[str]
+    _last_signature: object
+
+    def release_published(self) -> None:
+        """Drop the slots whose every row a refresh has published."""
+        self._segments = [segment for segment in self._segments if segment.has_pending()]
+        self._segments_changed()
+
+    def _segments_changed(self) -> None:
+        self._dataset_names = sorted(
+            {name for segment in self._segments for name in segment.cursors}
+        )
+        self._last_signature = object()
+
+
+class _DomainView(_SegmentedView):
     """One domain's growing directory of parquet parts."""
 
     def __init__(
@@ -548,17 +567,6 @@ class _DomainView:
             cursors = _dataset_cursors(rows.column("dataset").astype(str).to_numpy(), valid, keys)
             self._segments.append(_ReplaySegment(rows, None, cursors, first_seen=first_seen))
         self._segments_changed()
-
-    def release_published(self) -> None:
-        """Drop the slots whose every row a refresh has published."""
-        self._segments = [segment for segment in self._segments if segment.has_pending()]
-        self._segments_changed()
-
-    def _segments_changed(self) -> None:
-        self._dataset_names = sorted(
-            {name for segment in self._segments for name in segment.cursors}
-        )
-        self._last_signature = object()
 
     def append_replay_partition(self, replay: pd.DataFrame) -> None:
         if not self.incremental:
@@ -869,7 +877,7 @@ class _DomainView:
         return tuple((d, str(dataset_cutoff(d, when))) for d in self._dataset_names)
 
 
-class _TextView:
+class _TextView(_SegmentedView):
     """Rolling text index plus visible body shards.
 
     The frozen research library is fully visible at replay start, but replay-slot
@@ -937,17 +945,6 @@ class _TextView:
                 )
             )
         self._segments_changed()
-
-    def release_published(self) -> None:
-        """Drop the slots whose every index row a refresh has published."""
-        self._segments = [segment for segment in self._segments if segment.has_pending()]
-        self._segments_changed()
-
-    def _segments_changed(self) -> None:
-        self._dataset_names = sorted(
-            {name for segment in self._segments for name in segment.cursors}
-        )
-        self._last_signature = object()
 
     def _init_frozen(self, frozen_index_file: Path, frozen_library_dir: Path) -> None:
         if frozen_index_file.exists():
