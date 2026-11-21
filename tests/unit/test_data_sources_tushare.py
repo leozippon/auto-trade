@@ -28,6 +28,7 @@ from autotrade.data_sources.tushare import (
     cron_update,
     download,
     generation,
+    share_float,
     specs,
     stamps,
     versions,
@@ -691,9 +692,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
-        with patch.object(download, "share_float_union_files", return_value=[]):
+        with patch.object(share_float, "share_float_union_files", return_value=[]):
             report = {}
-            download.write_share_float_union(self.raw_dir, args, report)
+            share_float.write_share_float_union(self.raw_dir, args, report)
         self.assertEqual(tushare_io.parquet_rows(output), 2)
         self.assertTrue(report["union"]["baseline_inherited"])
 
@@ -707,8 +708,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ])
         tushare_io.write_parquet(source, rows, api_name="share_float", params={}, fields=list(rows.columns))
         report = {}
-        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
-            download.write_share_float_union(self.raw_dir, args, report)
+        with patch.object(share_float, "share_float_union_files", return_value=[(source, "ann_date")]):
+            share_float.write_share_float_union(self.raw_dir, args, report)
         self.assertEqual(report["union"]["previous_rows"], 2)
         self.assertEqual(report["union"]["rows_after_dedup"], 2)
         updated = pd.read_parquet(output).sort_values("ts_code")
@@ -736,9 +737,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             active = baseline.copy()
             active["float_share"] = value
             tushare_io.write_parquet(source, active, api_name="share_float", params={}, fields=list(active.columns))
-            with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
+            with patch.object(share_float, "share_float_union_files", return_value=[(source, "ann_date")]):
                 with patch.object(pd, "read_parquet", wraps=pd.read_parquet) as read_parquet:
-                    download.write_share_float_union(self.raw_dir, args, {})
+                    share_float.write_share_float_union(self.raw_dir, args, {})
             output_reads = [
                 call for call in read_parquet.call_args_list
                 if Path(call.args[0]).resolve() == output.resolve()
@@ -762,9 +763,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
-        with patch.object(download, "share_float_union_files") as list_files:
+        with patch.object(share_float, "share_float_union_files") as list_files:
             with self.assertRaisesRegex(RuntimeError, "baseline is missing"):
-                download.write_share_float_union(self.raw_dir, args, {})
+                share_float.write_share_float_union(self.raw_dir, args, {})
         list_files.assert_not_called()
         self.assertFalse(output.exists())
 
@@ -794,10 +795,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
-        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
-            download.write_share_float_union(self.raw_dir, args, {})
+        with patch.object(share_float, "share_float_union_files", return_value=[(source, "ann_date")]):
+            share_float.write_share_float_union(self.raw_dir, args, {})
             first = pd.read_parquet(output)
-            download.write_share_float_union(self.raw_dir, args, {})
+            share_float.write_share_float_union(self.raw_dir, args, {})
             second = pd.read_parquet(output)
 
         self.assertEqual(len(first), 3)
@@ -822,7 +823,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             skip_float_date_union=False,
         )
 
-        files = [path for path, _ in download.share_float_union_files(self.raw_dir, args)]
+        files = [path for path, _ in share_float.share_float_union_files(self.raw_dir, args)]
         self.assertEqual(files, [recent])
 
     def test_share_float_union_capped_group_preserves_complete_baseline(self):
@@ -836,7 +837,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         source = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         tushare_io.write_parquet(
             source,
-            existing.iloc[:common.SHARE_FLOAT_ROW_LIMIT],
+            existing.iloc[:share_float.SHARE_FLOAT_ROW_LIMIT],
             api_name="share_float",
             params={},
             fields=list(existing.columns),
@@ -849,8 +850,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         report = {}
-        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
-            download.write_share_float_union(self.raw_dir, args, report)
+        with patch.object(share_float, "share_float_union_files", return_value=[(source, "ann_date")]):
+            share_float.write_share_float_union(self.raw_dir, args, report)
 
         self.assertEqual(tushare_io.parquet_rows(output), 7000)
         self.assertEqual(report["union"]["rows_after_dedup"], 7000)
@@ -871,7 +872,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         rescue = self.raw_dir / "share_float_ann_date_ts_code" / "ann_date=20200101" / "ts_code=000001.SZ.parquet"
         tushare_io.write_parquet(
             capped,
-            pd.concat([refreshed] * common.SHARE_FLOAT_ROW_LIMIT, ignore_index=True),
+            pd.concat([refreshed] * share_float.SHARE_FLOAT_ROW_LIMIT, ignore_index=True),
             api_name="share_float",
             params={},
             fields=list(refreshed.columns),
@@ -885,12 +886,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         report = {}
-        with patch.object(
-            download,
-            "share_float_union_files",
+        with patch.object(share_float, "share_float_union_files",
             return_value=[(capped, "ann_date"), (rescue, "ann_date_ts_code")],
         ):
-            download.write_share_float_union(self.raw_dir, args, report)
+            share_float.write_share_float_union(self.raw_dir, args, report)
 
         result = pd.read_parquet(output)
         self.assertEqual(result["float_share"].tolist(), [10.0])
@@ -935,8 +934,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
-        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
-            download.write_share_float_union(self.raw_dir, args, report)
+        with patch.object(share_float, "share_float_union_files", return_value=[(source, "ann_date")]):
+            share_float.write_share_float_union(self.raw_dir, args, report)
 
         union = pd.read_parquet(output)
         stale = union[(union["ts_code"] == "301583.SZ") & (union["ann_date"] == "20260630")]
@@ -951,8 +950,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         # Idempotent re-run: nothing left to supersede, content stable.
         report = {}
-        with patch.object(download, "share_float_union_files", return_value=[(source, "ann_date")]):
-            download.write_share_float_union(self.raw_dir, args, report)
+        with patch.object(share_float, "share_float_union_files", return_value=[(source, "ann_date")]):
+            share_float.write_share_float_union(self.raw_dir, args, report)
         self.assertEqual(report["union"]["superseded_redated_groups"], 0)
         self.assertEqual(tushare_io.parquet_rows(output), 3)
 
@@ -988,8 +987,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
-        with patch.object(download, "share_float_union_files", return_value=files):
-            download.write_share_float_union(self.raw_dir, args, report)
+        with patch.object(share_float, "share_float_union_files", return_value=files):
+            share_float.write_share_float_union(self.raw_dir, args, report)
 
         union = pd.read_parquet(output)
         event = union[union["ts_code"] == "301583.SZ"]
@@ -1000,8 +999,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         # Idempotent: nothing left to prune or supersede.
         report2 = {}
-        with patch.object(download, "share_float_union_files", return_value=files):
-            download.write_share_float_union(self.raw_dir, args, report2)
+        with patch.object(share_float, "share_float_union_files", return_value=files):
+            share_float.write_share_float_union(self.raw_dir, args, report2)
         self.assertEqual(report2["union"]["superseded_redated_groups"], 0)
         self.assertEqual(tushare_io.parquet_rows(output), 2)
 
@@ -1022,7 +1021,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             dict(existing.iloc[0], ann_date="20260709", float_share=2.0),
             *[{"ts_code": f"9{i:05d}.SZ", "ann_date": "20260709", "float_date": "20270712",
                "holder_name": f"h{i}", "share_type": "首发原始股", "float_share": 1.0,
-               "float_ratio": 0.1} for i in range(common.SHARE_FLOAT_ROW_LIMIT - 1)],
+               "float_ratio": 0.1} for i in range(share_float.SHARE_FLOAT_ROW_LIMIT - 1)],
         ])
         new_path = self.raw_dir / "share_float_ann_date" / "ann_date=20260709.parquet"
         tushare_io.write_parquet(new_path, capped, api_name="share_float", params={},
@@ -1035,9 +1034,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
-        with patch.object(download, "share_float_union_files",
+        with patch.object(share_float, "share_float_union_files",
                           return_value=[(old_path, "ann_date"), (new_path, "ann_date")]):
-            download.write_share_float_union(self.raw_dir, args, report)
+            share_float.write_share_float_union(self.raw_dir, args, report)
         union = pd.read_parquet(output)
         event = union[(union["ts_code"] == "301583.SZ")]
         self.assertEqual(sorted(event["ann_date"]), ["20260630", "20260709"])  # conservative union
@@ -1059,7 +1058,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             dict(existing.iloc[0], ann_date="20260709", float_share=2.0),
             *[{"ts_code": f"9{i:05d}.SZ", "ann_date": "20260709", "float_date": "20270712",
                "holder_name": f"h{i}", "share_type": "首发原始股", "float_share": 1.0,
-               "float_ratio": 0.1} for i in range(common.SHARE_FLOAT_ROW_LIMIT - 1)],
+               "float_ratio": 0.1} for i in range(share_float.SHARE_FLOAT_ROW_LIMIT - 1)],
         ])
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20260709.parquet"
         tushare_io.write_parquet(path, capped, api_name="share_float", params={},
@@ -1072,8 +1071,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
         report = {}
-        with patch.object(download, "share_float_union_files", return_value=[(path, "ann_date")]):
-            download.write_share_float_union(self.raw_dir, args, report)
+        with patch.object(share_float, "share_float_union_files", return_value=[(path, "ann_date")]):
+            share_float.write_share_float_union(self.raw_dir, args, report)
         union = pd.read_parquet(output)
         event = union[union["ts_code"] == "301583.SZ"]
         self.assertEqual(sorted(event["ann_date"]), ["20260630", "20260709"])  # old row kept
@@ -1099,7 +1098,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def add(severity, check, message, details=None):
             findings.append({"severity": severity, "check": check, "details": details or {}})
 
-        audit.audit_share_float_complete_union(self.raw_dir, add)
+        share_float.audit_share_float_complete_union(self.raw_dir, add)
         finding = next(f for f in findings if f["check"] == "share_float_complete_union")
         self.assertEqual(finding["severity"], "warning")
         # whitespace variants of one holder count as ONE physical identity
@@ -1121,11 +1120,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 )
                 for field in fields
             }
-            for index in range(common.SHARE_FLOAT_ROW_LIMIT)
+            for index in range(share_float.SHARE_FLOAT_ROW_LIMIT)
         ])
         tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=fields)
 
-        result = download.query_share_float_to_path(
+        result = share_float.query_share_float_to_path(
             EmptyTradeDateClient(),
             path,
             {"ann_date": "20200101"},
@@ -1135,9 +1134,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         self.assertTrue(result["skipped"])
-        self.assertEqual(result["rows"], common.SHARE_FLOAT_ROW_LIMIT)
+        self.assertEqual(result["rows"], share_float.SHARE_FLOAT_ROW_LIMIT)
         self.assertTrue(result["source_cap_risk"])
-        self.assertEqual(tushare_io.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
+        self.assertEqual(tushare_io.parquet_rows(path), share_float.SHARE_FLOAT_ROW_LIMIT)
 
     def test_share_float_extreme_shrink_is_staged_and_reported(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
@@ -1159,7 +1158,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # raising aborted the whole run mid-loop and made the ts_code rescue
         # unreachable every time a capped partition rotated its keys.
         with redirect_stdout(io.StringIO()):
-            result = download.query_share_float_to_path(
+            result = share_float.query_share_float_to_path(
                 ShrunkClient(), path, {"ann_date": "20200101"}, "ann_date", True,
                 revision_ledger=self.root / "revision_events.jsonl",
             )
@@ -1183,7 +1182,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             def query(self, *a, **k):
                 raise AssertionError("resume must not call the API")
 
-        result = download.query_share_float_to_path(
+        result = share_float.query_share_float_to_path(
             Unused(), path, {"ann_date": "20200101"}, "ann_date", False,
         )
         self.assertEqual(sorted(result), ["path", "rows", "skipped", "source_cap_risk", "staged"])
@@ -1212,7 +1211,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 return tushare_client.ApiResult(
                     specs.SHARE_FLOAT_FIELDS.split(","),
                     [["301716.SZ", day, "20200103", 1.0, 0.1, f"n{index}", "type"]
-                     for index in range(common.SHARE_FLOAT_ROW_LIMIT)])
+                     for index in range(share_float.SHARE_FLOAT_ROW_LIMIT)])
 
         args = argparse.Namespace(
             ann_start_date=day, ann_end_date=day, force=True,
@@ -1222,15 +1221,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         report: dict = {}
         with redirect_stdout(io.StringIO()):
-            limit_hits = download.download_share_float_ann_dates(CappedNewIpoClient(), self.raw_dir, args, report)
+            limit_hits = share_float.download_share_float_ann_dates(CappedNewIpoClient(), self.raw_dir, args, report)
         self.assertEqual(limit_hits, [day])
         self.assertEqual(report["ann_date"]["staged_days"], [])
-        self.assertEqual(tushare_io.parquet_rows(path), common.SHARE_FLOAT_ROW_LIMIT)
-        self.assertEqual([version.split("-")[-1] for version in download.list_versions(path)], ["superseded"])
+        self.assertEqual(tushare_io.parquet_rows(path), share_float.SHARE_FLOAT_ROW_LIMIT)
+        self.assertEqual([version.split("-")[-1] for version in versions.list_versions(path)], ["superseded"])
         events = [json.loads(line) for line in (self.root / "revision_events.jsonl").read_text().splitlines()]
         self.assertEqual([event["kind"] for event in events], ["restatement"])
 
-        candidates, _ = download.select_share_float_rescue_date_codes(self.raw_dir, args, date_param="ann_date", dates=[day])
+        candidates, _ = share_float.select_share_float_rescue_date_codes(self.raw_dir, args, date_param="ann_date", dates=[day])
         self.assertEqual(set(candidates[day]), {"301716.SZ", "300227.SZ", *old_codes})
 
     def test_capped_staging_reaches_rescue_while_a_real_retraction_stays_staged(self):
@@ -1253,7 +1252,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                                  fields=list(frame.columns))
 
         capped_day, retracted_day = "20200101", "20200102"
-        seed(capped_day, common.SHARE_FLOAT_ROW_LIMIT)  # at the API cap
+        seed(capped_day, share_float.SHARE_FLOAT_ROW_LIMIT)  # at the API cap
         seed(retracted_day, 100)
 
         class ShrunkClient:
@@ -1267,7 +1266,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         report: dict = {}
         with redirect_stdout(io.StringIO()):
-            download.download_share_float_ann_dates(ShrunkClient(), self.raw_dir, args, report)
+            share_float.download_share_float_ann_dates(ShrunkClient(), self.raw_dir, args, report)
 
         # The capped day reached the rescue list, and BOTH partitions were
         # preserved.
@@ -1275,7 +1274,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(report["ann_date"]["staged_days"], [retracted_day])
         self.assertEqual(
             tushare_io.parquet_rows(self.raw_dir / "share_float_ann_date" / f"ann_date={capped_day}.parquet"),
-            common.SHARE_FLOAT_ROW_LIMIT,
+            share_float.SHARE_FLOAT_ROW_LIMIT,
         )
 
     def test_every_capped_day_is_rescued_within_the_call_limit_or_the_run_fails(self):
@@ -1292,7 +1291,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             def query(self, api_name, params=None, fields="", retries=5):
                 self.calls.append(dict(params))
                 code = f"3000{params['ann_date'][-2:]}.SZ"
-                rows = 1 if "ts_code" in params else common.SHARE_FLOAT_ROW_LIMIT
+                rows = 1 if "ts_code" in params else share_float.SHARE_FLOAT_ROW_LIMIT
                 return tushare_client.ApiResult(
                     specs.SHARE_FLOAT_FIELDS.split(","),
                     [[code, params["ann_date"], "20200301", 1.0, 0.1, f"h{index}", "type"] for index in range(rows)])
@@ -1306,11 +1305,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 "--max-rescue-calls", str(max_calls), "--revision-ledger", str(self.root / "revision_events.jsonl"),
             ])
             with (
-                patch.object(download, "TuShareClient", return_value=client),
-                patch.object(download, "load_token", return_value="token"),
+                patch.object(share_float, "TuShareClient", return_value=client),
+                patch.object(share_float, "load_token", return_value="token"),
                 redirect_stdout(io.StringIO()),
             ):
-                download.download_share_float_complete(args)
+                share_float.download_share_float_complete(args)
             return {call["ann_date"] for call in client.calls if "ts_code" in call}
 
         with self.assertRaisesRegex(RuntimeError, "would make 7 calls .* exceeding --max-rescue-calls=6"):
@@ -1323,7 +1322,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         pd.DataFrame([{"ann_date": "20200101", "title": "解禁"}]).to_parquet(path, index=False)
 
         with self.assertRaises(ArrowInvalid):
-            download.anns_unlock_candidate_codes(self.raw_dir, ["20200101"])
+            share_float.anns_unlock_candidate_codes(self.raw_dir, ["20200101"])
 
     def test_generic_event_flow_download_excludes_dedicated_share_float_path(self):
         selected = download.selected_event_flow_download_datasets(argparse.Namespace(datasets=None))
@@ -5810,14 +5809,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         client = FloatClient()
         with redirect_stdout(io.StringIO()):
-            report = download.query_share_float_to_path(
+            report = share_float.query_share_float_to_path(
                 client, path, {"ann_date": "20200101"}, "ann_date", False,
             )
         self.assertEqual([api for api, _ in client.calls], ["share_float"])
         self.assertFalse(report["skipped"])
         self.assertTrue(tushare_io.committed_partition_intact(path))
         client.calls.clear()
-        report = download.query_share_float_to_path(
+        report = share_float.query_share_float_to_path(
             client, path, {"ann_date": "20200101"}, "ann_date", False,
         )
         self.assertEqual(client.calls, [])
@@ -7464,7 +7463,7 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
 
     The one-off historical repair tool (repair.py) ran on 2026-07-30 and was
     retired on 2026-08-02 (dev-phase ruling); the rule it applied is now a
-    union-merge invariant (``common.undated_duplicate_mask``), pinned here.
+    union-merge invariant (``share_float.undated_duplicate_mask``), pinned here.
     """
 
     def setUp(self) -> None:
@@ -7507,7 +7506,7 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
         distinct_lot = self._row(ann_date=None, float_share=555.0)
         frame = pd.DataFrame([dated, undated, distinct_lot])
 
-        mask = common.undated_duplicate_mask(frame)
+        mask = share_float.undated_duplicate_mask(frame)
 
         self.assertEqual(mask.tolist(), [False, True, False])
         kept = frame.loc[~mask]
@@ -7533,8 +7532,8 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
         )
         report: dict = {}
 
-        with patch.object(download, "share_float_union_files", return_value=[(source, "float_date_existing")]):
-            download.write_share_float_union(self.raw_dir, args, report)
+        with patch.object(share_float, "share_float_union_files", return_value=[(source, "float_date_existing")]):
+            share_float.write_share_float_union(self.raw_dir, args, report)
 
         union = pd.read_parquet(self.baseline)
         self.assertEqual(report["union"]["superseded_redated_groups"], 0)
@@ -7560,11 +7559,10 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
         )
         report: dict = {}
 
-        with patch.object(
-            download, "share_float_union_files",
+        with patch.object(share_float, "share_float_union_files",
             return_value=[(dated_path, "ann_date"), (undated_path, "float_date_existing")],
         ):
-            download.write_share_float_union(self.raw_dir, args, report)
+            share_float.write_share_float_union(self.raw_dir, args, report)
 
         union = pd.read_parquet(self.baseline)
         self.assertEqual(report["union"]["active_stale_restatement_rows_dropped"], 1)
@@ -7581,7 +7579,7 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
                              fields=list(rows.columns))
         findings: list[dict] = []
 
-        audit.audit_share_float_complete_union(
+        share_float.audit_share_float_complete_union(
             self.raw_dir,
             lambda severity, check, message, details=None: findings.append(
                 {"check": check, "details": details or {}}
@@ -7595,7 +7593,7 @@ class ShareFloatUndatedDuplicateInvariantTest(unittest.TestCase):
 
     def test_vectorized_date_normalization_matches_the_scalar_rule(self) -> None:
         values = [None, float("nan"), "", "20200102", "2020-01-02", "20200102123", "2020010", "x", 20200102]
-        vector = common.normalized_date_keys(pd.Series(values, dtype=object)).tolist()
+        vector = share_float.normalized_date_keys(pd.Series(values, dtype=object)).tolist()
 
         self.assertEqual(vector, [common.normalize_date_key(value) for value in values])
         self.assertEqual(vector[0], "")

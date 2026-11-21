@@ -15,7 +15,6 @@ from typing import Any
 import pandas as pd
 import pyarrow.parquet as pq
 
-from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ, cn_today
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
 from autotrade.environment.data.contracts import (
@@ -52,7 +51,6 @@ from .common import (
     FUNDAMENTAL_RAW_STATUS_PATH,
     INTRADAY_MINUTES_STATUS_PATH,
     MACRO_CONTEXT_STATUS_PATH,
-    SHARE_FLOAT_ROW_LIMIT,
     TEXT_EVIDENCE_STATUS_PATH,
     active_year_windows,
     cli_values,
@@ -88,6 +86,10 @@ from .io import (
     read_many,
 )
 from .layout import partitions, range_partition, time_units
+from .share_float import (
+    audit_share_float_complete_union,
+    share_float_complete_union_exists,
+)
 from .specs import (
     BAK_BASIC_SPEC,
     BOARD_TRADING_SPECS,
@@ -1932,7 +1934,6 @@ def audit_text_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pat
     ))
 
 
-
 def expected_text_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     units = time_units(raw_dir, spec, max(start_date, spec.start_date), end_date)
     return {part.path for part in partitions(raw_dir, spec, units, args)}
@@ -2205,136 +2206,6 @@ def audit_event_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         zero_rows_ok=spec.zero_rows_ok,
     ))
 
-
-def audit_share_float_complete_union(raw_dir: Path, add) -> None:
-    union_path = raw_dir / "share_float_complete" / "share_float_complete.parquet"
-    meta_path = union_path.with_suffix(union_path.suffix + ".meta.json")
-    ann_rescue_files = sorted((raw_dir / "share_float_ann_date_ts_code").rglob("*.parquet"))
-    float_rescue_files = sorted((raw_dir / "share_float_float_date_ts_code").rglob("*.parquet"))
-    rescue_limit_files: list[str] = []
-    rescue_zero_files = 0
-    for path in ann_rescue_files + float_rescue_files:
-        rows = parquet_rows(path)
-        if rows == 0:
-            rescue_zero_files += 1
-        if rows >= SHARE_FLOAT_ROW_LIMIT:
-            rescue_limit_files.append(str(path))
-
-    base_details: dict[str, Any] = {
-        "path": str(union_path),
-        "ann_date_ts_code_files": len(ann_rescue_files),
-        "float_date_ts_code_files": len(float_rescue_files),
-        "rescue_zero_files": rescue_zero_files,
-        "rescue_limit_files": len(rescue_limit_files),
-        "rescue_limit_file_sample": rescue_limit_files[:10],
-    }
-    if not union_path.exists():
-        add("warning", "share_float_complete_union", "share_float complete union file is missing; event_flow audit falls back to raw share_float partitions only", base_details)
-        return
-
-    rows = parquet_rows(union_path)
-    schema = pq.ParquetFile(union_path).schema_arrow.names
-    required_columns = ["ts_code", "ann_date", "float_date", "download_path", "source_file", "source_cap_risk"]
-    missing_columns = [column for column in required_columns if column not in schema]
-    meta_row_count = None
-    meta_error = ""
-    if meta_path.exists():
-        try:
-            meta_row_count = read_json_object(meta_path).get("row_count")
-        except Exception as exc:  # noqa: BLE001 - unreadable sidecar is reported through meta_error
-            meta_error = str(exc)
-
-    details: dict[str, Any] = {
-        **base_details,
-        "rows": rows,
-        "meta_exists": meta_path.exists(),
-        "meta_row_count": meta_row_count,
-        "meta_error": meta_error,
-        "missing_columns": missing_columns,
-    }
-    # Business-identity duplication: the same PHYSICAL unlock event (ts_code +
-    # float_date + holder + share_type, ann_date excluded, holder whitespace
-    # normalized) must not survive under several announcement dates -- the
-    # provider re-dates announcements, and a retained stale generation double
-    # counts supply. Row/key checks cannot see this class, so it is checked
-    # explicitly here; the incremental merge only fixes what its refresh window
-    # touches, so historical residue needs a dedicated repair.
-    identity_columns = ["ts_code", "ann_date", "float_date", "holder_name", "share_type"]
-    # An absent identity column must surface, not silently skip the check --
-    # silently passing unverifiable data is the failure mode audits exist for.
-    identity_columns_missing = [column for column in identity_columns if column not in schema]
-    details["identity_columns_missing"] = identity_columns_missing
-    has_identity_columns = not identity_columns_missing
-    stat_columns = [column for column in ("download_path", "source_cap_risk", "source_file") if column in schema]
-    # One physical read serves both the identity check and the provenance
-    # stats; each block keeps its own error attribution.
-    read_columns = list(dict.fromkeys((identity_columns if has_identity_columns else []) + stat_columns))
-    union_frame: pd.DataFrame | None = None
-    union_read_error: Exception | None = None
-    if read_columns:
-        try:
-            union_frame = pd.read_parquet(union_path, columns=read_columns)
-        except Exception as exc:  # noqa: BLE001 - read failure is kept and re-raised into the audit finding
-            union_read_error = exc
-    if has_identity_columns:
-        try:
-            if union_frame is None:
-                raise union_read_error
-            frame = union_frame[identity_columns].copy()
-            # Datings are normalized: an UNDATED row (float_date query path, the
-            # provider left ann_date empty) must rank below every real date, or
-            # str(None)=="None" sorts above them and the informative dated row
-            # gets reported as the stale one.
-            frame["ann_date"] = core.normalized_date_keys(frame["ann_date"])
-            frame["holder_name"] = core.normalized_holder_keys(frame["holder_name"])
-            physical = ["ts_code", "float_date", "holder_name", "share_type"]
-            datings = frame.groupby(physical, sort=False)["ann_date"].nunique()
-            multi = datings[datings > 1]
-            details["cross_ann_date_identity_groups"] = len(multi)
-            if len(multi):
-                affected = frame.merge(multi.reset_index()[physical], on=physical, how="inner")
-                newest = affected.groupby(physical, sort=False)["ann_date"].transform("max")
-                stale = affected["ann_date"] < newest
-                details["stale_redated_rows"] = int(stale.sum())
-                # The two mechanisms need different repairs: an undated duplicate
-                # is provable from the baseline alone, an older REAL dating is not.
-                details["undated_duplicate_rows"] = int((stale & affected["ann_date"].eq("")).sum())
-                details["cross_ann_date_sample"] = [
-                    dict(zip(physical, values)) for values in multi.index[:5]
-                ]
-        except Exception as exc:  # noqa: BLE001 - failure is reported as identity_check_error
-            details["identity_check_error"] = str(exc)
-    try:
-        if stat_columns and union_frame is None:
-            raise union_read_error
-        df = union_frame[stat_columns] if union_frame is not None else pd.DataFrame()
-        if "download_path" in df.columns:
-            details["download_path_counts"] = {str(key): int(value) for key, value in df["download_path"].value_counts(dropna=False).sort_index().items()}
-        if "source_file" in df.columns:
-            details["input_files_seen"] = int(df["source_file"].nunique(dropna=True))
-        if "source_cap_risk" in df.columns:
-            risk = df["source_cap_risk"].fillna(False)
-            if risk.dtype != bool:
-                risk = risk.astype(str).str.lower().isin({"true", "1", "yes"})
-            details["source_cap_risk_rows"] = int(risk.sum())
-    except Exception as exc:  # noqa: BLE001 - failure is reported as read_error
-        details["read_error"] = str(exc)
-
-    severity = "warning" if (
-        rows == 0
-        or missing_columns
-        or identity_columns_missing
-        or not meta_path.exists()
-        or meta_error
-        or details.get("source_cap_risk_rows", 0)
-        or rescue_limit_files
-        or details.get("cross_ann_date_identity_groups", 0)
-        or details.get("identity_check_error")
-    ) else "info"
-    add(severity, "share_float_complete_union", "share_float complete union and rescue coverage", details)
-
-def share_float_complete_union_exists(raw_dir: Path) -> bool:
-    return (raw_dir / "share_float_complete" / "share_float_complete.parquet").exists()
 
 def audit_event_flow_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()

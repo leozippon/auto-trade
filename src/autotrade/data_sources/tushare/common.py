@@ -12,7 +12,6 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import quote
 
-import numpy as np
 import pandas as pd
 
 from autotrade.common.time import cn_today
@@ -124,13 +123,6 @@ def resolve_revision_ledger(
     return root / ledger
 
 
-SHARE_FLOAT_ROW_LIMIT = 6000
-
-SHARE_FLOAT_UNLOCK_TITLE_PATTERN = re.compile(
-    r"限售|解禁|上市流通|解除限售|限售股份上市|限售股上市|首次公开发行限售|非公开发行限售|定向增发限售"
-)
-
-
 def load_stock_codes(raw_dir: Path) -> list[str]:
     files = sorted((raw_dir / "stock_basic").glob("list_status=*.parquet"))
     if not files:
@@ -143,80 +135,6 @@ def load_stock_codes(raw_dir: Path) -> list[str]:
 def normalize_date_key(value: object) -> str:
     digits = re.sub(r"\D", "", str(value or ""))[:8]
     return digits if len(digits) == 8 else ""
-
-
-def normalized_date_keys(values: pd.Series) -> pd.Series:
-    """Vectorized twin of :func:`normalize_date_key` for whole-column passes.
-
-    Same rule, same output for every input (a drift test pins the equivalence):
-    non-digits dropped, first 8 digits kept, and anything that is not exactly 8
-    digits -- missing, null, empty, malformed -- becomes ``""``. ``""`` sorts
-    BELOW every real ``YYYYMMDD``, which is what makes an undated row lose the
-    newest-dating comparison instead of winning it (``str(None) == "None"``
-    sorted above every date and inverted the comparison)."""
-    keys = values.astype(str).str.replace(r"\D", "", regex=True).str.slice(0, 8)
-    return keys.where(keys.str.len() == 8, "")
-
-
-# One physical unlock (解禁) event, independent of its announcement date:
-# ``ann_date`` is excluded because the provider re-dates announcements.
-PHYSICAL_IDENTITY_COLUMNS = ["ts_code", "float_date", "holder_name", "share_type"]
-
-
-def normalized_holder_keys(values: pd.Series) -> pd.Series:
-    """Holder names with whitespace ignored (raw rows keep their source bytes).
-
-    Restatements carry cosmetic spacing drift (observed live: "...企业 (有限合伙)"
-    re-dated as "...企业(有限合伙)"), so whitespace must not split one holder
-    into two identities."""
-    return values.astype(str).str.replace(r"\s+", "", regex=True)
-
-
-def physical_identity_index(frame: pd.DataFrame) -> pd.MultiIndex:
-    """Physical-identity index for membership tests between two frames."""
-    view = frame[PHYSICAL_IDENTITY_COLUMNS].copy()
-    view["holder_name"] = normalized_holder_keys(view["holder_name"])
-    return pd.MultiIndex.from_frame(view)
-
-
-def physical_identity_codes(frame: pd.DataFrame) -> pd.Series:
-    """Dense integer identity code per row -- same identity rule as
-    :func:`physical_identity_index`, but for whole-baseline grouping where
-    materializing 12M index tuples would be wasteful."""
-    view = frame[PHYSICAL_IDENTITY_COLUMNS].copy()
-    view["holder_name"] = normalized_holder_keys(view["holder_name"])
-    return view.groupby(PHYSICAL_IDENTITY_COLUMNS, sort=False, dropna=False).ngroup()
-
-
-def undated_duplicate_mask(frame: pd.DataFrame) -> np.ndarray:
-    """Rows carrying no announcement date whose physical identity already holds
-    a dated row of the identical ``float_share``.
-
-    Such a row is the undated copy of an announcement the lake already has: it
-    contributes no observation and double-counts the lot. Deleting it cannot
-    move point-in-time visibility, because the undated row's availability was
-    the conservative ``float_date`` fallback while the dated twin was already
-    present and announced no later.
-
-    Shared by the union and the one-off repair so the property is an invariant
-    of the data rather than a fact about the current update schedule: a rescue
-    fetch that returns an undated lot must not re-introduce the duplicate.
-    """
-    required = [*PHYSICAL_IDENTITY_COLUMNS, "ann_date", "float_share"]
-    if frame.empty or any(column not in frame.columns for column in required):
-        return np.zeros(len(frame), dtype=bool)
-    ann = normalized_date_keys(frame["ann_date"]).to_numpy()
-    identity = physical_identity_codes(frame).to_numpy()
-    share = pd.to_numeric(frame["float_share"], errors="coerce").to_numpy()
-    undated = (ann == "") & ~pd.isna(share)
-    dated = ann != ""
-    if not undated.any() or not dated.any():
-        return np.zeros(len(frame), dtype=bool)
-    twins = pd.MultiIndex.from_arrays([identity[dated], share[dated]])
-    candidates = pd.MultiIndex.from_arrays([identity[undated], share[undated]])
-    mask = np.zeros(len(frame), dtype=bool)
-    mask[np.flatnonzero(undated)[candidates.isin(twins)]] = True
-    return mask
 
 
 def sse_calendar(raw_dir: Path) -> pd.DataFrame:
