@@ -2254,8 +2254,7 @@ class SnapshotBuilder:
             raise IndustryMembershipError(
                 f"industry classification is on, but the Shenwan membership ({source} "
                 f"under {self.raw_dir}) classifies no stock on {decision_day}: every "
-                "holding would read as unclassified. Download the membership, or "
-                "create the experiment with include_industry off."
+                "holding would read as unclassified. Download the membership."
             )
         return membership
 

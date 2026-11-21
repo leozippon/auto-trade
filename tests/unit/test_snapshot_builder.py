@@ -641,7 +641,9 @@ class SnapshotBuilderTest(unittest.TestCase):
             # A day the stored membership classifies nobody on, and a lake
             # without the membership at all, are refused: served empty, every
             # holding would read as unclassified.
-            with self.assertRaisesRegex(IndustryMembershipError, "classifies no stock on 20110103"):
+            with self.assertRaisesRegex(
+                IndustryMembershipError, r"classifies no stock on 20110103: .* Download the membership\.$"
+            ):
                 builder._industry_membership("20110103")
             bare = SnapshotBuilder(Path(tmp) / "bare_raw", Path(tmp) / "missing_events")
             for day in ("20180702", "20240101"):
