@@ -38,6 +38,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 from tests.unit.acceptance_fixture import NO_SEED, REQUIRED_RULES, TEST_GEOMETRY
+from tests.unit.agent_fixture import prompt_facts
 
 SESSION_KEY = "research"
 
@@ -163,7 +164,7 @@ def test_research_preview_carries_every_current_prompt_section(tmp_path: Path):
 
 def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path):
     prompt = str(_preview(tmp_path)["prompt"])
-    facts = _facts(prompt)
+    facts = prompt_facts(prompt)
     sandbox = SandboxConfig()
     assert facts["budgets"] == {
         "context_compaction": facts["budgets"]["context_compaction"],
@@ -244,7 +245,7 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
             research_directive="以截面因子为主线",
         )["prompt"]
     )
-    facts = _facts(prompt)
+    facts = prompt_facts(prompt)
     assert facts["budgets"]["max_null_controls"] == 7
     assert facts["budgets"]["max_llm_calls"] == 123
     assert facts["budgets"]["max_api_spend_usd"] == 12.5
@@ -260,7 +261,7 @@ def test_the_preview_takes_the_sessions_own_hitl_overrides(tmp_path: Path):
     the preview's facts carry both, as the session's run manifest does."""
 
     directory, repo = _experiment(tmp_path, gpu_count=1)
-    plain = _facts(_preview_of(directory, repo, SESSION_KEY))
+    plain = prompt_facts(_preview_of(directory, repo, SESSION_KEY))
     assert plain["runtime_tools"]["sandbox_gpus"].startswith("1 × ")
     write_control(
         directory / "hitl" / "control.json",
@@ -269,7 +270,7 @@ def test_the_preview_takes_the_sessions_own_hitl_overrides(tmp_path: Path):
             gpu_counts={SESSION_KEY: 0},
         ),
     )
-    facts = _facts(_preview_of(directory, repo, SESSION_KEY))
+    facts = prompt_facts(_preview_of(directory, repo, SESSION_KEY))
     assert facts["runtime_tools"]["sandbox_gpus"] == NO_SANDBOX_GPUS
     assert facts["budgets"]["max_llm_calls"] == 50
 
@@ -281,9 +282,4 @@ def test_unknown_and_forward_sessions_are_rejected(tmp_path: Path):
     with pytest.raises(KeyError):
         build_prompt_preview(directory, "s1", "", repo_root=repo)
 
-
-def _facts(prompt: str) -> dict:
-    """The run-facts JSON block the preview embeds in the system prompt."""
-    body = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
-    return json.loads(body)
 

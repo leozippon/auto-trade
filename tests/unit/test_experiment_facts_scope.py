@@ -28,39 +28,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import SandboxSpec
-
-
-def _facts(
-    *,
-    data_summary: dict[str, object] | None = None,
-    acceptance_rules: dict[str, object] | None = None,
-    **manifest_overrides: object,
-) -> dict[str, object]:
-    manifest: dict[str, object] = {
-        "experiment_id": "exp",
-        "run_id": "run_x",
-        "epoch_id": "research",
-        "fold_id": "s4",
-        "kind": "research",
-        "research": {
-            "decision_time": "2025-06-30T23:59:59+08:00",
-            "input_window": "20230701..20250630",
-            "research_period": "20210701..20250630",
-            "years": [{"label": "Y1", "start": "20210701", "end": "20220630"}],
-        },
-        "schedule": {"period": "day", "inference_time": "08:30"},
-        "snapshot_config": SnapshotConfig().to_record(),
-        "benchmark_index": "000300.SH",
-        "broker_profile": BrokerProfile().to_record(),
-    }
-    manifest.update(manifest_overrides)
-    with tempfile.TemporaryDirectory() as tmp:
-        return build_experiment_facts(
-            manifest=manifest,
-            ref_store=AgentRefStore(Path(tmp) / "experiment"),
-            data_summary=data_summary,
-            acceptance_rules=acceptance_rules,
-        )
+from tests.unit.agent_fixture import run_facts
 
 
 def _data_summary(rows: dict[str, int]) -> dict[str, object]:
@@ -85,7 +53,7 @@ def test_the_session_facts_hold_values_and_leave_the_prompts_prose_out() -> None
     descriptions'; the facts carry no second copy of them, and no date after
     the research years."""
 
-    facts = _facts(
+    facts = run_facts(
         budgets={**CONTAINER, "deadline_seconds": 43800.0, "batch_validate_max_concurrency": 3}
     )
     assert "research_scope" not in facts
@@ -127,7 +95,7 @@ def test_the_geometry_fact_lists_the_research_years_alone() -> None:
     )
     assert [year["label"] for year in record["years"]] == ["Y1", "Y2", "Y3", "Y4", "Y5"]
     rules = AcceptanceRules(alpha=0.05, research_years=3).to_record()
-    facts = _facts(
+    facts = run_facts(
         research=record,
         acceptance_rules=acceptance_facts({"acceptance_rules": rules, "research": record}),
         budgets={"validates_per_step": 6},
@@ -177,11 +145,11 @@ def test_a_screened_universe_and_a_monthly_cadence_are_stated_as_values() -> Non
     experiment sets one, as its active settings; the call schedule is the
     broker's ``schedule``."""
 
-    assert "universe_screen" not in _facts()["visible_timeline"]
+    assert "universe_screen" not in run_facts()["visible_timeline"]
     screened = SnapshotConfig(
         screen_exclude_st=True, screen_exclude_new_listed_days=180, screen_boards=("main",)
     ).to_record()
-    facts = _facts(
+    facts = run_facts(
         snapshot_config=screened,
         schedule={"period": "month", "inference_time": "09:00"},
     )
@@ -196,7 +164,7 @@ def test_a_screened_universe_and_a_monthly_cadence_are_stated_as_values() -> Non
 def test_both_strategy_wall_clocks_reach_the_session() -> None:
     """The prompts tell the agent to read both, so both must be projected."""
 
-    budgets = _facts(
+    budgets = run_facts(
         budgets={
             "max_llm_calls": 1600,
             "deadline_seconds": 43200,
@@ -215,7 +183,7 @@ def test_the_session_deadline_names_the_wrap_up_grace_inside_it() -> None:
     than the one its directive names and the one hard finalization uses.
     """
 
-    budgets = _facts(
+    budgets = run_facts(
         budgets={"deadline_seconds": 43800.0, "deadline_grace_seconds": 600.0}
     )["budgets"]
     assert budgets["deadline_seconds"] == 43800.0
@@ -226,9 +194,9 @@ def test_the_facts_say_where_the_session_started() -> None:
     """The template and a handed-on node are both stated; a later session
     sees the node id its working copy was seeded from."""
 
-    template = _facts(start={"kind": "template", "template_ref": "agent_output_template"})
+    template = run_facts(start={"kind": "template", "template_ref": "agent_output_template"})
     assert template["artifact_contract"]["start"]["kind"] == "template"
-    node = _facts(
+    node = run_facts(
         start={"kind": "step_node", "node_id": "research__session_ref_a__run_ref_b__valid_002"},
     )
     assert node["artifact_contract"]["start"] == {
@@ -241,10 +209,10 @@ def test_the_session_is_told_which_index_it_is_measured_against() -> None:
     """``benchmark_index`` is the key a reference workspace reads instead of
     restating an index, and the regression caliber names the same one."""
 
-    facts = _facts(benchmark_index="000905.SH")
+    facts = run_facts(benchmark_index="000905.SH")
     assert facts["benchmark_index"] == "000905.SH"
     assert "中证500" in facts["regression_method"]
-    assert "沪深300" in _facts()["regression_method"]
+    assert "沪深300" in run_facts()["regression_method"]
     # Every run manifest states the index; one that does not is refused.
     with tempfile.TemporaryDirectory() as tmp, pytest.raises(KeyError, match="benchmark_index"):
         build_experiment_facts(
@@ -257,12 +225,12 @@ def test_the_intraday_lookback_is_named_only_when_minutes_are_built() -> None:
     """Without minute bars the execution policy reports none available, so no
     minute lookback window may be advertised either."""
 
-    timeline = _facts()["visible_timeline"]
+    timeline = run_facts()["visible_timeline"]
     assert "intraday_trade_days" not in timeline["snapshot_windows"]
     assert "decision_snapshot_intraday_lookback_trade_days" not in timeline
     assert timeline["execution_policy"]["historical_minutes_available"] is False
 
-    with_minutes = _facts(
+    with_minutes = run_facts(
         snapshot_config=SnapshotConfig(include_intraday=True).to_record()
     )["visible_timeline"]
     assert with_minutes["snapshot_windows"]["intraday_trade_days"] == 21
@@ -276,7 +244,7 @@ def test_a_zero_row_domain_file_is_reported_as_unavailable() -> None:
     price orders at an exact minute or at the auction, and every such order was
     rejected as ``missing_execution_price``."""
 
-    empty = _facts(
+    empty = run_facts(
         data_summary=_data_summary(
             {
                 "intraday_1min.parquet": 0,
@@ -292,7 +260,7 @@ def test_a_zero_row_domain_file_is_reported_as_unavailable() -> None:
     # A populated domain in the same summary still reports available.
     assert empty["events_available"] is True
 
-    populated = _facts(
+    populated = run_facts(
         data_summary=_data_summary(
             {"intraday_1min.parquet": 4_800_000, "auction.parquet": 5_067}
         )
@@ -307,14 +275,14 @@ def test_a_cpu_only_experiment_still_states_its_strategy_gpu_count() -> None:
     dropping it would leave the session unable to tell a CPU-only experiment from an
     older manifest that never published the field."""
 
-    budgets = _facts(
+    budgets = run_facts(
         budgets={
             "strategy_fit_timeout_seconds": 3600.0,
             "strategy_gpu_count": 0,
         }
     )["budgets"]
     assert budgets["strategy_gpu_count"] == 0
-    assert "strategy_gpu_count" not in _facts(budgets={}).get("budgets", {})
+    assert "strategy_gpu_count" not in run_facts(budgets={}).get("budgets", {})
 
 
 # The strategy container's boundary as the run manifest carries it: the
@@ -335,13 +303,13 @@ def test_the_facts_publish_the_strategy_containers_cpu_quota_and_batch_width() -
     none rather than a guessed default.
     """
 
-    budgets = _facts(
+    budgets = run_facts(
         budgets={**CONTAINER, "strategy_cpus": 16.0, "batch_validate_max_concurrency": 5}
     )["budgets"]
     assert budgets["strategy_cpus"] == 16.0
     assert budgets["batch_validate_max_concurrency"] == 5
-    assert "strategy_cpus" in build_system_prompt(experiment_facts=_facts(budgets=CONTAINER))
-    assert "strategy_cpus" not in _facts(budgets={}).get("budgets", {})
+    assert "strategy_cpus" in build_system_prompt(experiment_facts=run_facts(budgets=CONTAINER))
+    assert "strategy_cpus" not in run_facts(budgets={}).get("budgets", {})
 
 
 def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
@@ -354,7 +322,7 @@ def test_the_facts_publish_the_strategy_containers_memory_ceiling() -> None:
     peak in, so the comparison needs no extrapolation at all.
     """
 
-    budgets = _facts(budgets={**CONTAINER, "strategy_memory_bytes": 64 * 1024**3})["budgets"]
+    budgets = run_facts(budgets={**CONTAINER, "strategy_memory_bytes": 64 * 1024**3})["budgets"]
     assert budgets["strategy_memory_bytes"] == 64 * 1024**3
     # How to probe a batch before sending it is advice a pack may give, not a
     # run fact.
@@ -370,7 +338,7 @@ def test_the_facts_place_every_read_root_in_the_shell_filesystem() -> None:
     no path in the container.
     """
 
-    note = _facts()["runtime_tools"]["file_root_shell_paths"]
+    note = run_facts()["runtime_tools"]["file_root_shell_paths"]
     assert note == SEARCH_ROOT_SHELL_NOTE
     for path in ("/mnt/artifacts/steps", "/mnt/snapshot", "/mnt/agent/workspace"):
         assert path in note
@@ -384,7 +352,7 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     closes with one bullet that says what the cards are for and what counts as
     using them, and names no card; without any it reads unchanged."""
 
-    a100 = _facts(
+    a100 = run_facts(
         sandbox_spec=SandboxSpec(gpu=(0,), gpu_count=1, gpu_name_filter="A100").to_record()
     )
     assert a100["runtime_tools"]["sandbox_gpus"] == "1 × A100"
@@ -397,7 +365,7 @@ def test_the_sandbox_gpus_are_one_fact_and_steer_the_orientation() -> None:
     assert "A100" not in orientation
 
     # gpu_count 0 is a spec without a GPU request (worker.resolve_worker_options).
-    cpu = _facts(sandbox_spec=SandboxSpec(gpu=None, gpu_count=0).to_record())
+    cpu = run_facts(sandbox_spec=SandboxSpec(gpu=None, gpu_count=0).to_record())
     assert cpu["runtime_tools"]["sandbox_gpus"] == "none"
     prompt = build_system_prompt(experiment_facts=cpu)
     assert prompt.startswith(PROTOCOL_INSTRUCTION + "\n\n# 环境")
@@ -418,7 +386,7 @@ def test_the_orientation_states_the_strategy_limits_as_timeouts() -> None:
     GPU bullet."""
 
     def limits(inference: float, fit: float, **overrides: object) -> dict[str, object]:
-        return _facts(
+        return run_facts(
             budgets={"strategy_inference_timeout_seconds": inference, "strategy_fit_timeout_seconds": fit},
             **overrides,
         )
@@ -436,8 +404,8 @@ def test_the_orientation_states_the_strategy_limits_as_timeouts() -> None:
 
     # Without both limits the static part is the protocol as written, and the
     # bullet is the only line the limits add to it.
-    fit_only = _facts(budgets={"strategy_fit_timeout_seconds": 7200})
-    for facts in (_facts(), fit_only, {"identity": {"session_kind": "research"}}):
+    fit_only = run_facts(budgets={"strategy_fit_timeout_seconds": 7200})
+    for facts in (run_facts(), fit_only, {"identity": {"session_kind": "research"}}):
         assert build_system_prompt(experiment_facts=facts).startswith(PROTOCOL_INSTRUCTION + "\n\n# 环境")
     stable = build_system_prompt(experiment_facts=limits(3600, 7200)).split("# 环境")[0]
     bullet = SESSION_BUDGET_ORIENTATION_BULLET.format(inference="1 小时", fit="2 小时")

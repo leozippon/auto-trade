@@ -10,10 +10,17 @@ engine over scripted replies, with the defaults the tests share.
 
 from __future__ import annotations
 
+import json
+import tempfile
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 
+from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.runner import AgentSessionRunner
 from autotrade.agent.subagent import SubAgentEngine
+from autotrade.environment.broker import BrokerProfile
+from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import LLMProxy, ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ToolRegistry
@@ -116,3 +123,42 @@ def shell_turns(count: int, *, prefix: str = "s") -> list[ProviderResponse]:
         ProviderResponse(tool_calls=(ToolCall(f"{prefix}{index}", "shell", {"argv": ["rg", str(index)]}),))
         for index in range(count)
     ]
+
+
+def run_facts(
+    *,
+    data_summary: dict[str, object] | None = None,
+    acceptance_rules: dict[str, object] | None = None,
+    **manifest_overrides: object,
+) -> dict[str, object]:
+    manifest: dict[str, object] = {
+        "experiment_id": "exp",
+        "run_id": "run_x",
+        "epoch_id": "research",
+        "fold_id": "s4",
+        "kind": "research",
+        "research": {
+            "decision_time": "2025-06-30T23:59:59+08:00",
+            "input_window": "20230701..20250630",
+            "research_period": "20210701..20250630",
+            "years": [{"label": "Y1", "start": "20210701", "end": "20220630"}],
+        },
+        "schedule": {"period": "day", "inference_time": "08:30"},
+        "snapshot_config": SnapshotConfig().to_record(),
+        "benchmark_index": "000300.SH",
+        "broker_profile": BrokerProfile().to_record(),
+    }
+    manifest.update(manifest_overrides)
+    with tempfile.TemporaryDirectory() as tmp:
+        return build_experiment_facts(
+            manifest=manifest,
+            ref_store=AgentRefStore(Path(tmp) / "experiment"),
+            data_summary=data_summary,
+            acceptance_rules=acceptance_rules,
+        )
+
+
+def prompt_facts(prompt: str) -> dict:
+    """The run-facts JSON block the preview embeds in the system prompt."""
+    body = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
+    return json.loads(body)

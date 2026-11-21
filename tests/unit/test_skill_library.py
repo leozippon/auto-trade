@@ -36,8 +36,7 @@ from autotrade.pipelines.skills import (
     validate_skills_tree,
 )
 from autotrade.pipelines.worker import load_worker_options
-
-from .test_interactive_worker_local import _experiment
+from tests.unit.synthetic_experiment import daily_experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIBRARY = REPO_ROOT / SKILL_LIBRARY_PATH
@@ -251,7 +250,7 @@ def test_a_session_can_neither_rewrite_nor_delete_mounted_memory(
 
 
 def test_the_run_config_carries_the_mode(tmp_path: Path) -> None:
-    repo, experiment = _experiment(tmp_path)
+    repo, experiment = daily_experiment(tmp_path)
     params_path = experiment / "hitl" / "params.json"
     params = json.loads(params_path.read_text(encoding="utf-8"))
 

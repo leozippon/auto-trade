@@ -11,7 +11,6 @@ import re
 import shutil
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
 from autotrade.environment.identity import AgentRefStore
@@ -23,11 +22,9 @@ from autotrade.environment.llm import (
     OpenAICompatibleProxy,
     ProviderResponse,
     ScriptedLLM,
-    ToolCall,
     model_profile,
 )
 from autotrade.environment.time_budget import InferenceTimeBudget
-from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
@@ -43,62 +40,9 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from autotrade.pipelines.worker import load_worker_options
 from autotrade.webui.manager import ExperimentManager
-from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
+from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED
 from tests.unit.gpu_probe import stubbed_gpu_probe
-
-
-def _experiment(
-    tmp_path: Path, *, developer_mode: str = "baseline"
-) -> tuple[Path, Path]:
-    repo = tmp_path / "repo"
-    experiment = repo / "experiments" / "smoke"
-    hitl = experiment / "hitl"
-    hitl.mkdir(parents=True)
-    strategy = repo / "strategies" / "main.py"
-    strategy.parent.mkdir(parents=True)
-    strategy.write_text(
-        "def generate_orders(context):\n    return []\n", encoding="utf-8"
-    )
-    daily = repo / "data" / "daily.parquet"
-    daily.parent.mkdir(parents=True)
-    # Reaches into the default Held-out, which is all the loader checks.
-    days = pd.bdate_range("2026-06-01", "2026-09-30")
-    pd.DataFrame(
-        {
-            "trade_date": [stamp.strftime("%Y%m%d") for stamp in days],
-            "symbol": ["000001.SZ"] * len(days),
-            "open": [10.0] * len(days),
-            "close": [10.0] * len(days),
-            "pre_close": [10.0] * len(days),
-        }
-    ).to_parquet(daily, index=False)
-    (hitl / "params.json").write_text(
-        json.dumps(
-            {
-                "experiment_id": "smoke",
-                "strategy_path": "strategies/main.py",
-                "daily_path": "data/daily.parquet",
-                "execution_mode": "trusted",
-                "developer_mode": developer_mode,
-                # The local model the tests' VLLM credential serves; a file
-                # that leaves the roles out runs on the hosted default.
-                "model": LOCAL_QWEN_MODEL,
-                "subagent_model": LOCAL_QWEN_MODEL,
-                "compact_model": LOCAL_QWEN_MODEL,
-                "data_backend": "daily",
-                "initial_control_mode": "auto",
-                "strategy_period": "day",
-                "inference_time": "08:30",
-                "initial_cash": 100_000,
-                **REQUIRED_RULES,
-            }
-        ),
-        encoding="utf-8",
-    )
-    (hitl / "control.json").write_text(
-        json.dumps({"schema_version": 1, "mode": "auto"}), encoding="utf-8"
-    )
-    return repo, experiment
+from tests.unit.synthetic_experiment import daily_experiment
 
 
 def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
@@ -111,7 +55,7 @@ def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
     from autotrade.environment.llm import effective_max_output_tokens
     from autotrade.pipelines.worker import resolve_worker_options
 
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
     for role in ("model", "subagent_model", "compact_model"):
         params.pop(role)
@@ -144,7 +88,7 @@ def test_a_stated_null_host_parameter_reads_as_unset(tmp_path: Path, key: str) -
     one that leaves the key out."""
     from autotrade.pipelines.worker import resolve_worker_options
 
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
 
     def resolved(record: dict) -> tuple:
@@ -157,7 +101,7 @@ def test_a_stated_null_host_parameter_reads_as_unset(tmp_path: Path, key: str) -
 
 
 def test_worker_rejects_llm_mode_without_provider_credentials(tmp_path: Path):
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     with pytest.raises(ValueError, match="requires an API key: set VLLM_API_KEY"):
         load_worker_options(experiment, repo_root=repo)
 
@@ -167,7 +111,7 @@ def test_worker_rejects_llm_mode_without_ripgrep_on_the_host(
 ) -> None:
     """The typed grep tool runs `rg` on the host; a host without it must stop
     the worker before the session starts rather than leave it without grep."""
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     which = shutil.which
     monkeypatch.setattr(
@@ -184,7 +128,7 @@ def test_the_worker_attaches_exactly_the_cards_the_console_claimed(
     """Without a claim the request names no device; with one the run pins
     those devices, and a claim that disagrees with the experiment's GPU count stops
     the worker instead of attaching some other number of cards."""
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     assert load_worker_options(experiment, repo_root=repo).agent_sandbox.gpu == "auto"
@@ -200,7 +144,7 @@ def test_worker_maps_model_context_params_to_role_gateways_and_compactor(
     tmp_path: Path,
     monkeypatch,
 ):
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
@@ -253,7 +197,7 @@ def test_worker_refuses_endpoint_and_credential_params(tmp_path: Path) -> None:
     exists to prevent, so a params file carrying either does not load.
     """
 
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["llm_base_url"] = "https://untrusted-snapshot.example.test/v1"
@@ -297,7 +241,7 @@ def test_llm_key_puts_every_relay_role_on_the_chosen_key_at_each_start(
     with pytest.raises(ValueError, match="llm_key alternate chooses the relay's key"):
         preflight(llm_key="alternate", compact_model=LOCAL_QWEN_MODEL)
 
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
@@ -337,10 +281,10 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
         strategy_boundary,
         strategy_sandbox_from_spec,
     )
-    from tests.unit.test_experiment_facts_scope import _facts
+    from tests.unit.agent_fixture import run_facts
 
     monkeypatch.setenv("LIGHTING_API_KEY", "test-primary")
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(dict.fromkeys(("model", "subagent_model", "compact_model"), "DeepSeek-V4.1-Flash"))
@@ -379,7 +323,7 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
     assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds) == (16.0, "64g", 1080.0)
     assert strategy.state_disk == "8g"
     assert (session.cpus, session.memory) == (16.0, "64g")
-    budgets = _facts(budgets=strategy_container_budgets(strategy))["budgets"]
+    budgets = run_facts(budgets=strategy_container_budgets(strategy))["budgets"]
     assert (budgets["strategy_cpus"], budgets["strategy_memory_bytes"]) == (16.0, 64 * 1024**3)
     assert budgets["strategy_state_disk_bytes"] == 8 * 1024**3
     assert budgets["strategy_inference_timeout_seconds"] == 1080.0
@@ -393,7 +337,7 @@ def test_worker_resolves_mixed_local_and_deepseek_roles_with_real_timeout(
     tmp_path: Path,
     monkeypatch,
 ):
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
@@ -432,7 +376,7 @@ def test_worker_applies_local_output_cap_to_each_role_budget(
     tmp_path: Path,
     monkeypatch,
 ):
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
@@ -482,7 +426,7 @@ def test_every_catalog_model_asks_for_its_own_longest_reply_and_compacts_before_
             self.bodies.append(json.loads(body))
             raise LLMProxyError("captured", retryable=False)
 
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     params = json.loads((experiment / "hitl/params.json").read_text(encoding="utf-8"))
     params["compact_token_threshold"] = None
     for model in MODEL_CHOICES:
@@ -520,7 +464,7 @@ def test_worker_derives_the_compaction_threshold_from_the_model_context(
     reply = model_profile(LOCAL_QWEN_MODEL).max_output_tokens
     derived = 262_144 - reply - COMPACTION_SAFETY_MARGIN_TOKENS
     assert derived == 188_416
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["model"] = LOCAL_QWEN_MODEL
@@ -560,7 +504,7 @@ def test_worker_default_threshold_fits_deepseek_and_compaction_can_be_disabled(
     tmp_path: Path,
     monkeypatch,
 ):
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["model"] = "deepseek-flash"
@@ -593,7 +537,7 @@ def test_a_console_default_experiment_compacts_gpt6_astra_at_its_maximum(
     long-context tier, so the console's default roles -- gpt-6-astra main,
     DeepSeek-V4.1-Flash sub-agents and compaction -- compact at their window
     bound, and only a stated value above that bound is refused."""
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     for role in ("model", "subagent_model", "compact_model"):
@@ -644,7 +588,7 @@ def test_an_input_only_window_bounds_the_prompt_alone_and_the_compaction_model_s
     gemini = "gemini-4-argon"
     assert model_profile(gemini).output_shares_context_window is False
     assert model_profile("DeepSeek-V4.1-Flash").output_shares_context_window is True
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["compact_token_threshold"] = None
@@ -679,7 +623,7 @@ def test_worker_gives_subagents_their_own_gateway_and_compaction_budget(
     budget − margin, bounded by what the compaction model can read."""
     from autotrade.pipelines.worker import resolve_worker_options
 
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
@@ -882,7 +826,6 @@ def test_session_boundary_restart_is_taken_before_the_next_session_starts(
     assert read_control(control_path).restart_pending is False
 
 
-
 @pytest.mark.parametrize(
     ("key", "value", "message"),
     [
@@ -903,7 +846,7 @@ def test_worker_rejects_invalid_model_context_params(
     value: object,
     message: str,
 ):
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params[key] = value
@@ -912,119 +855,6 @@ def test_worker_rejects_invalid_model_context_params(
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     with pytest.raises(ValueError, match=message):
         load_worker_options(experiment, repo_root=repo)
-
-
-
-class _NoShellRunner:
-    def run(self, argv, *, cwd, timeout_seconds, max_output_chars, input_text=None):
-        del argv, cwd, timeout_seconds, max_output_chars, input_text
-        return CommandResult(126, stderr="shell is disabled in this test")
-
-
-
-# The working copy as a one-candidate validate round: the scripted
-# sessions write output/ through a child and validate it as it stands.
-VALIDATE_WORKING_COPY = ToolCall(
-    "valid",
-    "validate",
-    {
-        "candidates": [
-            {
-                "name": "working_copy",
-                "hypothesis": "the implemented working copy beats its baseline",
-                "path": "output",
-                "control": False,
-            }
-        ],
-    },
-)
-# The working copy over the validation steps tested so far, under a name of
-# its own: the scripted test still names the full-span working-copy node.
-VALIDATE_REVEALED = ToolCall(
-    "revealed",
-    "validate",
-    {
-        "span": "revealed",
-        "candidates": [
-            {
-                "name": "revealed_copy",
-                "hypothesis": "the working copy read over the steps tested so far",
-                "path": "output",
-            }
-        ],
-    },
-)
-
-
-
-# A scripted test that names the working-copy row it has just read: node ids
-# carry the session's opaque run ref, which a script cannot know in advance.
-LAST_WORKING_COPY_NODE = "<working copy node>"
-TEST_WORKING_COPY = ToolCall("test", "test", {"candidate": LAST_WORKING_COPY_NODE})
-# The arguments a scripted call may name the last working-copy node in.
-_NODE_ARGUMENTS = ("candidate", "node_id")
-
-
-
-class _NominatingLLM(ScriptedLLM):
-    def complete(self, messages, **kwargs):
-        response = super().complete(messages, **kwargs)
-        if not any(
-            call.arguments.get(key) == LAST_WORKING_COPY_NODE
-            for call in response.tool_calls
-            for key in _NODE_ARGUMENTS
-        ):
-            return response
-        rows = re.findall(
-            # A completed row names its node by handle (node_id where shared).
-            r'"name":\s*"working_copy".*?"(?:handle|node_id)":\s*"([^"]+)"',
-            "\n".join(message.content or "" for message in messages),
-            flags=re.DOTALL,
-        )
-        return ProviderResponse(
-            tool_calls=tuple(
-                ToolCall(
-                    call.id,
-                    call.name,
-                    {
-                        key: rows[-1] if value == LAST_WORKING_COPY_NODE and key in _NODE_ARGUMENTS else value
-                        for key, value in call.arguments.items()
-                    },
-                )
-                for call in response.tool_calls
-            )
-        )
-
-
-def _agent_then(
-    *tool_calls: ToolCall,
-    roles: tuple[str, ...] = ("Explore",),
-    summary: str = "委托完成",
-    implement: dict[str, object] | None = None,
-) -> tuple[ProviderResponse, ...]:
-    launches = tuple(
-        ToolCall(f"ex_{role}", "agent", {"agent": role, "task": f"review {role}"})
-        for role in roles
-    )
-    responses: list[ProviderResponse] = [
-        ProviderResponse(tool_calls=(*launches, *tool_calls))
-    ]
-    for role in roles:
-        if implement is not None and role == "general-purpose":
-            responses.append(
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall("w", "write_file", dict(implement)),
-                    )
-                )
-            )
-        responses.append(
-            ProviderResponse(
-                content=summary,
-                usage={"prompt_tokens": 50, "completion_tokens": 7, "total_tokens": 57},
-            )
-        )
-    return tuple(responses)
 
 
 def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
@@ -1085,7 +915,7 @@ def test_webui_worker_output_is_recoverable_from_a_per_experiment_log(
 
 
 def test_worker_params_reject_unknown_keys_and_a_bad_geometry(tmp_path: Path):
-    repo, experiment = _experiment(tmp_path)
+    repo, experiment = daily_experiment(tmp_path)
     path = experiment / "hitl" / "params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     options = load_worker_options(experiment, repo_root=repo)
@@ -1116,7 +946,7 @@ def test_worker_params_reject_unknown_keys_and_a_bad_geometry(tmp_path: Path):
 
 
 def test_worker_maps_data_domain_controls_to_snapshot_config(tmp_path: Path):
-    repo, experiment = _experiment(tmp_path)
+    repo, experiment = daily_experiment(tmp_path)
     path = experiment / "hitl" / "params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params.update(
@@ -1169,7 +999,7 @@ def test_worker_maps_data_domain_controls_to_snapshot_config(tmp_path: Path):
 
 
 def test_worker_rejects_unknown_data_domain_selection(tmp_path: Path):
-    repo, experiment = _experiment(tmp_path)
+    repo, experiment = daily_experiment(tmp_path)
     path = experiment / "hitl" / "params.json"
     params = json.loads(path.read_text(encoding="utf-8"))
     params["events_datasets"] = ["not_a_dataset"]
@@ -1230,7 +1060,6 @@ def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -
     )
     state = read_control(control)
     assert state.gpu_counts == {"research": 0}
-
 
 
 #: (params.json key, offending value, worker error message). Every entry is a
@@ -1303,7 +1132,7 @@ def test_the_worker_rejects_every_value_the_create_form_no_longer_bounds(
     `params.json`. It must then fail fast and explicitly at worker startup
     rather than configuring a nonsense run.
     """
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     path = experiment / "hitl/params.json"
     baseline = json.loads(path.read_text(encoding="utf-8"))
@@ -1423,7 +1252,7 @@ def test_preflight_narrows_exactly_three_things_and_nothing_else(
 
 
 def test_compaction_gateway_makes_one_attempt(tmp_path: Path, monkeypatch):
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "deepseek-test-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     settings = load_worker_options(experiment, repo_root=repo).llm
@@ -1447,7 +1276,7 @@ def test_worker_reasoning_effort_offers_exactly_the_wire_levels(
     field = next(item for item in _FIELDS if item["key"] == "reasoning_effort")
     assert set(field["choices"]) == set(REASONING_EFFORTS)
 
-    repo, experiment = _experiment(tmp_path, developer_mode="llm")
+    repo, experiment = daily_experiment(tmp_path, developer_mode="llm")
     path = experiment / "hitl/params.json"
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-only-key")
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")

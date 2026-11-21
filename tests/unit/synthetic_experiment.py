@@ -12,11 +12,18 @@ assert what a stage asked for.
 The market: 30 names (the size factor needs 30 per day), CSI 300 in the
 slot's ``macro.parquet``, and one name, ``000001.SZ``, with a steady daily
 edge over the market that ``STRATEGY`` trades twice a month.
+
+The scripted developer that drives the worker's LLM sessions lives here too:
+``NominatingLLM`` replays a script whose ``test`` names the last working-copy
+row the session read, ``agent_then`` launches children before a call, and
+``NoShellRunner`` refuses every shell command. ``daily_experiment`` is the
+smaller trusted-daily experiment the worker-option tests load.
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import ClassVar
@@ -24,10 +31,16 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 
-from autotrade.environment.llm import LOCAL_QWEN_MODEL
+from autotrade.environment.llm import (
+    LOCAL_QWEN_MODEL,
+    ProviderResponse,
+    ScriptedLLM,
+    ToolCall,
+)
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
+from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBundle
 from autotrade.pipelines.pit_backend import prebuild_asof_stash
 from tests.unit.acceptance_fixture import REQUIRED_RULES
@@ -318,3 +331,169 @@ def make_experiment(tmp_path: Path, **params: object) -> tuple[Path, Path]:
 
 def decision_anchor(day: str) -> datetime:
     return datetime(int(day[:4]), int(day[4:6]), int(day[6:]), 23, 59, 59, tzinfo=CN_TZ)
+
+
+def daily_experiment(
+    tmp_path: Path, *, developer_mode: str = "baseline"
+) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    experiment = repo / "experiments" / "smoke"
+    hitl = experiment / "hitl"
+    hitl.mkdir(parents=True)
+    strategy = repo / "strategies" / "main.py"
+    strategy.parent.mkdir(parents=True)
+    strategy.write_text(
+        "def generate_orders(context):\n    return []\n", encoding="utf-8"
+    )
+    daily = repo / "data" / "daily.parquet"
+    daily.parent.mkdir(parents=True)
+    # Reaches into the default Held-out, which is all the loader checks.
+    days = pd.bdate_range("2026-06-01", "2026-09-30")
+    pd.DataFrame(
+        {
+            "trade_date": [stamp.strftime("%Y%m%d") for stamp in days],
+            "symbol": ["000001.SZ"] * len(days),
+            "open": [10.0] * len(days),
+            "close": [10.0] * len(days),
+            "pre_close": [10.0] * len(days),
+        }
+    ).to_parquet(daily, index=False)
+    (hitl / "params.json").write_text(
+        json.dumps(
+            {
+                "experiment_id": "smoke",
+                "strategy_path": "strategies/main.py",
+                "daily_path": "data/daily.parquet",
+                "execution_mode": "trusted",
+                "developer_mode": developer_mode,
+                # The local model the tests' VLLM credential serves; a file
+                # that leaves the roles out runs on the hosted default.
+                "model": LOCAL_QWEN_MODEL,
+                "subagent_model": LOCAL_QWEN_MODEL,
+                "compact_model": LOCAL_QWEN_MODEL,
+                "data_backend": "daily",
+                "initial_control_mode": "auto",
+                "strategy_period": "day",
+                "inference_time": "08:30",
+                "initial_cash": 100_000,
+                **REQUIRED_RULES,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (hitl / "control.json").write_text(
+        json.dumps({"schema_version": 1, "mode": "auto"}), encoding="utf-8"
+    )
+    return repo, experiment
+
+
+class NoShellRunner:
+    def run(self, argv, *, cwd, timeout_seconds, max_output_chars, input_text=None):
+        del argv, cwd, timeout_seconds, max_output_chars, input_text
+        return CommandResult(126, stderr="shell is disabled in this test")
+
+
+# The working copy as a one-candidate validate round: the scripted
+# sessions write output/ through a child and validate it as it stands.
+VALIDATE_WORKING_COPY = ToolCall(
+    "valid",
+    "validate",
+    {
+        "candidates": [
+            {
+                "name": "working_copy",
+                "hypothesis": "the implemented working copy beats its baseline",
+                "path": "output",
+                "control": False,
+            }
+        ],
+    },
+)
+
+# The working copy over the validation steps tested so far, under a name of
+# its own: the scripted test still names the full-span working-copy node.
+VALIDATE_REVEALED = ToolCall(
+    "revealed",
+    "validate",
+    {
+        "span": "revealed",
+        "candidates": [
+            {
+                "name": "revealed_copy",
+                "hypothesis": "the working copy read over the steps tested so far",
+                "path": "output",
+            }
+        ],
+    },
+)
+
+
+# A scripted test that names the working-copy row it has just read: node ids
+# carry the session's opaque run ref, which a script cannot know in advance.
+LAST_WORKING_COPY_NODE = "<working copy node>"
+
+TEST_WORKING_COPY = ToolCall("test", "test", {"candidate": LAST_WORKING_COPY_NODE})
+
+# The arguments a scripted call may name the last working-copy node in.
+_NODE_ARGUMENTS = ("candidate", "node_id")
+
+
+class NominatingLLM(ScriptedLLM):
+    def complete(self, messages, **kwargs):
+        response = super().complete(messages, **kwargs)
+        if not any(
+            call.arguments.get(key) == LAST_WORKING_COPY_NODE
+            for call in response.tool_calls
+            for key in _NODE_ARGUMENTS
+        ):
+            return response
+        rows = re.findall(
+            # A completed row names its node by handle (node_id where shared).
+            r'"name":\s*"working_copy".*?"(?:handle|node_id)":\s*"([^"]+)"',
+            "\n".join(message.content or "" for message in messages),
+            flags=re.DOTALL,
+        )
+        return ProviderResponse(
+            tool_calls=tuple(
+                ToolCall(
+                    call.id,
+                    call.name,
+                    {
+                        key: rows[-1] if value == LAST_WORKING_COPY_NODE and key in _NODE_ARGUMENTS else value
+                        for key, value in call.arguments.items()
+                    },
+                )
+                for call in response.tool_calls
+            )
+        )
+
+
+def agent_then(
+    *tool_calls: ToolCall,
+    roles: tuple[str, ...] = ("Explore",),
+    summary: str = "委托完成",
+    implement: dict[str, object] | None = None,
+) -> tuple[ProviderResponse, ...]:
+    launches = tuple(
+        ToolCall(f"ex_{role}", "agent", {"agent": role, "task": f"review {role}"})
+        for role in roles
+    )
+    responses: list[ProviderResponse] = [
+        ProviderResponse(tool_calls=(*launches, *tool_calls))
+    ]
+    for role in roles:
+        if implement is not None and role == "general-purpose":
+            responses.append(
+                ProviderResponse(
+                    tool_calls=(
+                        ToolCall("w", "write_file", dict(implement)),
+                    )
+                )
+            )
+        responses.append(
+            ProviderResponse(
+                content=summary,
+                usage={"prompt_tokens": 50, "completion_tokens": 7, "total_tokens": 57},
+            )
+        )
+    return tuple(responses)

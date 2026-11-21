@@ -32,10 +32,17 @@ from autotrade.pipelines.ledger import (
     research_records,
 )
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
+from tests.unit.agent_fixture import prompt_facts
 from tests.unit.synthetic_experiment import (
     GEOMETRY,
     RELEASE_END,
+    TEST_WORKING_COPY,
+    VALIDATE_REVEALED,
+    VALIDATE_WORKING_COPY,
+    NominatingLLM,
+    NoShellRunner,
     SyntheticPITProvider,
+    agent_then,
     decision_anchor,
     few_baseline_draws,
     make_experiment,
@@ -426,14 +433,6 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
 
     from autotrade.environment.llm import ProviderResponse
     from autotrade.pipelines.hitl_state import ControlState, read_control, write_control
-    from tests.unit.test_interactive_worker_local import (
-        TEST_WORKING_COPY,
-        VALIDATE_REVEALED,
-        VALIDATE_WORKING_COPY,
-        _agent_then,
-        _NominatingLLM,
-        _NoShellRunner,
-    )
 
     repo, experiment = make_experiment(tmp_path, developer_mode="llm")
     # The assertions below read the session tree. A finished experiment otherwise deletes it.
@@ -442,9 +441,9 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     # The console's GPU allocation for the research session, one-shot.
     write_control(experiment / "hitl" / "control.json", ControlState(gpu_counts={"research": 3}))
     options = load_worker_options(experiment, repo_root=repo)
-    llm = _NominatingLLM(
+    llm = NominatingLLM(
         [
-            *_agent_then(VALIDATE_WORKING_COPY, roles=()),
+            *agent_then(VALIDATE_WORKING_COPY, roles=()),
             ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
             ProviderResponse(tool_calls=(TEST_WORKING_COPY,)),
             ProviderResponse(tool_calls=(VALIDATE_REVEALED,)),
@@ -452,7 +451,7 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
         ]
     )
     result = run_local_interactive_worker(
-        options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+        options, llm=llm, command_runner_factory=lambda _workspace: NoShellRunner()
     )
 
     records = ExperimentLedger(options.experiment.ledger_path).read()
@@ -480,10 +479,9 @@ def test_the_llm_research_session_tests_through_the_validation_year_step_by_step
     ]
     # The console preview is the prompt the session received, runtime facts aside.
     from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
-    from tests.unit.test_webui_prompt_preview import _facts
 
-    received = _facts(system_prompts[0])
-    previewed = _facts(str(build_prompt_preview(experiment, "research", "", repo_root=repo)["prompt"]))
+    received = prompt_facts(system_prompts[0])
+    previewed = prompt_facts(str(build_prompt_preview(experiment, "research", "", repo_root=repo)["prompt"]))
     assert set(previewed) == set(received)
     for block in ("budgets", "visible_timeline", "broker_replay"):
         assert set(previewed[block]) == set(received[block]), block
@@ -659,13 +657,6 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     carries both attempts' steps."""
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
-    from tests.unit.test_interactive_worker_local import (
-        TEST_WORKING_COPY,
-        VALIDATE_WORKING_COPY,
-        _agent_then,
-        _NominatingLLM,
-        _NoShellRunner,
-    )
 
     repo, experiment = make_experiment(
         tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=40
@@ -673,16 +664,16 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     summary = _resume_script_summary()
-    first_llm = _NominatingLLM(
+    first_llm = NominatingLLM(
         [
-            *_agent_then(VALIDATE_WORKING_COPY, roles=()),
+            *agent_then(VALIDATE_WORKING_COPY, roles=()),
             ProviderResponse(tool_calls=(ToolCall("c", "compact", {"summary": summary}),)),
             # The script ends: three consecutive model failures end the attempt.
         ]
     )
     with pytest.raises(RuntimeError, match="language model unavailable"):
         run_local_interactive_worker(
-            options, llm=first_llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+            options, llm=first_llm, command_runner_factory=lambda _workspace: NoShellRunner()
         )
     ledger = ExperimentLedger(options.experiment.ledger_path)
     [failed] = ledger.read()
@@ -697,7 +688,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     assert len(transcripts) == 1 and "compact" in transcripts[0].read_text(encoding="utf-8")
     [compaction] = _trace_events(experiment, failed["run_id"], "context_compaction")
 
-    second_llm = _NominatingLLM(
+    second_llm = NominatingLLM(
         [
             ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
             *(ProviderResponse(tool_calls=(TEST_WORKING_COPY,)) for _step in range(4)),
@@ -706,7 +697,7 @@ def test_an_interrupted_llm_session_resumes_with_its_summary_budget_and_nodes(
     result = run_local_interactive_worker(
         load_worker_options(experiment, repo_root=repo),
         llm=second_llm,
-        command_runner_factory=lambda _workspace: _NoShellRunner(),
+        command_runner_factory=lambda _workspace: NoShellRunner(),
     )
 
     records = ledger.read()
@@ -777,20 +768,13 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     the resumed attempt added."""
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
-    from tests.unit.test_interactive_worker_local import (
-        TEST_WORKING_COPY,
-        VALIDATE_REVEALED,
-        VALIDATE_WORKING_COPY,
-        _NominatingLLM,
-        _NoShellRunner,
-    )
 
     repo, experiment = make_experiment(
         tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=7
     )
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
-    first_llm = _NominatingLLM(
+    first_llm = NominatingLLM(
         [
             ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,)),
             ProviderResponse(tool_calls=(TEST_WORKING_COPY,)),
@@ -800,7 +784,7 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
     )
     with pytest.raises(RuntimeError, match="language model unavailable"):
         run_local_interactive_worker(
-            options, llm=first_llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+            options, llm=first_llm, command_runner_factory=lambda _workspace: NoShellRunner()
         )
     ledger = ExperimentLedger(options.experiment.ledger_path)
     tested, failed = ledger.read()
@@ -814,11 +798,11 @@ def test_an_interrupted_session_resumes_from_its_test_horizon_and_record(
         event for event in _trace_events(experiment, failed["run_id"], "tool_call") if event.get("tool") == "test"
     ]
 
-    second_llm = _NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_REVEALED, VALIDATE_WORKING_COPY))])
+    second_llm = NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_REVEALED, VALIDATE_WORKING_COPY))])
     result = run_local_interactive_worker(
         load_worker_options(experiment, repo_root=repo),
         llm=second_llm,
-        command_runner_factory=lambda _workspace: _NoShellRunner(),
+        command_runner_factory=lambda _workspace: NoShellRunner(),
     )
 
     records = ledger.read()
@@ -901,11 +885,6 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     and completes the validation record from one replay of it."""
 
     from autotrade.environment.llm import ProviderResponse
-    from tests.unit.test_interactive_worker_local import (
-        VALIDATE_WORKING_COPY,
-        _NominatingLLM,
-        _NoShellRunner,
-    )
 
     repo, experiment = make_experiment(
         tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=4
@@ -914,18 +893,18 @@ def test_an_interrupted_session_without_a_checkpoint_resumes_from_the_note_alone
     options = load_worker_options(experiment, repo_root=repo)
     with pytest.raises(RuntimeError, match="language model unavailable"):
         run_local_interactive_worker(
-            options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
+            options, llm=NominatingLLM([]), command_runner_factory=lambda _workspace: NoShellRunner()
         )
     ledger = ExperimentLedger(options.experiment.ledger_path)
     [failed] = ledger.read()
     assert failed["record_type"] == "attempt_failed"
     assert not (experiment / "steps" / "tree.json").is_file()
 
-    second_llm = _NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))])
+    second_llm = NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))])
     result = run_local_interactive_worker(
         load_worker_options(experiment, repo_root=repo),
         llm=second_llm,
-        command_runner_factory=lambda _workspace: _NoShellRunner(),
+        command_runner_factory=lambda _workspace: NoShellRunner(),
     )
 
     records = ledger.read()
@@ -974,14 +953,8 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     carries both attempts' spend."""
 
     from autotrade.environment.llm import ProviderResponse
-    from tests.unit.test_interactive_worker_local import (
-        TEST_WORKING_COPY,
-        VALIDATE_WORKING_COPY,
-        _NominatingLLM,
-        _NoShellRunner,
-    )
 
-    class HostedLLM(_NominatingLLM):
+    class HostedLLM(NominatingLLM):
         provider = "lighting"
         model = "gemini-4-argon"
 
@@ -1003,7 +976,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
         run_local_interactive_worker(
             options,
             llm=HostedLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,), usage=usage)]),
-            command_runner_factory=lambda _workspace: _NoShellRunner(),
+            command_runner_factory=lambda _workspace: NoShellRunner(),
         )
 
     second_llm = HostedLLM(
@@ -1015,7 +988,7 @@ def test_a_hosted_session_that_reaches_its_api_spend_cap_is_completed_by_the_hos
     result = run_local_interactive_worker(
         load_worker_options(experiment, repo_root=repo),
         llm=second_llm,
-        command_runner_factory=lambda _workspace: _NoShellRunner(),
+        command_runner_factory=lambda _workspace: NoShellRunner(),
     )
 
     # The test was never asked for: the cap refused the call before it.
@@ -1083,22 +1056,21 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
 ):
     from autotrade.environment.llm import ProviderResponse, ToolCall
     from autotrade.environment.runtime import rmtree_keeping_file_modes
-    from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
     repo, experiment = make_experiment(tmp_path, developer_mode="llm", session_max_attempts=1)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
     with pytest.raises(RuntimeError, match="language model unavailable"):
         run_local_interactive_worker(
-            options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
+            options, llm=NominatingLLM([]), command_runner_factory=lambda _workspace: NoShellRunner()
         )
     rmtree_keeping_file_modes(options.work_root / options.experiment_id / "research")
 
     with pytest.raises(RuntimeError, match="workspace of the interrupted attempt is missing"):
         run_local_interactive_worker(
             load_worker_options(experiment, repo_root=repo),
-            llm=_NominatingLLM([ProviderResponse(tool_calls=(ToolCall("f", "test", {"outcome": "no_edge", "reason": "x" * 60}),))]),
-            command_runner_factory=lambda _workspace: _NoShellRunner(),
+            llm=NominatingLLM([ProviderResponse(tool_calls=(ToolCall("f", "test", {"outcome": "no_edge", "reason": "x" * 60}),))]),
+            command_runner_factory=lambda _workspace: NoShellRunner(),
         )
     rows = ExperimentLedger(options.experiment.ledger_path).read()
     assert [row["record_type"] for row in rows] == ["attempt_failed", "attempt_failed"]
@@ -1114,7 +1086,6 @@ def test_a_session_without_its_data_summary_fails_the_attempt(
     that its minute bars, auction, events and text are unavailable."""
 
     from autotrade.pipelines import research_session
-    from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
     repo, experiment = make_experiment(tmp_path, developer_mode="llm", session_max_attempts=1)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
@@ -1122,7 +1093,7 @@ def test_a_session_without_its_data_summary_fails_the_attempt(
     options = load_worker_options(experiment, repo_root=repo)
     with pytest.raises(FileNotFoundError, match=r"data_summary\.json"):
         run_local_interactive_worker(
-            options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
+            options, llm=NominatingLLM([]), command_runner_factory=lambda _workspace: NoShellRunner()
         )
     [row] = ExperimentLedger(options.experiment.ledger_path).read()
     assert row["record_type"] == "attempt_failed" and "data_summary.json" in row["error"]
@@ -1139,11 +1110,6 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
     from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION
     from autotrade.environment.llm import ProviderResponse
     from autotrade.pipelines import research_session
-    from tests.unit.test_interactive_worker_local import (
-        VALIDATE_WORKING_COPY,
-        _NominatingLLM,
-        _NoShellRunner,
-    )
 
     repo, experiment = make_experiment(tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=1)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
@@ -1154,7 +1120,7 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
         nonlocal session_root
         session_root = options.work_root / options.experiment_id / "research"
         return run_local_interactive_worker(
-            options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+            options, llm=llm, command_runner_factory=lambda _workspace: NoShellRunner()
         )
 
     def interrupted(*_args, **_kwargs):
@@ -1164,21 +1130,21 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
     research_inputs = pipeline.research_inputs
     monkeypatch.setattr(pipeline, "research_inputs", interrupted)
     with pytest.raises(SystemExit):
-        run(_NominatingLLM([]))
+        run(NominatingLLM([]))
     assert not session_root.exists()
     monkeypatch.setattr(pipeline, "research_inputs", research_inputs)
 
     copy_artifact = research_session.copy_artifact
     monkeypatch.setattr(research_session, "copy_artifact", interrupted)
     with pytest.raises(SystemExit):
-        run(_NominatingLLM([]))
+        run(NominatingLLM([]))
     workspace = session_root / "agent" / "workspace"
     assert workspace.is_dir() and not (workspace / "output" / "main.py").exists()
     monkeypatch.setattr(research_session, "copy_artifact", copy_artifact)
 
     # One call is the whole budget: the validate spends it, and the host
     # completes the record from the Validation it recorded.
-    llm = _NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))])
+    llm = NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))])
     run(llm)
     rows = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
     assert [row["record_type"] for row in rows] == [
@@ -1217,11 +1183,6 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     """
 
     from autotrade.environment.llm import ProviderResponse, ToolCall
-    from tests.unit.test_interactive_worker_local import (
-        TEST_WORKING_COPY,
-        _NominatingLLM,
-        _NoShellRunner,
-    )
 
     def validate(name: str, *, control: bool) -> ToolCall:
         return ToolCall(
@@ -1242,7 +1203,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
     repo, experiment = make_experiment(tmp_path, developer_mode="llm", max_llm_calls=5)
     monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
     options = load_worker_options(experiment, repo_root=repo)
-    llm = _NominatingLLM(
+    llm = NominatingLLM(
         [
             ProviderResponse(tool_calls=(validate("working_copy", control=True),)),
             ProviderResponse(tool_calls=(TEST_WORKING_COPY,)),
@@ -1252,7 +1213,7 @@ def test_a_control_is_refused_at_test_and_a_tested_step_is_completed_by_the_host
         ]
     )
     result = run_local_interactive_worker(
-        options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+        options, llm=llm, command_runner_factory=lambda _workspace: NoShellRunner()
     )
 
     assert len(llm.calls) == 5
@@ -1351,7 +1312,6 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
     from autotrade.environment.llm import ProviderResponse, ToolCall
     from autotrade.pipelines import pit_backend
     from autotrade.webui.registry import summarize_experiment
-    from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
     real_evaluate = pit_backend.PITDailyEvaluationBackend.evaluate
 
@@ -1393,9 +1353,9 @@ def test_a_span_the_host_cannot_replay_ends_the_experiment_environment_blocked(
     never = ProviderResponse(tool_calls=(ToolCall("test", "test", {"candidate": "working_copy"}),))
     attempts = options.experiment.session_max_attempts
     assert attempts == 3
-    llm = _NominatingLLM([*([validate("full")] * (2 * attempts)), never])
+    llm = NominatingLLM([*([validate("full")] * (2 * attempts)), never])
     result = run_local_interactive_worker(
-        options, llm=llm, command_runner_factory=lambda _workspace: _NoShellRunner()
+        options, llm=llm, command_runner_factory=lambda _workspace: NoShellRunner()
     )
 
     assert len(llm.calls) == 2 * attempts
