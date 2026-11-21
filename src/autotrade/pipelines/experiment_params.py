@@ -126,8 +126,7 @@ class ScheduleParams:
 
     strategy_period: str = _param("day")
     inference_time: str = _param("08:00")
-    # Sets nothing since the approval mode was removed; still written because
-    # the round launcher pins it (scripts/experiments/_round.py).
+    # Sets nothing: a tolerated inert key, accepted because existing params.json files carry it.
     initial_control_mode: str = _param("auto")
     benchmark_index: str = _param(experiment_default("benchmark_index"))
 
