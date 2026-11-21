@@ -123,11 +123,13 @@ def test_the_signal_screen_path_is_a_fact_only_where_the_mount_exists() -> None:
         docker_facts = build_experiment_facts(
             manifest=manifest,
             ref_store=store,
+            acceptance_rules=None,
             runtime_env={"mode": "docker"},
         )
         local_facts = build_experiment_facts(
             manifest=manifest,
             ref_store=store,
+            acceptance_rules=None,
             runtime_env={"mode": "local"},
         )
     screen = docker_facts["source_refs"]["signal_screen_ref"]
@@ -218,6 +220,7 @@ def test_the_session_is_told_which_index_it_is_measured_against() -> None:
         build_experiment_facts(
             manifest={"kind": "research", "broker_profile": BrokerProfile().to_record()},
             ref_store=AgentRefStore(Path(tmp) / "experiment"),
+            acceptance_rules=None,
         )
 
 

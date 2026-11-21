@@ -310,7 +310,11 @@ class SessionFactsTest(unittest.TestCase):
         self.assertEqual(facts["broker_replay"]["missing_exact_price"], "reject")
 
     def test_no_fact_key_names_a_fold_a_parent_or_a_hidden_stage(self):
-        facts = build_experiment_facts(manifest=RESEARCH_MANIFEST, ref_store=self.ref_store)
+        facts = build_experiment_facts(
+            manifest=RESEARCH_MANIFEST,
+            ref_store=self.ref_store,
+            acceptance_rules=acceptance_facts(RESEARCH_MANIFEST),
+        )
 
         def keys(value):
             if isinstance(value, dict):

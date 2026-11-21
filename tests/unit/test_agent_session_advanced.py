@@ -1411,6 +1411,7 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
             "broker_profile": BrokerProfile().to_record(),
         },
         ref_store=AgentRefStore(tmp_path / "experiment"),
+        acceptance_rules=None,
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
     # The facts carry no visibility policy: the hidden periods are the

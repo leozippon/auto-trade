@@ -70,19 +70,21 @@ def build_experiment_facts(
     *,
     manifest: Mapping[str, object],
     ref_store: AgentRefStore,
+    acceptance_rules: Mapping[str, object] | None,
     runtime_env: Mapping[str, object] | None = None,
     data_summary: Mapping[str, object] | None = None,
     max_llm_calls: int | None = None,
     context_compaction: Mapping[str, object] | None = None,
     model_artifacts_empty: bool | None = None,
-    acceptance_rules: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the short Agent-visible operational-facts projection.
 
     This is a convenience index, not a security boundary. It carries research
     dates only; exact trusted details remain in the referenced JSON files.
     ``acceptance_rules`` is the run's rules as the session reads them
-    (``pipelines.research_session.acceptance_facts`` of the same manifest).
+    (``pipelines.research_session.acceptance_facts`` of the same manifest);
+    it has no default, so a caller cannot drop the block by leaving it out,
+    and ``None`` states a manifest without acceptance rules.
     """
 
     runtime_env = runtime_env or {}
