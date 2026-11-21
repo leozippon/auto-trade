@@ -83,6 +83,7 @@ def _execution(**overrides: object) -> dict[str, object]:
         "price": 10.25,
         "commission": 5.0,
         "stamp_duty": 0.0,
+        "dividend_tax": 0.0,
     }
     row.update(overrides)
     return row

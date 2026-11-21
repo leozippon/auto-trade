@@ -329,17 +329,10 @@ def signal_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, 
     return {"env": env, "state": "ok", "error": None, "signal": signal}
 
 
-def _dividend_tax(row: dict[str, object]) -> float | None:
-    """The dividend tax a sale paid; a row journaled before the Broker charged
-    it carries no key and paid none."""
-
-    return finite_number(row.get("dividend_tax", 0.0))
-
-
 def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, object]:
     symbol = _text(row.get("symbol"))
     commission, stamp_duty = finite_number(row.get("commission")), finite_number(row.get("stamp_duty"))
-    dividend_tax = _dividend_tax(row)
+    dividend_tax = finite_number(row.get("dividend_tax"))
     return {
         "symbol": symbol,
         "name": names.get(symbol or ""),
@@ -365,7 +358,7 @@ def _fill(row: dict[str, object], names: dict[str, str | None]) -> dict[str, obj
 def _outcome(value: object) -> dict[str, object]:
     row = as_mapping(value)
     commission, stamp = finite_number(row.get("commission")) or 0.0, finite_number(row.get("stamp_duty")) or 0.0
-    tax = _dividend_tax(row) or 0.0
+    tax = finite_number(row.get("dividend_tax")) or 0.0
     return {
         "quantity": _count(row.get("quantity")),
         "price": finite_number(row.get("price")),
@@ -793,7 +786,7 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
             "turnover": finite_number(stats["turnover"]),
             "fees": finite_number(stats["fees_paid"]),
             "stamp_duty": finite_number(stats["stamp_duty_paid"]),
-            "dividend_tax": finite_number(stats.get("dividend_tax_paid", 0.0)),
+            "dividend_tax": finite_number(stats["dividend_tax_paid"]),
             "fills": int(as_mapping(stats["order_status_counts"]).get("filled", 0)),
         },
     }
@@ -929,10 +922,10 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
             continue
         realized = finite_number(row.get("realized_pnl")) if row.get("action") == "sell" else 0.0
         add(name, row, commission=finite_number(row.get("commission")),
-            stamp_duty=finite_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
+            stamp_duty=finite_number(row.get("stamp_duty")), dividend_tax=finite_number(row.get("dividend_tax")),
             realized_pnl=realized)
     for name, row in _journal_rows(root, CORPORATE_ACTIONS_PREFIX):
-        withheld = finite_number(row.get("dividend_tax_withheld", 0.0))
+        withheld = finite_number(row.get("dividend_tax_withheld"))
         add(name, row, dividends=finite_number(row.get("cash_credit")),
             dividend_tax=withheld, realized_pnl=-withheld if withheld is not None else None)
     # A real-fill book's corrections move the same money a fill does.
@@ -941,7 +934,7 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
         raise ValueError(f"{fills.CORRECTIONS_NAME} has {skipped} unreadable line(s)")
     for row in corrections:
         add(fills.CORRECTIONS_NAME, row, commission=finite_number(row.get("commission")),
-            stamp_duty=finite_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
+            stamp_duty=finite_number(row.get("stamp_duty")), dividend_tax=finite_number(row.get("dividend_tax")),
             realized_pnl=finite_number(row.get("realized_pnl")))
     return flows
 
