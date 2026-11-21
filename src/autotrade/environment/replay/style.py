@@ -46,10 +46,7 @@ import pyarrow.parquet as pq
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.broker_core import board_of
-from autotrade.environment.data.contracts import (
-    DEFAULT_BENCHMARK_INDEX,
-    benchmark_index_label,
-)
+from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.runtime import utc_now_iso
 
 from .market import date_text
@@ -65,10 +62,6 @@ from .stats import (
     total_return_from_curve,
 )
 
-# The benchmark an experiment takes when its create request names none. Every call
-# below takes the experiment's ``benchmark_index`` explicitly, so none can grade
-# against this one by omission.
-BENCHMARK_TS_CODE = DEFAULT_BENCHMARK_INDEX
 # The fewest overlapping days the factor regression runs on: a span shorter
 # than this has no loadings and no residual tracking error. The Held-out slot
 # is refused below it (``pipelines.calendar.ResearchGeometry.heldout``), so a
@@ -775,7 +768,6 @@ def write_style_rollup(result_dir: Path, payload: Mapping[str, object]) -> Path:
 
 
 __all__ = [
-    "BENCHMARK_TS_CODE",
     "FACTOR_SERIES",
     "MIN_REGRESSION_DAYS",
     "READABLE_STYLE_SCHEMA_VERSIONS",

@@ -8,10 +8,12 @@ import pandas as pd
 import pyarrow as pa
 import pytest
 
-from autotrade.environment.data.contracts import benchmark_index_label
+from autotrade.environment.data.contracts import (
+    DEFAULT_BENCHMARK_INDEX,
+    benchmark_index_label,
+)
 from autotrade.environment.replay.stats import ReplayResult, daily_returns_from_curve
 from autotrade.environment.replay.style import (
-    BENCHMARK_TS_CODE,
     FACTOR_SERIES,
     STYLE_SCHEMA_VERSION,
     _factor_legs,
@@ -118,7 +120,7 @@ def test_daily_style_uses_replay_positions_and_frozen_slot_inputs(tmp_path: Path
         replay_dir=replay_dir,
         universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
 
@@ -154,7 +156,7 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
         [
             {
                 "dataset": "index_daily",
-                "ts_code": BENCHMARK_TS_CODE,
+                "ts_code": DEFAULT_BENCHMARK_INDEX,
                 "trade_date": day,
                 "pct_chg": (-0.25 if index % 2 == 0 else 0.5),
             }
@@ -185,7 +187,7 @@ def test_the_agent_reads_its_own_sector_concentration_beside_the_size_tilt(tmp_p
         replay_dir=replay_dir,
         universes=[(days[0], snapshot_dir / "universe.parquet")],
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
 
@@ -236,7 +238,7 @@ def test_a_span_classifies_each_day_under_its_own_slots_universe_vintage(tmp_pat
         replay_dir=None,
         universes=[(days[0], first / "universe.parquet"), (days[4], second / "universe.parquet")],
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )["style"]
 
@@ -266,7 +268,7 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         replay_dir=replay_dir,
         universes=[(days[0], tmp_path / "missing-decision-snapshot" / "universe.parquet")],
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
 
@@ -286,7 +288,7 @@ def test_style_records_structured_unavailable_values(tmp_path: Path):
         replay_dir=tmp_path / "missing-replay-slot",
         universes=(),
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
     assert no_columns["compact"]["benchmark_return"] is None
@@ -333,13 +335,13 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
         replay_dir=replay_dir,
         universes=(),
         mode="heldout",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
     block = benchmark_summary_block(analysis)
     assert block is not None
-    assert block["label"] == benchmark_index_label(BENCHMARK_TS_CODE)
-    assert block["ts_code"] == BENCHMARK_TS_CODE
+    assert block["label"] == benchmark_index_label(DEFAULT_BENCHMARK_INDEX)
+    assert block["ts_code"] == DEFAULT_BENCHMARK_INDEX
     assert block["benchmark_return"] == analysis["compact"]["benchmark_return"]
     assert block["excess_return"] == analysis["compact"]["excess_return"]
 
@@ -347,7 +349,7 @@ def test_benchmark_block_restates_the_replay_benchmark(tmp_path: Path):
 def test_benchmark_block_is_absent_when_the_slot_has_no_benchmark(tmp_path: Path):
     days = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2024-01-02", periods=6)]
     analysis = replay_style_analysis(
-        _replay(days), _daily(days), replay_dir=None, universes=(), mode="valid", benchmark_index=BENCHMARK_TS_CODE, permitted_boards=BOARDS
+        _replay(days), _daily(days), replay_dir=None, universes=(), mode="valid", benchmark_index=DEFAULT_BENCHMARK_INDEX, permitted_boards=BOARDS
     )
     # No fabricated zero: a slot without index rows carries no benchmark at all,
     # and the report keeps reporting missing coverage truthfully.
@@ -366,7 +368,7 @@ def test_a_slot_benchmark_read_error_surfaces_instead_of_reading_as_no_benchmark
     pd.DataFrame({"dataset": ["cn_cpi"], "trade_date": ["20240102"]}).to_parquet(
         no_index / "macro.parquet", index=False
     )
-    assert slot_benchmark(no_index, benchmark_index=BENCHMARK_TS_CODE) == {}
+    assert slot_benchmark(no_index, benchmark_index=DEFAULT_BENCHMARK_INDEX) == {}
 
     mistyped = tmp_path / "mistyped"
     mistyped.mkdir()
@@ -374,13 +376,13 @@ def test_a_slot_benchmark_read_error_surfaces_instead_of_reading_as_no_benchmark
         {"dataset": ["index_daily"], "ts_code": [300], "trade_date": ["20240102"], "pct_chg": [1.0]}
     ).to_parquet(mistyped / "macro.parquet", index=False)
     with pytest.raises(pa.ArrowException):
-        slot_benchmark(mistyped, benchmark_index=BENCHMARK_TS_CODE)
+        slot_benchmark(mistyped, benchmark_index=DEFAULT_BENCHMARK_INDEX)
 
     truncated = tmp_path / "truncated"
     truncated.mkdir()
     (truncated / "macro.parquet").write_bytes(b"PAR1")
     with pytest.raises(pa.ArrowException):
-        slot_benchmark(truncated, benchmark_index=BENCHMARK_TS_CODE)
+        slot_benchmark(truncated, benchmark_index=DEFAULT_BENCHMARK_INDEX)
 
 
 def _regression_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFrame]:
@@ -391,7 +393,7 @@ def _regression_inputs(tmp_path: Path, days: list[str]) -> tuple[Path, pd.DataFr
         [
             {
                 "dataset": "index_daily",
-                "ts_code": BENCHMARK_TS_CODE,
+                "ts_code": DEFAULT_BENCHMARK_INDEX,
                 "trade_date": day,
                 "pct_chg": (-0.25 if index % 2 == 0 else 0.5),
             }
@@ -437,7 +439,7 @@ def test_the_factor_regression_reads_the_market_and_size_loadings(tmp_path: Path
         replay_dir=replay_dir,
         universes=(),
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
     block = analysis["factor_regression"]
@@ -478,7 +480,7 @@ def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
         replay_dir=replay_dir,
         universes=(),
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
 
@@ -499,7 +501,7 @@ def test_the_size_loading_is_stored_beside_the_tilt(tmp_path: Path):
         replay_dir=replay_dir,
         universes=(),
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
     assert unmeasured["factor_regression"]["size_beta"] is None
@@ -531,7 +533,7 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
         [
             {
                 "dataset": "index_daily",
-                "ts_code": BENCHMARK_TS_CODE,
+                "ts_code": DEFAULT_BENCHMARK_INDEX,
                 "trade_date": day,
                 # macro.parquet keeps index pct_chg in percent.
                 "pct_chg": market_percent[index % len(market_percent)],
@@ -591,7 +593,7 @@ def test_size_beta_is_measured_on_the_decimal_pct_chg_scale(tmp_path: Path):
         replay_dir=replay_dir,
         universes=(),
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
 
@@ -794,7 +796,7 @@ def test_a_warm_up_gives_every_leg_its_value_from_the_replays_first_day(tmp_path
     pd.DataFrame(
         {
             "dataset": "index_daily",
-            "ts_code": BENCHMARK_TS_CODE,
+            "ts_code": DEFAULT_BENCHMARK_INDEX,
             "trade_date": span,
             "pct_chg": np.random.default_rng(5).normal(0.0, 1.0, len(span)),
         }
@@ -805,7 +807,7 @@ def test_a_warm_up_gives_every_leg_its_value_from_the_replays_first_day(tmp_path
         replay_dir=replay_dir,
         universes=(),
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
         warmup=warmup,
     )
@@ -835,7 +837,7 @@ def test_the_legs_are_formed_on_the_boards_the_account_may_buy_on():
             replay_dir=None,
             universes=(),
             mode="valid",
-            benchmark_index=BENCHMARK_TS_CODE,
+            benchmark_index=DEFAULT_BENCHMARK_INDEX,
             permitted_boards=None,
         )
 
@@ -887,7 +889,7 @@ def test_the_factor_regression_reports_missing_factors_instead_of_zero(tmp_path:
         replay_dir=replay_dir,
         universes=(),
         mode="valid",
-        benchmark_index=BENCHMARK_TS_CODE,
+        benchmark_index=DEFAULT_BENCHMARK_INDEX,
         permitted_boards=BOARDS,
     )
     block = analysis["factor_regression"]
@@ -917,7 +919,7 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
     pd.DataFrame(
         {
             "dataset": "index_daily",
-            "ts_code": BENCHMARK_TS_CODE,
+            "ts_code": DEFAULT_BENCHMARK_INDEX,
             "trade_date": days,
             "pct_chg": rng.normal(0.0, 1.0, len(days)),
         }
@@ -950,7 +952,7 @@ def test_the_sidecar_carries_the_random_baseline_and_the_active_figures_the_verd
 
     def analyse(block):
         return replay_style_analysis(
-            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", baselines=block, benchmark_index=BENCHMARK_TS_CODE, permitted_boards=BOARDS
+            replay, daily, replay_dir=replay_dir, universes=(), mode="valid", baselines=block, benchmark_index=DEFAULT_BENCHMARK_INDEX, permitted_boards=BOARDS
         )
 
     graded, bare = analyse(baselines), analyse(None)
@@ -1018,22 +1020,22 @@ def test_membership_is_read_from_the_decision_view_and_every_slot(tmp_path: Path
     def weight(day: str, index: str, code: str) -> dict[str, object]:
         return {"dataset": "index_weight", "trade_date": day, "index_code": index, "con_code": code}
 
-    decision = slot("decision", [weight("20240531", BENCHMARK_TS_CODE, "000001.SZ"),
+    decision = slot("decision", [weight("20240531", DEFAULT_BENCHMARK_INDEX, "000001.SZ"),
                                  weight("20240531", "000905.SH", "000009.SZ")])
-    replay = slot("replay", [weight("20240628", BENCHMARK_TS_CODE, "000001.SZ"),
-                             weight("20240628", BENCHMARK_TS_CODE, "000002.SZ")])
+    replay = slot("replay", [weight("20240628", DEFAULT_BENCHMARK_INDEX, "000001.SZ"),
+                             weight("20240628", DEFAULT_BENCHMARK_INDEX, "000002.SZ")])
     # An experiment that did not select index_weight has no such rows, or columns.
-    plain = slot("plain", [{"dataset": "index_daily", "ts_code": BENCHMARK_TS_CODE,
+    plain = slot("plain", [{"dataset": "index_daily", "ts_code": DEFAULT_BENCHMARK_INDEX,
                             "trade_date": "20240628", "pct_chg": 0.1}])
     # A mounted index_weight keeps its columns where its window holds no row
     # of the benchmark (here: only another index's section).
     other = slot("other", [weight("20240531", "000905.SH", "000009.SZ")])
 
-    assert slot_membership([decision, replay, plain, tmp_path / "absent"], benchmark_index=BENCHMARK_TS_CODE) == {
+    assert slot_membership([decision, replay, plain, tmp_path / "absent"], benchmark_index=DEFAULT_BENCHMARK_INDEX) == {
         "20240531": frozenset({"000001.SZ"}),
         "20240628": frozenset({"000001.SZ", "000002.SZ"}),
     }
     # Unmounted and mounted-but-empty are different answers: only the first
     # lets the random baseline fall back to the float-cap decile.
-    assert slot_membership([plain], benchmark_index=BENCHMARK_TS_CODE) is None
-    assert slot_membership([plain, other], benchmark_index=BENCHMARK_TS_CODE) == {}
+    assert slot_membership([plain], benchmark_index=DEFAULT_BENCHMARK_INDEX) is None
+    assert slot_membership([plain, other], benchmark_index=DEFAULT_BENCHMARK_INDEX) == {}

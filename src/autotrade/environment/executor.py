@@ -201,7 +201,7 @@ def _cause_chain(exc: BaseException) -> Iterator[BaseException]:
 def raised_by_strategy(exc: BaseException) -> bool:
     """Whether ``exc``, or anything it was raised from, is ``StrategyRaised``."""
 
-    return any(isinstance(link, StrategyRaised) for link in _cause_chain(exc))
+    return caused_by(exc, StrategyRaised)
 
 
 def gpu_contended(exc: BaseException) -> bool:

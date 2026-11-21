@@ -22,13 +22,12 @@ import numpy as np
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.artifacts import REVISION_MANIFEST_FILE, artifact_fingerprint
-from autotrade.environment.data.contracts import benchmark_index_label
-from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.replay.style import (
-    BENCHMARK_TS_CODE,
-    STYLE_ARTIFACT_NAME,
-    STYLE_SCHEMA_VERSION,
+from autotrade.environment.data.contracts import (
+    DEFAULT_BENCHMARK_INDEX,
+    benchmark_index_label,
 )
+from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import FULL_SPAN
 from autotrade.pipelines.config import AcceptanceRules
@@ -174,8 +173,8 @@ def write_result(
             "schema_version": STYLE_SCHEMA_VERSION,
             "mode": mode,
             "benchmark": {
-                "ts_code": BENCHMARK_TS_CODE,
-                "label": benchmark_index_label(BENCHMARK_TS_CODE),
+                "ts_code": DEFAULT_BENCHMARK_INDEX,
+                "label": benchmark_index_label(DEFAULT_BENCHMARK_INDEX),
             },
             "factor_regression": {
                 "available": True, "reason": None, "n_days": days - 10, "tracking_error": 0.12,
