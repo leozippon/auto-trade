@@ -23,7 +23,7 @@ from autotrade.agent.prompts import (
     build_system_prompt,
 )
 from autotrade.agent.runner import COMPACT_ADVISORY_FRACTION
-from autotrade.agent.subagent import PROVIDER_TRANSIENT_FAILURE_HINT
+from autotrade.agent.turns import PROVIDER_TRANSIENT_FAILURE_HINT
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import AgentRefStore

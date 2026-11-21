@@ -40,9 +40,7 @@ from autotrade.environment.llm import (
     CallBudgetExhausted,
     ChatMessage,
     LLMProxy,
-    LLMProxyError,
     MalformedToolCallError,
-    ProviderRefusalError,
     ToolCall,
     estimate_chat_request_tokens,
     is_context_overflow_error,
@@ -62,7 +60,7 @@ from autotrade.environment.tools.base import (
     is_sequential_tool,
 )
 from autotrade.environment.tools.search import trace_read_stub
-from autotrade.environment.trace import TraceEvent, trace_reasoning
+from autotrade.environment.trace import TraceEvent
 
 from .compact import (
     DEFAULT_COMPACTION_TOKEN_THRESHOLD,
@@ -78,16 +76,24 @@ from .prompts import (
     WRAP_UP_PROMPT,
 )
 from .subagent import (
-    OUTPUT_TRUNCATED_CONTINUATION,
-    PROVIDER_TRANSIENT_FAILURE_HINT,
     AgentTool,
     SubAgentEngine,
-    accumulate_usage,
     deliver_subagent_report,
-    new_token_totals,
     normalize_subagent_thinking,
     resolve_subagent_max_turns,
     subagent_role,
+)
+from .turns import (
+    accumulate_usage,
+    assistant_message,
+    completion_tokens,
+    llm_call_fields,
+    llm_error_observation,
+    llm_failure_fields,
+    new_token_totals,
+    observation,
+    tool_message,
+    truncation_observation,
 )
 
 _LLM_FAILURE_CIRCUIT = 3
@@ -588,21 +594,17 @@ class AgentSessionRunner:
                 llm_failure_streak += 1
                 error = safe_error_summary(exc)
                 malformed = isinstance(exc, MalformedToolCallError)
-                failure: dict[str, object] = {
-                    "call_index": llm_calls,
-                    "status": "error",
-                    "provider": self.llm.provider,
-                    "model": self.llm.model,
-                    "error": error,
-                }
-                if malformed:
-                    # Countable in an audit: this class costs one turn, not a
-                    # repeated generation.
-                    failure["error_type"] = "malformed_tool_call"
-                    failure.update(trace_reasoning(exc.reasoning_content))
-                elif isinstance(exc, ProviderRefusalError):
-                    failure["error_type"] = "provider_refusal"
-                self._emit(TraceEvent.LLM_CALL, failure)
+                self._emit(
+                    TraceEvent.LLM_CALL,
+                    {
+                        "call_index": llm_calls,
+                        "status": "error",
+                        "provider": self.llm.provider,
+                        "model": self.llm.model,
+                        "error": error,
+                        **llm_failure_fields(exc),
+                    },
+                )
                 if is_context_overflow_error(exc):
                     if not context_overflow_recovery_used:
                         messages, progressed = self._context.recover(
@@ -665,43 +667,17 @@ class AgentSessionRunner:
                     malformed_reissue_used = True
                     messages.extend(malformed_tool_call_messages(exc, error=error))
                     continue
-                observation: dict[str, object] = {
-                    "observation": "llm_error",
-                    "error": error,
-                    "retry_hint": PROVIDER_TRANSIENT_FAILURE_HINT
-                    if isinstance(exc, LLMProxyError) and exc.retryable
-                    else "Proceed with a different bounded action; do not repeat the same failing request verbatim.",
-                }
-                messages.append(
-                    ChatMessage(
-                        "user",
-                        json.dumps(observation, ensure_ascii=False, allow_nan=False),
-                    )
-                )
+                messages.append(llm_error_observation(exc, error))
                 continue
 
             accumulate_usage(self._usage, response.usage)
-            messages.append(
-                ChatMessage(
-                    "assistant",
-                    response.content or None if response.tool_calls else response.content,
-                    response.tool_calls,
-                    reasoning_content=response.reasoning_content,
-                )
-            )
+            messages.append(assistant_message(response))
             self._emit(
                 TraceEvent.LLM_CALL,
                 {
                     "call_index": llm_calls,
                     "status": "ok",
-                    "provider": self.llm.provider,
-                    "model": response.model,
-                    "usage": dict(response.usage),
-                    "content": response.content,
-                    **trace_reasoning(
-                        response.reasoning_content or response.reasoning_summary
-                    ),
-                    "tool_names": [call.name for call in response.tool_calls],
+                    **llm_call_fields(self.llm.provider, response),
                 },
             )
             if not response.tool_calls:
@@ -709,40 +685,25 @@ class AgentSessionRunner:
                     # The whole budget went into thinking (or an unfinished
                     # essay): say so, ask for a concise continuation, and do
                     # not let the next turn silently repeat the same.
-                    completion = int(dict(response.usage).get("completion_tokens") or 0)
                     self._emit(
                         TraceEvent.OUTPUT_TRUNCATED,
                         {
                             "call_index": llm_calls,
-                            "completion_tokens": completion,
+                            "completion_tokens": completion_tokens(response.usage),
                             "max_tokens": output_cap,
                         },
                     )
-                    messages.append(
-                        ChatMessage(
-                            "user",
-                            json.dumps(
-                                {
-                                    "observation": "output_truncated",
-                                    "completion_tokens": completion,
-                                    "max_tokens": output_cap,
-                                    "message": OUTPUT_TRUNCATED_CONTINUATION.format(
-                                        limit=output_cap
-                                    ),
-                                },
-                                ensure_ascii=False,
-                            ),
-                        )
-                    )
+                    messages.append(truncation_observation(response.usage, output_cap))
                     continue
                 if self._yield_for_pending_subagent(time_budget):
                     continue
-                nudge: dict[str, object] = {
-                    "observation": "no_tool_call",
-                    "retry_hint": "Text alone does nothing: continue the research with the injected tools.",
-                }
                 messages.append(
-                    ChatMessage("user", json.dumps(nudge, ensure_ascii=False))
+                    observation(
+                        {
+                            "observation": "no_tool_call",
+                            "retry_hint": "Text alone does nothing: continue the research with the injected tools.",
+                        }
+                    )
                 )
                 messages = self._apply_inbox(
                     messages, safe_point=INBOX_SAFE_AFTER_LLM_BEFORE_TOOLS
@@ -768,18 +729,7 @@ class AgentSessionRunner:
                 else:
                     apply_point = INBOX_SAFE_AFTER_TOOLS_BEFORE_LLM
             for call, record in results:
-                messages.append(
-                    ChatMessage(
-                        "tool",
-                        json.dumps(
-                            sanitize_for_log(record),
-                            ensure_ascii=False,
-                            default=str,
-                            allow_nan=False,
-                        ),
-                        tool_call_id=call.id,
-                    )
-                )
+                messages.append(tool_message(call.id, record))
                 traced_arguments = dict(call.arguments)
                 if call.name == "agent":
                     traced_arguments.pop("task", None)

@@ -29,13 +29,10 @@ from autotrade.environment.llm import (
     CallBudgetExhausted,
     ChatMessage,
     LLMProxy,
-    LLMProxyError,
     MalformedToolCallError,
     ProviderRefusalError,
     ProviderResponse,
     ToolCall,
-    cache_write_tokens,
-    cached_prompt_tokens,
     is_context_overflow_error,
     malformed_tool_call_messages,
 )
@@ -58,7 +55,7 @@ from autotrade.environment.tools.base import (
     is_sequential_tool,
 )
 from autotrade.environment.tools.search import file_lines, trace_read_stub
-from autotrade.environment.trace import TraceEvent, trace_reasoning
+from autotrade.environment.trace import TraceEvent
 
 from .compact import (
     ContextCompactor,
@@ -68,6 +65,18 @@ from .compact import (
     safe_error_summary,
 )
 from .prompts import FILE_PATH_RULE, PATH_RULES_BULLET
+from .turns import (
+    accumulate_usage,
+    assistant_message,
+    completion_tokens,
+    llm_call_fields,
+    llm_error_observation,
+    llm_failure_fields,
+    new_token_totals,
+    observation,
+    tool_message,
+    truncation_observation,
+)
 
 SUBAGENT_THINKING_LEVELS = ("off", *REASONING_EFFORTS)
 # Aliases a parent still writes, each mapped to the level it was always sent
@@ -129,16 +138,6 @@ OUTPUT_TRUNCATED_MARKER = "[输出在 {limit} token 上限被截断]"
 # all-reasoning turn after an explicit "be concise" instruction is a stuck
 # loop, not an unfinished answer.
 SUBAGENT_MAX_TRUNCATION_CONTINUATIONS = 1
-OUTPUT_TRUNCATED_CONTINUATION = (
-    "上一回合的输出在 {limit} token 上限被截断且没有工具调用。"
-    "请把已有结论压缩成几句话，然后直接调用下一步工具；不要重新展开完整推理。"
-)
-# The llm_error note after a call whose transient provider failures (the
-# retryable class) outlasted the gateway's deadline: the request was not at
-# fault, so the usual advice to change the action does not apply.
-PROVIDER_TRANSIENT_FAILURE_HINT = (
-    "The provider failed transiently; nothing in your request needs to change."
-)
 # The forced final summary came back with no content (a reply that spent its
 # budget on reasoning). The whole child run is not worth discarding over the
 # last call: the reply's own reasoning, else the last assistant text still in
@@ -850,22 +849,20 @@ class SubAgentEngine(SessionTimeBudgetAware):
                     llm_errors += 1
                     error = safe_error_summary(exc)
                     malformed = isinstance(exc, MalformedToolCallError)
-                    failure: dict[str, object] = {
-                        "task_id": task_id,
-                        "role": role,
-                        "turn": turns,
-                        "provider": llm.provider,
-                        "model": llm.model,
-                        "llm_error": error,
-                        "parent_call_id": parent_call_id,
-                    }
                     refused = isinstance(exc, ProviderRefusalError)
-                    if malformed:
-                        failure["error_type"] = "malformed_tool_call"
-                        failure.update(trace_reasoning(exc.reasoning_content))
-                    elif refused:
-                        failure["error_type"] = "provider_refusal"
-                    self._emit(TraceEvent.SUBAGENT_LLM_ERROR, failure)
+                    self._emit(
+                        TraceEvent.SUBAGENT_LLM_ERROR,
+                        {
+                            "task_id": task_id,
+                            "role": role,
+                            "turn": turns,
+                            "provider": llm.provider,
+                            "model": llm.model,
+                            "llm_error": error,
+                            "parent_call_id": parent_call_id,
+                            **llm_failure_fields(exc),
+                        },
+                    )
                     if self._cancelled():
                         status = "cancelled"
                         error = "Sub-agent cancelled"
@@ -899,21 +896,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                             malformed_tool_call_messages(exc, error=error)
                         )
                         continue
-                    messages.append(
-                        ChatMessage(
-                            "user",
-                            json.dumps(
-                                {
-                                    "observation": "llm_error",
-                                    "error": error,
-                                    "retry_hint": PROVIDER_TRANSIENT_FAILURE_HINT
-                                    if isinstance(exc, LLMProxyError) and exc.retryable
-                                    else "Continue with a different bounded action.",
-                                },
-                                ensure_ascii=False,
-                            ),
-                        )
-                    )
+                    messages.append(llm_error_observation(exc, error))
                     continue
                 llm_calls += 1
                 # A transient provider error that a later turn survived is
@@ -923,28 +906,14 @@ class SubAgentEngine(SessionTimeBudgetAware):
                 accumulate_usage(usage, response.usage)
                 cut_off = output_truncated(response.usage, output_tokens)
                 truncated_turns += int(cut_off)
-                messages.append(
-                    ChatMessage(
-                        "assistant",
-                        response.content,
-                        response.tool_calls,
-                        reasoning_content=response.reasoning_content,
-                    )
-                )
+                messages.append(assistant_message(response))
                 self._emit(
                     TraceEvent.SUBAGENT_LLM,
                     {
                         "task_id": task_id,
                         "role": role,
                         "turn": turns,
-                        "provider": llm.provider,
-                        "model": response.model,
-                        "usage": dict(response.usage),
-                        "content": response.content,
-                        **trace_reasoning(
-                            response.reasoning_content or response.reasoning_summary
-                        ),
-                        "tool_names": [call.name for call in response.tool_calls],
+                        **llm_call_fields(llm.provider, response),
                         "parent_call_id": parent_call_id,
                     },
                 )
@@ -965,37 +934,19 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         # number of times; then the launch failed.
                         if continuations < SUBAGENT_MAX_TRUNCATION_CONTINUATIONS:
                             continuations += 1
-                            completion = int(
-                                dict(response.usage).get("completion_tokens") or 0
-                            )
                             self._emit(
                                 TraceEvent.SUBAGENT_OUTPUT_TRUNCATED,
                                 {
                                     "task_id": task_id,
                                     "role": role,
                                     "turn": turns,
-                                    "completion_tokens": completion,
+                                    "completion_tokens": completion_tokens(response.usage),
                                     "max_tokens": output_tokens,
                                     "continuation": continuations,
                                     "parent_call_id": parent_call_id,
                                 },
                             )
-                            messages.append(
-                                ChatMessage(
-                                    "user",
-                                    json.dumps(
-                                        {
-                                            "observation": "output_truncated",
-                                            "completion_tokens": completion,
-                                            "max_tokens": output_tokens,
-                                            "message": OUTPUT_TRUNCATED_CONTINUATION.format(
-                                                limit=output_tokens
-                                            ),
-                                        },
-                                        ensure_ascii=False,
-                                    ),
-                                )
-                            )
+                            messages.append(truncation_observation(response.usage, output_tokens))
                             continue
                         status = "error"
                         error = (
@@ -1004,33 +955,18 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         )
                         break
                     messages.append(
-                        ChatMessage(
-                            "user",
-                            json.dumps(
-                                {
-                                    "observation": "no_tool_call",
-                                    "retry_hint": "Use an injected tool; thinking-only replies do not finish the task.",
-                                },
-                                ensure_ascii=False,
-                            ),
+                        observation(
+                            {
+                                "observation": "no_tool_call",
+                                "retry_hint": "Use an injected tool; thinking-only replies do not finish the task.",
+                            }
                         )
                     )
                     continue
                 results = self._dispatch_calls(response.tool_calls, allowed=allowed)
                 for call, record, attempted in results:
                     tool_calls_made += int(attempted)
-                    messages.append(
-                        ChatMessage(
-                            "tool",
-                            json.dumps(
-                                sanitize_for_log(record),
-                                ensure_ascii=False,
-                                default=str,
-                                allow_nan=False,
-                            ),
-                            tool_call_id=call.id,
-                        )
-                    )
+                    messages.append(tool_message(call.id, record))
                     self._emit(
                         TraceEvent.SUBAGENT_TOOL,
                         {
@@ -1080,13 +1016,7 @@ class SubAgentEngine(SessionTimeBudgetAware):
                         "task_id": task_id,
                         "role": role,
                         "turn": turns,
-                        "provider": llm.provider,
-                        "model": response.model,
-                        "usage": dict(response.usage),
-                        "content": response.content,
-                        **trace_reasoning(
-                            response.reasoning_content or response.reasoning_summary
-                        ),
+                        **llm_call_fields(llm.provider, response),
                         "tool_names": [],
                         # The forced finalize is not one of the child's turns;
                         # without this the trace loses the call entirely.
@@ -1271,61 +1201,6 @@ class SubAgentEngine(SessionTimeBudgetAware):
     def _emit(self, event: TraceEvent, payload: dict[str, object]) -> None:
         if self.event_sink is not None:
             self.event_sink(event, dict(payload))
-
-
-def new_token_totals() -> dict[str, int]:
-    """One conversation's token counters, the session's and each child's."""
-
-    return dict.fromkeys(
-        (
-            "llm_calls_with_usage",
-            "prompt_tokens",
-            "completion_tokens",
-            "total_tokens",
-            "reasoning_tokens",
-            "cache_hit_tokens",
-            "cache_miss_tokens",
-            "cache_write_tokens",
-        ),
-        0,
-    )
-
-
-def accumulate_usage(total: dict[str, int], usage: object) -> None:
-    """Add one call's usage to ``new_token_totals`` counters; shared with the
-    parent session runner, which imports it from here.
-
-    A miss is a prompt token not read from the cache, the call's cache writes
-    included; hits and misses are summed only from a usage that reports a
-    cache count, because one without (vLLM) leaves its hit rate unknown, not
-    zero. Reasoning comes from ``completion_tokens_details`` or, in the
-    responses dialect, ``output_tokens_details``.
-
-    Cache hits are only realized while the request prefix (system prompt +
-    tool schemas + early history) stays byte-stable; semantic compaction and
-    emergency tool-result fitting rewrite history and reset that prefix.
-    """
-
-    if not isinstance(usage, dict):
-        return
-    total["llm_calls_with_usage"] += 1
-    for key in ("prompt_tokens", "completion_tokens", "total_tokens"):
-        value = usage.get(key)
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
-            total[key] += int(value)
-    cached = cached_prompt_tokens(usage)
-    prompt = usage.get("prompt_tokens")
-    if cached is not None:
-        total["cache_hit_tokens"] += cached
-        if isinstance(prompt, (int, float)) and not isinstance(prompt, bool):
-            total["cache_miss_tokens"] += max(int(prompt) - cached, 0)
-    total["cache_write_tokens"] += cache_write_tokens(usage)
-    for key in ("completion_tokens_details", "output_tokens_details"):
-        details = usage.get(key)
-        reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
-        if isinstance(reasoning, (int, float)) and not isinstance(reasoning, bool):
-            total["reasoning_tokens"] += int(reasoning)
-            break
 
 
 def _recovered_summary(
