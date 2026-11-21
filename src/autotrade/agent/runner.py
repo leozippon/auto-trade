@@ -102,15 +102,6 @@ _LLM_FAILURE_CIRCUIT = 3
 SUBAGENT_TEARDOWN_WAIT_SECONDS = 30.0
 
 
-def _pipeline_deadline_grace_seconds() -> float:
-    """The pipeline's default wrap-up grace (``ExperimentConfig.deadline_grace_minutes``),
-    imported on use because the pipelines package imports this one."""
-
-    from autotrade.pipelines.config import DEFAULT_DEADLINE_GRACE_MINUTES
-
-    return DEFAULT_DEADLINE_GRACE_MINUTES * 60.0
-
-
 # ``finish_reason`` values of a session that ended because a budget ran out.
 DEADLINE_GRACE_EXHAUSTED = "deadline_grace_exhausted"
 LLM_CALL_BUDGET_EXHAUSTED = "llm_call_budget_exhausted"
@@ -281,8 +272,10 @@ def _inbox_trace_text(text: str) -> str:
 class AgentSessionConfig:
     # Trailing wrap-up grace reserved from the end of the handed session
     # budget. The main deadline sits grace seconds before the budget end:
-    # reaching it never interrupts the model; exhausting the budget does.
-    deadline_grace_seconds: float = field(default_factory=_pipeline_deadline_grace_seconds)
+    # reaching it never interrupts the model; exhausting the budget does. The
+    # research session passes the experiment's own
+    # (``ResearchSessionRequest.deadline_grace_seconds``).
+    deadline_grace_seconds: float = 600.0
     max_llm_calls: int = 200
     deadline_seconds: float = 1_200.0
     # The longest reply one call asks for, thinking included: the pipeline
