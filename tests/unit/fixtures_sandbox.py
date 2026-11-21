@@ -2,19 +2,28 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
+import threading
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import artifact_fingerprint
-from autotrade.environment.data.snapshot import _write_manifest
+from autotrade.environment.container_stats import ContainerResourceMonitor
+from autotrade.environment.data.snapshot import SnapshotConfig, _write_manifest
 from autotrade.environment.data.units import validate_snapshot_units
+from autotrade.environment.executor import DockerStrategyExecutor
 from autotrade.environment.runtime import new_id
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.tools import ToolResult
+from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
@@ -167,3 +176,206 @@ class PassingModificationCheck:
                 "fingerprint": artifact_fingerprint(self.output_dir, self.models_dir),
             },
         )
+
+
+def _executor_for_process(
+    process: subprocess.Popen[bytes],
+    *,
+    config: SandboxConfig | None = None,
+    drain_stderr: bool = False,
+) -> DockerStrategyExecutor:
+    executor = object.__new__(DockerStrategyExecutor)
+    executor.config = config or SandboxConfig()
+    executor.container_name = "test-container"
+    executor._process = process
+    executor._stdout_buffer = bytearray()
+    executor._stderr_tail = deque()
+    executor._stderr_size = 0
+    executor._stderr_thread = None
+    executor._closed = False
+    executor.snapshot_dir = None
+    executor.asof_dir = None
+    executor.models_dir = None
+    executor.state_dir = None
+    executor.fit_schedule = None
+    executor.context_state_dir = ""
+    executor.context_models_dir = ""
+    executor._fit_worker = None
+    executor.gpu_indices = []
+    executor._fit_seconds = []
+    executor._decision_seconds = []
+    executor._monitor = ContainerResourceMonitor(executor.container_name)
+    executor._worker_reading = {}
+    executor._call_in_flight = False
+    executor._peak_state_bytes = None
+    executor._reset_transport_state()
+    if drain_stderr:
+        thread = threading.Thread(target=executor._drain_stderr, daemon=True)
+        executor._stderr_thread = thread
+        thread.start()
+    return executor
+
+
+VALID_MAIN = """
+def generate_orders(context):
+    return []
+"""
+
+
+def write_artifact(root: Path, *, main: str = VALID_MAIN) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "README.md").write_text("readonly", encoding="utf-8")
+    (root / "main.py").write_text(main, encoding="utf-8")
+    (root / "notes.md").write_text("neutral when evidence is thin\n", encoding="utf-8")
+    return root
+
+
+def _pit_slot_paths(
+    root: Path,
+    *,
+    decision: str,
+    replay: str,
+    generation_id: str,
+    phase: str = "valid",
+) -> tuple[Path, Path]:
+    cache_root = root / "pit_views"
+    snapshot = cache_root / "decision" / decision
+    replay_slot = cache_root / "replay" / phase / replay
+    snapshot.mkdir(parents=True)
+    replay_slot.mkdir(parents=True)
+    _write_provider_contract(cache_root, generation_id=generation_id)
+    return snapshot, replay_slot
+
+
+def _write_corporate_actions(replay: Path, rows: list[dict[str, object]] | None = None) -> None:
+    """The slot's ex-date table; every built slot carries it, dividends or not."""
+
+    columns = [
+        "ts_code", "ex_date", "record_date", "pay_date", "div_listdate",
+        "cash_per_share", "stock_per_share", "bonus_per_share",
+    ]
+    pd.DataFrame(rows or [], columns=columns).to_parquet(
+        replay / "corporate_actions.parquet", index=False
+    )
+
+
+def _write_domains(snapshot: Path, replay: Path) -> None:
+    pd.DataFrame(
+        {
+            "trade_date": ["20240101"],
+            "ts_code": ["000001.SZ"],
+            "open": [10.0],
+            "close": [10.0],
+            "pre_close": [10.0],
+            "available_at": ["2024-01-01T17:30:00+08:00"],
+        }
+    ).to_parquet(snapshot / "daily.parquet", index=False)
+    pd.DataFrame(
+        {
+            "trade_date": ["20240102", "20240103"],
+            "ts_code": ["000001.SZ", "000001.SZ"],
+            "open": [10.0, 10.0],
+            "close": [10.0, 10.0],
+            "pre_close": [10.0, 10.0],
+            "available_at": ["2024-01-02T17:30:00+08:00", "2024-01-03T17:30:00+08:00"],
+        }
+    ).to_parquet(replay / "daily.parquet", index=False)
+    _write_corporate_actions(replay)
+    minute_columns = {
+        "trade_date": ["20240101"],
+        "ts_code": ["000001.SZ"],
+        "trade_time": ["2024-01-01T15:00:00+08:00"],
+        "close": [10.0],
+        "available_at": ["2024-01-01T15:00:00+08:00"],
+    }
+    pd.DataFrame(minute_columns).to_parquet(snapshot / "intraday_1min.parquet", index=False)
+    minute_replay = pd.DataFrame(
+        {
+            key: [
+                value[0].replace("2024-01-01", "2024-01-02").replace("20240101", "20240102"),
+                value[0].replace("2024-01-01", "2024-01-03").replace("20240101", "20240103"),
+            ]
+            if isinstance(value[0], str)
+            else [value[0], value[0]]
+            for key, value in minute_columns.items()
+        }
+    )
+    pq.write_table(pa.Table.from_pandas(minute_replay, preserve_index=False), replay / "intraday_1min.parquet", row_group_size=1)
+
+    _write_simple_domain(snapshot, replay, "auction", dataset=None, time="09:29:00")
+    _write_simple_domain(snapshot, replay, "events", dataset="moneyflow", time="10:00:00")
+    _write_simple_domain(snapshot, replay, "macro", dataset="cn_cpi", time="10:00:00")
+    _write_simple_domain(snapshot, replay, "fundamentals", dataset="income_vip", time="10:00:00")
+
+    snapshot_index = pd.DataFrame(
+        {
+            "dataset": ["news"],
+            "text_id": ["old"],
+            "title": ["visibletoken old"],
+            "ts_codes": ["000001.SZ"],
+            "library_file": ["news.parquet"],
+            "available_at": ["2024-01-01T10:00:00+08:00"],
+        }
+    )
+    replay_index = pd.DataFrame(
+        {
+            "dataset": ["news", "news"],
+            "text_id": ["day1", "future"],
+            "title": ["visibletoken day1", "visibletoken future"],
+            "ts_codes": ["000001.SZ", "000001.SZ"],
+            "library_file": ["news.parquet", "news.parquet"],
+            "available_at": ["2024-01-02T10:00:00+08:00", "2024-01-03T10:00:00+08:00"],
+        }
+    )
+    snapshot_index.to_parquet(snapshot / "text_index.parquet", index=False)
+    replay_index.to_parquet(replay / "text_index.parquet", index=False)
+    pd.DataFrame({"text_id": ["old"], "body": ["visibletoken old body"]}).to_parquet(
+        snapshot / "text_library" / "news.parquet",
+        index=False,
+    )
+    pd.DataFrame(
+        {"text_id": ["day1", "future"], "body": ["visibletoken day1 body", "visibletoken future body"]}
+    ).to_parquet(replay / "text_library" / "news.parquet", index=False)
+    pd.DataFrame({"ts_code": ["000001.SZ"]}).to_parquet(snapshot / "universe.parquet", index=False)
+
+
+def _write_provider_contract(
+    cache_root: Path,
+    *,
+    generation_id: str,
+    config: dict[str, object] | None = None,
+) -> None:
+    (cache_root / "provider.json").write_text(
+        json.dumps(
+            {
+                "schema_version": SNAPSHOT_CACHE_FORMAT_VERSION,
+                "generation_id": generation_id,
+                "release_raw_dir": str(cache_root / "release" / generation_id / "raw"),
+                "snapshot_config": config or SnapshotConfig().to_record(),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_simple_domain(
+    snapshot: Path,
+    replay: Path,
+    name: str,
+    *,
+    dataset: str | None,
+    time: str,
+) -> None:
+    base = {
+        "trade_date": ["20240101"],
+        "ts_code": ["000001.SZ"],
+        "value": [1.0],
+        "available_at": [f"2024-01-01T{time}+08:00"],
+    }
+    if dataset is not None:
+        base["dataset"] = [dataset]
+    pd.DataFrame(base).to_parquet(snapshot / f"{name}.parquet", index=False)
+    current = {key: [value[0], value[0]] for key, value in base.items()}
+    current["trade_date"] = ["20240102", "20240103"]
+    current["available_at"] = [f"2024-01-02T{time}+08:00", f"2024-01-03T{time}+08:00"]
+    pd.DataFrame(current).to_parquet(replay / f"{name}.parquet", index=False)

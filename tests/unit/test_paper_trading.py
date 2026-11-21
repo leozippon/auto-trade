@@ -476,8 +476,7 @@ def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_pa
     macro table, not its own, and the book's first orders wait for the bars."""
 
     from autotrade.paper.pit import BookPITData
-
-    from .test_snapshot_builder import (
+    from tests.unit.snapshot_fixture import (
         build_fundamental_events,
         build_raw,
         write_fundamental_status,
@@ -540,8 +539,7 @@ def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_pa
 
 def test_late_data_is_refused_before_any_pit_view_is_built(tmp_path: Path):
     from autotrade.paper.pit import BookPITData
-
-    from .test_snapshot_builder import (
+    from tests.unit.snapshot_fixture import (
         build_fundamental_events,
         build_raw,
         write_fundamental_status,
@@ -575,8 +573,7 @@ def test_a_cache_of_its_generation_written_under_another_view_format_is_rebuilt(
 
     from autotrade.paper.pit import BookPITData
     from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
-
-    from .test_snapshot_builder import (
+    from tests.unit.snapshot_fixture import (
         build_fundamental_events,
         build_raw,
         write_fundamental_status,
@@ -621,8 +618,7 @@ def test_a_release_holding_a_stale_dataset_is_refused_before_any_pit_view_is_bui
 
     from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_config
     from autotrade.paper.pit import BookPITData
-
-    from .test_snapshot_builder import (
+    from tests.unit.snapshot_fixture import (
         build_fundamental_events,
         build_raw,
         write_fundamental_status,

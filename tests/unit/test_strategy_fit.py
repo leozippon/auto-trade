@@ -64,13 +64,13 @@ from autotrade.pipelines.experiment import seed_change
 from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
 from autotrade.pipelines.session_resume import REVISIONS_DIR
 from tests.unit.acceptance_fixture import REQUIRED_RULES
-from tests.unit.fixtures_sandbox import docker_available
-from tests.unit.test_pit_daily_backend import (
+from tests.unit.fixtures_sandbox import (
+    _executor_for_process,
     _pit_slot_paths,
     _write_corporate_actions,
     _write_domains,
+    docker_available,
 )
-from tests.unit.test_sandbox_runtime import _executor_for_process
 
 TEMPLATE = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
 

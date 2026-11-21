@@ -8,7 +8,6 @@ import subprocess
 import sys
 import threading
 import time
-from collections import deque
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -66,9 +65,7 @@ from autotrade.environment.sandbox import (
     experiment_container_labels,
     link_copytree,
 )
-from autotrade.environment.sandbox_images import (
-    prepare_experiment_sandbox_image,
-)
+from autotrade.environment.sandbox_images import prepare_experiment_sandbox_image
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,
@@ -92,6 +89,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.session_tools import resource_reading
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
+from tests.unit.fixtures_sandbox import _executor_for_process
 
 from .fixtures_sandbox import docker_available
 from .gpu_probe import gpu_roster, stubbed_gpu_probe
@@ -148,44 +146,6 @@ def _strategy_config(**fields: object) -> SandboxConfig:
     }
     spec = SandboxSpec(**{"gpu": None, "tmpfs_size": STRATEGY_TMPFS_SIZE, **fields})
     return SandboxConfig(spec=spec, **clocks)
-
-
-def _executor_for_process(
-    process: subprocess.Popen[bytes],
-    *,
-    config: SandboxConfig | None = None,
-    drain_stderr: bool = False,
-) -> DockerStrategyExecutor:
-    executor = object.__new__(DockerStrategyExecutor)
-    executor.config = config or SandboxConfig()
-    executor.container_name = "test-container"
-    executor._process = process
-    executor._stdout_buffer = bytearray()
-    executor._stderr_tail = deque()
-    executor._stderr_size = 0
-    executor._stderr_thread = None
-    executor._closed = False
-    executor.snapshot_dir = None
-    executor.asof_dir = None
-    executor.models_dir = None
-    executor.state_dir = None
-    executor.fit_schedule = None
-    executor.context_state_dir = ""
-    executor.context_models_dir = ""
-    executor._fit_worker = None
-    executor.gpu_indices = []
-    executor._fit_seconds = []
-    executor._decision_seconds = []
-    executor._monitor = ContainerResourceMonitor(executor.container_name)
-    executor._worker_reading = {}
-    executor._call_in_flight = False
-    executor._peak_state_bytes = None
-    executor._reset_transport_state()
-    if drain_stderr:
-        thread = threading.Thread(target=executor._drain_stderr, daemon=True)
-        executor._stderr_thread = thread
-        thread.start()
-    return executor
 
 
 def test_persistent_sandbox_command_has_bounded_explicit_identity_mounts(tmp_path: Path):

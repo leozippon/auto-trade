@@ -20,21 +20,9 @@ from autotrade.environment.artifacts import (
     readonly_baseline,
     restore_registered_artifact_trees,
 )
+from tests.unit.fixtures_sandbox import VALID_MAIN, write_artifact
 
 from .fixtures_sandbox import TEMPLATE_DIR
-
-VALID_MAIN = """
-def generate_orders(context):
-    return []
-"""
-
-
-def write_artifact(root: Path, *, main: str = VALID_MAIN) -> Path:
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "README.md").write_text("readonly", encoding="utf-8")
-    (root / "main.py").write_text(main, encoding="utf-8")
-    (root / "notes.md").write_text("neutral when evidence is thin\n", encoding="utf-8")
-    return root
 
 
 class ArtifactContractTest(unittest.TestCase):

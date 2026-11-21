@@ -14,17 +14,11 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from autotrade.common.records import (
-    read_json_object,
-    write_json_atomic,
-)
+from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.data_sources.tushare.cron_update import resolve_job_start_date
 from autotrade.environment import contract_fingerprint
 from autotrade.environment.artifacts import artifact_fingerprint
-from autotrade.environment.broker import (
-    DailyBroker,
-    default_permitted_boards,
-)
+from autotrade.environment.broker import DailyBroker, default_permitted_boards
 from autotrade.environment.broker_core import board_of
 from autotrade.environment.contract_fingerprint import ImageContract
 from autotrade.environment.executor import (
@@ -68,9 +62,9 @@ from tests.unit.paper_book_fixture import (
     run_days,
     write_book_record,
 )
+from tests.unit.snapshot_fixture import write_fundamental_status
 from tests.unit.test_broker_engine import MATCHED_AT, _bar, _order
 from tests.unit.test_null_control import _board_draws
-from tests.unit.test_snapshot_builder import write_fundamental_status
 from tests.unit.webui_research_experiment import build_experiment
 
 
