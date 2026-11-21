@@ -59,7 +59,7 @@ from autotrade.environment.runtime import (
     utc_now_iso,
 )
 from autotrade.environment.sandbox import SandboxConfig, link_copytree
-from autotrade.environment.step_tree import StepTree
+from autotrade.environment.step_tree import StepTree, node_handle
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
     SessionTimeBudgetAware,
@@ -544,6 +544,9 @@ VALIDATION_DAILY_ATTACHMENT = "validation/active_daily.csv"
 # and forced a 174 s compaction plus twelve recovery calls. They stay in the
 # referenced result.json; a step-tree node keeps every other metric.
 REPLAY_SCALED_SUMMARY_BLOCKS = ("per_stock", "weekly_returns")
+# A candidate's result name, its node's short handle: this prefix and its
+# number in the session (``SessionValidations.reserve``).
+RESULT_NAME_PREFIX = "valid_"
 
 
 def write_active_daily(result_ref: str) -> Path:
@@ -658,8 +661,16 @@ class SessionValidations:
         self.validates_in_interval = _validates_since(
             tree, self.tests[-1].get("recorded_at") if self.tests else None
         )
-        # Candidates reserved so far, which names each result.
-        self.candidates_started = 0
+        # The number of the last result named, which the next candidate's
+        # follows: a resumed attempt continues after the highest its session's
+        # earlier attempts gave, so a short handle names one node of the session.
+        self.last_result_number = max(
+            (
+                int(node_handle(node_id).removeprefix(RESULT_NAME_PREFIX))
+                for node_id in tree.session_node_ids(self.session_ref)
+            ),
+            default=0,
+        )
 
     @property
     def test_horizon(self) -> str:
@@ -929,18 +940,22 @@ class SessionValidations:
     def reserve(self, count: int) -> list[str]:
         """Name the results of ``count`` candidates about to replay.
 
-        A name is never reused: the attempt is recorded under it whether the
-        replay completes, fails or never starts.
+        A name is never reused within the attempt: the attempt is recorded
+        under it whether the replay completes, fails or never starts. Across
+        attempts the numbering continues after the session's nodes, so a name
+        comes again only where no node carries it (a failure while
+        ``record_failed_attempts`` is off).
         """
         names = [
-            f"valid_{self.candidates_started + offset + 1:03d}" for offset in range(count)
+            f"{RESULT_NAME_PREFIX}{self.last_result_number + offset + 1:03d}"
+            for offset in range(count)
         ]
-        self.candidates_started += count
+        self.last_result_number += count
         return names
 
     def release(self, count: int) -> None:
         """Give back the names of candidates whose snapshot never held (no replay ran)."""
-        self.candidates_started = max(0, self.candidates_started - count)
+        self.last_result_number = max(0, self.last_result_number - count)
 
     def check_deadline(self) -> None:
         try:

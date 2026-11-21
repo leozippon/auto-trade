@@ -53,9 +53,9 @@ _NODE_ID_SEPARATOR = "__"
 def build_node_id(epoch_id: str, session_ref: str, run_id: str, result_name: str) -> str:
     """A Step node's id: its four parts joined (``node_handle`` reads the last).
 
-    ``result_name`` (``valid_NNN``) is unique only within one run's results
-    directory; a retried attempt of the same session starts again at
-    ``valid_001``, so the run id is part of the node's identity.
+    ``result_name`` (``valid_NNN``) runs on across the attempts of a session,
+    but older sessions numbered every attempt from ``valid_001``, so the run
+    id stays part of the node's identity.
     """
 
     return _NODE_ID_SEPARATOR.join((epoch_id, session_ref, run_id, result_name))
@@ -66,10 +66,11 @@ def node_handle(node_id: str) -> str:
 
     A node id joins four opaque parts (``build_node_id``) and runs past a
     hundred characters, which the session's model mistypes; the result name
-    is the part that tells one Validation of a session from another. Each
-    attempt numbers its results from ``valid_001``, so a resumed attempt can
-    repeat an earlier attempt's handle -- a handle names a node only where no
-    other node of the session shares it.
+    is the part that tells one Validation of a session from another. A
+    resumed attempt continues its session's numbering, so a handle names one
+    node; in a session recorded while every attempt numbered from
+    ``valid_001`` a handle names a node only where no other node of the
+    session shares it.
     """
 
     return str(node_id).rsplit(_NODE_ID_SEPARATOR, 1)[-1]
@@ -118,8 +119,8 @@ def resolve_node_reference(
     if matches:
         message = (
             f"{reference} is the short handle of {len(matches)} nodes of this session "
-            "(each attempt numbers its results from valid_001); name one by its full "
-            f"node_id: {', '.join(matches)}"
+            "(its earlier attempts each numbered their results from valid_001); "
+            f"name one by its full node_id: {', '.join(matches)}"
         )
     else:
         message = (

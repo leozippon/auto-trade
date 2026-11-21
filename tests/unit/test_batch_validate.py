@@ -2093,3 +2093,57 @@ class RecordedValidationDurabilityTest(unittest.TestCase):
             self.assertTrue(all(Path(step.validation.result_ref).is_file() for step in steps))
             # Host-only: the sidecars sit beside the run markers, never in a mount.
             self.assertTrue((experiment / ".host" / "steps").is_dir())
+
+
+class ResumedHandleTest(unittest.TestCase):
+    """A resumed attempt numbers its results after its session's nodes, so a
+    short handle names one node; a session recorded while every attempt
+    numbered from valid_001 keeps its shared handles, refused by name."""
+
+    @staticmethod
+    def _earlier_attempt(root: Path, run_id: str, numbers: tuple[int, ...]) -> list[str]:
+        """The nodes an earlier attempt of the fixture's session left in its tree."""
+
+        refs = AgentRefStore(root / "experiment")
+        tree = StepTree(root / "steps")
+        return [
+            tree.record_failed_attempt(
+                epoch_id="research",
+                session_ref=refs.get_or_create("session", "research"),
+                run_id=refs.get_or_create("run", run_id),
+                result_name=f"valid_{number:03d}",
+                error="earlier attempt",
+            )
+            for number in numbers
+        ]
+
+    def test_a_resumed_attempt_continues_the_sessions_numbering(self) -> None:
+        with TemporaryDirectory() as tmp:
+            self._earlier_attempt(Path(tmp), "run_before", (1, 2, 3))
+            session = _Session(Path(tmp))
+            session.candidate("a", _strategy("1"))
+            session.candidate("b", _strategy("22"))
+            rows = session.call("a", "b").value["candidates"]
+            self.assertEqual([row["handle"] for row in rows], ["valid_004", "valid_005"])
+            self.assertEqual(_node_id(rows[0]).rsplit("__", 1)[1], "valid_004")
+            # The handle and the full id name the same node.
+            self.assertTrue(session.rollback.invoke({"node_id": "valid_004"}).ok)
+            self.assertTrue(session.rollback.invoke({"node_id": _node_id(rows[1])}).ok)
+
+    def test_a_session_whose_attempts_share_handles_still_refuses_them_by_name(self) -> None:
+        with TemporaryDirectory() as tmp:
+            first = self._earlier_attempt(Path(tmp), "run_first", (1, 2))
+            second = self._earlier_attempt(Path(tmp), "run_second", (1, 2))
+            session = _Session(Path(tmp))
+            row = session.validate_one("a", _strategy("1"))
+            self.assertEqual(row["handle"], "valid_003")
+            with self.assertRaises(ToolError) as refused:
+                session.rollback.invoke({"node_id": "valid_001"})
+            self.assertEqual(refused.exception.error_type, "unknown_node")
+            self.assertEqual(
+                str(refused.exception),
+                "step_rollback: valid_001 is the short handle of 2 nodes of this session "
+                "(its earlier attempts each numbered their results from valid_001); "
+                f"name one by its full node_id: {first[0]}, {second[0]}",
+            )
+            self.assertTrue(session.rollback.invoke({"node_id": "valid_003"}).ok)
