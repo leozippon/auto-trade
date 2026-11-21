@@ -105,6 +105,9 @@ SNAPSHOT_NAME = "account_snapshot.json"
 # Run health is separate from the account: even startup failures can report
 # without inventing or modifying an account checkpoint.
 RUN_STATUS_NAME = "run_status.json"
+# Journal-row key for the host-side reference quote of an order (last close and
+# name). Namespaced so it cannot collide with a strategy's own order metadata.
+REFERENCE_KEY = "paper_reference"
 
 
 def write_run_status(root: Path, trade_date: str, error: BaseException | None = None) -> None:
@@ -126,9 +129,6 @@ def run_reporting(root: Path, trade_date: str):
         raise
     else:
         write_run_status(root, trade_date)
-# Journal-row key for the host-side reference quote of an order (last close and
-# name). Namespaced so it cannot collide with a strategy's own order metadata.
-REFERENCE_KEY = "paper_reference"
 
 
 class PaperEngineError(RuntimeError):
