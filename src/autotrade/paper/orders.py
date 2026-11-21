@@ -489,7 +489,7 @@ def _fit_note(decision: Mapping[str, object], last_fit_date: str) -> str:
 
 
 def _day(value: str) -> str:
-    day = date(int(value[:4]), int(value[4:6]), int(value[6:8]))
+    day = date.fromisoformat(value)
     return f"{day.isoformat()}（周{WEEKDAYS[day.weekday()]}）"
 
 

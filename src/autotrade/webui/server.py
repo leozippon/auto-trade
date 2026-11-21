@@ -34,7 +34,7 @@ from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
 from autotrade.common.records import read_json_object
-from autotrade.common.time import CN_TZ
+from autotrade.common.time import cn_today
 from autotrade.environment.data.contracts import RAW_GENERATION_FILENAME
 from autotrade.environment.gpu import list_gpus
 from autotrade.environment.llm.model_profiles import model_profile
@@ -829,7 +829,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 body.trade_date,
                 outcome=body.outcome,
                 fills=body.fills,
-                today=datetime.now(CN_TZ).strftime("%Y%m%d"),
+                today=cn_today(),
             )
         return {"env": env, "book_id": book, "recorded": len(lines)}
 

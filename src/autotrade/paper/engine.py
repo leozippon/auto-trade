@@ -423,7 +423,7 @@ class DailyPaperEngine:
             self._queue_emission(
                 state, journal_name(CORPORATE_ACTIONS_PREFIX, day), {"kind": "corporate_action", **action.to_record()}
             )
-        day_end = datetime.combine(_date(day), time.max, tzinfo=CN_TZ)
+        day_end = datetime.combine(date.fromisoformat(day), time.max, tzinfo=CN_TZ)
         due = [order for order in pending if order.execute_at <= day_end]
         pending[:] = [order for order in pending if order.execute_at > day_end]
         simulated_equity: dict[str, float] = {}
@@ -818,10 +818,6 @@ class DailyPaperEngine:
             "decision": decisions[-1] if decisions else None,
             "warnings": list(state.get("warnings") or []),
         }
-
-
-def _date(value: str) -> date:
-    return date(int(value[:4]), int(value[4:6]), int(value[6:]))
 
 
 def _open_tree(root: Path) -> None:

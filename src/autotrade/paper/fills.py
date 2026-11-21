@@ -524,7 +524,7 @@ class RealFills:
                 if parse_key(key)[0] != clock or record.outcome != FILLED:
                     continue  # a trade recorded and then withdrawn
                 _clock, action, symbol = parse_key(key)
-                execute_at = datetime.combine(_date(day), time.fromisoformat(clock), tzinfo=CN_TZ)
+                execute_at = datetime.combine(date.fromisoformat(day), time.fromisoformat(clock), tzinfo=CN_TZ)
                 order = StrategyOrder(symbol, action, record.quantity, execute_at)
                 rows.append({**self._recorded(broker, real[key], order, 0, record), "off_sheet": True})
             if broker.cash < -1e-6:
@@ -733,10 +733,6 @@ def _move_lots(broker: DailyBroker, symbol: str, session: str, shares: int) -> N
         lots[:] = [lot for lot in lots if lot.quantity > 0]
     if not lots:
         del broker.lots[symbol]
-
-
-def _date(day: str) -> date:
-    return date(int(day[:4]), int(day[4:6]), int(day[6:]))
 
 
 def simulate(broker: DailyBroker) -> DailyBroker:

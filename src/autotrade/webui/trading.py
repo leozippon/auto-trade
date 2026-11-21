@@ -40,7 +40,7 @@ from pathlib import Path
 import pyarrow as pa
 
 from autotrade.common.records import as_mapping, finite_number, read_json_object
-from autotrade.common.time import CN_TZ
+from autotrade.common.time import CN_TZ, cn_today
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
 from autotrade.environment.replay.stats import (
@@ -187,7 +187,7 @@ def _today(state: dict[str, object] | None) -> dict[str, object]:
     return {
         "trade_date": _text(latest.get("trade_date")),
         "decided_at": _utc_iso(_to_utc(latest.get("decided_at"))),
-        "ready": latest.get("trade_date") == datetime.now(CN_TZ).strftime("%Y%m%d"),
+        "ready": latest.get("trade_date") == cn_today(),
     }
 
 
@@ -306,7 +306,7 @@ def signal_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, 
                 return {"env": env, "state": "unreadable", "error": error or "Paper account state is missing", "signal": None}
             holdings = exit_holdings(state)
             return {"env": env, "state": "ok", "error": error, "signal": {
-                "instruction": "exit", "trade_date": datetime.now(CN_TZ).strftime("%Y%m%d"),
+                "instruction": "exit", "trade_date": cn_today(),
                 "transition": {key: _text(transition.get(key)) for key in ("status", "date", "reason")},
                 "orders": [], "groups": [],
                 "target": [{"symbol": _text(row["symbol"]), "name": _text(row["name"]),
@@ -370,7 +370,7 @@ def _outcome(value: object) -> dict[str, object]:
 
 def _key_view(day: str, key: str, names: dict[str, str], references: dict[str, object]) -> dict[str, object]:
     clock, action, symbol = fills.parse_key(key)
-    execute_at = datetime.combine(date(int(day[:4]), int(day[4:6]), int(day[6:])), time.fromisoformat(clock), tzinfo=CN_TZ)
+    execute_at = datetime.combine(date.fromisoformat(day), time.fromisoformat(clock), tzinfo=CN_TZ)
     return {
         "key": key, "time": clock, "window": order_window(execute_at),
         "window_label": window_text(execute_at, day)[0], "symbol": symbol,
@@ -597,7 +597,7 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
 # ---------------------------------------------------------- performance
 
 def _day_before(yyyymmdd: str) -> str:
-    return (date(int(yyyymmdd[:4]), int(yyyymmdd[4:6]), int(yyyymmdd[6:8])) - timedelta(days=1)).strftime("%Y%m%d")
+    return (date.fromisoformat(yyyymmdd) - timedelta(days=1)).strftime("%Y%m%d")
 
 
 def _book_benchmark_index(record: dict[str, object]) -> str:

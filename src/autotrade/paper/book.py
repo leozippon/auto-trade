@@ -38,7 +38,7 @@ from datetime import datetime, time
 from pathlib import Path
 
 from autotrade.common.records import as_mapping, read_json_object, write_json_atomic
-from autotrade.common.time import CN_TZ
+from autotrade.common.time import CN_TZ, cn_today
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.broker_core import BOARDS
@@ -218,7 +218,7 @@ def create_book(
         raw_dir=options.raw_dir,
         fundamental_events_root=options.fundamental_events_root,
         fundamental_events_status=options.fundamental_events_status,
-        today=datetime.now(CN_TZ).strftime("%Y%m%d"),
+        today=cn_today(),
     )
     profile = options.experiment.broker_profile
     permitted_boards = profile.permitted_boards or BOARDS
