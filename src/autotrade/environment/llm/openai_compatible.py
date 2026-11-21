@@ -257,34 +257,6 @@ class _DirectHTTPTransport:
             connection.sock.settimeout(remaining)
 
 
-def load_env_value(env_var: str, env_file: str | Path = ".env") -> str:
-    """Read one explicit environment value without evaluating the env file.
-
-    Both ``NAME=value`` and the common ``export NAME=value`` spelling are
-    accepted.  Shell expansion and command execution are deliberately absent.
-    """
-
-    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", env_var):
-        raise ValueError("env_var must be an environment variable name")
-    direct = os.environ.get(env_var, "").strip()
-    if direct:
-        return direct
-    path = Path(env_file)
-    if not path.is_file():
-        return ""
-    for raw in path.read_text(encoding="utf-8").splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        if key.startswith("export "):
-            key = key[7:].strip()
-        if key == env_var:
-            return value.strip().strip("'\"")
-    return ""
-
-
 @dataclass(frozen=True)
 class OpenAICompatibleConfig:
     api_key: str = field(repr=False)

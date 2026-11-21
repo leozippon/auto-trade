@@ -15,7 +15,6 @@ from .model_profiles import (
 from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
-    load_env_value,
 )
 from .pricing import (
     ApiSpendExhausted,
@@ -83,7 +82,6 @@ __all__ = [
     "effective_max_output_tokens",
     "estimate_chat_request_tokens",
     "is_context_overflow_error",
-    "load_env_value",
     "malformed_tool_call_messages",
     "model_profile",
     "output_shares_context_window",

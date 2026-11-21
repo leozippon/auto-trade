@@ -6,11 +6,12 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import cast
 
+from autotrade.common.env import env_value
+
 from . import lighting as _lighting
 from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
-    load_env_value,
 )
 from .pricing import FREE, TokenPrices
 from .proxy import LLMProxy, ScriptedLLM
@@ -164,7 +165,7 @@ LLM_KEYS = tuple(_lighting.LLM_KEY_ENVS)
 def _api_key(key_env: str, model: str, env_file: str | Path, *, required: bool) -> str:
     """Resolve a credential from a name a trusted profile fixes."""
 
-    key = load_env_value(key_env, env_file)
+    key = env_value(key_env, env_file)
     if key or not required:
         return key
     raise ValueError(
@@ -263,7 +264,7 @@ def build_model_gateway(
     )
     key = _api_key(key_env, model, env_file, required=require_credentials) or "preflight"
     base_url = (
-        load_env_value(profile.base_url_env, env_file)
+        env_value(profile.base_url_env, env_file)
         if profile.base_url_env is not None
         else ""
     ) or profile.default_base_url

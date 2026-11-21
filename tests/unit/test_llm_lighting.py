@@ -17,6 +17,7 @@ import pytest
 from autotrade.agent import AgentSessionConfig, AgentSessionRunner
 from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.agent.subagent import AGENT_TOOL_SPEC
+from autotrade.common.env import env_value
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_TOKEN_MARGIN,
     MODEL_CHOICES,
@@ -40,7 +41,6 @@ from autotrade.environment.llm.lighting import (
     MODEL_PROFILES,
     LightingProxy,
 )
-from autotrade.environment.llm.openai_compatible import load_env_value
 from autotrade.environment.llm.pricing import TokenPrices
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import ToolRegistry
@@ -1232,4 +1232,4 @@ def test_tools_that_are_not_chat_completions_shaped_fail_explicitly(tmp_path: Pa
 
 def test_alternate_key_is_read_from_the_environment_of_the_gateway(tmp_path: Path):
     path = _env(tmp_path)
-    assert load_env_value(API_KEY_ALT_ENV, path) == "relay-alt"
+    assert env_value(API_KEY_ALT_ENV, path) == "relay-alt"

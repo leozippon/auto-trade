@@ -19,10 +19,11 @@ from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from autotrade.common.env import env_value
+
 from .openai_compatible import (
     OpenAICompatibleConfig,
     OpenAICompatibleProxy,
-    load_env_value,
     parse_complete_tool_call,
     provider_response_validation_error,
 )
@@ -235,7 +236,7 @@ def build_gateway(
                 context_window_tokens=profile.context_window_tokens,
                 output_shares_context_window=profile.output_shares_context_window,
             ),
-            fallback_api_key=load_env_value(fallback_key_env, env_file),
+            fallback_api_key=env_value(fallback_key_env, env_file),
             fallback_key_env=fallback_key_env,
         ),
     )

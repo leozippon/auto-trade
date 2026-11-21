@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from autotrade.common.env import env_value
 from autotrade.common.ids import is_experiment_id
 from autotrade.common.records import (
     dataclass_from_record,
@@ -22,6 +23,52 @@ from autotrade.environment import strategy
 
 def test_the_sandbox_contract_keeps_the_same_market_timezone() -> None:
     assert strategy.CN_TZ == CN_TZ
+
+
+def test_an_env_value_is_read_in_every_spelling_the_env_files_use_and_never_evaluated(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The union of what the model gateway's and the TuShare client's readers
+    accepted: ``NAME=value`` lines (each name on its own), ``export NAME``,
+    blanks around the name and value, quotes; a comment, a line without
+    ``=`` and a later repeat of a name are not values, and nothing runs."""
+
+    marker = tmp_path / "must-not-exist"
+    path = tmp_path / ".env"
+    path.write_text(
+        "# COMMENTED=commented-out\n"
+        "\n"
+        "TUSHARE_TOKEN_TMP=official-dummy\n"
+        "TUSHARE_TOKEN=relay-dummy\n"
+        "  INDENTED=indented  \n"
+        "export EXPORTED='exported'\n"
+        'SPACED = "spaced"\n'
+        "EMPTY=\n"
+        "EMPTY=later\n"
+        "NOEQUALS\n"
+        f"SHELL=$(touch {marker})\n",
+        encoding="utf-8",
+    )
+    names = ("TUSHARE_TOKEN_TMP", "TUSHARE_TOKEN", "INDENTED", "EXPORTED", "SPACED", "EMPTY", "SHELL")
+    for name in (*names, "COMMENTED", "NOEQUALS", "ABSENT"):
+        monkeypatch.delenv(name, raising=False)
+    assert [env_value(name, path) for name in names] == [
+        "official-dummy",
+        "relay-dummy",
+        "indented",
+        "exported",
+        "spaced",
+        "",
+        f"$(touch {marker})",
+    ]
+    assert not marker.exists()
+    for absent in ("COMMENTED", "NOEQUALS", "ABSENT"):
+        assert env_value(absent, path) == ""
+    assert env_value("TUSHARE_TOKEN", tmp_path / "missing.env") == ""
+    monkeypatch.setenv("TUSHARE_TOKEN", " from-the-process ")
+    assert env_value("TUSHARE_TOKEN", path) == "from-the-process"
+    with pytest.raises(ValueError, match="environment variable name"):
+        env_value("NOT-A-NAME", path)
 
 
 def test_a_record_file_reads_back_what_was_written_and_a_private_one_is_owner_only(tmp_path: Path) -> None:
