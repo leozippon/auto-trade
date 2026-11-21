@@ -19,7 +19,6 @@ import pytest
 from autotrade.environment.broker import BrokerProfile, default_permitted_boards
 from autotrade.environment.broker_core import board_of
 from autotrade.environment.replay import run_daily_replay
-from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.null_control import (
     BASELINE_DRAWS,
     MATCHED_DECILE,
@@ -38,9 +37,16 @@ from autotrade.environment.replay.null_control import (
     trade_skeleton,
 )
 from autotrade.environment.replay.stats import ReplayResult
-from autotrade.environment.strategy import CN_TZ, StrategySchedule
+from autotrade.environment.strategy import StrategySchedule
+from tests.unit.replay_fixture import (
+    _BOARD_SKELETON,
+    DAYS,
+    _at,
+    _board_draws,
+    _board_frame,
+    _sellable,
+)
 
-DAYS = tuple(pd.bdate_range("2026-01-05", periods=20).strftime("%Y%m%d"))
 SMALL = ("000001.SZ", "000002.SZ", "000003.SZ")
 LARGE = ("600001.SH", "600002.SH")
 CIRC_MV = {**{name: 1.0e9 for name in SMALL}, **{name: 5.0e10 for name in LARGE}}
@@ -56,18 +62,6 @@ def _sample_null_orders(skeleton, frame: pd.DataFrame, seed: int, draw: int) -> 
     universe = _Universe(frame)
     pools = [_candidate_pool(trip, universe) for trip in skeleton]
     return _orders_from_pools(skeleton, pools, seed, draw, _sellable(universe, frame), universe.carried_limit)[0]
-
-
-def _sellable(universe, frame: pd.DataFrame, corporate_actions=None):
-    market = DailyMarketData(frame, corporate_actions)
-    return lambda trip, symbol, quantity: universe.sellable_at_exit(
-        trip, symbol, quantity, market.cash_dividends_for_day
-    )
-
-
-def _at(day: str, clock: str) -> datetime:
-    hour, minute = (int(part) for part in clock.split(":"))
-    return datetime(int(day[:4]), int(day[4:6]), int(day[6:8]), hour, minute, tzinfo=CN_TZ)
 
 
 def _frame() -> pd.DataFrame:
@@ -249,58 +243,6 @@ def test_null_quantities_follow_the_star_declaration_ladder():
     ]
     assert DAYS[1] not in orders
     assert [order["quantity"] for order in orders[DAYS[2]]] == [200]
-
-
-BOARD_NAMES = (
-    "000001.SZ", "000002.SZ", "600001.SH",  # main
-    "300001.SZ", "300002.SZ",  # ChiNext
-    "688001.SH", "688002.SH",  # STAR
-    "830001.BJ", "830002.BJ",  # Beijing
-)
-
-
-def _board_frame(days: int = 6) -> pd.DataFrame:
-    """``days`` days of names on every board, one size bucket, no ex-date."""
-
-    rows = []
-    for offset, day in enumerate(DAYS[:days]):
-        for index, symbol in enumerate(BOARD_NAMES):
-            price = 10.0 + index + 0.1 * offset
-            rows.append(
-                {
-                    "ts_code": symbol,
-                    "trade_date": day,
-                    "open": price,
-                    "close": price,
-                    "pre_close": 10.0 + index + 0.1 * (offset - 1) if offset else price,
-                    "up_limit": price * 1.5,
-                    "down_limit": price * 0.5,
-                    "is_suspended": False,
-                    "circ_mv": 1.0e9,
-                }
-            )
-    return pd.DataFrame(rows)
-
-
-_BOARD_SKELETON = (
-    RoundTrip("000001.SZ", 1000, 10.0, _at(DAYS[0], "09:30"), _at(DAYS[3], "15:00")),
-    RoundTrip("300001.SZ", 500, 13.1, _at(DAYS[1], "09:30"), None),
-)
-
-
-def _board_draws(permitted_boards, draws: int, seed: int) -> list[list[tuple[str, str, int]]]:
-    frame = _board_frame()
-    universe = _Universe(frame)
-    pools = [_candidate_pool(trip, universe, None, permitted_boards) for trip in _BOARD_SKELETON]
-    result = []
-    for draw in range(draws):
-        orders, _dropped = _orders_from_pools(
-            _BOARD_SKELETON, pools, seed, draw, _sellable(universe, frame), universe.carried_limit
-        )
-        result.append(
-            [(order["symbol"], order["action"], order["quantity"]) for day in sorted(orders) for order in orders[day]]
-        )
-    return result
 
 
 def test_the_random_baseline_draws_only_on_the_boards_the_account_may_buy(monkeypatch):

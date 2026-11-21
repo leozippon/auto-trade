@@ -13,24 +13,9 @@ from pathlib import Path
 
 import pytest
 
+from tests.unit.webui_js import js_const, js_function
+
 APP_JS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
-
-
-def _fn(script: str, name: str) -> str:
-    start = script.index(f"function {name}(")
-    rest = script[start + 1 :]
-    nxt = len(rest)
-    for marker in ("\nfunction ", "\nasync function "):
-        index = rest.find(marker)
-        if index != -1:
-            nxt = min(nxt, index)
-    return script[start : start + 1 + nxt]
-
-
-def _const_block(script: str, name: str) -> str:
-    start = script.index(f"const {name} =")
-    end = script.index(";", start)
-    return script[start : end + 1]
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for JS contract")
@@ -38,13 +23,13 @@ def test_inject_message_js_contract_via_node() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     harness = "\n".join(
         [
-            _const_block(script, "INJECT_MESSAGE_MAX_CHARS"),
-            _const_block(script, "TERMINAL_INJECT_STATES"),
-            _fn(script, "injectMessageEnabled"),
-            _fn(script, "injectMessageDisableReason"),
-            _fn(script, "buildInjectMessagePayload"),
-            _fn(script, "validateInjectMessageText"),
-            _fn(script, "inboxQueueSummary"),
+            js_const(script, "INJECT_MESSAGE_MAX_CHARS"),
+            js_const(script, "TERMINAL_INJECT_STATES"),
+            js_function(script, "injectMessageEnabled"),
+            js_function(script, "injectMessageDisableReason"),
+            js_function(script, "buildInjectMessagePayload"),
+            js_function(script, "validateInjectMessageText"),
+            js_function(script, "inboxQueueSummary"),
             """
 // `injectable` is the server's (registry.experiment_state): a live worker in
 // an Agent session. The page adds which session the message is for.

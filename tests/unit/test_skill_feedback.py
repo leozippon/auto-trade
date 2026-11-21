@@ -21,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.runtime import RunManifest, append_versioned_jsonl
+from autotrade.environment.runtime import RunManifest
 from autotrade.environment.tools.base import ToolError, ToolRegistry
 from autotrade.environment.tools.skill_feedback import (
     MAX_SKILL_EVIDENCE_CHARS,
@@ -34,15 +34,14 @@ from autotrade.environment.tools.skill_feedback import (
 )
 from autotrade.pipelines.skills import MemorySource, mounted_skill_refs
 from autotrade.webui import feedback
-
-SESSION_KEY = "research"
-CURATED = "curated/offline-readings"
-OTHER_CURATED = "curated/validation-readings"
-# A real report: what was tried, what the reading was, what it contradicts.
-EVIDENCE = (
-    "条目说离线引擎在已验证节点上逐笔对上 executions 就可以读它的收益；本会话照做"
-    "（node_7f3a），名单与订单逐笔一致，年化收益却差 3 个百分点，差在离线引擎没扣最低佣金。"
+from tests.unit.skills_fixture import (
+    CURATED,
+    EVIDENCE,
+    SESSION_KEY,
+    file_skill_feedback,
 )
+
+OTHER_CURATED = "curated/validation-readings"
 
 
 def _mounted() -> dict[str, str]:
@@ -243,37 +242,17 @@ def _console_experiment(experiments_root: Path, name: str) -> Path:
     return directory
 
 
-def _filed(directory: Path, **overrides: object) -> dict[str, object]:
-    record = {
-        "report_id": "skillfb_abc",
-        "experiment_id": directory.name,
-        "session_key": SESSION_KEY,
-        "run_id": "run_raw",
-        "kind": "research",
-        "skill": CURATED,
-        "origin": "curated",
-        "claim": "outdated",
-        "evidence": EVIDENCE,
-        **overrides,
-    }
-    return append_versioned_jsonl(
-        skill_feedback_path(directory),
-        record,
-        schema_version=SKILL_FEEDBACK_SCHEMA_VERSION,
-    )
-
-
 def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     experiments = tmp_path / "experiments"
     first = _console_experiment(experiments, "expA")
     second = _console_experiment(experiments, "expB")
-    _filed(
+    file_skill_feedback(
         first,
         evidence=EVIDENCE + " 见 /Data2/lzp/ADMCubeQuant/experiments/expA/artifacts。",
     )
-    _filed(
+    file_skill_feedback(
         second,
         report_id="skillfb_b",
         skill=OTHER_CURATED,
@@ -313,9 +292,9 @@ def test_a_claim_or_entry_no_code_can_label_is_named_unreadable(tmp_path: Path) 
     ``report_issue`` and tested there on both channels."""
 
     experiments = tmp_path / "experiments"
-    _filed(_console_experiment(experiments, "expA"), claim="confirmed")
-    _filed(_console_experiment(experiments, "expB"), origin="graduated")
-    _filed(
+    file_skill_feedback(_console_experiment(experiments, "expA"), claim="confirmed")
+    file_skill_feedback(_console_experiment(experiments, "expB"), origin="graduated")
+    file_skill_feedback(
         _console_experiment(experiments, "expC"),
         skill="momentum_20260101/same-window-parent-control",
     )

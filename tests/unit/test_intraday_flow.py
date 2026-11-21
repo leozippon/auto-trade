@@ -16,28 +16,17 @@ from autotrade.environment.data.intraday_flow import (
     aggregate_intraday_flow,
 )
 from autotrade.environment.data.pit import to_cn_timestamps
-
-TRADE_DATE = "20260818"
-# The 241-bar A-share grid: 09:30 auction, 09:31-11:30, 13:01-15:00.
-SESSION = (
-    [("09", 30)]
-    + [("09", minute) for minute in range(31, 60)]
-    + [("10", minute) for minute in range(60)]
-    + [("11", minute) for minute in range(31)]
-    + [("13", minute) for minute in range(1, 60)]
-    + [("14", minute) for minute in range(60)]
-    + [("15", 0)]
-)
+from tests.unit.snapshot_fixture import MINUTE_GRID, MINUTE_TRADE_DATE
 
 
 def _session_frame(ts_code: str, closes, volumes) -> pd.DataFrame:
     """One synthetic stock-day on the real minute grid."""
-    assert len(SESSION) == BARS_PER_DAY == len(closes) == len(volumes)
+    assert len(MINUTE_GRID) == BARS_PER_DAY == len(closes) == len(volumes)
     return pd.DataFrame(
         {
             "ts_code": ts_code,
-            "trade_date": TRADE_DATE,
-            "trade_time": [f"2026-08-18 {hour}:{minute:02d}:00" for hour, minute in SESSION],
+            "trade_date": MINUTE_TRADE_DATE,
+            "trade_time": [f"2026-08-18 {hour}:{minute:02d}:00" for hour, minute in MINUTE_GRID],
             "close": [float(value) for value in closes],
             "vol": [float(value) for value in volumes],
             # Turnover consistent with the bar: price * volume.
@@ -194,7 +183,7 @@ class IntradayFlowAggregationTest(unittest.TestCase):
         flow = aggregate_intraday_flow(
             _session_frame("000001.SZ", closes, [1000.0] * BARS_PER_DAY)
         )
-        expected = INTRADAY_FLOW_CONTRACT.available_at(pd.Timestamp(TRADE_DATE).date())
+        expected = INTRADAY_FLOW_CONTRACT.available_at(pd.Timestamp(MINUTE_TRADE_DATE).date())
         self.assertEqual(expected.hour, 17)
         self.assertEqual(expected.minute, 30)
         stamped = to_cn_timestamps(flow["available_at"]).iloc[0]

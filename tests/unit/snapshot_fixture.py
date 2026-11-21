@@ -268,3 +268,17 @@ def write_domain_statuses(quality_dir: Path, **overrides: str) -> None:
             report_type,
             status=overrides.get(domain, "ok"),
         )
+
+
+MINUTE_TRADE_DATE = "20260818"
+
+# The 241-bar A-share grid: 09:30 auction, 09:31-11:30, 13:01-15:00.
+MINUTE_GRID = (
+    [("09", 30)]
+    + [("09", minute) for minute in range(31, 60)]
+    + [("10", minute) for minute in range(60)]
+    + [("11", minute) for minute in range(31)]
+    + [("13", minute) for minute in range(1, 60)]
+    + [("14", minute) for minute in range(60)]
+    + [("15", 0)]
+)

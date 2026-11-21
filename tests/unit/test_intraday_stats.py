@@ -28,11 +28,10 @@ from autotrade.environment.data.intraday_stats import (
 )
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.data.units import resolve_field
-
-from .test_intraday_flow import SESSION, TRADE_DATE
+from tests.unit.snapshot_fixture import MINUTE_GRID, MINUTE_TRADE_DATE
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-LABELS = [f"{hour}:{minute:02d}" for hour, minute in SESSION]
+LABELS = [f"{hour}:{minute:02d}" for hour, minute in MINUTE_GRID]
 
 
 def _day(ts_code, closes, volumes, *, first_open=None, drop=(), extra=()):
@@ -53,7 +52,7 @@ def _day(ts_code, closes, volumes, *, first_open=None, drop=(), extra=()):
     return pd.DataFrame(
         {
             "ts_code": ts_code,
-            "trade_date": TRADE_DATE,
+            "trade_date": MINUTE_TRADE_DATE,
             "trade_time": [f"2026-08-18 {label}:00" for label, *_ in rows],
             "open": [row[1] for row in rows],
             "close": [row[2] for row in rows],
@@ -265,7 +264,7 @@ class IntradayStatsContractTest(unittest.TestCase):
         # schemas, so a real published partition must resolve there too.
         findings: list[dict] = []
         with tempfile.TemporaryDirectory() as tmp:
-            target = Path(tmp) / "intraday_stats" / f"trade_date={TRADE_DATE}.parquet"
+            target = Path(tmp) / "intraday_stats" / f"trade_date={MINUTE_TRADE_DATE}.parquet"
             target.parent.mkdir(parents=True)
             aggregate_intraday_stats(_day("000001.SZ", REFERENCE_CLOSES, REFERENCE_VOLUMES)).to_parquet(target)
             unresolved = audit.audit_snapshot_unit_coverage(
@@ -280,7 +279,7 @@ class MinuteDerivedBuildTest(unittest.TestCase):
         script = REPO_ROOT / "scripts" / "data" / "build_minute_derived.py"
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp)
-            source = raw / "stk_mins_1min_by_date" / f"trade_date={TRADE_DATE}.parquet"
+            source = raw / "stk_mins_1min_by_date" / f"trade_date={MINUTE_TRADE_DATE}.parquet"
             source.parent.mkdir(parents=True)
             _day("000001.SZ", REFERENCE_CLOSES, REFERENCE_VOLUMES).to_parquet(source)
 
@@ -297,17 +296,17 @@ class MinuteDerivedBuildTest(unittest.TestCase):
             both = build()
             self.assertEqual(both["intraday_flow"]["partitions_written"], 0)
             self.assertEqual(both["intraday_stats"]["partitions_written"], 1)
-            written = pd.read_parquet(raw / "intraday_stats" / f"trade_date={TRADE_DATE}.parquet")
+            written = pd.read_parquet(raw / "intraday_stats" / f"trade_date={MINUTE_TRADE_DATE}.parquet")
             self.assertEqual(list(written.columns), list(INTRADAY_STATS_COLUMNS))
             meta = json.loads(
-                (raw / "intraday_stats" / f"trade_date={TRADE_DATE}.parquet.meta.json").read_text()
+                (raw / "intraday_stats" / f"trade_date={MINUTE_TRADE_DATE}.parquet.meta.json").read_text()
             )
             self.assertEqual(meta["api_name"], "derived:intraday_stats")
             self.assertEqual(meta["row_count"], 1)
             # A run killed between the parquet and its sidecar leaves a
             # partition that is not one committed write: the next run rebuilds
             # it instead of skipping it forever.
-            (raw / "intraday_flow" / f"trade_date={TRADE_DATE}.parquet.meta.json").unlink()
+            (raw / "intraday_flow" / f"trade_date={MINUTE_TRADE_DATE}.parquet.meta.json").unlink()
             healed = build()
             self.assertEqual(healed["intraday_flow"]["partitions_written"], 1)
             self.assertEqual(healed["intraday_stats"]["partitions_written"], 0)

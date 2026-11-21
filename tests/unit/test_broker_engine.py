@@ -15,7 +15,6 @@ import json
 import math
 import unittest
 from dataclasses import fields
-from datetime import datetime
 
 from autotrade.environment.broker import (
     EX_DATE_PRICE_TOLERANCE,
@@ -35,31 +34,8 @@ from autotrade.environment.broker_core import (
     validate_buy_lot,
 )
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
-from autotrade.environment.strategy import CN_TZ, StrategyOrder
-
-MATCHED_AT = datetime(2026, 1, 5, 9, 30, tzinfo=CN_TZ)
-
-
-def _order(action: str = "buy", *, symbol: str = "000001.SZ", quantity: int = 100) -> StrategyOrder:
-    return StrategyOrder(
-        symbol=symbol,
-        action=action,
-        quantity=quantity,
-        execute_at=MATCHED_AT,
-    )
-
-
-def _bar(**overrides: object) -> dict[str, object]:
-    bar = {
-        "open": 10.0,
-        "close": 10.0,
-        "pre_close": 10.0,
-        "up_limit": 11.0,
-        "down_limit": 9.0,
-        "is_suspended": False,
-    }
-    bar.update(overrides)
-    return bar
+from autotrade.environment.strategy import StrategyOrder
+from tests.unit.replay_fixture import MATCHED_AT, _bar, _order
 
 
 def _broker(**profile_fields: object) -> DailyBroker:

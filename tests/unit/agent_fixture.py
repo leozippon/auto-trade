@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 from collections.abc import Iterable, Mapping
 from pathlib import Path
 
@@ -162,3 +163,17 @@ def prompt_facts(prompt: str) -> dict:
     """The run-facts JSON block the preview embeds in the system prompt."""
     body = prompt.split("```json\n", 1)[1].split("\n```", 1)[0]
     return json.loads(body)
+
+
+class FakeClock:
+    def __init__(self, value: float = 100.0) -> None:
+        self.value = value
+        self._lock = threading.Lock()
+
+    def __call__(self) -> float:
+        with self._lock:
+            return self.value
+
+    def advance(self, seconds: float) -> None:
+        with self._lock:
+            self.value += seconds

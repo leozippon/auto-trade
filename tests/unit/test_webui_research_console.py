@@ -48,7 +48,7 @@ from tests.unit.acceptance_fixture import (
     REQUIRED_RULES,
     TEST_GEOMETRY,
 )
-from tests.unit.test_webui_inject_message import _const_block, _fn
+from tests.unit.webui_js import js_const, js_function
 from tests.unit.webui_research_experiment import (
     ENVIRONMENT_BLOCKED_REASON,
     REPLAY,
@@ -503,9 +503,9 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
         [
             "const el = (tag, attrs, ...children) => ({ tag, attrs, children });",
             "const stateBadge = (state) => el('span', { class: `badge state-${state}` }, state);",
-            *(_const_block(script, name) for name in ("ENDING_LABELS", "PASS_RULE", "PASS_PERIODS", "PASS_FAILURES")),
+            *(js_const(script, name) for name in ("ENDING_LABELS", "PASS_RULE", "PASS_PERIODS", "PASS_FAILURES")),
             *(
-                _fn(script, name)
+                js_function(script, name)
                 for name in ("fmtPct", "endingKey", "endingLabel", "passLabelLines", "endingBadge", "experimentBadge")
             ),
             f"const rows = {json.dumps(rows)};",
@@ -547,11 +547,11 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
         "running": ["", f"badge state-{rows['running']['state']}", rows["running"]["state"], None],
     }
     assert rows["running"]["ending"] is None and rows["running"]["state"] != "stopped"
-    assert "registered_with_record" not in _const_block(script, "ENDING_LABELS")
-    assert "endingBadge(detail)" in _fn(script, "readoutStagePanel")
-    assert "status: endingLabel(item)" in _fn(script, "pipelineTailSteps")
+    assert "registered_with_record" not in js_const(script, "ENDING_LABELS")
+    assert "endingBadge(detail)" in js_function(script, "readoutStagePanel")
+    assert "status: endingLabel(item)" in js_function(script, "pipelineTailSteps")
     for name in ("experimentCard", "renderDetailPage", "heroPanel"):
-        assert "experimentBadge(" in _fn(script, name), name
+        assert "experimentBadge(" in js_function(script, name), name
 
 
 def test_the_home_list_flags_a_blocked_experiment_and_an_unresolved_issue(tmp_path: Path) -> None:
@@ -594,7 +594,7 @@ def test_the_home_list_flags_a_blocked_experiment_and_an_unresolved_issue(tmp_pa
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    assert "item.attention" in _fn(script, "attentionLine")
+    assert "item.attention" in js_function(script, "attentionLine")
 
 
 def test_seed_replicates_are_shown_where_the_record_has_them_and_absent_otherwise(
@@ -870,7 +870,7 @@ const budgetBars = () => null;
 const fmtTs = () => "then";
 const traceReplayNode = (id, run) => document.createTextNode(`[trace ${run}]`);
 """,
-            *(_fn(script, name) for name in ("el", "panelHead", "controlPanel", "earlierAttemptsPanel")),
+            *(js_function(script, name) for name in ("el", "panelHead", "controlPanel", "earlierAttemptsPanel")),
             f"const detail = {json.dumps(detail)};",
             """
 const text = (item) => item.nodeType === 3 ? item.text : item.children.map(text).join("");
@@ -945,8 +945,8 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     ).read_text(encoding="utf-8")
     harness = "\n".join(
         [
-            *(_const_block(script, name) for name in ("ENDING_LABELS", "PASS_RULE")),
-            *(_fn(script, name) for name in ("fmtSharpe", "readoutRule")),
+            *(js_const(script, name) for name in ("ENDING_LABELS", "PASS_RULE")),
+            *(js_function(script, name) for name in ("fmtSharpe", "readoutRule")),
             f"console.log(readoutRule({json.dumps(preview)}));",
         ]
     )
@@ -958,7 +958,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
         "前推年与 Held-out 段各自扣费后盈利、跑赢基准指数，且回撤与主动回撤都不超过模拟账户的终止上限写作通过，否则未通过"
         in result.stdout
     )
-    assert "readoutRule(thresholds || {})" in _fn(script, "readoutStagePanel")
+    assert "readoutRule(thresholds || {})" in js_function(script, "readoutStagePanel")
 
 
 def _sidecar(directory: Path, row: dict[str, object]) -> Path:
@@ -1124,7 +1124,7 @@ def test_a_moved_revision_rereads_the_experiment_in_place() -> None:
     harness = "\n".join(
         [
             # ``_fn`` starts at ``function``.
-            "async " + _fn(script, "rereadDetail"),
+            "async " + js_function(script, "rereadDetail"),
             """
 const drawn = [];
 const controlPanel = (detail) => ({ bar: detail.revision });
@@ -1239,7 +1239,7 @@ def test_the_console_offers_no_start_for_an_archived_experiment() -> None:
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
     ).read_text(encoding="utf-8")
-    assert "experimentGrid(rows, { archived: true })" in _fn(script, "renderArchivedPage")
+    assert "experimentGrid(rows, { archived: true })" in js_function(script, "renderArchivedPage")
     # What a card shows beside its controls is not under test.
     context = (
         "experimentName",
@@ -1266,7 +1266,7 @@ const document = {
 };
 """,
             *(f"const {name} = () => null;" for name in context),
-            *(_fn(script, name) for name in ("el", "controlBar", "experimentCard", "experimentGrid")),
+            *(js_function(script, name) for name in ("el", "controlBar", "experimentCard", "experimentGrid")),
             """
 const buttons = (node) => node.nodeType !== 1 ? [] : node.tag === "button"
   ? [node.children.map((child) => child.text || "").join("")]
@@ -1463,10 +1463,10 @@ def test_no_strategy_is_offered_as_best_when_none_is_labelled_passed(tmp_path: P
     ).read_text(encoding="utf-8")
     harness = "\n".join(
         [
-            _const_block(script, "ENDING_LABELS"),
+            js_const(script, "ENDING_LABELS"),
             "const el = (tag, attrs, ...children) => ({ tag, attrs, children });",
             "const heroPanel = (row) => ({ hero: row.experiment_id });",
-            *(_fn(script, name) for name in ("bestRow", "bestPanel")),
+            *(js_function(script, name) for name in ("bestRow", "bestPanel")),
             f"const listed = {json.dumps(listed)};",
             "const empty = bestPanel(listed);",
             "console.log(JSON.stringify([",
@@ -1479,7 +1479,7 @@ def test_no_strategy_is_offered_as_best_when_none_is_labelled_passed(tmp_path: P
     result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == ["没有一个定版策略通过。", {"hero": "failing"}, None]
-    assert "paperHandoff(detail)" in _fn(script, "readoutStagePanel")
+    assert "paperHandoff(detail)" in js_function(script, "readoutStagePanel")
 
 
 def test_a_running_experiment_is_never_the_best_experiment(tmp_path: Path) -> None:
@@ -1516,10 +1516,10 @@ def test_a_home_card_shows_six_figures_with_a_dash_for_a_reading_not_yet_taken(t
     harness = "\n".join(
         [
             *(
-                _const_block(script, name)
+                js_const(script, name)
                 for name in ("ENDING_LABELS", "RECORD_IR_TITLE", "P_VALUE_TITLE", "LOWER_BOUND_TITLE")
             ),
-            *(_fn(script, name) for name in ("fmtPct", "fmtSharpe", "fmtPValue", "fmtSteps", "signCls", "evidenceTiles")),
+            *(js_function(script, name) for name in ("fmtPct", "fmtSharpe", "fmtPValue", "fmtSteps", "signCls", "evidenceTiles")),
             "const statTilesRow = (tiles) => tiles;",
             f"const rows = {json.dumps(rows)};",
             "console.log(JSON.stringify(Object.fromEntries(",
@@ -1687,9 +1687,9 @@ const route = null;
 const equityChart = () => null;
 const fmtAmount = String;
 """,
-            _const_block(script, "SOURCE_LABELS"),
+            js_const(script, "SOURCE_LABELS"),
             *(
-                _fn(script, name)
+                js_function(script, name)
                 for name in (
                     "el", "panelHead", "dataTable", "fmtSteps", "fmtSharpe", "fmtPValue",
                     "fmtPct", "signCls", "drawdownOf", "recordPanel",
@@ -1734,7 +1734,7 @@ def _pipeline_steps(rows: dict[str, dict[str, object]]) -> dict[str, list[list[s
                 for name in ("STATE_LABELS", "OUTCOME_LABELS", "ENDING_LABELS", "STEP_LABELS", "STEP_STATUS_LABELS", "ENDING_STEP_STATES")
             ),
             *(
-                _fn(script, name)
+                js_function(script, name)
                 for name in ("endingKey", "endingLabel", "researchStep", "pipelineTailSteps", "pipelineSteps")
             ),
             f"const rows = {json.dumps(rows)};",

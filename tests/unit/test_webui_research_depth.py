@@ -29,7 +29,7 @@ from autotrade.pipelines.ledger import LEDGER_RECORD_SCHEMA_VERSION
 from autotrade.webui import traces
 from autotrade.webui.registry import research_depth
 from autotrade.webui.server import create_app
-from tests.unit.test_webui_inject_message import _fn
+from tests.unit.webui_js import js_function
 from tests.unit.webui_research_experiment import PARAMS
 
 APP_JS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -311,7 +311,7 @@ const fmtTs = (iso) => `at ${iso.slice(11, 16)}`;
 """,
             f"const payload = {json.dumps(payload)};",
             "const api = async () => payload;",
-            *(_fn(script, name) for name in ("el", "panelHead", "dataTable", "fmtDuration", "fmtPct", "researchDepthPanel")),
+            *(js_function(script, name) for name in ("el", "panelHead", "dataTable", "fmtDuration", "fmtPct", "researchDepthPanel")),
             """
 const text = (item) => item.nodeType === 3 ? item.text : item.children.map(text).join("");
 const find = (item, tag) => item.nodeType !== 1 ? [] : [

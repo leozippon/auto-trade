@@ -53,24 +53,10 @@ from autotrade.pipelines.research_session import (
 )
 from autotrade.pipelines.session_tools import SessionValidations, ValidateTool
 from tests.unit.acceptance_fixture import RULES
-from tests.unit.agent_fixture import TerminalTool, make_engine, make_runner
+from tests.unit.agent_fixture import FakeClock, TerminalTool, make_engine, make_runner
 from tests.unit.validate_session_fixture import _write_style_sidecar
 
 from .fixtures_sandbox import PassingModificationCheck
-
-
-class FakeClock:
-    def __init__(self, value: float = 100.0) -> None:
-        self.value = value
-        self._lock = threading.Lock()
-
-    def __call__(self) -> float:
-        with self._lock:
-            return self.value
-
-    def advance(self, seconds: float) -> None:
-        with self._lock:
-            self.value += seconds
 
 
 class TimedLLM:

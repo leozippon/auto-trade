@@ -49,8 +49,7 @@ from autotrade.environment.tools.skill_feedback import (
 )
 from autotrade.webui import feedback
 from autotrade.webui.server import create_app
-
-from .test_skill_feedback import _filed
+from tests.unit.skills_fixture import file_skill_feedback
 
 SESSION_KEY = "s1"
 
@@ -425,7 +424,7 @@ CHANNELS = [
     ),
     pytest.param(
         _Channel(
-            "skill", _filed, skill_feedback_path, read_skill_feedback,
+            "skill", file_skill_feedback, skill_feedback_path, read_skill_feedback,
             append_skill_feedback_resolution, feedback.skill_feedback,
             "/api/skill-feedback", "skill_updated", "skill feedback",
         ),
