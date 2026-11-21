@@ -1,0 +1,13 @@
+[
+  {
+    "slug": "alphaqcm",
+    "title": "AlphaQCM: Alpha Discovery in Finance with Distributional Reinforcement Learning",
+    "venue": "ICML 2025",
+    "paper_url": "https://cdn.jsdelivr.net/gh/mlresearch/v267@7914d3407046b308db90001490534e422dab7d87/assets/zhu25ag/zhu25ag.pdf",
+    "repo": "https://github.com/ZhuZhouFan/AlphaQCM",
+    "commit": "dffc695f9ea54e6a54e4dac86ee357be314fead4",
+    "licence": "MIT",
+    "data_end": "2024-12-31",
+    "strip": []
+  }
+]
