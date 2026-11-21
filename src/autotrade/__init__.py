@@ -1,4 +1,1 @@
-"""Heuristic Learning trading research framework."""
-
-__all__ = ["__version__"]
-__version__ = "0.1.0"
+"""ADMCubeQuant: an LLM agent researching A-share strategies on a point-in-time data lake."""
