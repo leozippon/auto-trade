@@ -56,14 +56,19 @@ require_venv() { [ -x "$VENV/bin/python" ] || die "no venv at $VENV: run deploy 
 # used against its quota, and exit 0 only while at least the floor is free.
 # Neither df nor statvfs sees the quota (zgca.py, STORAGE_QUOTA), so this
 # measures du of the whole tree, which counts a hard link once, as the quota
-# does; a du that fails is no measure, and an unknown is never free. `status`
-# prints the line; the fill loop, which runs it in a shell of its own (written
-# for sh), and `resume` hold below the floor.
+# does; a du that fails or outlasts its limit (about a second on 2026-11-20;
+# GPFS has hung a du for an hour) is no measure, and an unknown is never free.
+# `status` prints the line; the fill loop, which runs it in a shell of its own
+# (written for sh), and `resume` hold below the floor.
 storage_check() {
-    local said used rc
-    said=$(du -sxB1 "$1" 2>&1) || {
+    local said used rc limit=300
+    said=$(timeout "$limit" du -sxB1 "$1" 2>&1) || {
         rc=$?
-        echo "storage: unknown, du of $1 failed (exit $rc): $(printf '%s\n' "$said" | grep -v '^[0-9]' | tail -n 1)"
+        if [ "$rc" -eq 124 ]; then
+            echo "storage: unknown, du of $1 did not finish within $limit s"
+        else
+            echo "storage: unknown, du of $1 failed (exit $rc): $(printf '%s\n' "$said" | grep -v '^[0-9]' | tail -n 1)"
+        fi
         return 1
     }
     used=${said%%[!0-9]*}

@@ -1344,7 +1344,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         """One round step with --fill, run for real against a temporary root with tmux, sleep,
         the launcher and (given ``du``) du stubbed: each launcher pass prints and exits as its
         ``<exit>|<line>`` in ``plan`` says, each du answers its line of ``du`` (bytes used,
-        or ``fail``). The fill log's lines and the seconds slept between passes."""
+        ``fail``, or ``hang``). The fill log's lines and the seconds slept between passes."""
         temp = Path(self.temp.name)
         root, stubs = temp / "instance", temp / "stubs"
         for directory in (root / ".venv" / "bin", root / "scripts" / "experiments", root / "logs" / "zgca", stubs):
@@ -1364,6 +1364,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
             scripts[stubs / "du"] = ('#!/bin/sh\nn=$(($(cat "$MEASURED" 2>/dev/null || echo 0) + 1)); echo $n >"$MEASURED"\n'
                                      'line=$(sed -n "${n}p" "$DU_PLAN")\n'
                                      '[ "$line" = fail ] && { printf "%s\\n" "du: cannot read directory \'$2/x\': Permission denied" >&2; exit 1; }\n'
+                                     '[ "$line" = hang ] && exec tail -f /dev/null\n'
                                      'printf "%s\\t%s\\n" "$line" "$2"\n')
             (temp / "du_plan").write_text("\n".join(du) + "\n", encoding="utf-8")
         for script, body in scripts.items():
@@ -1395,20 +1396,28 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(slept, ["600"] * (len(plan) - 1))
 
     def test_a_fill_pass_is_held_while_the_storage_floor_is_not_free_or_unmeasured(self) -> None:
-        """No launcher runs in a pass whose du fails or leaves less than the floor free under the
-        quota: the pass logs one line saying so and the next pass measures again; the first pass
-        that finds the floor free runs the launcher."""
+        """No launcher runs in a pass whose du fails, outlasts its limit (1 s here instead of 300 s)
+        or leaves less than the floor free under the quota: the pass logs one line saying so and
+        the next pass measures again; the first pass that finds the floor free runs the launcher."""
+        script = Path(self.temp.name) / "remote.sh"
+        text = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
+        self.assertEqual(text.count("limit=300"), 1)
+        script.write_text(text.replace("limit=300", "limit=1"), encoding="utf-8")
+        self.addCleanup(setattr, zgca, "REMOTE_SCRIPT", zgca.REMOTE_SCRIPT)
+        zgca.REMOTE_SCRIPT = script
         storage = Path(self.temp.name)
         below = zgca.STORAGE_QUOTA - zgca.STORAGE_FLOOR + 2**30  # a GiB short of the floor
-        lines, slept = self._fill([f"0|{self.FILL_DONE}"], du=["fail", str(below), str(zgca.STORAGE_QUOTA - zgca.STORAGE_FLOOR)])
-        self.assertEqual(len(lines), 4, lines)
+        lines, slept = self._fill([f"0|{self.FILL_DONE}"], du=["fail", "hang", str(below), str(zgca.STORAGE_QUOTA - zgca.STORAGE_FLOOR)])
+        self.assertEqual(len(lines), 5, lines)
         self.assertRegex(lines[0], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d fill held, no experiment is created this pass: ")
         self.assertTrue(lines[0].endswith(f"storage: unknown, du of {storage} failed (exit 1): "
                                           f"du: cannot read directory '{storage}/x': Permission denied"), lines[0])
-        self.assertTrue(lines[1].endswith(f"fill held, no experiment is created this pass: storage: 61.0 of 100 GiB used, 39.0 free "
-                                          f"(du of {storage}), below the 40 GiB floor"), lines[1])
-        self.assertEqual(lines[2:], [self.FILL_DONE, "round-exit 0"])
-        self.assertEqual(slept, ["600", "600"])
+        self.assertTrue(lines[1].endswith(f"fill held, no experiment is created this pass: storage: unknown, du of {storage} "
+                                          "did not finish within 1 s"), lines[1])
+        self.assertTrue(lines[2].endswith(f"fill held, no experiment is created this pass: storage: 61.0 of 100 GiB used, 39.0 free "
+                                          f"(du of {storage}), below the 40 GiB floor"), lines[2])
+        self.assertEqual(lines[3:], [self.FILL_DONE, "round-exit 0"])
+        self.assertEqual(slept, ["600", "600", "600"])
 
     def test_the_storage_step_measures_the_quota_by_du_and_status_shows_it(self) -> None:
         """The storage line against the quota, exit 0 only with the floor free; a failed du is no
