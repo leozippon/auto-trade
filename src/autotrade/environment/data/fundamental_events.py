@@ -10,7 +10,6 @@ import pandas as pd
 import pyarrow.parquet as pq
 
 from autotrade.common.time import CN_TZ
-from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.contracts import FUNDAMENTAL_EVENT_DATASETS
 from autotrade.environment.data.pit import (
     FIRST_SEEN_COLUMN,
@@ -23,6 +22,10 @@ from autotrade.environment.data.pit import (
     to_cn_timestamps,
     visible_from,
     yyyymmdd,
+)
+from autotrade.environment.data.quality import (
+    build_quality_report,
+    write_quality_report,
 )
 
 # Provenance/PIT columns the store stamps onto every fundamental event row on

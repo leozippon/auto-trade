@@ -16,12 +16,12 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 
-from autotrade.data_quality import build_quality_report
 from autotrade.environment.data import snapshot as snapshot_module
 from autotrade.environment.data.fundamental_events import (
     FUNDAMENTAL_EVENT_DATASETS,
     read_fundamental_events,
 )
+from autotrade.environment.data.quality import build_quality_report
 from autotrade.environment.data.snapshot import (
     DEFAULT_DATASETS,
     SELECTABLE_DATASETS,

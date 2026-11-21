@@ -34,7 +34,6 @@ import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.common.time import utc_now
-from autotrade.data_quality import read_quality_report
 from autotrade.environment.data.contracts import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,
@@ -47,6 +46,7 @@ from autotrade.environment.data.pit import (
     FIRST_SEEN_SUFFIX,
     complete_interrupted_commits,
 )
+from autotrade.environment.data.quality import read_quality_report
 
 _SCHEMA_VERSION = 2
 _PIN_DIR_NAME = "research_release"

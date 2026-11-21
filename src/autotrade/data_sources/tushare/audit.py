@@ -17,7 +17,6 @@ import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ, cn_today
-from autotrade.data_quality import build_quality_report, write_quality_report
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
 from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
@@ -26,6 +25,10 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.environment.data.fundamental_events import STATEMENT_DATASETS
 from autotrade.environment.data.pit import partition_value
+from autotrade.environment.data.quality import (
+    build_quality_report,
+    write_quality_report,
+)
 from autotrade.environment.data.units import (
     UnresolvedUnitError,
     column_source_units,

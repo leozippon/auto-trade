@@ -15,8 +15,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from autotrade.data_quality import build_quality_report
 from autotrade.environment.data import research_release
+from autotrade.environment.data.quality import build_quality_report
 from autotrade.environment.data.research_release import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,

@@ -42,7 +42,6 @@ import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ, utc_now
-from autotrade.data_quality import read_quality_report
 from autotrade.environment.broker_core import BOARDS, board_of
 from autotrade.environment.data import PITDataStore, default_tushare_contracts
 from autotrade.environment.data.auction import (
@@ -74,6 +73,7 @@ from autotrade.environment.data.pit import (
     to_cn_timestamps,
     yyyymmdd,
 )
+from autotrade.environment.data.quality import read_quality_report
 from autotrade.environment.data.research_release import (
     DOMAIN_REPORT_TYPES,
     DOMAIN_STATUS_FILES,

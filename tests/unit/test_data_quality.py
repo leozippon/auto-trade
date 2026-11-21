@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
 
-from autotrade.data_quality import (
+from autotrade.environment.data.quality import (
     FINDING_KEYS,
     QUALITY_REPORT_KEYS,
     QUALITY_REPORT_SCHEMA_VERSION,
@@ -105,7 +105,7 @@ class DataQualityContractTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             output = Path(tmp) / "status.json"
-            with patch("autotrade.data_quality.os.replace", side_effect=synchronized_replace):
+            with patch("os.replace", side_effect=synchronized_replace):
                 with ThreadPoolExecutor(max_workers=2) as pool:
                     futures = [
                         pool.submit(write_quality_report, output, report)

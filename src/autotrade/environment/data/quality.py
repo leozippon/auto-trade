@@ -1,14 +1,16 @@
-"""Small, shared contract for machine-readable data-quality reports."""
+"""The machine-readable data-quality report: the status contract the data
+gates read (snapshot builds, research releases) and the audits and the
+fundamental-events builder write."""
 
 from __future__ import annotations
 
-import json
-import os
 from collections.abc import Iterable, Mapping
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+
+from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.time import utc_now
 
 QUALITY_REPORT_SCHEMA_VERSION = 2
 QUALITY_REPORT_KEYS = frozenset(
@@ -249,7 +251,7 @@ def build_quality_report(
     report = {
         "schema_version": QUALITY_REPORT_SCHEMA_VERSION,
         "report_type": str(report_type),
-        "created_at": created_at or datetime.now(UTC).isoformat(),
+        "created_at": created_at or utc_now("auto"),
         "status": quality_status(counts),
         "scope": scope_record,
         "finding_counts": counts,
@@ -265,28 +267,12 @@ def read_quality_report(
     path: str | Path, *, expected_report_type: str | None = None
 ) -> dict[str, Any]:
     """Read and fail-closed validate one v2 quality report."""
-    source = Path(path)
-    try:
-        payload = json.loads(source.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid quality report JSON: {source}") from exc
-    if not isinstance(payload, dict):
-        raise TypeError(f"quality report must be an object: {source}")
+    payload = read_json_object(path)
     validate_quality_report(payload, expected_report_type=expected_report_type)
     return payload
 
 
 def write_quality_report(path: str | Path, report: Mapping[str, Any]) -> None:
-    """Publish one validated report via a unique same-directory temporary."""
+    """Publish one validated report atomically, every value already JSON."""
     validate_quality_report(report)
-    output = Path(path)
-    output.parent.mkdir(parents=True, exist_ok=True)
-    temporary = output.parent / f".{output.name}.{uuid4().hex}.tmp"
-    try:
-        temporary.write_text(
-            json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False) + "\n",
-            encoding="utf-8",
-        )
-        os.replace(temporary, output)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, report, default=None)
