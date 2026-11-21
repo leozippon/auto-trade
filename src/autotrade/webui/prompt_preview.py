@@ -5,15 +5,19 @@ prompt the session will actually receive rather than a second description of
 it. Nothing here restates prompt text, budgets or contract wording: the
 experiment is resolved by the worker's own ``load_worker_options`` over the
 persisted parameters, the research window comes from the experiment's own
-``ResearchGeometry``, the Agent-visible facts come from the shared
-``build_experiment_facts`` projection of a run manifest shaped like the one a
-session writes, and the text is rendered by ``build_system_prompt``. A change
-to ``prompts.py``, to a budget default or to the facts projection therefore
-reaches this preview with no edit here.
+``ResearchGeometry``, the run manifest is built by the session's own
+``session_manifest`` from the session's own budgets (``session_budgets``) and
+GPU allocation (``session_sandbox_spec``), the Agent-visible facts are the
+shared ``build_experiment_facts`` projection of it, and the text is rendered
+by ``build_system_prompt``. A change to ``prompts.py``, to a budget default,
+to the manifest or to the facts projection therefore reaches this preview
+with no edit here.
 
-Only what comes into existence when the session starts is unavailable: the run
-id, the sandbox runtime environment and which PIT files the session's snapshot
-will carry. Those render as ``RUNTIME_PLACEHOLDER`` instead of being invented.
+Only what comes into existence when the session starts is unavailable: the run,
+snapshot and conversation ids, the gateway's provider, the sandbox runtime
+environment and which PIT files the session's snapshot will carry. Those
+render as ``RUNTIME_PLACEHOLDER`` instead of being invented (the run id stays
+out of the manifest, so no reference is minted for it).
 """
 
 from __future__ import annotations
@@ -80,7 +84,8 @@ def build_prompt_preview(
     system = _research_prompt(
         context,
         directive=directive,
-        resource_override=control.resource_overrides.get(session_key),
+        resource_override=control.resource_overrides.get(session_key, {}),
+        sandbox_gpu_count=control.gpu_counts.get(session_key),
     )
     prompt = f"{_SYSTEM_BANNER}\n{system}\n\n{_USER_BANNER}\n{SESSION_DEFAULT_INSTRUCTION}"
     return {"prompt": prompt, "note": PREVIEW_NOTE}
@@ -129,63 +134,59 @@ def _research_prompt(
     *,
     directive: str,
     resource_override: object,
+    sandbox_gpu_count: int | None,
 ) -> str:
-    from autotrade.pipelines.experiment import _session_budgets
+    from autotrade.pipelines.experiment import session_budgets
     from autotrade.pipelines.research_session import (
-        experiment_record,
-        research_geometry_record,
+        acceptance_facts,
         session_fact_blocks,
-        start_record,
+        session_manifest,
+        session_sandbox_spec,
     )
 
     config = context.experiment
-    geometry = config.geometry
-    budgets = _session_budgets(config, resource_override)
-    sandbox = context.strategy_sandbox
-    manifest: dict[str, object] = {
-        "experiment_id": config.experiment_id,
-        "epoch_id": "research",
-        "fold_id": context.session_key,
-        "kind": "research",
-        "research": research_geometry_record(
-            geometry.research_years,
-            research_years=config.acceptance.research_years,
-            test_step_months=config.acceptance.test_step_months,
-            steps_tested=0,
-            window_months=config.window_months,
-        ),
-        "benchmark_index": config.benchmark_index,
-        "snapshot_config": context.options.snapshot_config.to_record(),
-        "start": start_record(),
-        "experiment": experiment_record(()),
-        "modification_constraints": config.step_constraints.to_record(),
-        "acceptance_rules": config.acceptance.to_record(),
-        "schedule": config.schedule.to_record(),
-        "broker_profile": config.broker_profile.to_record(),
-        "record_failed_attempts": config.record_failed_attempts,
-        "attempt": 1,
-        "sandbox_spec": (
-            context.options.agent_sandbox.to_record()
-            if context.options.agent_sandbox is not None
+    llm = context.options.llm
+    agent_sandbox = context.options.agent_sandbox
+    budgets = session_budgets(config, resource_override)
+    # What a first attempt's run manifest holds: no steps, nothing used, and
+    # no run id, so the facts mint no reference for one.
+    manifest = session_manifest(
+        experiment_id=config.experiment_id,
+        session_key=context.session_key,
+        run_id="",
+        conversation_id=RUNTIME_PLACEHOLDER,
+        provider=RUNTIME_PLACEHOLDER,
+        model=llm.model if llm is not None else RUNTIME_PLACEHOLDER,
+        subagent_provider=RUNTIME_PLACEHOLDER,
+        subagent_model=llm.subagent_model if llm is not None else RUNTIME_PLACEHOLDER,
+        years=config.geometry.research_years,
+        window_months=config.window_months,
+        steps_tested=0,
+        benchmark_index=config.benchmark_index,
+        snapshot_config=context.options.snapshot_config.to_record(),
+        snapshot_id=RUNTIME_PLACEHOLDER,
+        steps=(),
+        modification_constraints=config.step_constraints,
+        acceptance_rules=config.acceptance.to_record(),
+        schedule=config.schedule,
+        broker_profile=config.broker_profile,
+        record_failed_attempts=config.record_failed_attempts,
+        attempt=1,
+        sandbox_spec=(
+            session_sandbox_spec(agent_sandbox, sandbox_gpu_count)
+            if agent_sandbox is not None
             else None
         ),
-        "budgets": {
-            "validates_per_step": config.acceptance.validates_per_step,
-            "max_null_controls": config.max_null_controls,
-            "max_llm_calls": budgets["max_llm_calls"],
-            "max_api_spend_usd": budgets["max_api_spend_usd"],
-            "deadline_seconds": budgets["deadline_seconds"],
-            "deadline_grace_seconds": budgets["deadline_grace_seconds"],
-            "strategy_inference_timeout_seconds": sandbox.timeout_seconds,
-            "strategy_fit_timeout_seconds": sandbox.fit_timeout_seconds,
-            "strategy_gpu_count": sandbox.spec.gpu_count,
-            "strategy_cpus": sandbox.spec.cpus,
-            "strategy_memory_bytes": sandbox.spec.memory_bytes,
-            "strategy_state_disk_bytes": sandbox.state_disk_bytes,
-            "batch_validate_max_concurrency": config.batch_validate_max_concurrency,
-            "used_before_this_attempt": BudgetUsed().to_record(),
-        },
-    }
+        research_directive=config.research_directive,
+        max_llm_calls=budgets["max_llm_calls"],
+        max_api_spend_usd=budgets["max_api_spend_usd"],
+        deadline_seconds=budgets["deadline_seconds"],
+        deadline_grace_seconds=budgets["deadline_grace_seconds"],
+        max_null_controls=config.max_null_controls,
+        batch_validate_max_concurrency=config.batch_validate_max_concurrency,
+        strategy_sandbox=context.strategy_sandbox,
+        used=BudgetUsed(),
+    )
     # The blocks LLMResearchDeveloper._session_facts adds beside the shared
     # projection: the fixed workspace/boundary index.
     blocks = session_fact_blocks(Path("/nonexistent/prompt-preview-workspace"))
@@ -198,6 +199,7 @@ def _research_prompt(
             max_llm_calls=int(budgets["max_llm_calls"]),
             context_compaction=context.context_compaction,
             model_artifacts_empty=True,
+            acceptance_rules=acceptance_facts(manifest),
         ),
         **blocks,
     }

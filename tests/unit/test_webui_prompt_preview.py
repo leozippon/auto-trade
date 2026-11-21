@@ -16,6 +16,7 @@ import pandas as pd
 import pytest
 
 from autotrade.agent import prompts
+from autotrade.agent.experiment_facts import NO_SANDBOX_GPUS
 from autotrade.agent.prompts import (
     SESSION_DEFAULT_INSTRUCTION,
     SESSION_DYNAMIC_CONTEXT_HEADER,
@@ -30,7 +31,11 @@ from autotrade.pipelines.config import (
     experiment_default,
     session_deadline_seconds,
 )
-from autotrade.pipelines.hitl_state import build_session_plan
+from autotrade.pipelines.hitl_state import (
+    ControlState,
+    build_session_plan,
+    write_control,
+)
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
 from tests.unit.acceptance_fixture import NO_SEED, REQUIRED_RULES, TEST_GEOMETRY
 
@@ -248,6 +253,25 @@ def test_preview_follows_the_experiment_parameters(tmp_path: Path):
     )
     assert "以截面因子为主线" in prompt
     assert directive in prompt
+
+
+def test_the_preview_takes_the_sessions_own_hitl_overrides(tmp_path: Path):
+    """The session runs under its HITL budget override and GPU allocation, so
+    the preview's facts carry both, as the session's run manifest does."""
+
+    directory, repo = _experiment(tmp_path, gpu_count=1)
+    plain = _facts(_preview_of(directory, repo, SESSION_KEY))
+    assert plain["runtime_tools"]["sandbox_gpus"].startswith("1 × ")
+    write_control(
+        directory / "hitl" / "control.json",
+        ControlState(
+            resource_overrides={SESSION_KEY: {"max_llm_calls": 50}},
+            gpu_counts={SESSION_KEY: 0},
+        ),
+    )
+    facts = _facts(_preview_of(directory, repo, SESSION_KEY))
+    assert facts["runtime_tools"]["sandbox_gpus"] == NO_SANDBOX_GPUS
+    assert facts["budgets"]["max_llm_calls"] == 50
 
 
 def test_unknown_and_forward_sessions_are_rejected(tmp_path: Path):

@@ -33,6 +33,7 @@ from autotrade.environment.sandbox import SandboxSpec
 def _facts(
     *,
     data_summary: dict[str, object] | None = None,
+    acceptance_rules: dict[str, object] | None = None,
     **manifest_overrides: object,
 ) -> dict[str, object]:
     manifest: dict[str, object] = {
@@ -58,6 +59,7 @@ def _facts(
             manifest=manifest,
             ref_store=AgentRefStore(Path(tmp) / "experiment"),
             data_summary=data_summary,
+            acceptance_rules=acceptance_rules,
         )
 
 
@@ -111,7 +113,10 @@ def test_the_geometry_fact_lists_the_research_years_alone() -> None:
     from types import SimpleNamespace
 
     from autotrade.pipelines.config import AcceptanceRules
-    from autotrade.pipelines.research_session import research_geometry_record
+    from autotrade.pipelines.research_session import (
+        acceptance_facts,
+        research_geometry_record,
+    )
 
     years = [
         SimpleNamespace(label=f"Y{index}", start=f"{2014 + index}0701", end=f"{2015 + index}0630")
@@ -121,9 +126,10 @@ def test_the_geometry_fact_lists_the_research_years_alone() -> None:
         years, research_years=3, test_step_months=3, steps_tested=0, window_months=24
     )
     assert [year["label"] for year in record["years"]] == ["Y1", "Y2", "Y3", "Y4", "Y5"]
+    rules = AcceptanceRules(alpha=0.05, research_years=3).to_record()
     facts = _facts(
         research=record,
-        acceptance_rules=AcceptanceRules(alpha=0.05, research_years=3).to_record(),
+        acceptance_rules=acceptance_facts({"acceptance_rules": rules, "research": record}),
         budgets={"validates_per_step": 6},
     )
     geometry = facts["research_geometry"]

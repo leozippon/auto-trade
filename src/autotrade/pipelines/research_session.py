@@ -118,6 +118,7 @@ from .config import (
     DEFAULT_MAX_API_SPEND_USD,
     TEST_STEP_NAMES,
     VALIDATION_PERIOD_COMPLETE,
+    AcceptanceRules,
     BudgetUsed,
     EvaluationBackend,
     ReplaySpan,
@@ -156,6 +157,9 @@ from .validation_record import ValidationSteps
 if TYPE_CHECKING:
     from autotrade.agent.runner import AgentSessionRunner
     from autotrade.environment.llm import ChatMessage, LLMProxy, ProviderResponse
+    from autotrade.environment.sandbox import SandboxConfig
+
+    from .config import ModificationConstraints
 
 
 SESSION_LLM_CALL_ROLES = ("main", "subagent", "compact")
@@ -452,49 +456,6 @@ class LLMResearchDeveloper:
         self.repo_root = Path(repo_root).resolve() if repo_root is not None else None
         validate_strategy_package(self.baseline_strategy)
 
-    @property
-    def decision_timeout_seconds(self) -> float:
-        """The formal executor's per-decision inference wall clock."""
-
-        return float(self.evaluator.sandbox.timeout_seconds)
-
-    @property
-    def fit_timeout_seconds(self) -> float:
-        """The formal executor's wall clock for one strategy ``fit(context)``."""
-
-        return float(self.evaluator.sandbox.fit_timeout_seconds)
-
-    @property
-    def strategy_cpus(self) -> float:
-        """The formal strategy container's CPU quota, its thread variables' source."""
-
-        return float(self.evaluator.sandbox.spec.cpus)
-
-    @property
-    def strategy_memory_bytes(self) -> int:
-        """The formal strategy container's memory ceiling, in bytes."""
-
-        return int(self.evaluator.sandbox.spec.memory_bytes)
-
-    @property
-    def strategy_state_disk_bytes(self) -> int:
-        """The disk the formal replay's state directory may hold, in bytes."""
-
-        return int(self.evaluator.sandbox.state_disk_bytes)
-
-    @property
-    def strategy_gpu_count(self) -> int:
-        """GPUs attached to the formal executor's strategy container.
-
-        Read from the evaluator's own limits, so it is the number ``fit`` and
-        ``generate_orders`` will actually see rather than a second derivation
-        of the experiment request. It can differ from this session's container
-        (``runtime_env.json``'s ``sandbox_spec``), which a per-session HITL
-        override may move on its own.
-        """
-
-        return int(self.evaluator.sandbox.spec.gpu_count)
-
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         root, resume, attempt = self._resolve_resume(request)
         used = request.budget_used
@@ -506,7 +467,7 @@ class LLMResearchDeveloper:
         _environment_phase(request.progress_hook, "sandbox_layout", request.run_id)
         local = LocalSandbox(root)
         paths = local.prepare_layout()
-        sandbox_spec = self._session_sandbox_spec(request)
+        sandbox_spec = session_sandbox_spec(self.sandbox_spec, request.sandbox_gpu_count)
         manifest = self._create_run_manifest(
             request, paths, attempt=attempt, sandbox_spec=sandbox_spec, used=used
         )
@@ -741,27 +702,6 @@ class LLMResearchDeveloper:
         )
         return transcripts, trace
 
-    def _session_sandbox_spec(self, request: ResearchSessionRequest) -> SandboxSpec:
-        """The session container's spec under this session's GPU allocation."""
-
-        # Per-session HITL override: the session attaches that many of the
-        # devices its experiment holds (a tuple, worker.load_worker_options) and
-        # never another experiment's.
-        if request.sandbox_gpu_count is None:
-            return self.sandbox_spec
-        count = int(request.sandbox_gpu_count)
-        if count == 0:
-            return replace(self.sandbox_spec, gpu=None, gpu_count=0)
-        claim = self.sandbox_spec.gpu
-        if isinstance(claim, tuple):
-            if count > len(claim):
-                raise GpuUnavailableError(
-                    f"this session asks for {count} GPU(s) but the experiment holds "
-                    f"{len(claim)}: devices {list(claim)}"
-                )
-            return replace(self.sandbox_spec, gpu=claim[:count], gpu_count=count)
-        return replace(self.sandbox_spec, gpu_count=count)
-
     def _create_run_manifest(
         self,
         request: ResearchSessionRequest,
@@ -774,81 +714,42 @@ class LLMResearchDeveloper:
         # RunManifest publishes two views of the same data: the host audit copy
         # under runtime/, and the allowlisted Agent-visible copy mounted at
         # /mnt/artifacts/run_manifest.json. It is also where every backtest
-        # summary accumulates. Research dates only: the forward period is
-        # never known to a session.
+        # summary accumulates.
         return RunManifest.create(
             paths.run_manifest,
-            {
-                # Raw on the host manifest (issue reports link on it);
-                # RunManifest's Agent-visible view and build_experiment_facts
-                # both project ``fold_id`` through the experiment reference store.
-                **link_head(request.experiment_id, request.session_key, request.run_id),
-                "kind": SessionKind.RESEARCH,
-                "llm": {
-                    "provider": str(self.llm.provider),
-                    "model": str(self.llm.model),
-                    "subagent": {
-                        "provider": str(self.subagent_llm.provider),
-                        "model": str(self.subagent_llm.model),
-                    },
-                },
-                "conversation_id": request.run_id,
-                "runtime_env_ref": RUNTIME_ENV_REF,
-                "data_summary_ref": DATA_SUMMARY_REF,
-                "research": research_geometry_record(
-                    request.years,
-                    research_years=request.research_years,
-                    test_step_months=int(request.acceptance_rules["test_step_months"]),  # type: ignore[call-overload]
-                    steps_tested=len(request.tests_before),
-                    window_months=request.window_months,
-                ),
-                # The index this experiment is graded against; the Agent-visible facts
-                # publish it so a session designs against the same benchmark
-                # the host measures it on.
-                "benchmark_index": request.benchmark_index,
-                "snapshot_config": dict(request.snapshot_config),
-                "snapshots": {
-                    "decision_input": {"snapshot_id": request.snapshot.snapshot_id}
-                },
-                "start": start_record(),
-                "experiment": experiment_record(request.steps_before),
-                "modification_constraints": request.modification_constraints.to_record(),
-                "acceptance_rules": dict(request.acceptance_rules),
-                "schedule": self.schedule.to_record(),
-                "broker_profile": self.broker_profile.to_record(),
-                "record_failed_attempts": request.record_failed_attempts,
-                "attempt": attempt,
-                "sandbox_spec": sandbox_spec.to_record(),
-                "exploration_directive": self.research_directive.strip(),
-                "budgets": {
-                    "validates_per_step": int(request.acceptance_rules["validates_per_step"]),  # type: ignore[call-overload]
-                    "max_null_controls": request.max_null_controls,
-                    "max_llm_calls": request.max_llm_calls,
-                    "max_api_spend_usd": request.max_api_spend_usd,
-                    # deadline_seconds is the whole session wall clock;
-                    # the grace is the trailing wrap-up slice of it, so
-                    # the manifest carries both and the run facts can
-                    # publish the split instead of one opaque total.
-                    "deadline_seconds": request.deadline_seconds,
-                    "deadline_grace_seconds": request.deadline_grace_seconds,
-                    "strategy_inference_timeout_seconds": self.decision_timeout_seconds,
-                    "strategy_fit_timeout_seconds": self.fit_timeout_seconds,
-                    # What ``fit`` may spend those wall clocks on: the formal
-                    # strategy container's own GPU allocation.
-                    "strategy_gpu_count": self.strategy_gpu_count,
-                    # The CPU quota and memory ceiling of that container.
-                    "strategy_cpus": self.strategy_cpus,
-                    "strategy_memory_bytes": self.strategy_memory_bytes,
-                    # The disk quota of the replay's state directory.
-                    "strategy_state_disk_bytes": self.strategy_state_disk_bytes,
-                    # How many replays one validate call runs at once,
-                    # and so the factor both wall clocks above are scaled by.
-                    "batch_validate_max_concurrency": request.batch_validate_max_concurrency,
-                    # The totals above are the experiment's; what earlier attempts
-                    # already spent of them.
-                    "used_before_this_attempt": used.to_record(),
-                },
-            },
+            session_manifest(
+                experiment_id=request.experiment_id,
+                session_key=request.session_key,
+                run_id=request.run_id,
+                conversation_id=request.run_id,
+                provider=str(self.llm.provider),
+                model=str(self.llm.model),
+                subagent_provider=str(self.subagent_llm.provider),
+                subagent_model=str(self.subagent_llm.model),
+                years=request.years,
+                window_months=request.window_months,
+                steps_tested=len(request.tests_before),
+                benchmark_index=request.benchmark_index,
+                snapshot_config=request.snapshot_config,
+                snapshot_id=request.snapshot.snapshot_id,
+                steps=request.steps_before,
+                modification_constraints=request.modification_constraints,
+                acceptance_rules=request.acceptance_rules,
+                schedule=self.schedule,
+                broker_profile=self.broker_profile,
+                record_failed_attempts=request.record_failed_attempts,
+                attempt=attempt,
+                sandbox_spec=sandbox_spec,
+                research_directive=self.research_directive,
+                max_llm_calls=request.max_llm_calls,
+                max_api_spend_usd=request.max_api_spend_usd,
+                deadline_seconds=request.deadline_seconds,
+                deadline_grace_seconds=request.deadline_grace_seconds,
+                max_null_controls=request.max_null_controls,
+                batch_validate_max_concurrency=request.batch_validate_max_concurrency,
+                strategy_sandbox=self.evaluator.sandbox,
+                used=used,
+            ),
             ref_store=self.ref_store,
         )
 
@@ -1423,6 +1324,7 @@ class LLMResearchDeveloper:
             **build_experiment_facts(
                 manifest=dict(manifest.data),
                 ref_store=self.ref_store,
+                acceptance_rules=acceptance_facts(manifest.data),
                 runtime_env=read_json_object(paths.runtime_env),
                 data_summary=read_json_object(paths.data_summary),
                 max_llm_calls=request.max_llm_calls,
@@ -1556,6 +1458,169 @@ def experiment_record(steps: Sequence[StepResult]) -> dict[str, object]:
         "validations_to_date": len(steps),
         "full_span_validations_to_date": sum(1 for step in steps if step.span == FULL_SPAN),
     }
+
+
+def session_manifest(
+    *,
+    experiment_id: str,
+    session_key: str,
+    run_id: str,
+    conversation_id: str,
+    provider: str,
+    model: str,
+    subagent_provider: str,
+    subagent_model: str,
+    years: Sequence[Slot] | Sequence[ReplaySpan],
+    window_months: int,
+    steps_tested: int,
+    benchmark_index: str,
+    snapshot_config: Mapping[str, object],
+    snapshot_id: str,
+    steps: Sequence[StepResult],
+    modification_constraints: ModificationConstraints,
+    acceptance_rules: Mapping[str, object],
+    schedule,
+    broker_profile,
+    record_failed_attempts: bool,
+    attempt: int,
+    sandbox_spec: SandboxSpec | None,
+    research_directive: str,
+    max_llm_calls: int,
+    max_api_spend_usd: float,
+    deadline_seconds: float,
+    deadline_grace_seconds: float,
+    max_null_controls: int,
+    batch_validate_max_concurrency: int,
+    strategy_sandbox: SandboxConfig,
+    used: BudgetUsed,
+) -> dict[str, object]:
+    """The record a research attempt's run manifest starts from (``RunManifest.create``).
+
+    Pure, so the console's prompt preview projects its facts from a manifest
+    this same function built: it passes a first attempt's values (no steps,
+    attempt 1, nothing used) and placeholders for the ids that exist only
+    once the session starts. The four session budgets are as
+    :func:`~autotrade.pipelines.experiment.session_budgets` gives them, after
+    any HITL override. Research dates only: the forward period is never
+    known to a session.
+    """
+
+    return {
+        # Raw on the host manifest (issue reports link on it); RunManifest's
+        # Agent-visible view and build_experiment_facts both project
+        # ``fold_id`` through the experiment reference store.
+        **link_head(experiment_id, session_key, run_id),
+        "kind": SessionKind.RESEARCH,
+        "llm": {
+            "provider": provider,
+            "model": model,
+            "subagent": {"provider": subagent_provider, "model": subagent_model},
+        },
+        "conversation_id": conversation_id,
+        "runtime_env_ref": RUNTIME_ENV_REF,
+        "data_summary_ref": DATA_SUMMARY_REF,
+        "research": research_geometry_record(
+            years,
+            research_years=int(acceptance_rules["research_years"]),  # type: ignore[call-overload]
+            test_step_months=int(acceptance_rules["test_step_months"]),  # type: ignore[call-overload]
+            steps_tested=steps_tested,
+            window_months=window_months,
+        ),
+        # The index this experiment is graded against; the Agent-visible facts
+        # publish it so a session designs against the same benchmark the host
+        # measures it on.
+        "benchmark_index": benchmark_index,
+        "snapshot_config": dict(snapshot_config),
+        "snapshots": {"decision_input": {"snapshot_id": snapshot_id}},
+        "start": start_record(),
+        "experiment": experiment_record(steps),
+        "modification_constraints": modification_constraints.to_record(),
+        "acceptance_rules": dict(acceptance_rules),
+        "schedule": schedule.to_record(),
+        "broker_profile": broker_profile.to_record(),
+        "record_failed_attempts": record_failed_attempts,
+        "attempt": attempt,
+        "sandbox_spec": sandbox_spec.to_record() if sandbox_spec is not None else None,
+        "exploration_directive": research_directive.strip(),
+        "budgets": {
+            "validates_per_step": int(acceptance_rules["validates_per_step"]),  # type: ignore[call-overload]
+            "max_null_controls": max_null_controls,
+            "max_llm_calls": max_llm_calls,
+            "max_api_spend_usd": max_api_spend_usd,
+            # deadline_seconds is the whole session wall clock; the grace is
+            # the trailing wrap-up slice of it, so the manifest carries both
+            # and the run facts can publish the split instead of one opaque
+            # total.
+            "deadline_seconds": deadline_seconds,
+            "deadline_grace_seconds": deadline_grace_seconds,
+            **strategy_container_budgets(strategy_sandbox),
+            # How many replays one validate call runs at once, and so the
+            # factor both strategy wall clocks are scaled by.
+            "batch_validate_max_concurrency": batch_validate_max_concurrency,
+            # The totals above are the experiment's; what earlier attempts
+            # already spent of them.
+            "used_before_this_attempt": used.to_record(),
+        },
+    }
+
+
+def strategy_container_budgets(sandbox: SandboxConfig) -> dict[str, object]:
+    """The formal strategy container's limits as a run manifest's ``budgets``
+    publish them, read off the evaluator's own ``SandboxConfig``: the numbers
+    ``fit`` and ``generate_orders`` will actually meet, rather than a second
+    derivation of the experiment request. The GPU count can differ from the
+    session's own container (``runtime_env.json``'s ``sandbox_spec``), which
+    a per-session HITL override may move on its own."""
+
+    return {
+        # The per-decision inference wall clock and the wall clock of one
+        # ``fit(context)``.
+        "strategy_inference_timeout_seconds": float(sandbox.timeout_seconds),
+        "strategy_fit_timeout_seconds": float(sandbox.fit_timeout_seconds),
+        # What ``fit`` may spend those wall clocks on.
+        "strategy_gpu_count": int(sandbox.spec.gpu_count),
+        # The CPU quota (its thread variables' source) and the memory ceiling.
+        "strategy_cpus": float(sandbox.spec.cpus),
+        "strategy_memory_bytes": int(sandbox.spec.memory_bytes),
+        # The disk quota of the replay's state directory.
+        "strategy_state_disk_bytes": int(sandbox.state_disk_bytes),
+    }
+
+
+def session_sandbox_spec(spec: SandboxSpec, gpu_count: int | None) -> SandboxSpec:
+    """The session container's spec under the session's GPU allocation.
+
+    A per-session HITL override (``gpu_count``; None keeps the experiment's)
+    attaches that many of the devices the experiment holds (a tuple,
+    ``worker.load_worker_options``) and never another experiment's.
+    """
+
+    if gpu_count is None:
+        return spec
+    count = int(gpu_count)
+    if count == 0:
+        return replace(spec, gpu=None, gpu_count=0)
+    claim = spec.gpu
+    if isinstance(claim, tuple):
+        if count > len(claim):
+            raise GpuUnavailableError(
+                f"this session asks for {count} GPU(s) but the experiment holds "
+                f"{len(claim)}: devices {list(claim)}"
+            )
+        return replace(spec, gpu=claim[:count], gpu_count=count)
+    return replace(spec, gpu_count=count)
+
+
+def acceptance_facts(manifest: Mapping[str, object]) -> dict[str, object]:
+    """The run's acceptance rules as the session reads them
+    (``AcceptanceRules.agent_facts``): the registration every test enforces,
+    the validation protocol and the readings the registered artifact is
+    reported on later, over the validation years the manifest's geometry
+    leaves after the research years. No date after its last year."""
+
+    rules = AcceptanceRules.from_record(manifest["acceptance_rules"])
+    years = manifest["research"]["years"]  # type: ignore[index]
+    return rules.agent_facts(validation_years=len(years) - rules.research_years)
 
 
 # The read-only facts file of a session, under ``workspace/inputs``.
@@ -1829,6 +1894,10 @@ __all__ = [
     "LLMResearchDeveloper",
     "SessionBudgetLLM",
     "SessionCallBudget",
+    "acceptance_facts",
+    "session_manifest",
     "session_role_quotas",
+    "session_sandbox_spec",
     "session_workspace_map",
+    "strategy_container_budgets",
 ]

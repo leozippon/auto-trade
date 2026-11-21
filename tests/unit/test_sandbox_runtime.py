@@ -706,7 +706,7 @@ def test_the_consoles_claim_pins_every_container_of_the_experiment() -> None:
     strategy container, and a session that asks for fewer gets that many of
     the experiment's own cards, never another one. A spec without a claim gives its
     strategy containers no device."""
-    from autotrade.pipelines.research_session import LLMResearchDeveloper
+    from autotrade.pipelines.research_session import session_sandbox_spec
 
     claimed = SandboxSpec(gpu=(3, 6), gpu_count=2)
     spec = strategy_sandbox_from_spec(claimed, fit_timeout_seconds=60).spec
@@ -718,9 +718,7 @@ def test_the_consoles_claim_pins_every_container_of_the_experiment() -> None:
         unclaimed.spec.devices()
 
     def session(count: int) -> SandboxSpec:
-        return LLMResearchDeveloper._session_sandbox_spec(
-            SimpleNamespace(sandbox_spec=claimed), SimpleNamespace(sandbox_gpu_count=count)
-        )
+        return session_sandbox_spec(claimed, count)
 
     assert (session(1).gpu, session(1).gpu_count) == ((3,), 1)
     assert (session(0).gpu, session(0).gpu_count) == (None, 0)

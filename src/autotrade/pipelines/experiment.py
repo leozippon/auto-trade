@@ -129,7 +129,7 @@ _MAX_DEADLINE_OVERRIDE_MINUTES = 2 * DEFAULT_MAX_RESEARCH_MINUTES
 class SessionContext:
     """What one planned session runs with beyond the experiment's config:
     the operator's controls for it (a directive, budget overrides checked by
-    ``_session_budgets``, a sandbox GPU count) and the worker's progress
+    ``session_budgets``, a sandbox GPU count) and the worker's progress
     hook. Only the research session reads the controls."""
 
     directive: str = ""
@@ -331,7 +331,7 @@ class ExperimentPipeline:
         run_started = time.monotonic()
         context = session_context or SessionContext()
         progress = context.progress_hook
-        budgets = _session_budgets(self.config, context.resource_override)
+        budgets = session_budgets(self.config, context.resource_override)
         current_skills = self._current_skills()
         registered_id: str | None = None
         with self._recorded_run(SessionKind.RESEARCH) as run:
@@ -1609,9 +1609,16 @@ def _publish_progress(hook, stage: str, **progress: object) -> None:
         hook(stage, dict(progress) if progress else None)
 
 
-def _session_budgets(
+def session_budgets(
     config: ExperimentConfig, override: object
 ) -> dict[str, int | float]:
+    """The research session's four budgets (``max_llm_calls``,
+    ``max_api_spend_usd``, ``deadline_seconds`` with the grace in it, and
+    ``deadline_grace_seconds``) under the session's HITL ``override``, which
+    may lower the first two and set the main deadline up to an absolute
+    ceiling. The pipeline's session request and the console's prompt preview
+    both take them from here."""
+
     limits: dict[str, int | float] = {
         "max_llm_calls": config.max_llm_calls,
         "max_api_spend_usd": config.max_api_spend_usd,
@@ -1669,5 +1676,6 @@ __all__ = [
     "research_step_record",
     "result_analysis",
     "seed_change",
+    "session_budgets",
     "validation_statistics",
 ]

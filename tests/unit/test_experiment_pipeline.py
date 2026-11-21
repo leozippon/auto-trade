@@ -39,9 +39,9 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.experiment import (
     EnvironmentBlockedAttempt,
     ExperimentPipeline,
-    _session_budgets,
     replay_and_analysis,
     research_step_record,
+    session_budgets,
 )
 from autotrade.pipelines.ledger import (
     INTERRUPTED_RUN_ERROR,
@@ -1289,7 +1289,7 @@ def test_session_budgets_honor_nondefault_deadline_grace(tmp_path: Path):
         max_research_minutes=60,
         deadline_grace_minutes=5,
     )
-    budgets = _session_budgets(config, None)
+    budgets = session_budgets(config, None)
     assert budgets["deadline_seconds"] == 65 * 60
     assert budgets["deadline_grace_seconds"] == 5 * 60
 

@@ -75,11 +75,14 @@ def build_experiment_facts(
     max_llm_calls: int | None = None,
     context_compaction: Mapping[str, object] | None = None,
     model_artifacts_empty: bool | None = None,
+    acceptance_rules: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the short Agent-visible operational-facts projection.
 
     This is a convenience index, not a security boundary. It carries research
     dates only; exact trusted details remain in the referenced JSON files.
+    ``acceptance_rules`` is the run's rules as the session reads them
+    (``pipelines.research_session.acceptance_facts`` of the same manifest).
     """
 
     runtime_env = runtime_env or {}
@@ -140,7 +143,9 @@ def build_experiment_facts(
         # No paths table and no per-file data profile: data_summary.json and
         # the fixed mount layout carry both.
         "artifact_contract": _artifact_contract_facts(
-            manifest, model_artifacts_empty=model_artifacts_empty
+            manifest,
+            model_artifacts_empty=model_artifacts_empty,
+            acceptance_rules=acceptance_rules,
         ),
         "broker_replay": _broker_replay_facts(manifest),
         # The index this experiment is measured against: the benchmark leg of every
@@ -324,26 +329,10 @@ def _artifact_contract_facts(
     manifest: Mapping[str, object],
     *,
     model_artifacts_empty: bool | None,
+    acceptance_rules: Mapping[str, object] | None,
 ) -> dict[str, object]:
-    # Local import: the pipelines package imports this module, so binding the
-    # acceptance rules at module scope would close an import cycle.
-    from autotrade.pipelines.config import AcceptanceRules
-
     start = dict(_as_mapping(manifest.get("start")))
     start["model_artifacts_empty"] = model_artifacts_empty
-    # The registration every test enforces, the validation protocol and the
-    # readings the registered artifact is reported on later, all derived from the
-    # run's own rules and the count of validation years the manifest's
-    # geometry leaves after the research years. No date after the geometry's
-    # last year.
-    acceptance = _as_mapping(manifest.get("acceptance_rules"))
-    research = _as_mapping(manifest.get("research"))
-    years = research.get("years")
-    validation_years = (
-        len(years) - int(acceptance["research_years"])  # type: ignore[call-overload]
-        if acceptance and isinstance(years, list)
-        else None
-    )
     return compact_mapping(
         {
             "required_entry": "output/main.py",
@@ -353,11 +342,7 @@ def _artifact_contract_facts(
             "workspace_frozen": False,
             "start": compact_mapping(start),
             "modification_constraints": manifest.get("modification_constraints"),
-            "acceptance_rules": (
-                AcceptanceRules.from_record(acceptance).agent_facts(validation_years=validation_years)
-                if validation_years is not None
-                else None
-            ),
+            "acceptance_rules": acceptance_rules,
             "record_failed_attempts": manifest.get("record_failed_attempts"),
         }
     )

@@ -34,7 +34,7 @@ from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import experiment_default
 from autotrade.pipelines.experiment import (
     _MAX_DEADLINE_OVERRIDE_MINUTES,
-    _session_budgets,
+    session_budgets,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
@@ -424,15 +424,15 @@ def test_budgets_come_from_one_source_each():
         max_research_minutes=experiment_default("max_research_minutes"),
         deadline_grace_minutes=experiment_default("deadline_grace_minutes"),
     )
-    budgets = _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60})
+    budgets = session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60})
     grace = experiment_default("deadline_grace_minutes") * 60.0
     assert budgets["deadline_seconds"] == 20_160 * 60.0 + grace
     with pytest.raises(ValueError, match="cannot exceed 20160 minutes"):
-        _session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60 + 1})
+        session_budgets(config, {"deadline_seconds": _MAX_DEADLINE_OVERRIDE_MINUTES * 60 + 1})
     # The spend cap overrides downward only, and keeps its cents.
-    assert _session_budgets(config, {"max_api_spend_usd": 12.5})["max_api_spend_usd"] == 12.5
+    assert session_budgets(config, {"max_api_spend_usd": 12.5})["max_api_spend_usd"] == 12.5
     with pytest.raises(ValueError, match="max_api_spend_usd override cannot exceed"):
-        _session_budgets(config, {"max_api_spend_usd": 50.01})
+        session_budgets(config, {"max_api_spend_usd": 50.01})
 
 
 @pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")

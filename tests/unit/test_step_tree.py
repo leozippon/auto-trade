@@ -10,6 +10,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
+from autotrade.pipelines.research_session import acceptance_facts
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 from .test_artifacts import write_artifact
@@ -279,6 +280,7 @@ class SessionFactsTest(unittest.TestCase):
             max_llm_calls=10,
             context_compaction={"enabled": True, "token_threshold": 200000, "max_calls": 8},
             model_artifacts_empty=True,
+            acceptance_rules=acceptance_facts(RESEARCH_MANIFEST),
         )
         prompt = build_system_prompt(experiment_facts=facts)
 

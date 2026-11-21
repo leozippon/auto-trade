@@ -331,10 +331,8 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
     gets them in both, and in the facts its sessions read (through the run
     manifest, from the evaluator's own limits)."""
 
-    from types import SimpleNamespace
-
     from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
-    from autotrade.pipelines.research_session import LLMResearchDeveloper
+    from autotrade.pipelines.research_session import strategy_container_budgets
     from autotrade.pipelines.worker import (
         strategy_boundary,
         strategy_sandbox_from_spec,
@@ -381,19 +379,7 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
     assert (strategy.spec.cpus, strategy.spec.memory, strategy.timeout_seconds) == (16.0, "64g", 1080.0)
     assert strategy.state_disk == "8g"
     assert (session.cpus, session.memory) == (16.0, "64g")
-    developer = SimpleNamespace(evaluator=SimpleNamespace(sandbox=strategy))
-    budgets = _facts(
-        budgets={
-            "strategy_cpus": LLMResearchDeveloper.strategy_cpus.fget(developer),
-            "strategy_memory_bytes": LLMResearchDeveloper.strategy_memory_bytes.fget(developer),
-            "strategy_inference_timeout_seconds": (
-                LLMResearchDeveloper.decision_timeout_seconds.fget(developer)
-            ),
-            "strategy_state_disk_bytes": (
-                LLMResearchDeveloper.strategy_state_disk_bytes.fget(developer)
-            ),
-        }
-    )["budgets"]
+    budgets = _facts(budgets=strategy_container_budgets(strategy))["budgets"]
     assert (budgets["strategy_cpus"], budgets["strategy_memory_bytes"]) == (16.0, 64 * 1024**3)
     assert budgets["strategy_state_disk_bytes"] == 8 * 1024**3
     assert budgets["strategy_inference_timeout_seconds"] == 1080.0
