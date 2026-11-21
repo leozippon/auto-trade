@@ -21,6 +21,7 @@ from unittest.mock import patch
 
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.runtime import SandboxPaths
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.tools import (
     CommandResult,
     EditFileTool,
@@ -2140,6 +2141,8 @@ def _validate_tool(
     }
 
     class Evaluator:
+        sandbox = SandboxConfig()
+
         def evaluate(self, _request, max_days=None):
             # Under the experiment, where the worker roots results: the registration check
             # reads a row's result under its experiment (``ledger.recorded_path``).
@@ -2328,6 +2331,7 @@ class ValidateSnapshotAccountingTest(unittest.TestCase):
                 def __init__(self, inner, output: Path) -> None:
                     self.inner = inner
                     self.output = output
+                    self.sandbox = inner.sandbox
 
                 def evaluate(self, request, max_days=None):
                     main = Path(request.revision.output_path) / "main.py"
@@ -2361,6 +2365,8 @@ class ValidateSnapshotAccountingTest(unittest.TestCase):
         from autotrade.environment.tools.base import SessionInterrupt
 
         class InterruptedEvaluator:
+            sandbox = SandboxConfig()
+
             def evaluate(self, _request, max_days=None):
                 raise SessionInterrupt("the session was interrupted")
 

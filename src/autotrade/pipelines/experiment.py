@@ -542,13 +542,11 @@ class ExperimentPipeline:
             # Every revision a Validation recorded stays: it is the experiment's
             # artifact history, and the store shares the bytes between
             # revisions. Only registered artifacts no record still references go.
-            prune = getattr(self.artifacts, "prune_superseded_registered", None)
-            if callable(prune):
-                prune(
-                    keep_registered_ids=_keep_registered_artifact_ids(
-                        self.ledger.read(), extra_id=registered_id
-                    )
+            self.artifacts.prune_superseded_registered(
+                keep_registered_ids=_keep_registered_artifact_ids(
+                    self.ledger.read(), extra_id=registered_id
                 )
+            )
             return record
         except BaseException as exc:
             # BaseException, not Exception: a terminated worker unwinds this

@@ -56,7 +56,6 @@ from autotrade.environment.runtime import (
 from autotrade.environment.sandbox import (
     DockerSandbox,
     LocalSandbox,
-    SandboxConfig,
     SandboxSpec,
     experiment_container_labels,
     link_copytree,
@@ -391,13 +390,6 @@ def build_subagent_tools(
 
 
 
-def _strategy_sandbox(evaluator: object) -> SandboxConfig:
-    """The formal executor's strategy container: the evaluator's own, or the
-    executor's default for one that runs none (trusted mode, test doubles)."""
-
-    sandbox = getattr(evaluator, "sandbox", None)
-    return sandbox if isinstance(sandbox, SandboxConfig) else SandboxConfig()
-
 class LLMResearchDeveloper:
     """Adapter from the native Agent loop to ``ResearchDeveloper``."""
 
@@ -458,31 +450,31 @@ class LLMResearchDeveloper:
     def decision_timeout_seconds(self) -> float:
         """The formal executor's per-decision inference wall clock."""
 
-        return float(_strategy_sandbox(self.evaluator).timeout_seconds)
+        return float(self.evaluator.sandbox.timeout_seconds)
 
     @property
     def fit_timeout_seconds(self) -> float:
         """The formal executor's wall clock for one strategy ``fit(context)``."""
 
-        return float(_strategy_sandbox(self.evaluator).fit_timeout_seconds)
+        return float(self.evaluator.sandbox.fit_timeout_seconds)
 
     @property
     def strategy_cpus(self) -> float:
         """The formal strategy container's CPU quota, its thread variables' source."""
 
-        return float(_strategy_sandbox(self.evaluator).spec.cpus)
+        return float(self.evaluator.sandbox.spec.cpus)
 
     @property
     def strategy_memory_bytes(self) -> int:
         """The formal strategy container's memory ceiling, in bytes."""
 
-        return int(_strategy_sandbox(self.evaluator).spec.memory_bytes)
+        return int(self.evaluator.sandbox.spec.memory_bytes)
 
     @property
     def strategy_state_disk_bytes(self) -> int:
         """The disk the formal replay's state directory may hold, in bytes."""
 
-        return int(_strategy_sandbox(self.evaluator).state_disk_bytes)
+        return int(self.evaluator.sandbox.state_disk_bytes)
 
     @property
     def strategy_gpu_count(self) -> int:
@@ -495,7 +487,7 @@ class LLMResearchDeveloper:
         override may move on its own.
         """
 
-        return int(_strategy_sandbox(self.evaluator).spec.gpu_count)
+        return int(self.evaluator.sandbox.spec.gpu_count)
 
     def __call__(self, request: ResearchSessionRequest) -> ResearchSessionResult:
         root, resume, attempt = self._resolve_resume(request)

@@ -30,6 +30,7 @@ from autotrade.environment.llm import (
     token_prices,
 )
 from autotrade.environment.runtime import RunManifest
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
@@ -181,6 +182,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
 
     class FailThenPassEvaluator:
         calls = 0
+        sandbox = SandboxConfig()
 
         def evaluate(self, _request):
             self.calls += 1

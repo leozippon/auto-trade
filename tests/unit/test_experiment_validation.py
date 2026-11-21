@@ -67,13 +67,13 @@ class _WindowEvaluator:
         self.drift: dict[str, str] = {}
         self.requests: list[tuple[str, str, str | None]] = []
         # Each replay's source, card and (inference, fit) clocks as it ran.
-        self.legs: list[tuple[str, tuple[int, ...] | None, tuple[float, float] | None]] = []
-        self.sandbox = None
+        self.legs: list[tuple[str, tuple[int, ...] | None, tuple[float, float]]] = []
+        self.sandbox = SandboxConfig()
 
     def evaluate(self, request, max_days=None, start_day=None, end_day=None):
         source = (Path(request.revision.output_path) / "main.py").read_text(encoding="utf-8")
         self.requests.append((request.start, request.end, end_day))
-        clocks = None if self.sandbox is None else (self.sandbox.timeout_seconds, self.sandbox.fit_timeout_seconds)
+        clocks = (self.sandbox.timeout_seconds, self.sandbox.fit_timeout_seconds)
         self.legs.append((source, request.gpu_devices, clocks))
         for marker, error in {**self.raise_for, **(self.validation_raise_for if end_day else {})}.items():
             if marker in source:

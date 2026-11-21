@@ -58,7 +58,7 @@ from autotrade.environment.runtime import (
     RunManifest,
     utc_now_iso,
 )
-from autotrade.environment.sandbox import SandboxConfig, link_copytree
+from autotrade.environment.sandbox import link_copytree
 from autotrade.environment.step_tree import StepTree, node_handle
 from autotrade.environment.time_budget import (
     InferenceTimeBudget,
@@ -1426,7 +1426,7 @@ def _seconds_summary(seconds: Sequence[float]) -> dict[str, float]:
 
 
 @contextmanager
-def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
+def _batch_replay_timeouts(evaluator: EvaluationBackend, workers: int) -> Iterator[None]:
     """Widen both strategy deadlines to the replay width this batch creates.
 
     ``SandboxConfig.fit_timeout_seconds`` and ``timeout_seconds`` are
@@ -1453,16 +1453,11 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     mutating and restoring it here is safe: the parent runs its replaying
     tools one at a time, and a sub-agent's ``smoke_backtest`` (the only other
     replay) belongs to a role that can write, which the runner's writer
-    barrier keeps from overlapping ``validate`` or ``test``. An evaluator
-    without a strategy sandbox (trusted mode, test doubles) has no clock to
-    scale and is left alone.
+    barrier keeps from overlapping ``validate`` or ``test``.
     """
 
-    config = getattr(evaluator, "sandbox", None)
-    if not isinstance(config, SandboxConfig):
-        yield
-        return
-    evaluator.sandbox = replace(  # type: ignore[attr-defined]
+    config = evaluator.sandbox
+    evaluator.sandbox = replace(
         config,
         fit_timeout_seconds=config.fit_timeout_seconds * workers,
         timeout_seconds=config.timeout_seconds * workers,
@@ -1470,7 +1465,7 @@ def _batch_replay_timeouts(evaluator: object, workers: int) -> Iterator[None]:
     try:
         yield
     finally:
-        evaluator.sandbox = config  # type: ignore[attr-defined]
+        evaluator.sandbox = config
 
 
 def replay_legs(
@@ -1500,8 +1495,7 @@ def replay_legs(
     # when it ends, so a leg never lands on a card another running leg
     # holds while a free one waits.
     free_cards: queue.SimpleQueue[int] = queue.SimpleQueue()
-    sandbox = getattr(evaluator, "sandbox", None)
-    pinned = sandbox.spec.gpu if isinstance(sandbox, SandboxConfig) else None
+    pinned = evaluator.sandbox.spec.gpu
     devices = pinned if isinstance(pinned, tuple) else ()
     cards = leg_cards(devices, workers)
     for card in cards:

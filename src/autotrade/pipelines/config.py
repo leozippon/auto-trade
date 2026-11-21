@@ -746,6 +746,8 @@ class ArtifactStore(Protocol):
         experiment_id: str | None = None,
     ) -> RegisteredArtifact: ...
 
+    def prune_superseded_registered(self, *, keep_registered_ids: tuple[str, ...] = ()) -> None: ...
+
 
 @dataclass(frozen=True)
 class EvaluationRequest:
@@ -887,7 +889,22 @@ class EvaluationResult:
 
 
 class EvaluationBackend(Protocol):
-    def evaluate(self, request: EvaluationRequest) -> EvaluationResult: ...
+    """A replay backend (``LocalDailyEvaluationBackend``, ``PITDailyEvaluationBackend``).
+
+    ``sandbox`` is the strategy container every replay runs in. ``max_days``,
+    ``start_day`` and ``end_day`` truncate a replay (``calendar.replay_window``).
+    """
+
+    sandbox: SandboxConfig
+
+    def evaluate(
+        self,
+        request: EvaluationRequest,
+        *,
+        max_days: int | None = None,
+        start_day: str | None = None,
+        end_day: str | None = None,
+    ) -> EvaluationResult: ...
 
 
 @dataclass(frozen=True)

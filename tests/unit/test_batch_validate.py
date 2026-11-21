@@ -249,8 +249,8 @@ class _Evaluator:
         # beyond the fixture's (a benchmark excess, a cost block).
         self.summary_extra: dict[str, object] = {}
 
-    def evaluate(self, request, max_days=None):
-        del max_days
+    def evaluate(self, request, max_days=None, start_day=None, end_day=None):
+        del max_days, start_day, end_day
         source = (Path(request.revision.output_path) / "main.py").read_text(
             encoding="utf-8"
         )

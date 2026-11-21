@@ -23,6 +23,7 @@ from autotrade.environment.artifacts import (
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
 from autotrade.pipelines.config import ExperimentConfig
@@ -133,6 +134,8 @@ class RecordFailedAttemptsTest(unittest.TestCase):
         raised = error or RuntimeError(f"validation blew up at {HOST_RESULT_PATH}")
 
         class ExplodingEvaluator:
+            sandbox = SandboxConfig()
+
             def evaluate(self, _request):
                 raise raised
 
