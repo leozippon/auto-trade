@@ -38,7 +38,6 @@ def test_inject_message_js_contract_via_node() -> None:
     script = APP_JS.read_text(encoding="utf-8")
     harness = "\n".join(
         [
-            _const_block(script, "LIVE_RUN_STATES"),
             _const_block(script, "INJECT_MESSAGE_MAX_CHARS"),
             _const_block(script, "TERMINAL_INJECT_STATES"),
             _fn(script, "injectMessageEnabled"),
@@ -47,9 +46,12 @@ def test_inject_message_js_contract_via_node() -> None:
             _fn(script, "validateInjectMessageText"),
             _fn(script, "inboxQueueSummary"),
             """
+// `injectable` is the server's (registry.experiment_state): a live worker in
+// an Agent session. The page adds which session the message is for.
 const live = {
   state: "running_session",
   worker_alive: true,
+  injectable: true,
   status: { session_key: "s1" },
 };
 const session = { key: "s1", kind: "research" };
@@ -60,13 +62,14 @@ function check(name, got, want) {
   if (a !== b) cases.push({ name, got, want });
 }
 check("live research session", injectMessageEnabled(live, session), true);
-check("paused", injectMessageEnabled({ ...live, state: "paused" }, session), false);
-check("paused reason", injectMessageDisableReason({ ...live, state: "paused" }, session),
+const paused = { ...live, state: "paused", injectable: false };
+check("paused", injectMessageEnabled(paused, session), false);
+check("paused reason", injectMessageDisableReason(paused, session),
   "实验已暂停。请先恢复运行后再发送。");
 for (const state of ["completed", "stopped", "failed", "interrupted", "terminated"]) {
-  check("terminal " + state, injectMessageEnabled({ ...live, state }, session), false);
+  check("terminal " + state, injectMessageEnabled({ ...live, state, injectable: false }, session), false);
   check("terminal reason " + state,
-    injectMessageDisableReason({ ...live, state }, session),
+    injectMessageDisableReason({ ...live, state, injectable: false }, session),
     "会话已结束，无法发送。");
 }
 check("forward replay", injectMessageEnabled({
@@ -75,7 +78,7 @@ check("forward replay", injectMessageEnabled({
 check("other session", injectMessageEnabled(live, {
   key: "s2", kind: "research",
 }), false);
-check("dead worker", injectMessageEnabled({ ...live, worker_alive: false }, session), false);
+check("dead worker", injectMessageEnabled({ ...live, worker_alive: false, injectable: false }, session), false);
 check("no session_key", injectMessageEnabled({
   ...live, status: {},
 }, session), false);

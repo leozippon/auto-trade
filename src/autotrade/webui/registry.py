@@ -67,6 +67,7 @@ from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
     CONTROL_NAME,
     HITL_DIR_NAME,
+    LIVE_RUN_STATES,
     PARAMS_NAME,
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
@@ -116,6 +117,15 @@ ACTIVE_STATES = (
 # Manager-written stub state between spawn and the worker's first status write
 # (interpreter start + imports take seconds). Stale = the worker never came up.
 LAUNCH_GRACE_SECONDS = 180.0
+# The states a resume relaunches the worker from, re-deriving its position
+# from the ledger (``ExperimentManager.control``).
+RESUMABLE_STATES = frozenset({
+    ExperimentState.STOPPED,
+    ExperimentState.FAILED,
+    ExperimentState.INTERRUPTED,
+    ExperimentState.TERMINATED,
+    ExperimentState.CREATED,
+})
 # Operator-only keys. The read model never echoes any of them back out.
 _PRIVATE_PARAMS = {
     "raw_dir",
@@ -214,36 +224,44 @@ def experiment_state(
     schema_version) reads as "unreadable" with a one-line error: never counted
     as running, still listed, still deletable. Only this read-model combiner is
     total — control-plane mutation paths keep using the strict ``read_status``
-    and fail fast on the same file."""
+    and fail fast on the same file.
+
+    It also states the two rules the console and the manager act on:
+    ``resumable`` (a resume relaunches the worker) and ``injectable`` (a live
+    worker runs an Agent session a message can be queued for)."""
     path = Path(experiment_dir) / HITL_DIR_NAME / STATUS_NAME
+    result: dict[str, object]
     try:
         status = read_status(path)
     except (OSError, ValueError) as exc:
-        return {
+        result = {
             "kind": "hitl",
             "state": ExperimentState.UNREADABLE,
             "worker_alive": False,
             "error": f"{type(exc).__name__}: {exc}",
         }
-    log_ref = worker_log_for(experiment_dir, repo_root)
-    if not status:
-        result: dict[str, object] = {
-            "kind": "hitl",
-            "state": ExperimentState.CREATED,
-            "worker_alive": False,
-            "status": {},
-        }
     else:
-        alive = status_pid_alive(status)
-        state = str(status.get("state") or "unknown")
-        if state == ExperimentState.LAUNCHING and not alive:
-            if _age_seconds(status.get("launched_at")) > LAUNCH_GRACE_SECONDS:
+        if not status:
+            result = {
+                "kind": "hitl",
+                "state": ExperimentState.CREATED,
+                "worker_alive": False,
+                "status": {},
+            }
+        else:
+            alive = status_pid_alive(status)
+            state = str(status.get("state") or "unknown")
+            if state == ExperimentState.LAUNCHING and not alive:
+                if _age_seconds(status.get("launched_at")) > LAUNCH_GRACE_SECONDS:
+                    state = ExperimentState.INTERRUPTED
+            elif state in ACTIVE_STATES and not alive:
                 state = ExperimentState.INTERRUPTED
-        elif state in ACTIVE_STATES and not alive:
-            state = ExperimentState.INTERRUPTED
-        result = {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
-    if log_ref:
-        result["worker_log"] = log_ref
+            result = {"kind": "hitl", "state": state, "worker_alive": alive, "status": status}
+        log_ref = worker_log_for(experiment_dir, repo_root)
+        if log_ref:
+            result["worker_log"] = log_ref
+    result["resumable"] = result["state"] in RESUMABLE_STATES
+    result["injectable"] = result["worker_alive"] is True and result["state"] in LIVE_RUN_STATES
     return result
 
 

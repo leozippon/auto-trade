@@ -166,20 +166,9 @@ const PREP_ENVIRONMENT_STAGES = new Set([
   "readout",
   "session_retry",
 ]);
-// Dead-worker states the backend can relaunch from a ledger resume; mirrors
-// manager.py _TERMINAL_RESUMABLE_STATES. Keep in sync or the resume button
-// silently disappears for a resumable experiment (e.g. "terminated").
-const RESUMABLE_STATES = [
-  "stopped",
-  "failed",
-  "interrupted",
-  "terminated",
-  "created",
-];
-// Worker states that carry a live Agent session; mirrors
-// hitl_state.LIVE_RUN_STATES. Keep in sync or the console offers message
-// injection on a session the backend will refuse.
-const LIVE_RUN_STATES = new Set(["running_session"]);
+// Whether a resume relaunches the worker, and whether a live worker runs an
+// Agent session, come from the server with every experiment state
+// (`resumable`, `injectable`: registry.experiment_state).
 const INJECT_MESSAGE_MAX_CHARS = 8192;
 const INJECT_MESSAGE_QUEUED_NOTE = "已排队，将在 Agent 下一安全点生效";
 const TERMINAL_INJECT_STATES = new Set([
@@ -382,11 +371,7 @@ function sessionDurationNode(detail, session, prefix = "", className = "") {
     status.session_key === session.key
       ? Date.parse(status.session_started_at || "")
       : NaN;
-  const isLive =
-    !isFixed &&
-    detail.worker_alive &&
-    LIVE_RUN_STATES.has(status.state) &&
-    Number.isFinite(startedAt);
+  const isLive = !isFixed && detail.injectable && Number.isFinite(startedAt);
   const update = () => {
     const seconds = isFixed
       ? fixed
@@ -2248,7 +2233,7 @@ function experimentCard(item, { archived = false } = {}) {
     readable ? cardEquityNode(item) : null,
   );
   const actions = el("div", { class: "actions" });
-  if (!archived && item.kind === "hitl" && RESUMABLE_STATES.includes(item.state)) {
+  if (!archived && item.kind === "hitl" && item.resumable) {
     actions.append(
       el(
         "button",
@@ -3627,7 +3612,6 @@ function controlPanel(detail) {
 function controlBar(detail, ...lead) {
   const id = detail.experiment_id;
   const control = detail.control || { request: null };
-  const state = detail.state;
   const alive = detail.worker_alive;
   // The console never starts an archived experiment again (manager.start_worker), so
   // it offers neither 重启 nor 恢复运行.
@@ -3788,7 +3772,7 @@ function controlBar(detail, ...lead) {
           "重启",
         ),
       );
-  } else if (!archived && RESUMABLE_STATES.includes(state)) {
+  } else if (!archived && detail.resumable) {
     actions.append(
       el(
         "button",
@@ -3848,7 +3832,7 @@ function sessionDetailPanel(detail, selectedKey) {
   }
   const status = detail.status || {};
   const isCurrent = status.session_key === session.key && detail.worker_alive;
-  const running = isCurrent && LIVE_RUN_STATES.has(detail.state);
+  const running = isCurrent && detail.injectable;
   // The search so far opens the pane: the Step tree is what the research
   // sessions have built, the live Trace below it is what is happening in the
   // current one, and the reader's own message box closes the column.
@@ -4709,12 +4693,7 @@ function injectMessageEnabled(detail, session) {
   const kind = session && session.kind;
   const sessionKey = session && session.key;
   return Boolean(
-    kind === "research" &&
-      LIVE_RUN_STATES.has(detail && detail.state) &&
-      sessionKey &&
-      status.session_key === sessionKey &&
-      detail &&
-      detail.worker_alive,
+    kind === "research" && detail && detail.injectable && sessionKey && status.session_key === sessionKey,
   );
 }
 

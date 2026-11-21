@@ -40,7 +40,6 @@ from autotrade.pipelines.experiment_params import (
 from autotrade.pipelines.hitl_state import (
     CONTROL_NAME,
     HITL_DIR_NAME,
-    LIVE_RUN_STATES,
     PARAMS_NAME,
     STATUS_NAME,
     WEB_CREATE_DEFAULTS,
@@ -94,13 +93,6 @@ EXPERIMENT_DISK_MARGIN_BYTES = 3 * 1024**3
 _TERMINATE_GRACE_SECONDS = 10.0
 _RESTART_GRACE_SECONDS = 30.0
 _SIGKILL_EXIT_SECONDS = 5.0
-_TERMINAL_RESUMABLE_STATES = (
-    ExperimentState.STOPPED,
-    ExperimentState.FAILED,
-    ExperimentState.INTERRUPTED,
-    ExperimentState.TERMINATED,
-    ExperimentState.CREATED,
-)
 _ACTIONS = {
     "pause",
     "resume",
@@ -762,12 +754,7 @@ class ExperimentManager:
                 }
             if action == "resume":
                 state = experiment_state(directory)
-                resumable = state.get("state") in _TERMINAL_RESUMABLE_STATES
-                if (
-                    not state.get("worker_alive")
-                    and resumable
-                    and self.worker_script.is_file()
-                ):
+                if not state["worker_alive"] and state["resumable"] and self.worker_script.is_file():
                     return {**response, **self.start_worker(experiment_id)}
             return response
 
@@ -794,9 +781,8 @@ class ExperimentManager:
             raise ManagerError("inject_message requires a live worker")
         status = state.get("status")
         status_map = status if isinstance(status, Mapping) else {}
-        run_state = str(status_map.get("state") or "")
         current = str(status_map.get("session_key") or "")
-        if run_state not in LIVE_RUN_STATES or not current:
+        if not state["injectable"] or not current:
             raise ManagerError(
                 "cannot inject_message into a finished or failed session"
             )

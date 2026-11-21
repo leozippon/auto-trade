@@ -1266,18 +1266,18 @@ const document = {
 };
 """,
             *(f"const {name} = () => null;" for name in context),
-            _const_block(script, "RESUMABLE_STATES"),
             *(_fn(script, name) for name in ("el", "controlBar", "experimentCard", "experimentGrid")),
             """
 const buttons = (node) => node.nodeType !== 1 ? [] : node.tag === "button"
   ? [node.children.map((child) => child.text || "").join("")]
   : node.children.flatMap(buttons);
 const archived = { archived_at: "2026-10-24T00:00:00+00:00", reason: "not resumed" };
+// `resumable` and `injectable` as registry.experiment_state reads these states.
 const dead = {
   experiment_id: "experiment", kind: "hitl", state: "interrupted", worker_alive: false,
-  control: { request: null },
+  resumable: true, injectable: false, control: { request: null },
 };
-const live = { ...dead, state: "running_session", worker_alive: true };
+const live = { ...dead, state: "running_session", worker_alive: true, resumable: false, injectable: true };
 console.log(JSON.stringify({
   dead: buttons(controlBar(dead)),
   deadArchived: buttons(controlBar({ ...dead, archived })),

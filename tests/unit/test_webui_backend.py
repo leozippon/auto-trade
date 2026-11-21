@@ -1989,7 +1989,6 @@ def test_a_worker_that_dies_during_boot_reads_as_interrupted(tmp_path: Path) -> 
     no resume button on a worker that is gone. The state is read back from the
     writer rather than spelled a second time here, so the two cannot drift.
     """
-    from autotrade.webui.manager import _TERMINAL_RESUMABLE_STATES
     from autotrade.webui.registry import ACTIVE_STATES, experiment_state
 
     directory = tmp_path / "experiments/demo"
@@ -2007,7 +2006,7 @@ def test_a_worker_that_dies_during_boot_reads_as_interrupted(tmp_path: Path) -> 
     state = experiment_state(directory)
     assert state["state"] == "interrupted"
     # …and the console offers the researcher a way out of it.
-    assert state["state"] in _TERMINAL_RESUMABLE_STATES
+    assert state["resumable"] is True
 
 
 def test_a_worker_that_dies_while_preparing_reads_as_interrupted(tmp_path: Path) -> None:
@@ -2016,7 +2015,6 @@ def test_a_worker_that_dies_while_preparing_reads_as_interrupted(tmp_path: Path)
     pipeline. A worker killed there (OOM, reboot) must read as interrupted
     and be resumable like any other dead worker, not keep a raw
     ``preparing`` badge whose resume never respawns it."""
-    from autotrade.webui.manager import _TERMINAL_RESUMABLE_STATES
     from autotrade.webui.registry import experiment_state
 
     directory = tmp_path / "experiments/demo"
@@ -2034,7 +2032,37 @@ def test_a_worker_that_dies_while_preparing_reads_as_interrupted(tmp_path: Path)
     )
     state = experiment_state(directory)
     assert state["state"] == "interrupted"
-    assert state["state"] in _TERMINAL_RESUMABLE_STATES
+    assert state["resumable"] is True
+
+
+
+def test_the_state_says_whether_a_resume_relaunches_and_a_message_can_be_queued(tmp_path: Path) -> None:
+    """The two rules the console's buttons follow are the server's: a live
+    worker in an Agent session takes a message, a dead worker in a stopped,
+    failed, interrupted, terminated or never-started experiment resumes."""
+    from autotrade.webui.registry import experiment_state
+
+    directory = tmp_path / "experiments/demo"
+    (directory / "hitl").mkdir(parents=True)
+    assert experiment_state(directory)["resumable"] is True  # created, never spawned
+    live = {"schema_version": 1, "pid": os.getpid(), "pid_start_ticks": proc_start_ticks(os.getpid())}
+    dead = {"schema_version": 1, "pid": 999_999_999, "pid_start_ticks": 1}
+    for worker, state, resumable, injectable in (
+        (live, "running_session", False, True),
+        (live, "paused", False, False),
+        (live, "preparing", False, False),
+        (dead, "running_session", True, False),  # read as interrupted
+        (dead, "completed", False, False),
+        (dead, "stopped", True, False),
+        (dead, "failed", True, False),
+        (dead, "terminated", True, False),
+    ):
+        write_json_atomic(directory / "hitl/status.json", {**worker, "state": state})
+        read = experiment_state(directory)
+        assert (read["resumable"], read["injectable"]) == (resumable, injectable), state
+    (directory / "hitl/status.json").write_text("{broken", encoding="utf-8")
+    read = experiment_state(directory)
+    assert (read["state"], read["resumable"], read["injectable"]) == ("unreadable", False, False)
 
 
 
