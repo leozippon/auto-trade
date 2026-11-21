@@ -338,7 +338,8 @@ class CronJobTest(LakeTestCase):
     def test_mutated_not_ready_from_unexpected_operation_is_an_error(self):
         # Exit 76 only carries the commit-and-retry contract for the download
         # path that enforces it; anywhere else it is an ordinary failure,
-        # which commits what it wrote and records an error.
+        # which commits what it wrote, records an error and exits 1: cron
+        # reports failures by exit status and keeps the retry exits quiet.
         self._write_trade_cal("20260807", is_open="1")
         config_path = self._write_event_flow_schedule("tier_job", operation="download_tier")
         generation = self.raw_dir / ".raw_generation.json"
@@ -352,10 +353,10 @@ class CronJobTest(LakeTestCase):
             common.MUTATED_NOT_READY_RETRY_EXIT_CODE,
             jobs_root,
         )
-        self.assertEqual(result, common.MUTATED_NOT_READY_RETRY_EXIT_CODE)
+        self.assertEqual(result, 1)
         self.assertEqual(json.loads(generation.read_text(encoding="utf-8"))["state"], "committed")
         record = json.loads((jobs_root / "tier_job.json").read_text(encoding="utf-8"))
-        self.assertEqual(record["status"], "error")
+        self.assertEqual((record["status"], record["returncode"]), ("error", 1))
 
     def test_lost_official_access_leaves_the_lake_committed_and_the_job_failed(self):
         # Losing TUSHARE_TOKEN_TMP must stop only the jobs that need it: such a

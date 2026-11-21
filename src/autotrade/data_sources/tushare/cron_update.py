@@ -869,6 +869,11 @@ def _run(args: argparse.Namespace) -> int:
         status = "ok" if returncode == 0 else (
             "not_ready" if no_mutation_retry or mutated_not_ready else "error"
         )
+        if status == "error" and returncode in (NO_MUTATION_RETRY_EXIT_CODE, MUTATED_NOT_READY_RETRY_EXIT_CODE):
+            # A retry exit the job's operation does not honour is an error, and
+            # the run's own exit must not pass for a planned retry: cron is
+            # told of a failure by the exit (ops/cron/logged.sh).
+            returncode = 1
         detail = {"error": summarize_failure_from_log(log_path, returncode)} if status == "error" else {}
         record = record_job_state(ctx.job_name, job_state_record(
             ctx, payload, log_path, status, returncode, previous=job_state, **detail,
