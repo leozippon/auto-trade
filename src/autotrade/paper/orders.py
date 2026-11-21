@@ -21,7 +21,7 @@ from collections.abc import Iterable, Mapping
 from datetime import date, datetime
 from pathlib import Path
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import read_json_object, write_text_atomic
 from autotrade.common.time import CN_TZ
 from autotrade.environment.strategy import MARKET_CLOSE, MARKET_OPEN
 
@@ -412,9 +412,7 @@ def write_orders(orders_dir: str | Path, trade_date: str, text: str) -> Path:
     directory.mkdir(parents=True, exist_ok=True)
     target = directory / orders_file_name(trade_date)
     for path in (target, directory / LATEST_NAME):
-        staging = path.with_name(f".{path.name}.tmp")
-        staging.write_text(text, encoding="utf-8")
-        staging.replace(path)
+        write_text_atomic(path, text)
     return target
 
 

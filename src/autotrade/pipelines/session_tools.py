@@ -25,6 +25,7 @@ from autotrade.common.records import (
     read_json_object,
     redact_host_paths,
     write_json_atomic,
+    write_text_atomic,
 )
 from autotrade.environment.artifacts import (
     READONLY_FILES,
@@ -555,12 +556,7 @@ def write_active_daily(result_ref: str) -> Path:
     result_dir = Path(result_ref).parent
     analysis = result_analysis(result_ref)
     target = result_dir / PurePosixPath(VALIDATION_DAILY_ATTACHMENT).name
-    staging = target.with_name(f".{target.name}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        active_daily(analysis).to_csv(staging, index=False, float_format="%.10g")
-        staging.replace(target)
-    finally:
-        staging.unlink(missing_ok=True)
+    write_text_atomic(target, active_daily(analysis).to_csv(index=False, float_format="%.10g"))
     return target
 
 

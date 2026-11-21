@@ -18,14 +18,16 @@ comparable.
 
 from __future__ import annotations
 
-import os
 import shutil
-import uuid
 from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    read_json_object,
+    write_json_atomic,
+    write_text_atomic,
+)
 from autotrade.environment.artifacts import copy_artifact, copy_model_artifacts
 from autotrade.environment.runtime import chmod_tree, sanitize_for_log, utc_now_iso
 
@@ -267,16 +269,7 @@ class StepTree:
         # leave it referencing node snapshots that were never copied back.
         write_json_atomic(self.tree_path, safe_data)
         # Always refresh the human/Agent-readable rendering alongside the JSON.
-        self._write_text_atomic(self.root / "tree.txt", self.render_ascii() + "\n")
-
-    @staticmethod
-    def _write_text_atomic(path: Path, content: str) -> None:
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-        try:
-            tmp.write_text(content, encoding="utf-8")
-            tmp.replace(path)
-        finally:
-            tmp.unlink(missing_ok=True)
+        write_text_atomic(self.root / "tree.txt", self.render_ascii() + "\n")
 
     # ---- read views ----
 

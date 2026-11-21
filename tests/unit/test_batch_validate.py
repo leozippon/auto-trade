@@ -1722,12 +1722,16 @@ class DailySeriesTest(unittest.TestCase):
             session = _Session(Path(tmp))
             session.candidate("a", _strategy("1"))
 
-            def disk_full(frame: pd.DataFrame, path: Path, **_kwargs: object) -> None:
-                Path(path).write_text("trade_date,strategy_return\n2021", encoding="utf-8")
+            write_text = Path.write_text
+
+            def disk_full(path: Path, text: str, *args: object, **kwargs: object) -> int:
+                if "active_daily" not in path.name:
+                    return write_text(path, text, *args, **kwargs)
+                write_text(path, text[:30], *args, **kwargs)
                 raise OSError("No space left on device")
 
             with (
-                patch.object(pd.DataFrame, "to_csv", disk_full),
+                patch.object(Path, "write_text", disk_full),
                 self.assertRaises(OSError),
             ):
                 session.call("a", span="Y1")

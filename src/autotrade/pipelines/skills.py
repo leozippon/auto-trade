@@ -21,7 +21,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from autotrade.common.records import read_json_object, write_json_atomic
+from autotrade.common.records import (
+    read_json_object,
+    write_json_atomic,
+    write_text_atomic,
+)
 from autotrade.environment.runtime import chmod_tree, utc_now_iso
 from autotrade.environment.tools.base import ToolError, ToolResult, ToolSpec
 from autotrade.environment.tools.skills_policy import (
@@ -896,15 +900,7 @@ class WriteSkillTool:
                 raise ValueError(f"skills tree exceeds {MAX_SKILLS_FILES} files")
             if resulting_bytes > MAX_SKILLS_BYTES:
                 raise ValueError(f"skills tree exceeds {MAX_SKILLS_BYTES} bytes")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            temporary = target.with_name(
-                f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
-            )
-            try:
-                temporary.write_bytes(payload)
-                temporary.replace(target)
-            finally:
-                temporary.unlink(missing_ok=True)
+            write_text_atomic(target, content)
             after = validate_skills_tree(self.root, require_writable=True)
         except ValueError as exc:
             raise ToolError(str(exc), error_type="skill_policy") from exc

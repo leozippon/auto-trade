@@ -1,6 +1,7 @@
 """JSON record files, host-path redaction, and the strict dataclass record pair.
 
-One reader and one atomic writer serve every JSON record file the host keeps;
+One reader and one atomic writer serve every JSON record file the host keeps,
+and the JSON writer's text writer every other text file published by rename;
 a module that owes its callers another error type translates the reader's
 ``ValueError`` at its own boundary. Redaction scrubs host paths out of text
 that leaves the host process. A frozen dataclass whose fields are JSON scalars,
@@ -77,6 +78,29 @@ def as_mapping(value: object) -> Mapping[str, object]:
     return value if isinstance(value, Mapping) else {}
 
 
+def write_text_atomic(path: str | Path, text: str, *, private: bool = False) -> None:
+    """Publish one UTF-8 text file atomically: a reader finds the old file or
+    the new one, never part of either.
+
+    The text goes to a temp name beside the target and is renamed over it;
+    nothing is fsynced. ``private`` makes the file owner-only and creates
+    missing parents owner-only.
+    """
+
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if private else 0o777)
+    # A unique temp name: concurrent writers must never share one, or
+    # interleaved chunks are replaced into place.
+    temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
+    try:
+        temporary.write_text(text, encoding="utf-8")
+        if private:
+            temporary.chmod(0o600)
+        temporary.replace(target)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def write_json_atomic(
     path: str | Path,
     payload: object,
@@ -85,7 +109,7 @@ def write_json_atomic(
     private: bool = False,
     default: Callable[[object], object] | None = str,
 ) -> None:
-    """Publish one JSON file atomically.
+    """Publish one JSON file atomically (:func:`write_text_atomic`).
 
     ``sort_keys`` keeps a record diffable; pass False for a file whose builder
     orders keys deliberately (an index the Agent reads in chunks needs its
@@ -96,29 +120,15 @@ def write_json_atomic(
     record it is an upstream bug.
     """
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True, mode=0o700 if private else 0o777)
-    # A unique temp name: concurrent writers must never share one, or
-    # interleaved chunks are replaced into place.
-    temporary = target.with_name(f".{target.name}.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp")
-    try:
-        temporary.write_text(
-            json.dumps(
-                payload,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=sort_keys,
-                default=default,
-                allow_nan=False,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-        if private:
-            temporary.chmod(0o600)
-        temporary.replace(target)
-    finally:
-        temporary.unlink(missing_ok=True)
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=sort_keys,
+        default=default,
+        allow_nan=False,
+    )
+    write_text_atomic(path, text + "\n", private=private)
 
 
 # Host-path redaction. A match has to look like a path: a top-level directory
@@ -216,4 +226,5 @@ __all__ = [
     "read_json_object_or_empty",
     "redact_host_paths",
     "write_json_atomic",
+    "write_text_atomic",
 ]
