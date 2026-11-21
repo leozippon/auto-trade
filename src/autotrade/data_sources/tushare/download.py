@@ -274,7 +274,7 @@ def download_bak_basic(
 
     land(
         partitions(raw_dir, BAK_BASIC_SPEC, [d for d in trade_dates if d >= start_date]), pull,
-        skip=lambda part: part.path.exists() and not force,
+        skip=lambda part: should_skip_existing_partition(part.path, force=force),
         revision_ledger=revision_ledger, name="bak_basic", every=250,
     )
 
@@ -362,12 +362,13 @@ def download_index_member_history(
 ) -> None:
     """SW2014 L1 membership via the legacy index_member API. The old taxonomy
     closed on 20211213 (every retired index's members carry that out_date), so
-    the history is frozen and only re-downloads under an explicit force."""
+    the history is frozen and only re-downloads under an explicit force or
+    where a partition lacks its commit identity."""
     fields = "index_code,con_code,in_date,out_date,is_new"
     l1_codes = classify_sw2014.loc[classify_sw2014["level"].astype(str) == "L1", "index_code"].dropna().astype(str).tolist()
     for code in sorted(l1_codes):
         path = raw_dir / "index_member" / f"l1_code={code}.parquet"
-        if path.exists() and not force:
+        if should_skip_existing_partition(path, force=force):
             continue
         params = {"index_code": code}
         result, _pages = query_paged(client, "index_member", params, fields, 3000)

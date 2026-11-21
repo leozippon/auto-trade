@@ -2233,63 +2233,84 @@ def _codes(count: int) -> list[str]:
 # what that loop returns).
 UNCOMMITTED_PARTITIONS = [
     pytest.param(
-        specs.EVENT_FLOW_SPECS["margin_secs"], "trade_date=20260601",
+        "margin_secs", "trade_date=20260601",
         {"trade_date": ["20260601"] * 3, "ts_code": ["600000.SH", "000001.SZ", "830000.BJ"], "exchange": ["SSE", "SZSE", "BSE"]},
-        lambda client, raw_dir, spec: download.download_event_trade_date_dataset(client, raw_dir, spec, ["20260601"], False, None),
+        lambda client, raw_dir: download.download_event_trade_date_dataset(
+            client, raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
+        ),
         (1, 0), id="event_trade_date",
     ),
     pytest.param(
-        specs.DAILY_SPECS["daily"], "trade_date=20200102", {"trade_date": ["20200102"], "ts_code": ["000001.SZ"]},
-        lambda client, raw_dir, spec: download.download_trade_date_dataset(client, raw_dir, spec, ["20200102"], False, 5000, None),
+        "daily", "trade_date=20200102", {"trade_date": ["20200102"], "ts_code": ["000001.SZ"]},
+        lambda client, raw_dir: download.download_trade_date_dataset(client, raw_dir, specs.DAILY_SPECS["daily"], ["20200102"], False, 5000, None),
         0, id="daily",
     ),
     pytest.param(
-        specs.BOARD_TRADING_SPECS["limit_list_d"], "trade_date=20200102", {"trade_date": ["20200102"], "ts_code": ["000001.SZ"], "limit": ["U"]},
-        lambda client, raw_dir, spec: download.download_board_trade_date_dataset(client, raw_dir, spec, ["20200102"], False, 5000, None),
+        "limit_list_d", "trade_date=20200102", {"trade_date": ["20200102"], "ts_code": ["000001.SZ"], "limit": ["U"]},
+        lambda client, raw_dir: download.download_board_trade_date_dataset(
+            client, raw_dir, specs.BOARD_TRADING_SPECS["limit_list_d"], ["20200102"], False, 5000, None
+        ),
         None, id="board_trade_date",
     ),
     pytest.param(
-        specs.TEXT_SPECS["cctv_news"], "date=20200102", {"date": ["20200102"], "title": ["t"], "content": ["c"]},
-        lambda client, raw_dir, spec: download.download_text_day(client, raw_dir, spec, ["20200102"], False),
+        "cctv_news", "date=20200102", {"date": ["20200102"], "title": ["t"], "content": ["c"]},
+        lambda client, raw_dir: download.download_text_day(client, raw_dir, specs.TEXT_SPECS["cctv_news"], ["20200102"], False),
         None, id="text_day",
     ),
     pytest.param(
-        specs.MACRO_SPECS["sw_daily"], "trade_date=20200102",
+        "sw_daily", "trade_date=20200102",
         {name: ["801010.SI" if name == "ts_code" else "20200102" if name == "trade_date" else "1"] for name in specs.MACRO_SPECS["sw_daily"].fields.split(",")},
-        lambda client, raw_dir, spec: download.download_macro_trade_date(client, raw_dir, spec, "20200102", "20200102", False, 5000),
+        lambda client, raw_dir: download.download_macro_trade_date(client, raw_dir, specs.MACRO_SPECS["sw_daily"], "20200102", "20200102", False, 5000),
         None, id="macro_trade_date",
     ),
     pytest.param(
-        specs.FUNDAMENTAL_SPECS["income_vip"], "period=20200331",
+        "income_vip", "period=20200331",
         dict(zip(specs.FUNDAMENTAL_SPECS["income_vip"].key_columns, [["000001.SZ"], ["20200430"], ["20200430"], ["20200331"], ["1"], ["1"], ["1"]], strict=True)),
-        lambda client, raw_dir, spec: download.download_fundamental_period_dataset(client, raw_dir, spec, ["20200331"], False, 5000),
+        lambda client, raw_dir: download.download_fundamental_period_dataset(
+            client, raw_dir, specs.FUNDAMENTAL_SPECS["income_vip"], ["20200331"], False, 5000
+        ),
         None, id="fundamental_period",
+    ),
+    # The reference tier's two loops that no scheduled run rewrites whole:
+    # bak_basic before the update window and the frozen SW2014 membership.
+    pytest.param(
+        "bak_basic", "trade_date=20200102", {"trade_date": ["20200102"], "ts_code": ["000001.SZ"], "name": ["x"]},
+        lambda client, raw_dir: download.download_bak_basic(client, raw_dir, ["20200102"], "20200102", False, None),
+        None, id="bak_basic",
+    ),
+    pytest.param(
+        "index_member", "l1_code=801010.SI",
+        {"index_code": ["801010.SI"], "con_code": ["000001.SZ"], "in_date": ["20140101"], "out_date": ["20211213"], "is_new": ["N"]},
+        lambda client, raw_dir: download.download_index_member_history(
+            client, raw_dir, pd.DataFrame([{"index_code": "801010.SI", "level": "L1"}]), False, ledger=None
+        ),
+        None, id="index_member",
     ),
 ]
 
 
-@pytest.mark.parametrize(("spec", "partition", "held", "pull", "returned"), UNCOMMITTED_PARTITIONS)
-def test_a_partition_without_its_commit_identity_is_pulled_again(tmp_path, spec, partition, held, pull, returned):
+@pytest.mark.parametrize(("api_name", "partition", "held", "pull", "returned"), UNCOMMITTED_PARTITIONS)
+def test_a_partition_without_its_commit_identity_is_pulled_again(tmp_path, api_name, partition, held, pull, returned):
     # An interrupted write leaves a parquet without (or with a stale) sidecar;
     # treating it as committed froze such partitions forever. Every landing
     # loop pulls it again (DATA_DOCUMENTATION §2.3), and the vendor's
     # identical answer commits the pair.
     raw_dir = tmp_path / "raw"
     write_trade_cal(raw_dir)
-    path = raw_dir / spec.api_name / f"{partition}.parquet"
+    path = raw_dir / api_name / f"{partition}.parquet"
     path.parent.mkdir(parents=True)
     pd.DataFrame(held).to_parquet(path, index=False)  # NO sidecar
     assert not tushare_io.committed_partition_intact(path)
     assert not download.should_skip_existing_partition(path, force=False)
-    client = AnswerClient(spec.api_name, pd.DataFrame(held))
+    client = AnswerClient(api_name, pd.DataFrame(held))
 
     def run():
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
-            return pull(client, raw_dir, spec)
+            return pull(client, raw_dir)
 
     assert run() == returned
-    assert [api for api, _ in client.calls] == [spec.api_name]
+    assert [api for api, _ in client.calls] == [api_name]
     assert tushare_io.committed_partition_intact(path)
     # Once the pair is intact, the same covering run skips it.
     run()
@@ -2301,7 +2322,7 @@ def test_a_partition_without_its_commit_identity_is_pulled_again(tmp_path, spec,
     sidecar.write_text(json.dumps(meta), encoding="utf-8")
     assert not tushare_io.committed_partition_intact(path)
     run()
-    assert [api for api, _ in client.calls] == [spec.api_name]
+    assert [api for api, _ in client.calls] == [api_name]
     assert tushare_io.committed_partition_intact(path)
     # So is a parquet replaced under its sidecar: its footer no longer matches.
     pd.read_parquet(path).iloc[:2].to_parquet(path, index=False)
