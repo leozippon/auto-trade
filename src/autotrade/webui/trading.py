@@ -73,7 +73,15 @@ from autotrade.paper.orders import (
     window_text,
 )
 from autotrade.paper.pit import newest_replay_slot
-from autotrade.paper.storage import read_jsonl
+from autotrade.paper.storage import (
+    CORPORATE_ACTIONS_PREFIX,
+    EQUITY_JOURNAL_NAME,
+    EXECUTIONS_PREFIX,
+    ORDERS_PREFIX,
+    journal_dates,
+    journal_name,
+    read_jsonl,
+)
 from autotrade.paper.verdict import VERDICT_NAME
 
 from .public_identity import omit_private_paths
@@ -87,7 +95,6 @@ STALE_SNAPSHOT_ALERT_SECONDS = 4 * 24 * 3600.0
 # Annualised return, Sharpe and maximum drawdown are served from this many
 # settled days; a shorter book reads "—" with its day count instead.
 MIN_STATISTICS_DAYS = 20
-EQUITY_JOURNAL_NAME = "equity_daily.jsonl"
 
 
 def env_dir(repo_root: Path, env: str) -> Path:
@@ -109,10 +116,6 @@ def book_dir(repo_root: Path, book: str, env: str = "paper") -> Path:
 
 def _valid_date(value: str) -> bool:
     return len(value) == 8 and value.isdigit()
-
-
-def _dates(root: Path, prefix: str) -> list[str]:
-    return sorted(path.stem.removeprefix(prefix) for path in root.glob(f"{prefix}[0-9]*.jsonl") if _valid_date(path.stem.removeprefix(prefix)))
 
 
 def _text(value: object) -> str | None:
@@ -452,7 +455,7 @@ def _open_sessions(root: Path, state: dict[str, object], records: fills.Records)
     for day in sorted(days):
         references = {
             str(row.get("symbol")): as_mapping(row.get(REFERENCE_KEY)).get("close")
-            for row in read_jsonl(root / f"orders_{day}.jsonl")[0]
+            for row in read_jsonl(root / journal_name(ORDERS_PREFIX, day))[0]
         }
         keys = ordered.get(day, {})
         rows = []
@@ -554,7 +557,7 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
     if error:
         return {"env": env, "state": "unreadable", "error": error, "days": []}
     decided = _decision_dates(state)
-    days = sorted(set(decided[:-1]) | set(_dates(root, "executions_")), reverse=True)
+    days = sorted(set(decided[:-1]) | set(journal_dates(root, EXECUTIONS_PREFIX)), reverse=True)
     # A real-fill book's settled sessions, key by key against the simulator,
     # and the corrections each later session booked.
     ledgers = as_mapping(as_mapping(fills.mode(state or {})).get("sessions"))
@@ -575,7 +578,7 @@ def history_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str,
             return {"env": env, "state": "unreadable", "error": f"decision {day}: {exc}", "days": []}
         orders = sheet["orders"] if sheet else []
         names = {**all_names, **{row["symbol"]: row["name"] for row in orders if row["symbol"]}}
-        executed, skipped = read_jsonl(root / f"executions_{day}.jsonl")
+        executed, skipped = read_jsonl(root / journal_name(EXECUTIONS_PREFIX, day))
         ledger = ledgers.get(day)
         rows.append({
             "trade_date": day,
@@ -735,9 +738,10 @@ def performance_payload(repo_root: Path, book: str, env: str = "paper") -> dict[
         if benchmark_rows
         else None
     )
-    executions = [row for day in _dates(root, "executions_") for row in read_jsonl(root / f"executions_{day}.jsonl")[0]]
-    actions = [row for day in _dates(root, "corporate_actions_")
-               for row in read_jsonl(root / f"corporate_actions_{day}.jsonl")[0]]
+    executions, actions = (
+        [row for day in journal_dates(root, prefix) for row in read_jsonl(root / journal_name(prefix, day))[0]]
+        for prefix in (EXECUTIONS_PREFIX, CORPORATE_ACTIONS_PREFIX)
+    )
     stats = compute_return_stats(
         ReplayResult(equity_curve=tuple(curve), executions=tuple(executions), inference_dates=(),
                      pending_orders=(), corporate_actions=tuple(actions))
@@ -898,8 +902,8 @@ def _journal_rows(root: Path, prefix: str) -> list[tuple[str, dict[str, object]]
     """Every row of one journal family, each with its file name. A damaged line
     raises: here it would silently shorten one name's P&L, not just a list."""
     rows = []
-    for day in _dates(root, prefix):
-        name = f"{prefix}{day}.jsonl"
+    for day in journal_dates(root, prefix):
+        name = journal_name(prefix, day)
         records, skipped = read_jsonl(root / name)
         if skipped:
             raise ValueError(f"{name} has {skipped} unreadable line(s)")
@@ -921,14 +925,14 @@ def _instrument_flows(root: Path) -> dict[str, dict[str, float]]:
         for key, value in amounts.items():
             entry[key] += value
 
-    for name, row in _journal_rows(root, "executions_"):
+    for name, row in _journal_rows(root, EXECUTIONS_PREFIX):
         if row.get("status") != "filled":
             continue
         realized = finite_number(row.get("realized_pnl")) if row.get("action") == "sell" else 0.0
         add(name, row, commission=finite_number(row.get("commission")),
             stamp_duty=finite_number(row.get("stamp_duty")), dividend_tax=_dividend_tax(row),
             realized_pnl=realized)
-    for name, row in _journal_rows(root, "corporate_actions_"):
+    for name, row in _journal_rows(root, CORPORATE_ACTIONS_PREFIX):
         withheld = finite_number(row.get("dividend_tax_withheld", 0.0))
         add(name, row, dividends=finite_number(row.get("cash_credit")),
             dividend_tax=withheld, realized_pnl=-withheld if withheld is not None else None)
@@ -947,8 +951,8 @@ def _names(root: Path) -> dict[str, str]:
     """Security names from the reference quote on each order row: every name
     the book ever traded was ordered first."""
     names = {}
-    for day in _dates(root, "orders_"):
-        for row in read_jsonl(root / f"orders_{day}.jsonl")[0]:
+    for day in journal_dates(root, ORDERS_PREFIX):
+        for row in read_jsonl(root / journal_name(ORDERS_PREFIX, day))[0]:
             symbol, name = _text(row.get("symbol")), _text(as_mapping(row.get(REFERENCE_KEY)).get("name"))
             if symbol and name:
                 names[symbol] = name
@@ -1047,7 +1051,9 @@ def book_status(repo_root: Path, book: str, env: str = "paper") -> dict[str, obj
     root = book_dir(repo_root, book, env)
     snapshot = snapshot_payload(repo_root, book, env)
     state, state_error = _read_json(root / PAPER_STATE_NAME)
-    latest = max([*_dates(root, "orders_")[-1:], *_dates(root, "executions_")[-1:]], default=None)
+    latest = max(
+        [*journal_dates(root, ORDERS_PREFIX)[-1:], *journal_dates(root, EXECUTIONS_PREFIX)[-1:]], default=None
+    )
     environment = _environment_state(str(snapshot["state"]), state_error, latest)
     # A real-fill book whose closed session is not recorded yet: every run
     # stops there (``PaperAwaitingFills``, which the run reports as a failed

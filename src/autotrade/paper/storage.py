@@ -12,6 +12,31 @@ import os
 from collections.abc import Sequence
 from pathlib import Path
 
+# The account's journals: one file per session and family
+# (``<prefix><YYYYMMDD>.jsonl``) -- what each decision ordered, what each
+# session filled and each session's ex-date settlements -- and the one equity
+# journal, a row per settled session.
+ORDERS_PREFIX = "orders_"
+EXECUTIONS_PREFIX = "executions_"
+CORPORATE_ACTIONS_PREFIX = "corporate_actions_"
+EQUITY_JOURNAL_NAME = "equity_daily.jsonl"
+
+
+def journal_name(prefix: str, day: str) -> str:
+    """The file of one session's journal of a family."""
+
+    return f"{prefix}{day}.jsonl"
+
+
+def journal_dates(root: Path, prefix: str) -> list[str]:
+    """The sessions one journal family holds a file for, oldest first."""
+
+    return sorted(
+        day
+        for path in Path(root).glob(f"{prefix}[0-9]*.jsonl")
+        if len(day := path.stem.removeprefix(prefix)) == 8 and day.isdigit()
+    )
+
 
 def read_jsonl(path: Path) -> tuple[list[dict[str, object]], int]:
     """Tolerant reader for the Paper JSONL journals (orders/executions/equity).
@@ -76,4 +101,14 @@ def append_jsonl(path: Path, payloads: Sequence[dict[str, object]]) -> None:
     path.chmod(0o600)
 
 
-__all__ = ["append_jsonl", "append_jsonl_once", "read_jsonl"]
+__all__ = [
+    "CORPORATE_ACTIONS_PREFIX",
+    "EQUITY_JOURNAL_NAME",
+    "EXECUTIONS_PREFIX",
+    "ORDERS_PREFIX",
+    "append_jsonl",
+    "append_jsonl_once",
+    "journal_dates",
+    "journal_name",
+    "read_jsonl",
+]

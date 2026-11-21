@@ -64,7 +64,14 @@ from .book import VERDICT_LOG_NAME, Book, book_status
 from .engine import PAPER_STATE_NAME, writer_lock
 from .fills import CORRECTIONS_NAME, key_text, mode, parse_key
 from .pit import newest_replay_slot
-from .storage import append_jsonl_once, read_jsonl
+from .storage import (
+    EQUITY_JOURNAL_NAME,
+    EXECUTIONS_PREFIX,
+    append_jsonl_once,
+    journal_dates,
+    journal_name,
+    read_jsonl,
+)
 
 VERDICT_NAME = "verdict.json"
 # 3: the plain reading alone; 2 carried a regressed one beside it.
@@ -294,12 +301,12 @@ def _journals(root: Path) -> tuple[list[dict[str, object]], list[dict[str, objec
     sessions are not restated, as the account itself never restates them.
     """
 
-    equity, skipped = read_jsonl(root / "equity_daily.jsonl")
+    equity, skipped = read_jsonl(root / EQUITY_JOURNAL_NAME)
     corrections, damaged = read_jsonl(root / CORRECTIONS_NAME)
     skipped += damaged
     executions: list[dict[str, object]] = []
-    for path in sorted(root.glob("executions_*.jsonl")):
-        rows, damaged = read_jsonl(path)
+    for day in journal_dates(root, EXECUTIONS_PREFIX):
+        rows, damaged = read_jsonl(root / journal_name(EXECUTIONS_PREFIX, day))
         skipped += damaged
         executions += [row for row in rows if row.get("kind") == "execution"]
     if skipped:

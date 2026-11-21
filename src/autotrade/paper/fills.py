@@ -51,7 +51,13 @@ from autotrade.environment.broker import DailyBroker, Execution, Lot, Position
 from autotrade.environment.broker_core import validate_buy_lot
 from autotrade.environment.strategy import StrategyOrder
 
-from .storage import append_jsonl, read_jsonl
+from .storage import (
+    CORPORATE_ACTIONS_PREFIX,
+    append_jsonl,
+    journal_dates,
+    journal_name,
+    read_jsonl,
+)
 
 FILLS_NAME = "fills.jsonl"
 CORRECTIONS_NAME = "corrections.jsonl"
@@ -688,9 +694,10 @@ class RealFills:
     def _ex_dated(self, broker: DailyBroker, symbol: str, session: str) -> bool:
         if any(action.symbol == symbol and action.trade_date > session for action in broker.corporate_actions):
             return True
-        for path in self.root.glob("corporate_actions_[0-9]*.jsonl"):
-            if path.stem.removeprefix("corporate_actions_") > session and any(
-                row.get("symbol") == symbol for row in read_jsonl(path)[0]
+        for day in journal_dates(self.root, CORPORATE_ACTIONS_PREFIX):
+            if day > session and any(
+                row.get("symbol") == symbol
+                for row in read_jsonl(self.root / journal_name(CORPORATE_ACTIONS_PREFIX, day))[0]
             ):
                 return True
         return False

@@ -84,7 +84,15 @@ from .fills import (
     simulate,
     unresolved,
 )
-from .storage import append_jsonl_once, read_jsonl
+from .storage import (
+    CORPORATE_ACTIONS_PREFIX,
+    EQUITY_JOURNAL_NAME,
+    EXECUTIONS_PREFIX,
+    ORDERS_PREFIX,
+    append_jsonl_once,
+    journal_name,
+    read_jsonl,
+)
 
 PAPER_SOURCE = "paper_engine"
 PAPER_STATE_SCHEMA_VERSION = 4
@@ -413,7 +421,7 @@ class DailyPaperEngine:
         # fill, so its ex-date settlements are journaled like executions.
         for action in broker.corporate_actions[settled_actions:]:
             self._queue_emission(
-                state, f"corporate_actions_{day}.jsonl", {"kind": "corporate_action", **action.to_record()}
+                state, journal_name(CORPORATE_ACTIONS_PREFIX, day), {"kind": "corporate_action", **action.to_record()}
             )
         day_end = datetime.combine(_date(day), time.max, tzinfo=CN_TZ)
         due = [order for order in pending if order.execute_at <= day_end]
@@ -429,7 +437,7 @@ class DailyPaperEngine:
                 execution = simulator.execute(order, bar, matched_at=order.execute_at, raw_price=raw_price)
                 simulated.append((order, execution))
                 self._queue_emission(
-                    state, f"{SIMULATED_EXECUTIONS_PREFIX}{day}.jsonl", {"kind": "execution", **execution.to_record()}
+                    state, journal_name(SIMULATED_EXECUTIONS_PREFIX, day), {"kind": "execution", **execution.to_record()}
                 )
             simulator.mark(bars)
             try:
@@ -439,15 +447,17 @@ class DailyPaperEngine:
             for row in corrections:
                 self._queue_emission(state, CORRECTIONS_NAME, row)
             for row in rows:
-                self._queue_emission(state, f"executions_{day}.jsonl", row)
+                self._queue_emission(state, journal_name(EXECUTIONS_PREFIX, day), row)
             simulated_equity = {"simulated_equity": simulator.equity()}
         else:
             for order in due:
                 bar, raw_price = resolve_execution_price(market, order, execution_price=data.execution_price)
                 execution = broker.execute(order, bar, matched_at=order.execute_at, raw_price=raw_price)
-                self._queue_emission(state, f"executions_{day}.jsonl", {"kind": "execution", **execution.to_record()})
+                self._queue_emission(
+                    state, journal_name(EXECUTIONS_PREFIX, day), {"kind": "execution", **execution.to_record()}
+                )
         broker.mark(bars)
-        self._queue_emission(state, "equity_daily.jsonl", {
+        self._queue_emission(state, EQUITY_JOURNAL_NAME, {
             "kind": "equity", "trade_date": day, "equity": broker.equity(),
             "cash": broker.cash, "position_count": len(broker.positions), **simulated_equity,
         })
@@ -538,7 +548,7 @@ class DailyPaperEngine:
         pending.extend(orders)
         pending.sort(key=lambda item: item.execute_at)
         for order in orders:
-            self._queue_emission(state, f"orders_{trade_date}.jsonl", {
+            self._queue_emission(state, journal_name(ORDERS_PREFIX, trade_date), {
                 "kind": "order", **order.to_record(), REFERENCE_KEY: quotes.get(order.symbol, {}),
             })
         state["last_error"] = ""
@@ -577,7 +587,7 @@ class DailyPaperEngine:
         )
 
     def _journaled_orders(self, trade_date: str) -> list[dict[str, object]]:
-        rows, _skipped = read_jsonl(self.state_root / f"orders_{trade_date}.jsonl")
+        rows, _skipped = read_jsonl(self.state_root / journal_name(ORDERS_PREFIX, trade_date))
         hidden = {"kind", "event_id", REFERENCE_KEY}
         return [{key: value for key, value in row.items() if key not in hidden} for row in rows]
 
@@ -659,8 +669,10 @@ class DailyPaperEngine:
             markers = [
                 item.name for item in self.state_root.iterdir()
                 if item.name == SNAPSHOT_NAME
-                or item.name.startswith(("orders_", "executions_", "corporate_actions_", SIMULATED_EXECUTIONS_PREFIX))
-                or item.name in {"equity_daily.jsonl", CORRECTIONS_NAME}
+                or item.name.startswith(
+                    (ORDERS_PREFIX, EXECUTIONS_PREFIX, CORPORATE_ACTIONS_PREFIX, SIMULATED_EXECUTIONS_PREFIX)
+                )
+                or item.name in {EQUITY_JOURNAL_NAME, CORRECTIONS_NAME}
             ]
             if markers:
                 raise PaperEngineError(f"Paper journals exist but {PAPER_STATE_NAME} is missing; refusing to fabricate an account")

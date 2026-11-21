@@ -32,7 +32,7 @@ from .engine import (
     PaperAwaitingFills,
     PaperTitlesNotLanded,
 )
-from .storage import read_jsonl
+from .storage import ORDERS_PREFIX, journal_name, read_jsonl
 
 WEEKDAYS = "一二三四五六日"
 LATEST_NAME = "latest_orders.md"
@@ -176,7 +176,7 @@ def order_sheet(
     )
     if decision is None:
         raise ValueError(f"the book has no decision for {trade_date}")
-    rows, skipped = read_jsonl(root / f"orders_{trade_date}.jsonl")
+    rows, skipped = read_jsonl(root / journal_name(ORDERS_PREFIX, trade_date))
     held = {str(symbol): int(quantity) for symbol, quantity in dict(decision["positions"]).items()}
     quotes = {
         **{str(row["symbol"]): dict(row.get(REFERENCE_KEY) or {}) for row in rows},
@@ -303,7 +303,7 @@ def render_orders(book: Book, trade_date: str) -> str:
         if sheet["limit_guidance"]:
             lines += [sheet["limit_guidance"], ""]
         if sheet["skipped_lines"]:
-            lines += [f"订单日志有 {sheet['skipped_lines']} 行无法解析，已跳过；请检查 orders_{trade_date}.jsonl。", ""]
+            lines += [f"订单日志有 {sheet['skipped_lines']} 行无法解析，已跳过；请检查 {journal_name(ORDERS_PREFIX, trade_date)}。", ""]
     else:
         lines += ["## 订单", "", "今日无订单，持仓不变。", ""]
     lines += [
