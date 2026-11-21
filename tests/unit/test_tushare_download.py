@@ -12,9 +12,10 @@ import unittest
 from contextlib import chdir, redirect_stderr, redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 import pandas as pd
+import pytest
 
 from autotrade.data_sources.tushare import (
     audit,
@@ -28,7 +29,14 @@ from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.data_sources.tushare import lock as tushare_lock
 
-from .tushare_fixture import DAILY_FIELDS, EmptyClient, FieldClient, LakeTestCase, param
+from .tushare_fixture import (
+    DAILY_FIELDS,
+    EmptyClient,
+    FieldClient,
+    LakeTestCase,
+    param,
+    write_trade_cal,
+)
 
 # A macro row answering its request's month and end date.
 MACRO_FIELDS = {
@@ -1347,155 +1355,6 @@ class DownloadTest(LakeTestCase):
         self.assertEqual(len(ledger), 1)
         self.assertEqual(json.loads(ledger[0])["kind"], "defect")
 
-    @staticmethod
-    def _shrinking_client(api_name: str, keep: int, keyed_columns: dict[str, list[str]]):
-        """A client whose response for `api_name` keeps only `keep` of the keys
-        the partition already holds -- the transient-truncation shape the
-        destructive-shrink guard exists for."""
-
-        class ShrinkingClient(EmptyClient):
-            def query(self, name, params=None, fields="", retries=5):
-                self.calls.append((name, dict(params or {})))
-                if name != api_name:
-                    return super().query(name, params, fields, retries)
-                columns = fields.split(",")
-                rows = [
-                    [keyed_columns.get(column, [""] * keep)[index] if column in keyed_columns else "1"
-                     for column in columns]
-                    for index in range(keep)
-                ]
-                return tushare_client.ApiResult(columns, rows)
-
-        return ShrinkingClient()
-
-    def _seed_shrinkable_partition(self, path: Path, columns: dict[str, list[str]], api_name: str) -> pd.DataFrame:
-        original = pd.DataFrame(columns)
-        tushare_io.write_parquet(path, original, api_name=api_name, params={}, fields=list(original.columns))
-        return original
-
-    def _assert_staged(self, path: Path, original: pd.DataFrame, ledger: Path) -> None:
-        """An answer removing most keys stays out of the visible partition:
-        it is a staged version beside it, and the ledger names it."""
-        self.assertTrue(pd.read_parquet(path).equals(original))
-        staged = [version for version in versions.list_versions(path) if version.endswith("-staged")]
-        self.assertEqual(len(staged), 1)
-        events = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
-        self.assertEqual([(event["kind"], event["version"]) for event in events], [("staged", staged[0])])
-
-    def test_board_trading_extreme_shrink_is_staged_and_the_run_goes_on(self):
-        self._write_trade_cal("20200102")
-        path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
-        original = self._seed_shrinkable_partition(
-            path,
-            {
-                "trade_date": ["20200102"] * 30,
-                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
-                "limit": ["U"] * 30,
-            },
-            "limit_list_d",
-        )
-        client = self._shrinking_client("limit_list_d", 2, {
-            "trade_date": ["20200102"] * 2,
-            "ts_code": ["000000.SZ", "000001.SZ"],
-            "limit": ["U", "U"],
-        })
-        args = argparse.Namespace(
-            raw_dir=str(self.raw_dir),
-            start_date="20200102",
-            end_date="20200102",
-            datasets=["limit_list_d"],
-            revision_ledger=str(self.root / "board_revision_events.jsonl"),
-            force=True,
-            page_limit=10000,
-            min_interval_seconds=0,
-            timeout_seconds=1,
-        )
-
-        with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient", return_value=client),
-            redirect_stdout(io.StringIO()),
-        ):
-            self.assertEqual(download.download_board_trading(args), 0)
-
-        self._assert_staged(path, original, self.root / "board_revision_events.jsonl")
-
-    def test_zero_rows_ok_event_dataset_extreme_shrink_is_staged(self):
-        # Tolerating an EMPTY day says nothing about accepting an answer that
-        # removes most of a partition.
-        self.assertTrue(specs.EVENT_FLOW_SPECS["cyq_perf"].zero_rows_ok)
-        self._write_trade_cal("20200102")
-        path = self.raw_dir / "cyq_perf" / "trade_date=20200102.parquet"
-        original = self._seed_shrinkable_partition(
-            path,
-            {
-                "trade_date": ["20200102"] * 30,
-                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
-                "winner_rate": ["1"] * 30,
-            },
-            "cyq_perf",
-        )
-        client = self._shrinking_client("cyq_perf", 2, {
-            "trade_date": ["20200102"] * 2,
-            "ts_code": ["000000.SZ", "000001.SZ"],
-        })
-        args = argparse.Namespace(
-            raw_dir=str(self.raw_dir),
-            start_date="20200102",
-            end_date="20200102",
-            datasets=["cyq_perf"],
-            revision_ledger=str(self.root / "cyq_revision_events.jsonl"),
-            force=True,
-            page_limit=None,
-            min_interval_seconds=0,
-            timeout_seconds=1,
-            zero_rows_not_ready=True,
-        )
-
-        with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient", return_value=client),
-            redirect_stdout(io.StringIO()),
-        ):
-            download.download_event_flow(args)
-
-        self._assert_staged(path, original, self.root / "cyq_revision_events.jsonl")
-
-    def test_event_range_month_extreme_shrink_is_staged(self):
-        path = self.raw_dir / "repurchase" / "month=202001.parquet"
-        original = self._seed_shrinkable_partition(
-            path,
-            {
-                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
-                "ann_date": ["20200115"] * 30,
-                "end_date": [""] * 30,
-                "proc": [""] * 30,
-                "exp_date": [""] * 30,
-            },
-            "repurchase",
-        )
-        client = self._shrinking_client("repurchase", 2, {
-            "ts_code": ["000000.SZ", "000001.SZ"],
-            "ann_date": ["20200115", "20200115"],
-            "end_date": ["", ""],
-            "proc": ["", ""],
-            "exp_date": ["", ""],
-        })
-
-        with redirect_stdout(io.StringIO()):
-            written = download.download_event_range_month(
-                client,
-                self.raw_dir,
-                specs.EVENT_FLOW_SPECS["repurchase"],
-                [("20200101", "20200131", "202001")],
-                True,
-                5000,
-                str(self.root / "range_month_revision_events.jsonl"),
-            )
-
-        self.assertEqual(written, 0)
-        self._assert_staged(path, original, self.root / "range_month_revision_events.jsonl")
-
     def test_event_range_month_counts_only_partitions_it_wrote(self):
         # `written` decides the event/flow no-mutation exit contract, so a
         # partition the writer kept must never be counted as a mutation.
@@ -1512,7 +1371,7 @@ class DownloadTest(LakeTestCase):
         self.assertEqual(written, 1)
         self.assertTrue(fresh.exists())
 
-        self._seed_shrinkable_partition(
+        seed_partition(
             self.raw_dir / "repurchase" / "month=202003.parquet",
             {
                 "ts_code": ["000001.SZ"],
@@ -1649,30 +1508,6 @@ class DownloadTest(LakeTestCase):
 
         self.assertEqual(first_window("top10_floatholders"), ("20260517", "20260531"))
         self.assertEqual(first_window("repurchase"), ("20260914", "20260930"))
-
-    def test_bak_basic_extreme_shrink_is_staged(self):
-        path = self.raw_dir / "bak_basic" / "trade_date=20200102.parquet"
-        original = self._seed_shrinkable_partition(
-            path,
-            {
-                "trade_date": ["20200102"] * 30,
-                "ts_code": [f"{index:06d}.SZ" for index in range(30)],
-                "name": ["x"] * 30,
-            },
-            "bak_basic",
-        )
-        client = self._shrinking_client("bak_basic", 2, {
-            "trade_date": ["20200102"] * 2,
-            "ts_code": ["000000.SZ", "000001.SZ"],
-        })
-
-        with redirect_stdout(io.StringIO()):
-            download.download_bak_basic(
-                client, self.raw_dir, ["20200102"], "20200102", True,
-                self.root / "bak_basic_revision_events.jsonl",
-            )
-
-        self._assert_staged(path, original, self.root / "bak_basic_revision_events.jsonl")
 
     def test_required_event_flow_zero_rows_raise_instead_of_cron_ok(self):
         self._write_trade_cal_with_stamping_window("20200102")
@@ -1898,161 +1733,6 @@ class DownloadTest(LakeTestCase):
         self.assertEqual((severity, code), ("error", "margin_secs_exchange_completeness"))
         self.assertEqual(details["incomplete_days"], [{"trade_date": "20260529", "missing_exchanges": ["BSE"]}])
 
-    def test_fundamental_extreme_shrink_is_staged(self):
-        spec = specs.FUNDAMENTAL_SPECS["fina_mainbz_vip"]
-        keys = list(spec.key_columns)
-        d = self.raw_dir / spec.api_name
-        d.mkdir(parents=True, exist_ok=True)
-        old = pd.DataFrame({col: [f"{col}{i}" for i in range(40)] for col in keys})
-        old["bz_sales"] = 1.0
-        path = d / "ts_code=000001.SZ.parquet"
-        tushare_io.write_parquet(path, old, api_name=spec.api_name, params={}, fields=list(old.columns))
-
-        class ShrunkClient(EmptyClient):
-            def query(self, api_name, params=None, fields="", retries=5):
-                self.calls.append((api_name, dict(params or {})))
-                columns = keys + ["bz_sales"]
-                rows = [[f"{col}{i}" if col in keys else "2.0" for col in columns] for i in range(3)]
-                return tushare_client.ApiResult(columns, rows)
-
-        ledger = self.root / "fundamental_revision_events.jsonl"
-        with redirect_stdout(io.StringIO()):
-            download.download_fundamental_ts_code_dataset(
-                ShrunkClient(), self.raw_dir, spec, ["000001.SZ"], True, 5000, revision_ledger=ledger,
-            )
-        self._assert_staged(path, old, ledger)
-
-    def test_event_skip_reattempts_partition_without_intact_sidecar(self):
-        # An interrupted write leaves a parquet without (or with a stale)
-        # sidecar; treating it as committed froze such partitions forever.
-        secs_dir = self.raw_dir / "margin_secs"
-        secs_dir.mkdir(parents=True, exist_ok=True)
-        orphan = secs_dir / "trade_date=20260601.parquet"
-        pd.DataFrame({
-            "trade_date": ["20260601"] * 3, "ts_code": ["600000.SH", "000001.SZ", "830000.BJ"],
-            "exchange": ["SSE", "SZSE", "BSE"],
-        }).to_parquet(orphan, index=False)  # complete content, NO sidecar
-
-        class ThreeExchangeSecsClient(EmptyClient):
-            def query(self, api_name, params=None, fields="", retries=5):
-                self.calls.append((api_name, dict(params or {})))
-                columns = fields.split(",")
-                rows = [
-                    ["20260601" if col == "trade_date" else code if col == "ts_code" else exch if col == "exchange" else "x" for col in columns]
-                    for code, exch in (("600000.SH", "SSE"), ("000001.SZ", "SZSE"), ("830000.BJ", "BSE"))
-                ]
-                return tushare_client.ApiResult(columns, rows)
-
-        client = ThreeExchangeSecsClient()
-        written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
-        )
-        self.assertEqual([api for api, _ in client.calls], ["margin_secs"])
-        self.assertEqual((written, zero_skipped), (1, 0))
-        self.assertTrue(tushare_io.committed_partition_intact(orphan))
-
-        # Once the pair is intact, the same covering run skips it.
-        client.calls.clear()
-        written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
-        )
-        self.assertEqual(client.calls, [])
-        # A replaced Parquet from an interrupted publish is also re-attempted:
-        # its footer and row count no longer match the committed sidecar.
-        pd.read_parquet(orphan).iloc[:2].to_parquet(orphan, index=False)
-        self.assertFalse(tushare_io.committed_partition_intact(orphan))
-
-    def test_daily_skip_reattempts_partition_without_intact_sidecar(self):
-        path = self.raw_dir / "daily" / "trade_date=20200102.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ"}]).to_parquet(path, index=False)
-        self.assertFalse(tushare_io.committed_partition_intact(path))
-        client = FieldClient(DAILY_FIELDS, default=0)
-        ledger = self.root / "daily_skip_heal.jsonl"
-        with redirect_stdout(io.StringIO()):
-            zero_skipped = download.download_trade_date_dataset(
-                client, self.raw_dir, specs.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
-            )
-        self.assertEqual([api for api, _ in client.calls], ["daily"])
-        self.assertEqual(zero_skipped, 0)
-        self.assertTrue(tushare_io.committed_partition_intact(path))
-        client.calls.clear()
-        with redirect_stdout(io.StringIO()):
-            download.download_trade_date_dataset(
-                client, self.raw_dir, specs.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
-            )
-        self.assertEqual(client.calls, [])
-        sidecar = path.with_suffix(path.suffix + ".meta.json")
-        meta = json.loads(sidecar.read_text(encoding="utf-8"))
-        meta["write_id"] = "00000000-0000-0000-0000-000000000000"
-        sidecar.write_text(json.dumps(meta), encoding="utf-8")
-        self.assertFalse(tushare_io.committed_partition_intact(path))
-        client.calls.clear()
-        with redirect_stdout(io.StringIO()):
-            download.download_trade_date_dataset(
-                client, self.raw_dir, specs.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
-            )
-        self.assertEqual([api for api, _ in client.calls], ["daily"])
-        self.assertTrue(tushare_io.committed_partition_intact(path))
-
-    def test_board_skip_reattempts_partition_without_intact_sidecar(self):
-        spec = specs.BOARD_TRADING_SPECS["limit_list_d"]
-        path = self.raw_dir / spec.api_name / "trade_date=20200102.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}]).to_parquet(path, index=False)
-        self.assertFalse(download.should_skip_existing_partition(path, force=False))
-
-        class LimitClient(EmptyClient):
-            def query(self, api_name, params=None, fields="", retries=5):
-                self.calls.append((api_name, dict(params or {})))
-                columns = fields.split(",") if fields else ["trade_date", "ts_code", "limit"]
-                row = ["20200102" if col == "trade_date" else "000001.SZ" if col == "ts_code" else "U" if col == "limit" else "x" for col in columns]
-                return tushare_client.ApiResult(columns, [row])
-
-        client = LimitClient()
-        with redirect_stdout(io.StringIO()):
-            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None)
-        self.assertEqual([api for api, _ in client.calls], ["limit_list_d"])
-        self.assertTrue(tushare_io.committed_partition_intact(path))
-        client.calls.clear()
-        with redirect_stdout(io.StringIO()):
-            download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None)
-        self.assertEqual(client.calls, [])
-
-    def test_text_day_and_macro_trade_date_skips_reattempt_partitions_without_intact_sidecar(self):
-        # Same rule as every other versioned family (DATA_DOCUMENTATION §2.3):
-        # a parquet without its commit identity is re-pulled and committed.
-        self._write_trade_cal()
-        cases = [
-            (specs.TEXT_SPECS["cctv_news"], "date=20200102", ["20200102", "t", "c"],
-             lambda client: download.download_text_day(client, self.raw_dir, specs.TEXT_SPECS["cctv_news"], ["20200102"], False)),
-            (specs.MACRO_SPECS["sw_daily"], "trade_date=20200102", None,
-             lambda client: download.download_macro_trade_date(
-                 client, self.raw_dir, specs.MACRO_SPECS["sw_daily"], "20200102", "20200102", False, 5000)),
-        ]
-        for spec, partition, row, run in cases:
-            columns = spec.fields.split(",")
-            row = row or ["801010.SI" if col == "ts_code" else "20200102" if col == "trade_date" else "1" for col in columns]
-            path = self.raw_dir / spec.api_name / f"{partition}.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame([row], columns=columns).to_parquet(path, index=False)  # NO sidecar
-            self.assertFalse(tushare_io.committed_partition_intact(path))
-
-            class RowClient(EmptyClient):
-                def query(self, api_name, params=None, fields="", retries=5, answer=row, names=columns):
-                    self.calls.append((api_name, dict(params or {})))
-                    return tushare_client.ApiResult(names, [answer])
-
-            client = RowClient()
-            with redirect_stdout(io.StringIO()):
-                run(client)
-            self.assertEqual([api for api, _ in client.calls], [spec.api_name])
-            self.assertTrue(tushare_io.committed_partition_intact(path))
-            client.calls.clear()
-            with redirect_stdout(io.StringIO()):
-                run(client)
-            self.assertEqual(client.calls, [], spec.api_name)
-
     def test_board_progress_counts_only_partitions_publish_wrote(self):
         spec = specs.BOARD_TRADING_SPECS["limit_list_d"]
 
@@ -2071,32 +1751,6 @@ class DownloadTest(LakeTestCase):
         self.assertIn("written=1 rows_written=1", run())
         # The same answer again: publish keeps the partition, so nothing is counted.
         self.assertIn("written=0 rows_written=0", run())
-
-    def test_fundamental_skip_reattempts_partition_without_intact_sidecar(self):
-        spec = specs.FUNDAMENTAL_SPECS["income_vip"]
-        keys = list(spec.key_columns)
-        path = self.raw_dir / spec.api_name / "period=20200331.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        answer = ["000001.SZ", "20200430", "20200430", "20200331", "1", "1", "1"]
-        # The same row the vendor answers, written without a commit identity:
-        # the identical answer is committed again to heal the pair.
-        pd.DataFrame([answer], columns=keys).to_parquet(path, index=False)
-        self.assertFalse(tushare_io.committed_partition_intact(path))
-
-        class PeriodClient(EmptyClient):
-            def query(self, api_name, params=None, fields="", retries=5):
-                self.calls.append((api_name, dict(params or {})))
-                return tushare_client.ApiResult(keys, [answer])
-
-        client = PeriodClient()
-        with redirect_stdout(io.StringIO()):
-            download.download_fundamental_period_dataset(client, self.raw_dir, spec, ["20200331"], False, 5000)
-        self.assertEqual([api for api, _ in client.calls], ["income_vip"])
-        self.assertTrue(tushare_io.committed_partition_intact(path))
-        client.calls.clear()
-        with redirect_stdout(io.StringIO()):
-            download.download_fundamental_period_dataset(client, self.raw_dir, spec, ["20200331"], False, 5000)
-        self.assertEqual(client.calls, [])
 
     def test_macro_static_full_writes_per_loop_registry_files(self):
         class RegistryClient(EmptyClient):
@@ -2193,7 +1847,7 @@ class DownloadTest(LakeTestCase):
             with redirect_stdout(io.StringIO()):
                 self.assertEqual(download.download_event_flow(args), 0)
 
-        self._assert_staged(path, original, self.root / "shrink_revision_events.jsonl")
+        assert_staged(path, original, self.root / "shrink_revision_events.jsonl")
 
     def test_event_flow_zero_rows_not_ready_partial_write_reports_not_ready(self):
         self._write_trade_cal_with_stamping_window("20200102")
@@ -2525,6 +2179,190 @@ class ManualProductionWriteRefusalTest(unittest.TestCase):
                  "--raw-dir", str(self.root / "data" / "raw" / "daily")],
                 "update_data", 0,
             )
+
+
+def seed_partition(path: Path, columns: dict[str, list[str]], api_name: str) -> pd.DataFrame:
+    """A committed partition holding ``columns``."""
+    original = pd.DataFrame(columns)
+    tushare_io.write_parquet(path, original, api_name=api_name, params={}, fields=list(original.columns))
+    return original
+
+
+def assert_staged(path: Path, original: pd.DataFrame, ledger: Path) -> None:
+    """An answer removing most keys stays out of the visible partition: it is a
+    staged version beside it, and the ledger names it."""
+    assert pd.read_parquet(path).equals(original)
+    staged = [version for version in versions.list_versions(path) if version.endswith("-staged")]
+    assert len(staged) == 1
+    events = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+    assert [(event["kind"], event["version"]) for event in events] == [("staged", staged[0])]
+
+
+class AnswerClient(EmptyClient):
+    """A vendor answering ``api_name`` with ``frame`` and anything else with
+    no rows."""
+
+    def __init__(self, api_name: str, frame: pd.DataFrame):
+        super().__init__()
+        self.api_name, self.frame = api_name, frame
+
+    def query(self, api_name, params=None, fields="", retries=5):
+        answer = super().query(api_name, params, fields, retries)
+        if api_name != self.api_name:
+            return answer
+        return tushare_client.ApiResult(list(self.frame.columns), self.frame.values.tolist())
+
+
+def run_tier(tier, client: EmptyClient, raw_dir: Path, ledger: Path, dataset: str, **extra):
+    """One tier download of ``dataset`` on 20200102, forced, through the vendor ``client``."""
+    args = argparse.Namespace(**{
+        "raw_dir": str(raw_dir), "start_date": "20200102", "end_date": "20200102", "datasets": [dataset],
+        "revision_ledger": str(ledger), "force": True, "page_limit": None, "min_interval_seconds": 0, "timeout_seconds": 1,
+        **extra,
+    })
+    with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
+        return tier(args)
+
+
+def _codes(count: int) -> list[str]:
+    return [f"{index:06d}.SZ" for index in range(count)]
+
+
+# One row per landing loop: the dataset, the partition an interrupted write
+# left without its commit identity, what it holds, and the pull (returning
+# what that loop returns).
+UNCOMMITTED_PARTITIONS = [
+    pytest.param(
+        specs.EVENT_FLOW_SPECS["margin_secs"], "trade_date=20260601",
+        {"trade_date": ["20260601"] * 3, "ts_code": ["600000.SH", "000001.SZ", "830000.BJ"], "exchange": ["SSE", "SZSE", "BSE"]},
+        lambda client, raw_dir, spec: download.download_event_trade_date_dataset(client, raw_dir, spec, ["20260601"], False, None),
+        (1, 0), id="event_trade_date",
+    ),
+    pytest.param(
+        specs.DAILY_SPECS["daily"], "trade_date=20200102", {"trade_date": ["20200102"], "ts_code": ["000001.SZ"]},
+        lambda client, raw_dir, spec: download.download_trade_date_dataset(client, raw_dir, spec, ["20200102"], False, 5000, None),
+        0, id="daily",
+    ),
+    pytest.param(
+        specs.BOARD_TRADING_SPECS["limit_list_d"], "trade_date=20200102", {"trade_date": ["20200102"], "ts_code": ["000001.SZ"], "limit": ["U"]},
+        lambda client, raw_dir, spec: download.download_board_trade_date_dataset(client, raw_dir, spec, ["20200102"], False, 5000, None),
+        None, id="board_trade_date",
+    ),
+    pytest.param(
+        specs.TEXT_SPECS["cctv_news"], "date=20200102", {"date": ["20200102"], "title": ["t"], "content": ["c"]},
+        lambda client, raw_dir, spec: download.download_text_day(client, raw_dir, spec, ["20200102"], False),
+        None, id="text_day",
+    ),
+    pytest.param(
+        specs.MACRO_SPECS["sw_daily"], "trade_date=20200102",
+        {name: ["801010.SI" if name == "ts_code" else "20200102" if name == "trade_date" else "1"] for name in specs.MACRO_SPECS["sw_daily"].fields.split(",")},
+        lambda client, raw_dir, spec: download.download_macro_trade_date(client, raw_dir, spec, "20200102", "20200102", False, 5000),
+        None, id="macro_trade_date",
+    ),
+    pytest.param(
+        specs.FUNDAMENTAL_SPECS["income_vip"], "period=20200331",
+        dict(zip(specs.FUNDAMENTAL_SPECS["income_vip"].key_columns, [["000001.SZ"], ["20200430"], ["20200430"], ["20200331"], ["1"], ["1"], ["1"]], strict=True)),
+        lambda client, raw_dir, spec: download.download_fundamental_period_dataset(client, raw_dir, spec, ["20200331"], False, 5000),
+        None, id="fundamental_period",
+    ),
+]
+
+
+@pytest.mark.parametrize(("spec", "partition", "held", "pull", "returned"), UNCOMMITTED_PARTITIONS)
+def test_a_partition_without_its_commit_identity_is_pulled_again(tmp_path, spec, partition, held, pull, returned):
+    # An interrupted write leaves a parquet without (or with a stale) sidecar;
+    # treating it as committed froze such partitions forever. Every landing
+    # loop pulls it again (DATA_DOCUMENTATION §2.3), and the vendor's
+    # identical answer commits the pair.
+    raw_dir = tmp_path / "raw"
+    write_trade_cal(raw_dir)
+    path = raw_dir / spec.api_name / f"{partition}.parquet"
+    path.parent.mkdir(parents=True)
+    pd.DataFrame(held).to_parquet(path, index=False)  # NO sidecar
+    assert not tushare_io.committed_partition_intact(path)
+    assert not download.should_skip_existing_partition(path, force=False)
+    client = AnswerClient(spec.api_name, pd.DataFrame(held))
+
+    def run():
+        client.calls.clear()
+        with redirect_stdout(io.StringIO()):
+            return pull(client, raw_dir, spec)
+
+    assert run() == returned
+    assert [api for api, _ in client.calls] == [spec.api_name]
+    assert tushare_io.committed_partition_intact(path)
+    # Once the pair is intact, the same covering run skips it.
+    run()
+    assert client.calls == []
+    # A sidecar naming another write is an interrupted commit as well.
+    sidecar = path.with_suffix(path.suffix + ".meta.json")
+    meta = json.loads(sidecar.read_text(encoding="utf-8"))
+    meta["write_id"] = "00000000-0000-0000-0000-000000000000"
+    sidecar.write_text(json.dumps(meta), encoding="utf-8")
+    assert not tushare_io.committed_partition_intact(path)
+    run()
+    assert [api for api, _ in client.calls] == [spec.api_name]
+    assert tushare_io.committed_partition_intact(path)
+    # So is a parquet replaced under its sidecar: its footer no longer matches.
+    pd.read_parquet(path).iloc[:2].to_parquet(path, index=False)
+    assert not tushare_io.committed_partition_intact(path)
+
+
+def _pull_zero_rows_ok_event(client, raw_dir, ledger):
+    # Tolerating an EMPTY day says nothing about accepting an answer that
+    # removes most of a partition.
+    assert specs.EVENT_FLOW_SPECS["cyq_perf"].zero_rows_ok
+    return run_tier(download.download_event_flow, client, raw_dir, ledger, "cyq_perf", zero_rows_not_ready=True)
+
+
+# One row per landing loop: the dataset, its partition holding many keys, how
+# many of them the forced pull's answer keeps, the pull, and what it returns
+# (the board run goes on; the range loop counts nothing written).
+SHRUNK_ANSWERS = [
+    pytest.param(
+        "limit_list_d", "trade_date=20200102", {"trade_date": ["20200102"] * 30, "ts_code": _codes(30), "limit": ["U"] * 30}, 2,
+        lambda client, raw_dir, ledger: run_tier(download.download_board_trading, client, raw_dir, ledger, "limit_list_d", page_limit=10000),
+        0, id="board_trade_date",
+    ),
+    pytest.param(
+        "cyq_perf", "trade_date=20200102", {"trade_date": ["20200102"] * 30, "ts_code": _codes(30), "winner_rate": ["1"] * 30}, 2,
+        _pull_zero_rows_ok_event, ANY, id="event_trade_date_zero_rows_ok",
+    ),
+    pytest.param(
+        "repurchase", "month=202001",
+        {"ts_code": _codes(30), "ann_date": ["20200115"] * 30, "end_date": [""] * 30, "proc": [""] * 30, "exp_date": [""] * 30}, 2,
+        lambda client, raw_dir, ledger: download.download_event_range_month(
+            client, raw_dir, specs.EVENT_FLOW_SPECS["repurchase"], [("20200101", "20200131", "202001")], True, 5000, str(ledger),
+        ),
+        0, id="event_range_month",
+    ),
+    pytest.param(
+        "bak_basic", "trade_date=20200102", {"trade_date": ["20200102"] * 30, "ts_code": _codes(30), "name": ["x"] * 30}, 2,
+        lambda client, raw_dir, ledger: download.download_bak_basic(client, raw_dir, ["20200102"], "20200102", True, ledger),
+        None, id="bak_basic",
+    ),
+    pytest.param(
+        "fina_mainbz_vip", "ts_code=000001.SZ",
+        {**{col: [f"{col}{i}" for i in range(40)] for col in specs.FUNDAMENTAL_SPECS["fina_mainbz_vip"].key_columns}, "bz_sales": [1.0] * 40}, 3,
+        lambda client, raw_dir, ledger: download.download_fundamental_ts_code_dataset(
+            client, raw_dir, specs.FUNDAMENTAL_SPECS["fina_mainbz_vip"], ["000001.SZ"], True, 5000, revision_ledger=ledger,
+        ),
+        None, id="fundamental_ts_code",
+    ),
+]
+
+
+@pytest.mark.parametrize(("api_name", "partition", "held", "kept", "pull", "returned"), SHRUNK_ANSWERS)
+def test_an_answer_removing_most_keys_is_staged(tmp_path, api_name, partition, held, kept, pull, returned):
+    # The transient-truncation shape the destructive-shrink guard exists for.
+    raw_dir = tmp_path / "raw"
+    write_trade_cal(raw_dir)
+    path = raw_dir / api_name / f"{partition}.parquet"
+    original = seed_partition(path, held, api_name)
+    ledger = tmp_path / "revision_events.jsonl"
+    with redirect_stdout(io.StringIO()):
+        assert pull(AnswerClient(api_name, original.iloc[:kept]), raw_dir, ledger) == returned
+    assert_staged(path, original, ledger)
 
 
 if __name__ == "__main__":

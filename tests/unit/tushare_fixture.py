@@ -67,6 +67,13 @@ class FieldClient(EmptyClient):
 DAILY_FIELDS = {"trade_date": param("trade_date", "20200102"), "ts_code": "000001.SZ", "adj_factor": 1.0}
 
 
+def write_trade_cal(raw_dir: Path, trade_date="20200102", is_open="1") -> None:
+    """An SSE calendar of the one day ``trade_date``."""
+    path = raw_dir / "trade_cal" / "exchange=SSE" / f"year={trade_date[:4]}.parquet"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([{"cal_date": trade_date, "is_open": is_open}]).to_parquet(path, index=False)
+
+
 class LakeTestCase(unittest.TestCase):
     """A test with its own temp lake: ``root`` holds ``raw_dir`` and the
     ledgers, and goes when the test ends."""
@@ -80,9 +87,7 @@ class LakeTestCase(unittest.TestCase):
         self.tmp.cleanup()
 
     def _write_trade_cal(self, trade_date="20200102", is_open="1"):
-        path = self.raw_dir / "trade_cal" / "exchange=SSE" / f"year={trade_date[:4]}.parquet"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([{"cal_date": trade_date, "is_open": is_open}]).to_parquet(path, index=False)
+        write_trade_cal(self.raw_dir, trade_date, is_open)
 
     def _write_trade_cal_with_stamping_window(self, trade_date="20200102", is_open="1"):
         """trade_date plus the 31 days a margin download stamps from (weekdays open)."""
