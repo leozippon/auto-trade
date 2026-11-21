@@ -16,17 +16,16 @@ its own window, the audit to the window it checks (:func:`time_units`).
 from __future__ import annotations
 
 import argparse
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from .common import (
-    by_ts_code_universe,
     cli_values,
     date_range_days,
     load_sse_open_dates,
     month_windows,
-    retained_range_start,
     safe_partition_value,
     selected_board_hot_is_new,
     selected_news_sources,
@@ -76,6 +75,16 @@ _TIME_KEYS = {
 def directory_name(value: Any) -> str:
     """A dimension's directory value: percent-encoded, ``all`` for no filter."""
     return safe_partition_value(value) if value else "all"
+
+def by_ts_code_universe(dataset: str, args: argparse.Namespace) -> list[str]:
+    """The codes a by-ts_code macro dataset is pulled and audited over."""
+    if dataset == "index_global":
+        return cli_values(args, "index_code")
+    if dataset in ("index_daily", "index_dailybasic"):
+        return cli_values(args, "cn_index_code")
+    if dataset == "fx_daily":
+        return cli_values(args, "fx_code")
+    raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
 
 
 def dimensions(spec: DatasetSpec, args: argparse.Namespace | None) -> list[dict[str, Any]]:
@@ -147,6 +156,26 @@ def partitions(
             if label >= first:
                 out.append(Partition(base / f"{time_key}={label}.parquet", unit, dims))
     return out
+
+def retained_range_start(dataset_dir: Path, start_date: str) -> str:
+    """The first date a range dataset's canonical file must keep covering.
+
+    A quarter_once/month_once pull rewrites ONE canonical
+    ``range=<start>_latest`` file, so a rewrite from a later start than the
+    file on disk holds would drop the history below it -- a backfill under the
+    research-history floor included. The retained start is therefore never
+    later than the start of the canonical file already there.
+    """
+
+    starts = [start_date]
+    for path in dataset_dir.glob("range=*_latest.parquet"):
+        token = path.name[len("range="):-len("_latest.parquet")]
+        quarter = re.fullmatch(r"(\d{4})Q([1-4])", token)
+        if quarter:
+            starts.append(f"{quarter.group(1)}{(int(quarter.group(2)) - 1) * 3 + 1:02d}01")
+        elif re.fullmatch(r"\d{6}", token):
+            starts.append(f"{token}01")
+    return min(starts)
 
 
 def range_partition(raw_dir: Path, spec: DatasetSpec, start_date: str) -> Partition:

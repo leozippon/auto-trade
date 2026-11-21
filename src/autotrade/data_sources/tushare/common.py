@@ -9,7 +9,6 @@ import re
 from collections.abc import Iterable
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
 from urllib.parse import quote
 
 import pandas as pd
@@ -40,14 +39,10 @@ from .specs import (
     EVENT_FLOW_SPECS,
     FUNDAMENTAL_DATASETS,
     FUNDAMENTAL_SPECS,
-    GLOBAL_CONTEXT_DEFAULT_DATASETS,
-    MACRO_REGIME_DEFAULT_DATASETS,
-    MACRO_SPECS,
     NEWS_SOURCES,
     STK_MINS_BY_DATE_DATASET,
     TEXT_DATASETS,
     TEXT_SPECS,
-    DatasetSpec,
 )
 from .versions import publish, record_defect
 
@@ -339,52 +334,6 @@ def yyyymmdd_to_quarter(value: str) -> str:
     quarter = (parsed.month - 1) // 3 + 1
     return f"{parsed.year}Q{quarter}"
 
-def history_floor(floor: str, args: argparse.Namespace) -> str:
-    """``floor`` lowered to a backfill run's ``--history-floor``, never raised."""
-
-    lowered = getattr(args, "history_floor", None)
-    return min(floor, lowered) if lowered else floor
-
-def yyyymmdd_arg(value: str) -> str:
-    """argparse type of a YYYYMMDD calendar date."""
-
-    try:
-        parse_yyyymmdd(value)
-    except ValueError:
-        raise argparse.ArgumentTypeError(f"expected a YYYYMMDD date, got {value!r}") from None
-    return value
-
-def retained_range_start(dataset_dir: Path, start_date: str) -> str:
-    """The first date a range dataset's canonical file must keep covering.
-
-    A quarter_once/month_once pull rewrites ONE canonical
-    ``range=<start>_latest`` file, so a rewrite from a later start than the
-    file on disk holds would drop the history below it -- a backfill under the
-    research-history floor included. The retained start is therefore never
-    later than the start of the canonical file already there.
-    """
-
-    starts = [start_date]
-    for path in dataset_dir.glob("range=*_latest.parquet"):
-        token = path.name[len("range="):-len("_latest.parquet")]
-        quarter = re.fullmatch(r"(\d{4})Q([1-4])", token)
-        if quarter:
-            starts.append(f"{quarter.group(1)}{(int(quarter.group(2)) - 1) * 3 + 1:02d}01")
-        elif re.fullmatch(r"\d{6}", token):
-            starts.append(f"{token}01")
-    return min(starts)
-
-
-def selected_macro_datasets(args: argparse.Namespace) -> list[str]:
-    default = GLOBAL_CONTEXT_DEFAULT_DATASETS if args.tier == "global" else MACRO_REGIME_DEFAULT_DATASETS
-    return select_datasets(args.datasets, default=default, allowed=MACRO_SPECS, label="macro/global")
-
-def spec_page_limit(spec, requested: int | None) -> int:
-    """Effective page size for one dataset spec: the caller's request clamped
-    to the spec's documented limit; 10000 when the spec documents none."""
-    if spec.page_limit is not None:
-        return min(requested or spec.page_limit, spec.page_limit)
-    return requested or 10000
 
 # What a repeatable filter option (add_macro_filter_args, add_board_filter_args)
 # means when it is not given; None is "no filter".
@@ -409,38 +358,6 @@ def cli_values(args: argparse.Namespace, attr: str) -> list:
     values = [str(value).strip() for value in getattr(args, attr, None) or [] if str(value).strip()]
     return values or list(CLI_LIST_DEFAULTS[attr])
 
-def by_ts_code_universe(dataset: str, args: argparse.Namespace) -> list[str]:
-    """The codes a by-ts_code macro dataset is pulled and audited over."""
-    if dataset == "index_global":
-        return cli_values(args, "index_code")
-    if dataset in ("index_daily", "index_dailybasic"):
-        return cli_values(args, "cn_index_code")
-    if dataset == "fx_daily":
-        return cli_values(args, "fx_code")
-    raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
-
-def write_frame(
-    path: Path,
-    df: pd.DataFrame,
-    spec: DatasetSpec,
-    params: dict[str, Any],
-    revision_ledger: Path | str | None = None,
-) -> tuple[bool, int]:
-    """Publish one augmented answer at ``path`` under ``spec``'s key. Returns
-    whether the visible partition changed and the rows that change wrote (0
-    when ``publish`` wrote nothing)."""
-    outcome = publish(
-        path,
-        df,
-        api_name=spec.api_name,
-        params=params,
-        fields=list(df.columns),
-        key_columns=list(spec.key_columns),
-        ledger=revision_ledger,
-        deduplicate=spec.unique_key,
-    )
-    written = outcome in WRITTEN_OUTCOMES
-    return written, len(df) if written else 0
 
 def selected_event_flow_datasets(args: argparse.Namespace) -> list[str]:
     return select_datasets(args.datasets, default=EVENT_FLOW_DATASETS, allowed=EVENT_FLOW_SPECS, label="event/flow")
@@ -533,9 +450,6 @@ def date_range_days(start_date: str, end_date: str) -> list[str]:
     days = pd.date_range(start, end, freq="D")
     return days.strftime("%Y%m%d").tolist()
 
-def as_datetime_window(value: str, *, end: bool = False) -> str:
-    suffix = "23:59:59" if end else "00:00:00"
-    return f"{value[:4]}-{value[4:6]}-{value[6:8]} {suffix}"
 
 def safe_partition_value(value: str) -> str:
     """The single authority for raw-lake partition directory names.

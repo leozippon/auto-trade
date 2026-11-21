@@ -51,12 +51,10 @@ from .common import (
     NO_MUTATION_RETRY_EXIT_CODE,
     REVISION_EVENTS_PATH,
     WRITTEN_OUTCOMES,
-    as_datetime_window,
     date_range_days,
     download_trade_cal,
     ensure_trade_cal_coverage,
     format_yyyymmdd,
-    history_floor,
     latest_sse_calendar_date,
     load_sse_open_dates,
     load_stock_codes,
@@ -72,10 +70,7 @@ from .common import (
     selected_board_trading_datasets,
     selected_daily_datasets,
     selected_fundamental_datasets,
-    selected_macro_datasets,
     selected_text_datasets,
-    spec_page_limit,
-    write_frame,
     year_windows,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
@@ -111,10 +106,12 @@ from .specs import (
     EVENT_FLOW_SPECS,
     FUNDAMENTAL_DATASETS,
     FUNDAMENTAL_SPECS,
+    GLOBAL_CONTEXT_DEFAULT_DATASETS,
     INDEX_WEIGHT_FIELDS,
     INDEX_WEIGHT_PAGE_LIMIT,
     INTRADAY_DATASETS,
     MACRO_DATASETS,
+    MACRO_REGIME_DEFAULT_DATASETS,
     MACRO_SPECS,
     REFERENCE_DATASETS,
     REFERENCE_PAGE_LIMIT,
@@ -141,6 +138,34 @@ from .versions import (
     publish,
     report_complete,
 )
+
+
+def history_floor(floor: str, args: argparse.Namespace) -> str:
+    """``floor`` lowered to a backfill run's ``--history-floor``, never raised."""
+
+    lowered = getattr(args, "history_floor", None)
+    return min(floor, lowered) if lowered else floor
+
+def yyyymmdd_arg(value: str) -> str:
+    """argparse type of a YYYYMMDD calendar date."""
+
+    try:
+        parse_yyyymmdd(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"expected a YYYYMMDD date, got {value!r}") from None
+    return value
+
+
+def selected_macro_datasets(args: argparse.Namespace) -> list[str]:
+    default = GLOBAL_CONTEXT_DEFAULT_DATASETS if args.tier == "global" else MACRO_REGIME_DEFAULT_DATASETS
+    return select_datasets(args.datasets, default=default, allowed=MACRO_SPECS, label="macro/global")
+
+def spec_page_limit(spec, requested: int | None) -> int:
+    """Effective page size for one dataset spec: the caller's request clamped
+    to the spec's documented limit; 10000 when the spec documents none."""
+    if spec.page_limit is not None:
+        return min(requested or spec.page_limit, spec.page_limit)
+    return requested or 10000
 
 
 def write_reference_query_result(
@@ -571,6 +596,29 @@ def write_window_merged_partition(
         ledger=revision_ledger,
         deduplicate=deduplicate,
         current=current,
+    )
+    written = outcome in WRITTEN_OUTCOMES
+    return written, len(df) if written else 0
+
+def write_frame(
+    path: Path,
+    df: pd.DataFrame,
+    spec: DatasetSpec,
+    params: dict[str, Any],
+    revision_ledger: Path | str | None = None,
+) -> tuple[bool, int]:
+    """Publish one augmented answer at ``path`` under ``spec``'s key. Returns
+    whether the visible partition changed and the rows that change wrote (0
+    when ``publish`` wrote nothing)."""
+    outcome = publish(
+        path,
+        df,
+        api_name=spec.api_name,
+        params=params,
+        fields=list(df.columns),
+        key_columns=list(spec.key_columns),
+        ledger=revision_ledger,
+        deduplicate=spec.unique_key,
     )
     written = outcome in WRITTEN_OUTCOMES
     return written, len(df) if written else 0
@@ -1562,6 +1610,10 @@ def official_text_client(datasets: list[str], repo_root: Path, args: argparse.Na
         client.query(spec.api_name, {"start_date": args.end_date, "end_date": args.end_date, "limit": 1}, spec.fields)
     return client
 
+def as_datetime_window(value: str, *, end: bool = False) -> str:
+    suffix = "23:59:59" if end else "00:00:00"
+    return f"{value[:4]}-{value[4:6]}-{value[6:8]} {suffix}"
+
 
 def download_text(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -1969,7 +2021,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--force", action="store_true")
     parser.add_argument(
         "--history-floor",
-        type=core.yyyymmdd_arg,
+        type=yyyymmdd_arg,
         help="Backfill only: lower the research-history floor (RESEARCH_HISTORY_FLOOR, and the "
         "tier's own per-dataset floors) to this date for the datasets this run downloads, so "
         "--start-date can reach below it. Never raises a floor.",

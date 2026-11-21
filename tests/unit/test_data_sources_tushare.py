@@ -2321,10 +2321,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_history_floor_is_lowered_only_by_an_explicit_backfill_flag(self):
         plain = argparse.Namespace()
         backfill = argparse.Namespace(history_floor="20140701")
-        self.assertEqual(common.history_floor(specs.RESEARCH_HISTORY_FLOOR, plain), "20200101")
-        self.assertEqual(common.history_floor(specs.RESEARCH_HISTORY_FLOOR, backfill), "20140701")
+        self.assertEqual(download.history_floor(specs.RESEARCH_HISTORY_FLOOR, plain), "20200101")
+        self.assertEqual(download.history_floor(specs.RESEARCH_HISTORY_FLOOR, backfill), "20140701")
         # Never raised: a spec floor already below the flag stays where it is.
-        self.assertEqual(common.history_floor("20100101", backfill), "20100101")
+        self.assertEqual(download.history_floor("20100101", backfill), "20100101")
         parser = argparse.ArgumentParser()
         download.add_download_parser(parser.add_subparsers(dest="command"))
         parsed = parser.parse_args(["download", "--tier", "macro", "--history-floor", "20140701"])
