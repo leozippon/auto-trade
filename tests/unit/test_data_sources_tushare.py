@@ -23,6 +23,7 @@ import pandas as pd
 from pyarrow.lib import ArrowInvalid
 
 from autotrade.data_sources.tushare import (
+    auction,
     audit,
     common,
     cron_update,
@@ -2470,12 +2471,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             timeout_seconds=1.0,
         )
         with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient"),
-            patch.object(download, "query_paged", side_effect=responses) as query,
-            patch.object(download.time, "sleep", return_value=None),
+            patch.object(auction, "load_token", return_value="token"),
+            patch.object(auction, "TuShareClient"),
+            patch.object(auction, "query_paged", side_effect=responses) as query,
+            patch.object(auction.time, "sleep", return_value=None),
         ):
-            self.assertEqual(download.capture_open_auction(args), 0)
+            self.assertEqual(auction.capture_open_auction(args), 0)
 
         self.assertEqual(query.call_count, 5)
         target = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
@@ -2488,12 +2489,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # different API order. Canonical persistence keeps the first landing.
         reversed_result = result(list(reversed(full)))
         with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient"),
-            patch.object(download, "query_paged", side_effect=[(reversed_result, 1), (reversed_result, 1)]),
-            patch.object(download.time, "sleep", return_value=None),
+            patch.object(auction, "load_token", return_value="token"),
+            patch.object(auction, "TuShareClient"),
+            patch.object(auction, "query_paged", side_effect=[(reversed_result, 1), (reversed_result, 1)]),
+            patch.object(auction.time, "sleep", return_value=None),
         ):
-            self.assertEqual(download.capture_open_auction(args), 0)
+            self.assertEqual(auction.capture_open_auction(args), 0)
         self.assertEqual(tushare_io.parquet_meta(target)["availability"], availability)
         self.assertEqual(pd.read_parquet(target)["ts_code"].tolist(), ["000001.SZ", "600000.SH"])
 
@@ -2529,12 +2530,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             timeout_seconds=1.0,
         )
         with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient"),
-            patch.object(download, "query_paged", return_value=(partial, 1)),
+            patch.object(auction, "load_token", return_value="token"),
+            patch.object(auction, "TuShareClient"),
+            patch.object(auction, "query_paged", return_value=(partial, 1)),
         ):
             self.assertEqual(
-                download.capture_open_auction(args),
+                auction.capture_open_auction(args),
                 common.NO_MUTATION_RETRY_EXIT_CODE,
             )
 
@@ -2581,13 +2582,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         clock = Clock()
         with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient"),
-            patch.object(download, "query_paged", side_effect=clock.query),
-            patch.object(download.time, "monotonic", side_effect=clock.monotonic),
-            patch.object(download.time, "sleep", side_effect=clock.sleep),
+            patch.object(auction, "load_token", return_value="token"),
+            patch.object(auction, "TuShareClient"),
+            patch.object(auction, "query_paged", side_effect=clock.query),
+            patch.object(auction.time, "monotonic", side_effect=clock.monotonic),
+            patch.object(auction.time, "sleep", side_effect=clock.sleep),
         ):
-            self.assertEqual(download.capture_open_auction(args), 0)
+            self.assertEqual(auction.capture_open_auction(args), 0)
 
         self.assertEqual(clock.query_starts, [0.0, 10.0, 20.0])
         self.assertEqual(clock.sleeps, [7.0, 7.0])
@@ -2604,7 +2605,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "volume_ratio": 1.0,
             "float_share": 100000.0,
         }
-        errors = download._validate_auction_capture(
+        errors = auction._validate_auction_capture(
             pd.DataFrame([row, row]), "20260713", min_rows=1
         )
         self.assertIn("duplicate_keys=1", errors)
@@ -2624,7 +2625,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {**base, "ts_code": "000002.SZ", "price": None, "vol": 2000.0, "amount": 16000.0},
             {**base, "ts_code": "000003.SZ", "price": None, "vol": 0.0, "amount": 0.0},
         ])
-        self.assertEqual(download._validate_auction_capture(valid, "20260713", min_rows=3), [])
+        self.assertEqual(auction._validate_auction_capture(valid, "20260713", min_rows=3), [])
 
         invalid = pd.DataFrame([
             {**base, "ts_code": "000004.SZ", "price": 10.0, "vol": float("nan"), "amount": 10.0},
@@ -2636,7 +2637,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {**base, "ts_code": "000010.SZ", "price": 10.0, "vol": 0.0, "amount": 0.0},
             {**base, "ts_code": "000011.SZ", "price": 100.0, "vol": 1000.0, "amount": 10000.0},
         ])
-        errors = download._validate_auction_capture(invalid, "20260713", min_rows=8)
+        errors = auction._validate_auction_capture(invalid, "20260713", min_rows=8)
         self.assertIn("invalid_vol_rows=2", errors)
         self.assertIn("invalid_amount_rows=2", errors)
         self.assertIn("inconsistent_trade_rows=1", errors)
@@ -2658,21 +2659,21 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         funds = [f"{510000 + index}.SH" for index in range(1000)] + [f"{150000 + index}.SZ" for index in range(900)]
         pd.DataFrame({"ts_code": stocks + funds}).to_parquet(previous, index=False)
 
-        minimum = download._auction_capture_min_rows(
+        minimum = auction._auction_capture_min_rows(
             self.raw_dir, "20260911", floor=1000, ratio=0.85,
         )
         self.assertEqual(minimum, 4250)  # floor(5000 stock rows * 0.85)
         row = {"trade_date": "20260911", "vol": 0.0, "price": None, "amount": 0.0, "pre_close": 9.9, "turnover_rate": 0.0, "volume_ratio": 1.0, "float_share": 1.0}
         without_funds = pd.DataFrame([{**row, "ts_code": code} for code in stocks])
-        self.assertEqual(download._validate_auction_capture(without_funds, "20260911", min_rows=minimum), [])
+        self.assertEqual(auction._validate_auction_capture(without_funds, "20260911", min_rows=minimum), [])
         truncated = pd.DataFrame([{**row, "ts_code": code} for code in stocks[:4000] + funds])
         self.assertIn(
             "stock_rows=4000 below_min_rows=4250",
-            download._validate_auction_capture(truncated, "20260911", min_rows=minimum),
+            auction._validate_auction_capture(truncated, "20260911", min_rows=minimum),
         )
         # No previous partition: the absolute floor holds.
         self.assertEqual(
-            download._auction_capture_min_rows(self.raw_dir, "20260701", floor=1000, ratio=0.85),
+            auction._auction_capture_min_rows(self.raw_dir, "20260701", floor=1000, ratio=0.85),
             1000,
         )
 
@@ -2702,13 +2703,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def run(**response):
             output = io.StringIO()
             with (
-                patch.object(download, "load_token", return_value="token"),
-                patch.object(download, "TuShareClient"),
-                patch.object(download, "AUCTION_CAPTURE_MIN_ROWS_FLOOR", 2),
-                patch.object(download, "query_paged", **response),
+                patch.object(auction, "load_token", return_value="token"),
+                patch.object(auction, "TuShareClient"),
+                patch.object(auction, "AUCTION_CAPTURE_MIN_ROWS_FLOOR", 2),
+                patch.object(auction, "query_paged", **response),
                 redirect_stdout(output),
             ):
-                code = download.recheck_stk_auction(args)
+                code = auction.recheck_stk_auction(args)
             return code, output.getvalue()
 
         # Catch-up: no partition yet (the whole pre-open window failed); one
@@ -2805,13 +2806,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             landing_job="cn_evening_auction_backfill",
         )
         with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient"),
-            patch.object(download, "AUCTION_CAPTURE_MIN_ROWS_FLOOR", 2),
-            patch.object(download, "query_paged", side_effect=fake_query),
+            patch.object(auction, "load_token", return_value="token"),
+            patch.object(auction, "TuShareClient"),
+            patch.object(auction, "AUCTION_CAPTURE_MIN_ROWS_FLOOR", 2),
+            patch.object(auction, "query_paged", side_effect=fake_query),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(download.recheck_stk_auction(args), 0)
+            self.assertEqual(auction.recheck_stk_auction(args), 0)
         self.assertEqual(queried, ["20260710", "20260713"])
         self.assertTrue((target_dir / "trade_date=20260710.parquet").exists())
         self.assertTrue((target_dir / "trade_date=20260713.parquet").exists())
@@ -2855,13 +2856,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             landing_job="cn_evening_auction_backfill",
         )
         with (
-            patch.object(download, "load_token", return_value="token"),
-            patch.object(download, "TuShareClient"),
-            patch.object(download, "AUCTION_CAPTURE_MIN_ROWS_FLOOR", 2),
-            patch.object(download, "query_paged", side_effect=fake_query),
+            patch.object(auction, "load_token", return_value="token"),
+            patch.object(auction, "TuShareClient"),
+            patch.object(auction, "AUCTION_CAPTURE_MIN_ROWS_FLOOR", 2),
+            patch.object(auction, "query_paged", side_effect=fake_query),
             redirect_stdout(io.StringIO()),
         ):
-            self.assertEqual(download.recheck_stk_auction(args), 0)
+            self.assertEqual(auction.recheck_stk_auction(args), 0)
         self.assertEqual(queried, ["20260709", "20260710", "20260713"])
         self.assertTrue(tushare_io.committed_partition_intact(torn))
 
