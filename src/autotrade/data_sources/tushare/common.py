@@ -18,10 +18,10 @@ from autotrade.common.time import cn_today
 
 # Raw-lake research contract values are owned by the environment's PIT layer;
 # the ingest adapter imports them so producer and consumer cannot drift.
-from autotrade.environment.data.contracts import (
-    DOMAIN_STATUS_FILES,
-)
+from autotrade.environment.data.contracts import DOMAIN_STATUS_FILES
+from autotrade.environment.data.pit import concat_rows
 
+from .client import TuShareClient, frame
 from .io import parquet_rows, read_many
 from .specs import (
     BOARD_DC_HOT_MARKETS,
@@ -53,7 +53,7 @@ from .specs import (
     TEXT_SPECS,
     DatasetSpec,
 )
-from .versions import publish
+from .versions import publish, record_defect
 
 # Status file names are owned by environment.data.contracts (one source for
 # audit producers, snapshot gates, and research-release pinning).
@@ -172,6 +172,109 @@ def load_sse_open_dates(raw_dir: Path, start_date: str, end_date: str, *, allow_
 
 def latest_sse_calendar_date(raw_dir: Path) -> str:
     return str(sse_calendar(raw_dir)["cal_date"].max())
+
+def merge_trade_cal_partition(path: Path, refreshed: pd.DataFrame) -> pd.DataFrame:
+    if not path.exists():
+        return refreshed
+    existing = pd.read_parquet(path)
+    if existing.empty:
+        return refreshed
+    if refreshed.empty:
+        return existing
+    # A vendor flip of is_open/pretrade_date on an already-elapsed date would
+    # retroactively shift every derived PIT stamp (T+2 visibility rules,
+    # resolved cron end dates), so it must never merge silently. Refuse and
+    # leave the decision to a human: verify against the exchange, then delete
+    # the year partition to accept the correction.
+    today = cn_today()
+    checked = [column for column in ("is_open", "pretrade_date") if column in existing.columns and column in refreshed.columns]
+    if checked:
+        # Each partition file is single-exchange by construction (exchange=
+        # directory), so cal_date alone identifies the day.
+        old = existing[existing["cal_date"].astype(str) <= today].set_index("cal_date")[checked]
+        new = refreshed[refreshed["cal_date"].astype(str) <= today].set_index("cal_date")[checked]
+        joined = old.join(new, how="inner", lsuffix="_old", rsuffix="_new")
+        changed = pd.Series(False, index=joined.index)
+        for column in checked:
+            changed |= joined[f"{column}_old"].fillna("").astype(str) != joined[f"{column}_new"].fillna("").astype(str)
+        if bool(changed.any()):
+            raise RuntimeError(
+                f"trade_cal {path} revises {int(changed.sum())} already-elapsed calendar day(s) "
+                f"(sample: {sorted(joined.index[changed].tolist())[:5]}); refusing to merge silently -- "
+                "verify against the exchange and delete the year partition to accept the correction"
+            )
+    merged = concat_rows([existing, refreshed])
+    return (
+        merged.drop_duplicates(["exchange", "cal_date"], keep="last")
+        .sort_values(["exchange", "cal_date"], ascending=[True, False])
+        .reset_index(drop=True)
+    )
+
+def download_trade_cal(
+    client: TuShareClient, raw_dir: Path, start_date: str, end_date: str, force: bool, *, ledger: Path | str | None
+) -> list[str]:
+    fields = "exchange,cal_date,is_open,pretrade_date"
+    sse_open: set[str] = set()
+    for exchange in ("SSE", "SZSE", "BSE"):
+        for year in range(int(start_date[:4]), int(end_date[:4]) + 1):
+            path = raw_dir / "trade_cal" / f"exchange={exchange}" / f"year={year}.parquet"
+            params = {"exchange": exchange, "start_date": max(start_date, f"{year}0101"), "end_date": min(end_date, f"{year}1231")}
+            if path.exists() and not force:
+                df = pd.read_parquet(path)
+                dates = df["cal_date"].map(normalize_date_key) if "cal_date" in df.columns else pd.Series(dtype=str)
+                dates = dates[dates != ""]
+                if not dates.empty and dates.min() <= params["start_date"] and dates.max() >= params["end_date"]:
+                    if exchange == "SSE" and not df.empty:
+                        sse_open.update(
+                            date_key
+                            for date_key in df.loc[df["is_open"].astype(str) == "1", "cal_date"].map(normalize_date_key).tolist()
+                            if date_key
+                        )
+                    continue
+            merging = path.exists()
+            result = client.query("trade_cal", params, fields)
+            answer = frame(result)
+            df = merge_trade_cal_partition(path, answer)
+            if answer.empty and not df.empty:
+                # The year already holds days, so an empty answer is the
+                # vendor's fault: the partition keeps them.
+                record_defect(path, f"trade_cal params={params} returned zero rows for an existing partition", ledger=ledger, source="force_refresh")
+            else:
+                publish(
+                    path,
+                    df,
+                    api_name="trade_cal",
+                    params={**params, "merge_existing": True} if merging else params,
+                    fields=fields.split(",") if merging else result.fields,
+                    key_columns=(),
+                    ledger=ledger,
+                )
+            if exchange == "SSE" and not df.empty:
+                sse_open.update(
+                    date_key
+                    for date_key in df.loc[df["is_open"].astype(str) == "1", "cal_date"].map(normalize_date_key).tolist()
+                    if date_key
+                )
+    return sorted(sse_open)
+
+def sse_trade_cal_covers(raw_dir: Path, start_date: str, end_date: str) -> bool:
+    try:
+        dates = sse_calendar(raw_dir)["cal_date"]
+    except RuntimeError:
+        return False
+    return bool(dates.min() <= start_date and dates.max() >= end_date)
+
+def ensure_trade_cal_coverage(
+    client: TuShareClient, raw_dir: Path, start_date: str, end_date: str, *, ledger: Path | str | None
+) -> bool:
+    """Extend local SSE trade_cal when it lags; True means the lake was written."""
+    if parse_yyyymmdd(start_date) > parse_yyyymmdd(end_date):
+        return False
+    if sse_trade_cal_covers(raw_dir, start_date, end_date):
+        return False
+    print(f"refreshing trade_cal coverage for {start_date}-{end_date}")
+    download_trade_cal(client, raw_dir, start_date, end_date, force=False, ledger=ledger)
+    return True
 
 def select_datasets(
     values: Iterable[str] | None,

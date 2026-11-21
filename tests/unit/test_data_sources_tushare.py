@@ -452,7 +452,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(common.load_sse_open_dates(self.raw_dir, "20260603", "20260605"), ["20260603", "20260605"])
         self.assertEqual(common.latest_sse_calendar_date(self.raw_dir), "20260605")
-        self.assertTrue(download.sse_trade_cal_covers(self.raw_dir, "20260603", "20260605"))
+        self.assertTrue(common.sse_trade_cal_covers(self.raw_dir, "20260603", "20260605"))
 
     def test_audit_window_never_expects_future_trading_days(self):
         """The calendar is published ahead; the audit must not demand data for
@@ -4253,7 +4253,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ]).to_parquet(path, index=False)
         client = TradeCalClient()
 
-        open_dates = download.download_trade_cal(client, self.raw_dir, "20260604", "20260604", force=True, ledger=None)
+        open_dates = common.download_trade_cal(client, self.raw_dir, "20260604", "20260604", force=True, ledger=None)
 
         refreshed = pd.read_parquet(path)
         self.assertEqual(sorted(refreshed["cal_date"].astype(str).tolist()), ["20260603", "20260604"])
@@ -5861,13 +5861,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "is_open": ["0", "1"], "pretrade_date": ["20200101", "20200102"],
         })
         with self.assertRaises(RuntimeError) as ctx:
-            download.merge_trade_cal_partition(path, flipped)
+            common.merge_trade_cal_partition(path, flipped)
         self.assertIn("already-elapsed", str(ctx.exception))
         # Future-dated schedule publication merges freely.
         future = pd.DataFrame({
             "exchange": ["SSE"], "cal_date": ["29991231"], "is_open": ["0"], "pretrade_date": [""],
         })
-        merged = download.merge_trade_cal_partition(path, future)
+        merged = common.merge_trade_cal_partition(path, future)
         self.assertEqual(len(merged), 3)
 
 
