@@ -35,11 +35,18 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment_params import NON_PERSISTABLE_PARAMS
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
+from autotrade.pipelines.pack_payload import (
+    PAYLOAD_MANIFEST,
+    PAYLOAD_ROOT,
+    format_manifest,
+    payload_digests,
+)
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 from autotrade.pipelines.pit_views_seed import (
     UNFINISHED_BUILD_MARKER,
     pit_cache_provider_record,
 )
+from autotrade.pipelines.research_session import install_workspace_reference
 from autotrade.pipelines.worker import _snapshot_config, strategy_sandbox_from_spec
 from autotrade.webui.manager import (
     MAX_RUNNING_EXPERIMENTS,
@@ -337,6 +344,45 @@ def test_an_experiment_mounts_the_pack_named_after_it_unless_it_names_another(
     err = capsys.readouterr().err
     assert "conventional_test: parameters rejected" in err and "workspace_reference" in err
     assert err.splitlines()[-1] == "refused: conventional_test"
+
+
+def test_a_paper_packs_payload_passes_the_dry_run_only_as_listed_and_reaches_refs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """End to end without the network: a Pack whose manifest lists a paper and a
+    repository passes the round's pre-flight, a session's refs/ then holds the
+    tracked Pack and the payload, and the pre-flight refuses the experiment once
+    a listed file is gone."""
+    rnd = _sealed_round(experiments={"paper_test": {}}, pit_views_seed="data/seed_probe")
+    _synthetic_repo(tmp_path, monkeypatch, rnd)
+    pack = tmp_path / "configs/workspace_refs/paper_test"
+    (pack / "README.md").write_text("Reproduce papers/demo/ and evaluate it here.\n", encoding="utf-8")
+    store = tmp_path / PAYLOAD_ROOT / "paper_test"
+    payload = {
+        "papers/demo/paper.pdf": b"%PDF-1.4\n%%EOF\n",
+        "papers/demo/paper.txt": b"Abstract\n",
+        "papers/demo/repo/demo/__init__.py": b"VALUE = 1\n",
+    }
+    for relative, data in payload.items():
+        (store / relative).parent.mkdir(parents=True, exist_ok=True)
+        (store / relative).write_bytes(data)
+    (pack / PAYLOAD_MANIFEST).write_text(format_manifest(payload_digests(store, str(store))), encoding="utf-8")
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 0
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    install_workspace_reference(workspace, "configs/workspace_refs/paper_test", repo_root=tmp_path)
+    refs = workspace / "refs"
+    assert {path.relative_to(refs).as_posix(): path.read_bytes() for path in refs.rglob("*") if path.is_file()} == {
+        "README.md": (pack / "README.md").read_bytes(),
+        PAYLOAD_MANIFEST: (pack / PAYLOAD_MANIFEST).read_bytes(),
+        **payload,
+    }
+    capsys.readouterr()
+    (store / "papers/demo/paper.txt").unlink()
+    assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 1
+    err = capsys.readouterr().err
+    assert "paper_test: parameters rejected" in err
+    assert "Pack paper_test: data/pack_payloads/paper_test/papers/demo/paper.txt is missing" in err
 
 
 def test_a_round_without_experiments_is_never_posted() -> None:

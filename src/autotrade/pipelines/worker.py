@@ -95,6 +95,7 @@ from .local_backend import (
     LocalDailyEvaluationBackend,
     LocalDailySnapshotProvider,
 )
+from .pack_payload import pack_payload
 from .pit_backend import (
     PITDailyEvaluationBackend,
     ResearchPITSnapshotProvider,
@@ -1330,10 +1331,12 @@ def _optional_workspace_reference(value: object, repo_root: Path) -> str:
         return ""
     # Config seed, not a data lake: existence is required even at create
     # preflight, and its absence is a refused parameter like any other (the
-    # console and the round launcher report ValueError, not an OSError).
+    # console and the round launcher report ValueError, not an OSError). So is
+    # a paper Pack's payload that is missing or differs from its manifest
+    # (PackPayloadError is a ValueError), here as at every session start.
     if not (repo_root / text).is_dir():
         raise ValueError(f"workspace_reference {text} is not a directory in the repository")
-    _repo_dir(repo_root, text, "workspace_reference")
+    pack_payload(_repo_dir(repo_root, text, "workspace_reference"), repo_root)
     return text
 
 

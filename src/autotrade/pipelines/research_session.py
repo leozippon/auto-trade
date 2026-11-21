@@ -126,6 +126,7 @@ from .config import (
     positive_spend_cap,
 )
 from .ledger import ENVIRONMENT_BLOCKED, ExperimentLedger, SessionKind, link_head
+from .pack_payload import pack_payload
 from .session_tools import (
     EnvironmentBlocked,
     NullControlTool,
@@ -1690,17 +1691,28 @@ def install_workspace_reference(
     sandbox user owns. Drift costs nothing instead: every session start removes
     this tree and re-copies it from the checked-in reference workspace.
 
+    A paper Pack's payload (``pack_payload``) is verified against its
+    manifest first and then lands beside the tracked files at the paths the
+    manifest lists, hidden files and PDFs of any size included. Each file is
+    a byte copy, never a hard link: ``refs/`` is writable, and nothing done
+    there may reach the store.
+
     The copy writes only ``refs/``, never ``models/`` or ``inputs/``;
     ``output/`` is seeded separately by :func:`seed_output_from_starter`.
     """
     seed = _resolve_workspace_reference(workspace_reference, repo_root)
     if seed is None:
         return
+    payload = pack_payload(seed, None if repo_root is None else Path(repo_root).resolve())
     dest = Path(workspace) / _WORKSPACE_REFS_DIR
     if dest.exists():
         raise FileExistsError(f"workspace refs directory already exists: {dest}")
     dest.mkdir()
     _copy_workspace_reference_tree(seed, dest, seed_root=seed)
+    for relative, source in payload:
+        target = dest / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, target)
     chmod_tree(dest, file_mode=WORKSPACE_FILE_MODE, dir_mode=WORKSPACE_DIR_MODE)
 
 
