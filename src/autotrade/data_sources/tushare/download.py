@@ -1715,6 +1715,14 @@ def download_event_range_month(
     print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     return written
 
+BOARD_TRADE_DATE_STRATEGIES = frozenset({
+    FetchStrategy.TRADE_DATE,
+    FetchStrategy.TRADE_DATE_BY_TAG,
+    FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE,
+    FetchStrategy.TRADE_DATE_BY_MARKET,
+    FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE,
+})
+
 def download_board_trading(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
@@ -1741,16 +1749,8 @@ def download_board_trading(args: argparse.Namespace) -> int:
         page_limit = spec_page_limit(spec, args.page_limit)
         if spec.strategy == FetchStrategy.STATIC_FULL:
             download_board_static_dataset(client, raw_dir, spec, revision_ledger)
-        elif spec.strategy == FetchStrategy.TRADE_DATE:
-            download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
-        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
-            download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
-        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
-            download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
-        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET:
-            download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
-        elif spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE:
-            download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
+        elif spec.strategy in BOARD_TRADE_DATE_STRATEGIES:
+            download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger, args)
         else:
             raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {dataset}")
     print(f"board-trading download finished under {raw_dir}")
@@ -1766,133 +1766,45 @@ def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: Da
         _, rows = write_frame(path, augment_board_frame(frame(result), spec, {}), spec, {}, revision_ledger)
         print(f"{spec.api_name} static rows={rows}")
 
-def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
+def download_board_trade_date_dataset(
+    client: TuShareClient,
+    raw_dir: Path,
+    spec: DatasetSpec,
+    trade_dates: list[str],
+    force: bool,
+    page_limit: int,
+    revision_ledger: Path | str | None = None,
+    args: argparse.Namespace | None = None,
+) -> None:
+    """Every trade-date board table: one partition per trade date and, for
+    the tag, pool and hot-list tables, per value of their dimensions
+    (``args`` filters them; layout.dimensions)."""
+    tasks = partitions(raw_dir, spec, trade_dates, args)
     written = 0
     skipped = 0
     total_rows = 0
     total_pages = 0
-    for index, part in enumerate(partitions(raw_dir, spec, trade_dates), start=1):
-        path, trade_date = part.path, part.unit
+    for index, part in enumerate(tasks, start=1):
+        path = part.path
         if should_skip_existing_partition(path, force=force):
             skipped += 1
             continue
-        params = {"trade_date": trade_date}
+        params = {"trade_date": part.unit, **part.dims}
         with answer_defects(path, ledger=revision_ledger):
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            # The sidecar also names each percent-encoded directory (is_new is a plain Y/N).
+            meta_params = {
+                **params,
+                **{f"{key}_partition": directory_name(value) for key, value in part.dims.items() if key != "is_new"},
+                "pagination": {"page_limit": page_limit, "pages": pages},
+            }
             landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
             total_rows += rows
             total_pages += pages
             written += landed
         if index % 250 == 0:
-            print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-
-def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
-    tasks = partitions(raw_dir, spec, trade_dates, args)
-    total_tasks = len(tasks)
-    written = 0
-    skipped = 0
-    total_rows = 0
-    total_pages = 0
-    for task_index, part in enumerate(tasks, start=1):
-        path = part.path
-        if should_skip_existing_partition(path, force=force):
-            skipped += 1
-            continue
-        params = {"trade_date": part.unit, **part.dims}
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["tag_partition"] = directory_name(part.dims["tag"])
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-            total_rows += rows
-            total_pages += pages
-            written += landed
-        if task_index % 250 == 0:
-            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-
-def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
-    tasks = partitions(raw_dir, spec, trade_dates, args)
-    total_tasks = len(tasks)
-    written = 0
-    skipped = 0
-    total_rows = 0
-    total_pages = 0
-    for task_index, part in enumerate(tasks, start=1):
-        path = part.path
-        if should_skip_existing_partition(path, force=force):
-            skipped += 1
-            continue
-        params = {"trade_date": part.unit, **part.dims}
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["limit_type_partition"] = directory_name(part.dims["limit_type"])
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-            total_rows += rows
-            total_pages += pages
-            written += landed
-        if task_index % 250 == 0:
-            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-
-def download_board_hot_by_market(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
-    tasks = partitions(raw_dir, spec, trade_dates, args)
-    total_tasks = len(tasks)
-    written = 0
-    skipped = 0
-    total_rows = 0
-    total_pages = 0
-    for task_index, part in enumerate(tasks, start=1):
-        path = part.path
-        if should_skip_existing_partition(path, force=force):
-            skipped += 1
-            continue
-        params = {"trade_date": part.unit, **part.dims}
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["market_partition"] = directory_name(part.dims["market"])
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-            total_rows += rows
-            total_pages += pages
-            written += landed
-        if task_index % 250 == 0:
-            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-
-def download_board_dc_hot(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
-    tasks = partitions(raw_dir, spec, trade_dates, args)
-    total_tasks = len(tasks)
-    written = 0
-    skipped = 0
-    total_rows = 0
-    total_pages = 0
-    for task_index, part in enumerate(tasks, start=1):
-        path = part.path
-        if should_skip_existing_partition(path, force=force):
-            skipped += 1
-            continue
-        params = {"trade_date": part.unit, **part.dims}
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["market_partition"] = directory_name(part.dims["market"])
-            meta_params["hot_type_partition"] = directory_name(part.dims["hot_type"])
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-            total_rows += rows
-            total_pages += pages
-            written += landed
-        if task_index % 250 == 0:
-            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+            print(f"{spec.api_name} {index}/{len(tasks)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+    print(f"{spec.api_name} done tasks={len(tasks)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
 def query_share_float_to_path(
     client: TuShareClient,
