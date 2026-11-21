@@ -351,6 +351,45 @@ class SandboxSpec:
             )
         return list(self.gpu)
 
+    def boundary_args(
+        self,
+        *,
+        labels: Mapping[str, str],
+        gpu_indices: Sequence[int],
+        env: Sequence[tuple[str, str]] = (),
+    ) -> list[str]:
+        """The ``docker run`` flags the session and the strategy container share:
+        the network, user and filesystem boundary, the limits, the labels, the
+        devices and the environment (``env`` ahead of the thread counts)."""
+
+        args = [
+            "--network", self.network, "--user", self.user, "--read-only",
+            # exec: Triton compiles the launcher modules of its kernels into
+            # its cache under /tmp (the image's TRITON_CACHE_DIR) and loads
+            # them from there; Docker mounts a tmpfs noexec unless told.
+            "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={self.tmpfs_size}",
+            # Shared memory for multi-process training inside fit(context):
+            # without it Docker's 64 MB default makes a torch DataLoader with
+            # workers or a joblib memmapped backend fail on a container that
+            # otherwise has 8 CPUs to use.
+            "--shm-size", self.shm_size,
+            # Swap ceiling equal to the memory cap: see ``memory`` for why the
+            # two are the same number.
+            "--cpus", f"{self.cpus:g}", "--memory", self.memory, "--memory-swap", self.memory,
+            # No core files: a crashing process would write one into its
+            # working directory, the /tmp scratch or a strategy's state
+            # directory included, charged to the memory cap or the state quota.
+            "--pids-limit", str(self.pids), "--ulimit", "core=0:0",
+            "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        ]
+        for key, value in sorted(labels.items()):
+            args.extend(["--label", f"{key}={value}"])
+        if gpu_indices:
+            args.extend(["--gpus", device_request(gpu_indices)])
+        for key, value in (*env, *sorted(container_numeric_env(self.cpus).items())):
+            args.extend(["--env", f"{key}={value}"])
+        return args
+
     def to_record(self) -> dict[str, object]:
         return dataclass_record(self)
 
@@ -623,33 +662,21 @@ class DockerSandbox:
         paths = self.local.paths
         command = [
             self.spec.docker_executable, "run", "--pull", "never", "--detach", "--init",
-            "--name", self.container, "--network", "none", "--user", self.spec.user,
-            # exec for Triton's kernel cache, as in the strategy container
-            # (``executor.DockerStrategyExecutor.docker_command``).
-            "--read-only", "--tmpfs", f"/tmp:rw,exec,nosuid,nodev,size={self.spec.tmpfs_size}",
-            "--shm-size", self.spec.shm_size,
-            # Swap ceiling equal to the memory cap: see ``SandboxSpec.memory``
-            # for why the two are the same number.
-            "--cpus", f"{self.spec.cpus:g}", "--memory", self.spec.memory,
-            "--memory-swap", self.spec.memory,
-            "--pids-limit", str(self.spec.pids), "--ulimit", "core=0:0",
-            "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+            "--name", self.container,
+            *self.spec.boundary_args(
+                labels=self.labels,
+                gpu_indices=self.gpu_indices,
+                env=(
+                    ("XDG_CACHE_HOME", "/tmp/cache"), ("PIP_CACHE_DIR", "/tmp/cache/pip"),
+                    ("HF_HOME", "/tmp/cache/hf"), ("MPLCONFIGDIR", "/tmp/cache/mpl"),
+                    # py_compile and compileall write bytecode whatever
+                    # PYTHONDONTWRITEBYTECODE says, and a __pycache__ left under
+                    # output/ or a candidate fails modification_check; the prefix
+                    # sends every .pyc to the tmpfs instead.
+                    ("PYTHONPYCACHEPREFIX", "/tmp/cache/pycache"),
+                ),
+            ),
         ]
-        for key, value in sorted(self.labels.items()):
-            command.extend(["--label", f"{key}={value}"])
-        if self.gpu_indices:
-            command.extend(["--gpus", device_request(self.gpu_indices)])
-        for key, value in (
-            ("XDG_CACHE_HOME", "/tmp/cache"), ("PIP_CACHE_DIR", "/tmp/cache/pip"),
-            ("HF_HOME", "/tmp/cache/hf"), ("MPLCONFIGDIR", "/tmp/cache/mpl"),
-            # py_compile and compileall write bytecode whatever
-            # PYTHONDONTWRITEBYTECODE says, and a __pycache__ left under
-            # output/ or a candidate fails modification_check; the prefix
-            # sends every .pyc to the tmpfs instead.
-            ("PYTHONPYCACHEPREFIX", "/tmp/cache/pycache"),
-            *sorted(container_numeric_env(self.spec.cpus).items()),
-        ):
-            command.extend(["--env", f"{key}={value}"])
         command.extend([
             "--mount", f"type=bind,src={paths.current_snapshot},dst=/mnt/snapshot,readonly",
             "--mount", f"type=bind,src={paths.artifacts},dst=/mnt/artifacts,readonly",

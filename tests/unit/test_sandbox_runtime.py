@@ -1022,6 +1022,7 @@ def test_docker_command_has_fail_closed_boundary(tmp_path: Path):
     for pair in (
         ["--network", "none"],
         ["--user", "61000:61000"],
+        ["--ulimit", "core=0:0"],
         ["--cap-drop", "ALL"],
         ["--security-opt", "no-new-privileges"],
     ):

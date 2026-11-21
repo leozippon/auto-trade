@@ -25,13 +25,12 @@ from .contract_fingerprint import (
     assert_image_contract_current,
     compute_runtime_fingerprint,
 )
-from .gpu import device_request, gpu_memory_contention
+from .gpu import gpu_memory_contention
 from .pretrained import PretrainedStoreError, require_pretrained_store
 from .sandbox import (
     DockerSandbox,
     SandboxConfig,
     SandboxSpec,
-    container_numeric_env,
     remove_sandbox_tree,
 )
 from .strategy import (
@@ -534,52 +533,11 @@ class DockerStrategyExecutor:
             f"type=bind,src={self.strategy_path.parent},dst={CONTAINER_STRATEGY_DIR},readonly"
         )
         command = [
-            self.config.spec.docker_executable,
-            "run",
-            "--pull",
-            "never",
-            "--rm",
-            "-i",
-            "--name",
-            self.container_name,
-            "--network",
-            spec.network,
-            "--user",
-            spec.user,
-            "--read-only",
-            # exec: Triton compiles the launcher modules of its kernels into
-            # its cache under /tmp (the image's TRITON_CACHE_DIR) and loads
-            # them from there; Docker mounts a tmpfs noexec unless told.
-            "--tmpfs",
-            f"/tmp:rw,exec,nosuid,nodev,size={spec.tmpfs_size}",
-            # Shared memory for multi-process training inside fit(context):
-            # without it Docker's 64 MB default makes a torch DataLoader with
-            # workers or a joblib memmapped backend fail on a container that
-            # otherwise has 8 CPUs to use.
-            "--shm-size",
-            spec.shm_size,
-            "--cpus",
-            f"{spec.cpus:g}",
-            # Swap ceiling equal to the memory cap: see ``SandboxSpec.memory``
-            # for why the two are the same number.
-            "--memory",
-            spec.memory,
-            "--memory-swap",
-            spec.memory,
-            "--pids-limit",
-            str(spec.pids),
-            "--cap-drop",
-            "ALL",
-            "--security-opt",
-            "no-new-privileges",
+            spec.docker_executable, "run", "--pull", "never", "--rm", "-i",
+            "--name", self.container_name,
+            *spec.boundary_args(labels=self.config.labels, gpu_indices=self.gpu_indices),
+            "--mount", strategy_mount,
         ]
-        for key, value in sorted(self.config.labels.items()):
-            command.extend(["--label", f"{key}={value}"])
-        if self.gpu_indices:
-            command.extend(["--gpus", device_request(self.gpu_indices)])
-        for key, value in sorted(container_numeric_env(spec.cpus).items()):
-            command.extend(["--env", f"{key}={value}"])
-        command.extend(["--mount", strategy_mount])
         for source, target in (
             (self.snapshot_dir, CONTAINER_SNAPSHOT_DIR),
             (self.asof_dir, CONTAINER_ASOF_DIR),
