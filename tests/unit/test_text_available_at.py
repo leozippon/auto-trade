@@ -8,8 +8,7 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from autotrade.data_sources.tushare import audit, download, specs, versions
-from autotrade.data_sources.tushare import common as core
+from autotrade.data_sources.tushare import audit, download, specs, stamps, versions
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data.snapshot import SnapshotBuilder, SnapshotConfig
 
@@ -27,13 +26,13 @@ def irm_frame(rows):
 class TextAvailableAtPlausibilityTest(unittest.TestCase):
     def test_plausible_rec_time_is_kept_as_publication_time(self):
         frame = anns_frame([("20200110", "000001.SZ", "n", "t", "u", "2020-01-10 18:30:00")])
-        out = core.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-10 18:30:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "source:rec_time")
 
     def test_backfilled_collection_time_falls_back_to_ann_date_eod(self):
         frame = anns_frame([("20200110", "000001.SZ", "n", "t", "u", "2025-07-05 06:55:56")])
-        out = core.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-10 23:59:59+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "conservative_from:ann_date:implausible_rec_time")
 
@@ -41,7 +40,7 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
         # The nightly title job fetches the next day's titles the evening
         # they arrive: each is visible from its receive time, never earlier.
         frame = anns_frame([("20200111", "000001.SZ", "n", "t", "u", "2020-01-10 20:00:00")])
-        out = core.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-10 20:00:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "source:rec_time")
 
@@ -67,7 +66,7 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
             "2026-10-26 23:15:31", "2026-10-31 05:20:07", "2026-10-30 23:40:00", None,
             "2026-10-26 23:15:31", "2026-10-26 23:15:31",
         ]).tz_localize(cn))
-        out = core.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"], first_seen)
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"], first_seen)
         self.assertEqual(out["available_at"].tolist(), [
             "2026-10-26 23:15:00+08:00", "2026-10-30 23:15:00+08:00", "2015-08-11 23:59:59+08:00",
             "2026-10-27 23:59:59+08:00", "2020-01-10 23:59:59+08:00", "2026-10-26 00:00:01+08:00",
@@ -78,13 +77,13 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
             "conservative_from:ann_date:implausible_rec_time", "source:rec_time",
         ])
         # Without a receipt record every bare date takes the end of its date.
-        bare = core.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
+        bare = stamps.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
         self.assertEqual(bare.loc[0, "available_at"], "2026-10-27 23:59:59+08:00")
         self.assertEqual(bare.loc[0, "available_at_rule"], "conservative_from:ann_date:date_only_rec_time")
 
     def test_missing_rec_time_uses_ann_date_fallback(self):
         frame = anns_frame([("20200110", "000001.SZ", "n", "t", "u", "")])
-        out = core.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["anns_d"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-10 23:59:59+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "conservative_from:ann_date")
 
@@ -93,7 +92,7 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
             [{"ts_code": "000001.SZ", "report_date": "20200110", "report_title": "t", "org_name": "o",
               "author_name": "a", "quarter": "2020Q1", "create_time": "2022-05-30 08:00:00"}]
         )
-        out = core.augment_text_frame(frame, specs.TEXT_SPECS["report_rc"])
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["report_rc"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-10 22:00:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "conservative_from:report_date:implausible_create_time")
 
@@ -110,14 +109,14 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
             tushare_io.write_parquet(
                 dataset_dir / "month=202001.parquet", stale, api_name="anns_d", params={}, fields=list(stale.columns)
             )
-            stats = core.repair_text_available_at(str(raw), ["anns_d"])
+            stats = stamps.repair_text_available_at(str(raw), ["anns_d"])
             self.assertEqual(stats["files_rewritten"], 1)
             self.assertEqual(stats["rows_changed"], 1)
             repaired = pd.read_parquet(dataset_dir / "month=202001.parquet")
             self.assertEqual(repaired.loc[0, "available_at"], "2020-01-10 23:59:59+08:00")
             # The rewrite is a restatement: the replaced partition is kept.
             self.assertEqual(len(list((Path(tmp) / "raw_versions").rglob("*-superseded.parquet"))), 1)
-            again = core.repair_text_available_at(str(raw), ["anns_d"])
+            again = stamps.repair_text_available_at(str(raw), ["anns_d"])
             self.assertEqual(again["files_rewritten"], 0)
 
 
@@ -132,7 +131,7 @@ class InvestorQaAvailableAtTest(unittest.TestCase):
             # A bare reply date is the end of that date.
             ("000657.SZ", "20251107", "q2", "a2", "2026-01-05 00:00:00"),
         ])
-        out = core.augment_text_frame(frame, specs.TEXT_SPECS["irm_qa_sz"])
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["irm_qa_sz"])
         self.assertEqual(out["available_at"].tolist(), ["2025-03-11 18:26:27+08:00", "2026-01-05 23:59:59+08:00"])
         self.assertEqual(out["available_at_rule"].tolist(), ["source:pub_time", "conservative_from:pub_time"])
 
@@ -141,7 +140,7 @@ class InvestorQaAvailableAtTest(unittest.TestCase):
             ("301002.SZ", "20250303", "replied", "a", "2025-03-11 18:26:27"),
             ("000001.SZ", "20250303", "unknown", "a", None),
         ])
-        stamped = core.augment_text_frame(frame, specs.TEXT_SPECS["irm_qa_sz"])
+        stamped = stamps.augment_text_frame(frame, specs.TEXT_SPECS["irm_qa_sz"])
         config = SnapshotConfig(
             events_datasets=(), macro_datasets=(), fundamental_datasets=(),
             text_datasets=("irm_qa_sz",), intraday_trade_days=1, include_industry=False,
@@ -172,7 +171,7 @@ class InvestorQaAvailableAtTest(unittest.TestCase):
 
     def test_the_cap_and_the_date_fallback_hold_where_the_source_time_does_not_bind(self):
         # The vendor crawled the 2023-24 Shanghai history on 2025-01-15.
-        sh = core.augment_text_frame(irm_frame([
+        sh = stamps.augment_text_frame(irm_frame([
             ("600000.SH", "20230612", "q1", "a1", "2025-01-15 17:06:50"),
             ("600000.SH", "20230612", "q2", "a2", None),
         ]), specs.TEXT_SPECS["irm_qa_sh"])
@@ -180,7 +179,7 @@ class InvestorQaAvailableAtTest(unittest.TestCase):
         self.assertEqual(sh["available_at_rule"].tolist(), [
             "conservative_from:trade_date:implausible_pub_time", "conservative_from:trade_date",
         ])
-        anns = core.augment_text_frame(anns_frame([
+        anns = stamps.augment_text_frame(anns_frame([
             ("20250303", "000001.SZ", "n", "t1", "u", "2025-03-11 18:26:27"),
             ("20250303", "000001.SZ", "n", "t2", "u", ""),
         ]), specs.TEXT_SPECS["anns_d"])
@@ -209,7 +208,7 @@ class LakeReceiptStampTest(unittest.TestCase):
 
             def land(answer: pd.DataFrame, instant: str) -> str:
                 with patch.object(versions, "utc_now", return_value=instant), redirect_stdout(io.StringIO()):
-                    stamped = core.augment_text_frame(answer, spec, download.landing_first_seen(path, answer, keys))
+                    stamped = stamps.augment_text_frame(answer, spec, download.landing_first_seen(path, answer, keys))
                     return versions.publish(path, stamped, api_name="anns_d", params={}, fields=list(stamped.columns),
                                             key_columns=keys, ledger=None, deduplicate=True)
 
@@ -219,7 +218,7 @@ class LakeReceiptStampTest(unittest.TestCase):
             with patch.object(versions, "utc_now", return_value="2026-10-26T15:15:31+00:00"), redirect_stdout(io.StringIO()):
                 versions.publish(path, stale, api_name="anns_d", params={}, fields=list(stale.columns),
                                  key_columns=keys, ledger=None)
-            stats = core.repair_text_available_at(str(raw), ["anns_d"])
+            stats = stamps.repair_text_available_at(str(raw), ["anns_d"])
             self.assertEqual((stats["files_rewritten"], stats["rows_changed"]), (1, 1))
             stored = pd.read_parquet(path)
             self.assertEqual(stored.loc[0, "available_at"], "2026-10-26 23:15:00+08:00")
@@ -233,7 +232,7 @@ class LakeReceiptStampTest(unittest.TestCase):
                 "601995.SH": "2026-10-26 23:15:00+08:00", "600276.SH": "2026-10-27 23:15:00+08:00",
             })
             self.assertEqual(land(later, "2026-10-28T15:15:12+00:00"), "unchanged")
-            self.assertEqual(core.repair_text_available_at(str(raw), ["anns_d"])["files_rewritten"], 0)
+            self.assertEqual(stamps.repair_text_available_at(str(raw), ["anns_d"])["files_rewritten"], 0)
 
 
 if __name__ == "__main__":

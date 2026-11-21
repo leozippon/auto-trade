@@ -29,6 +29,7 @@ from autotrade.data_sources.tushare import (
     download,
     generation,
     specs,
+    stamps,
     versions,
 )
 from autotrade.data_sources.tushare import client as tushare_client
@@ -1145,7 +1146,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             [f"{index:06d}.SZ", "20200101", "20200102", f"h{index}", "type", 1.0, 0.1]
             for index in range(100)
         ], columns=fields)
-        existing = common.augment_event_frame(existing, specs.EVENT_FLOW_SPECS["share_float"])
+        existing = stamps.augment_event_frame(existing, specs.EVENT_FLOW_SPECS["share_float"])
         tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
 
         class ShrunkClient:
@@ -1174,7 +1175,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         fields = specs.SHARE_FLOAT_FIELDS.split(",")
         frame = pd.DataFrame([["000001.SZ", "20200101", "20200102", "h", "type", 1.0, 0.1]], columns=fields)
-        frame = common.augment_event_frame(frame, specs.EVENT_FLOW_SPECS["share_float"])
+        frame = stamps.augment_event_frame(frame, specs.EVENT_FLOW_SPECS["share_float"])
         tushare_io.write_parquet(path, frame, api_name="share_float", params={},
                              fields=list(frame.columns))
 
@@ -1201,7 +1202,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         path = self.raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
         old_codes = [f"{index:06d}.SZ" for index in range(100)]
         existing = pd.DataFrame([[code, day, "20200102", 1.0, 0.1, "h", "type"] for code in old_codes], columns=fields)
-        existing = common.augment_event_frame(existing, specs.EVENT_FLOW_SPECS["share_float"])
+        existing = stamps.augment_event_frame(existing, specs.EVENT_FLOW_SPECS["share_float"])
         tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
         rescued = self.raw_dir / "share_float_ann_date_ts_code" / f"ann_date={day}" / "ts_code=300227.SZ.parquet"
         tushare_io.write_parquet(rescued, existing.head(1), api_name="share_float", params={}, fields=list(existing.columns))
@@ -1247,7 +1248,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 [f"{index:06d}.SZ", day, "20200102", f"h{index}", "type", 1.0, 0.1]
                 for index in range(rows)
             ], columns=fields)
-            frame = common.augment_event_frame(frame, specs.EVENT_FLOW_SPECS["share_float"])
+            frame = stamps.augment_event_frame(frame, specs.EVENT_FLOW_SPECS["share_float"])
             tushare_io.write_parquet(path, frame, api_name="share_float", params={},
                                  fields=list(frame.columns))
 
@@ -1412,7 +1413,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         spec = specs.MACRO_SPECS["cn_schedule"]
         for month in ("202604", "202605"):
             path = self.raw_dir / "cn_schedule" / f"month={month}.parquet"
-            frame = common.augment_macro_frame(
+            frame = stamps.augment_macro_frame(
                 tushare_client.frame(CountingMacroClient().query("cn_schedule", {"m": month}, spec.fields)), spec
             )
             tushare_io.write_parquet(
@@ -1850,7 +1851,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         dates = ["20260701", "20260702", "20260703", "20260706", "20260707"]
         for index, trade_date in enumerate(dates):
             if index < 2:
-                rows = common.augment_board_frame(
+                rows = stamps.augment_board_frame(
                     pd.DataFrame([{
                         **{column: "1.0" for column in spec.fields.split(",")},
                         "trade_date": trade_date,
@@ -1888,7 +1889,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 if dead and index > 0:
                     rows = pd.DataFrame(columns=columns)
                 else:
-                    rows = common.augment_text_frame(
+                    rows = stamps.augment_text_frame(
                         pd.DataFrame([{
                             "datetime": f"{day[:4]}-{day[4:6]}-{day[6:]} 09:00:00",
                             "content": "内容", "title": f"标题{day}", "channels": "",
@@ -1915,14 +1916,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # no announcement column) and new_share's ballot is announced 1-2
         # trading days after ipo_date: both stamps must clear a weekend and a
         # month boundary instead of using the source date's own EOD.
-        surv = common.augment_event_frame(
+        surv = stamps.augment_event_frame(
             pd.DataFrame([{"ts_code": "000001.SZ", "surv_date": "20260828"}]),
             specs.EVENT_FLOW_SPECS["stk_surv"],
         )
         self.assertEqual(surv.loc[0, "available_at"], "2026-09-02 23:59:59+08:00")
         self.assertEqual(surv.loc[0, "available_at_rule"], "conservative_plus_5d_eod_from:surv_date")
 
-        ipo = common.augment_event_frame(
+        ipo = stamps.augment_event_frame(
             pd.DataFrame([{"ts_code": "301000.SZ", "ipo_date": "20260731", "ballot": "0.02"}]),
             specs.EVENT_FLOW_SPECS["new_share"],
             trading_dates=["20260803", "20260804"],
@@ -1930,7 +1931,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(ipo.loc[0, "available_at"], "2026-08-04 23:59:59+08:00")
         self.assertEqual(ipo.loc[0, "available_at_rule"], "conservative_tplus_2_eod_from:ipo_date")
 
-        holiday = common.augment_event_frame(
+        holiday = stamps.augment_event_frame(
             pd.DataFrame([{"ts_code": "301380.SZ", "ipo_date": "20220930", "ballot": "0.03"}]),
             specs.EVENT_FLOW_SPECS["new_share"],
             trading_dates=["20220930", "20221010", "20221011"],
@@ -1938,7 +1939,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(holiday.loc[0, "available_at"], "2022-10-11 23:59:59+08:00")
 
         with self.assertRaisesRegex(RuntimeError, "requires the A-share trading calendar"):
-            common.augment_event_frame(
+            stamps.augment_event_frame(
                 pd.DataFrame([{"ts_code": "301380.SZ", "ipo_date": "20220930"}]),
                 specs.EVENT_FLOW_SPECS["new_share"],
             )
@@ -1950,7 +1951,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000004.SZ", "ann_date": "20250512 ", "end_date": "20250509", "holder_num": 30282},
             {"ts_code": "000005.SZ", "ann_date": None, "end_date": "20250509", "holder_num": 1},
         ])
-        out = common.augment_event_frame(rows, specs.EVENT_FLOW_SPECS["stk_holdernumber"])
+        out = stamps.augment_event_frame(rows, specs.EVENT_FLOW_SPECS["stk_holdernumber"])
         self.assertEqual(out.loc[0, "ann_date"], "20250512")
         self.assertIsNone(out.loc[1, "ann_date"])
         self.assertEqual(out.loc[0, "available_at"], "2025-05-12 23:59:59+08:00")
@@ -1966,7 +1967,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def stamp(dataset: str, trade_date: str) -> pd.Timestamp:
             rows = pd.DataFrame([{"trade_date": trade_date, "exchange_id": ex, "ts_code": f"60000{i}.SH"}
                                  for i, ex in enumerate(("SSE", "SZSE", "BSE"))])
-            stamped = common.augment_event_frame(rows, specs.EVENT_FLOW_SPECS[dataset], trading_dates=calendar)
+            stamped = stamps.augment_event_frame(rows, specs.EVENT_FLOW_SPECS[dataset], trading_dates=calendar)
             self.assertEqual(set(stamped["available_at_rule"]), {"official_next_trading_day_09_from:trade_date"})
             self.assertEqual(stamped["available_at"].nunique(), 1)
             return pd.Timestamp(stamped.loc[0, "available_at"])
@@ -1986,7 +1987,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "fewer than 1 open dates after 20261012"):
             stamp("margin", "20261012")
         with self.assertRaisesRegex(RuntimeError, "requires the A-share trading calendar"):
-            common.augment_event_frame(pd.DataFrame([{"trade_date": "20260929"}]), specs.EVENT_FLOW_SPECS["margin"])
+            stamps.augment_event_frame(pd.DataFrame([{"trade_date": "20260929"}]), specs.EVENT_FLOW_SPECS["margin"])
 
     def test_event_available_at_repair_restamps_through_new_files(self):
         # Releases hard-link raw partitions: the repair must replace the live
@@ -2017,7 +2018,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         release_copy = self.root / "release_margin.parquet"
         os.link(friday, release_copy)
 
-        stats = common.repair_event_available_at(str(self.raw_dir), ["margin"])
+        stats = stamps.repair_event_available_at(str(self.raw_dir), ["margin"])
         self.assertEqual((stats["files_rewritten"], stats["rows_changed"]), (2, 3))
         live = pd.read_parquet(friday)
         self.assertEqual(set(live["available_at"]), {"2026-10-12 09:00:00+08:00"})
@@ -2030,13 +2031,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         (superseded,) = versions.list_versions(friday)
         self.assertTrue(superseded.endswith("-superseded"))
         self.assertEqual(set(pd.read_parquet(release_copy)["available_at"]), {"2026-10-10 09:00:00+08:00"})
-        self.assertEqual(common.repair_event_available_at(str(self.raw_dir), ["margin"])["files_rewritten"], 0)
+        self.assertEqual(stamps.repair_event_available_at(str(self.raw_dir), ["margin"])["files_rewritten"], 0)
 
         meta_path = friday.with_suffix(".parquet.meta.json")
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
         meta_path.write_text(json.dumps({**meta, "write_id": "torn"}), encoding="utf-8")
         with self.assertRaisesRegex(RuntimeError, "not a complete commit"):
-            common.repair_event_available_at(str(self.raw_dir), ["margin"])
+            stamps.repair_event_available_at(str(self.raw_dir), ["margin"])
 
     def test_new_share_download_uses_the_local_trading_calendar(self):
         calendar_path = self.raw_dir / "trade_cal" / "exchange=SSE" / "year=2022.parquet"
@@ -6436,7 +6437,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 {col: (trade_date if col == "trade_date" else exchange if col == "exchange_id" else 1.0) for col in spec.fields.split(",")}
                 for exchange in ("SSE", "SZSE", "BSE")
             ])
-            df = common.augment_event_frame(rows, spec, trading_dates=trading_dates)
+            df = stamps.augment_event_frame(rows, spec, trading_dates=trading_dates)
             tushare_io.write_parquet(
                 self.raw_dir / "margin" / f"trade_date={trade_date}.parquet",
                 df, api_name="margin", params={}, fields=list(df.columns),
@@ -6723,7 +6724,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_text_source_time_is_normalized_to_china_timezone(self):
         frame = pd.DataFrame([{"title": "sample", "pub_time": "2020-01-02 10:00:00", "src": "x"}])
-        out = common.augment_text_frame(frame, specs.TEXT_SPECS["major_news"])
+        out = stamps.augment_text_frame(frame, specs.TEXT_SPECS["major_news"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-02 10:00:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "source:pub_time")
 

@@ -9,9 +9,8 @@ from unittest.mock import patch
 
 import pandas as pd
 
-from autotrade.data_sources.tushare import audit, specs
+from autotrade.data_sources.tushare import audit, specs, stamps
 from autotrade.data_sources.tushare import client as tushare_client
-from autotrade.data_sources.tushare import common as core
 
 
 def limit_list_frame(rows):
@@ -21,7 +20,7 @@ def limit_list_frame(rows):
 class LimitListAvailableAtStampTest(unittest.TestCase):
     def test_limit_list_d_rows_stamp_the_shared_16_00_family_rule(self):
         frame = limit_list_frame([("20200102", "000001.SZ", 10.0, "U")])
-        out = core.augment_board_frame(frame, specs.BOARD_TRADING_SPECS["limit_list_d"])
+        out = stamps.augment_board_frame(frame, specs.BOARD_TRADING_SPECS["limit_list_d"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-02 16:00:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "official_16_from:trade_date")
         # Single source: the official list must ride the exact limit_list_ths rule.
@@ -32,7 +31,7 @@ class LimitListAvailableAtStampTest(unittest.TestCase):
 
     def test_malformed_trade_date_stays_unstamped_instead_of_guessing(self):
         frame = limit_list_frame([("", "000001.SZ", 10.0, "Z")])
-        out = core.augment_board_frame(frame, specs.BOARD_TRADING_SPECS["limit_list_d"])
+        out = stamps.augment_board_frame(frame, specs.BOARD_TRADING_SPECS["limit_list_d"])
         self.assertEqual(out.loc[0, "available_at"], "")
         self.assertEqual(out.loc[0, "available_at_rule"], "missing_source_time")
 
@@ -54,7 +53,7 @@ class LimitListAvailableAtStampTest(unittest.TestCase):
             (raw / "trade_cal" / "exchange=SSE").mkdir(parents=True)
             calendar.to_parquet(raw / "trade_cal" / "exchange=SSE" / "year=2020.parquet", index=False)
             spec = specs.BOARD_TRADING_SPECS["limit_list_d"]
-            stamped = core.augment_board_frame(
+            stamped = stamps.augment_board_frame(
                 pd.DataFrame([{name: {"trade_date": "20200102", "ts_code": "000001.SZ", "close": 10.0,
                                       "limit": "U"}.get(name) for name in spec.fields.split(",")}]),
                 spec,

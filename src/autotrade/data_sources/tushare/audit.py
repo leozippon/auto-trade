@@ -55,8 +55,6 @@ from .common import (
     SHARE_FLOAT_ROW_LIMIT,
     TEXT_EVIDENCE_STATUS_PATH,
     active_year_windows,
-    augment_board_frame,
-    augment_event_frame,
     cli_values,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
@@ -119,6 +117,13 @@ from .specs import (
     AvailabilityRule,
     DatasetSpec,
     FetchStrategy,
+)
+from .stamps import (
+    NEVER_AVAILABLE_AT,
+    augment_board_frame,
+    augment_event_frame,
+    local_time,
+    official_available_at,
 )
 from .versions import diff_frames, revision_event
 
@@ -1875,7 +1880,7 @@ def audit_domain_keys(files: list[Path], key_columns: tuple[str, ...], blank_mod
         available = df["available_at"].astype(str).str.strip()
         if blank_mode == "available_at_total":
             blank_available_at += blank_count(df["available_at"])
-            never_available_rows += int(available.eq(core.NEVER_AVAILABLE_AT).sum())
+            never_available_rows += int(available.eq(NEVER_AVAILABLE_AT).sum())
         blank = available.eq("") | available.eq("nan") | available.eq("None")
         if blank_mode == "available_at_rows":
             blank_available_at += int(blank.sum())
@@ -2127,12 +2132,12 @@ def latest_published_trade_date(open_dates: list[str], through: str, rule: Avail
     the calendar day after (observed on every pre-weekend and pre-holiday day).
     """
     for trade_date in reversed([day for day in open_dates if day <= through]):
-        stamped, _ = core.official_available_at(trade_date, rule, trading_dates=open_dates)
+        stamped, _ = official_available_at(trade_date, rule, trading_dates=open_dates)
         named_day = stamped[:10].replace("-", "")
         index = bisect_left(open_dates, named_day)
         if index == len(open_dates):
             raise RuntimeError(f"SSE trade_cal has no open day on or after {named_day}; refresh reference trade_cal first")
-        if datetime.fromisoformat(core.local_time(open_dates[index], rule.clock)) <= as_of:
+        if datetime.fromisoformat(local_time(open_dates[index], rule.clock)) <= as_of:
             return trade_date
     return None
 

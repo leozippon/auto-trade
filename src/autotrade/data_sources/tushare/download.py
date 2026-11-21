@@ -56,11 +56,7 @@ from .common import (
     WRITTEN_OUTCOMES,
     active_year_windows,
     as_datetime_window,
-    augment_board_frame,
-    augment_event_frame,
-    augment_macro_frame,
     augment_stk_mins_frame,
-    augment_text_frame,
     date_range_days,
     format_yyyymmdd,
     history_floor,
@@ -146,6 +142,14 @@ from .specs import (
     TRADE_DATE_PAGE_LIMIT,
     DatasetSpec,
     FetchStrategy,
+)
+from .stamps import (
+    augment_board_frame,
+    augment_event_frame,
+    augment_macro_frame,
+    augment_text_frame,
+    repair_event_available_at,
+    repair_text_available_at,
 )
 from .versions import (
     DefectiveAnswer,
@@ -3714,11 +3718,11 @@ def _dispatch(args: argparse.Namespace) -> int:
     if args.command == "download-share-float-complete":
         return download_share_float_complete(args)
     if args.command == "repair-text-available-at":
-        stats = core.repair_text_available_at(args.raw_dir, list(args.datasets))
+        stats = repair_text_available_at(args.raw_dir, list(args.datasets))
         print(json.dumps({"status": "ok", **stats}, ensure_ascii=False, sort_keys=True))
         return 0
     if args.command == "repair-event-available-at":
-        stats = core.repair_event_available_at(args.raw_dir, list(args.datasets))
+        stats = repair_event_available_at(args.raw_dir, list(args.datasets))
         print(json.dumps({"status": "ok", **stats}, ensure_ascii=False, sort_keys=True))
         return 0
     raise RuntimeError(f"unknown command {args.command}")
