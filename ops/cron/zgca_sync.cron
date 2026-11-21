@@ -1,21 +1,10 @@
 # ADM-Cube ZGCA sync: bring every ended experiment of the ZGCA rounds back here, once.
 # Install or refresh with: /home/lzp/miniconda3/envs/quant/bin/python ops/cron/install_cron.py --block zgca
 #
-# Experiments run on the ZGCA instance (ops/zgca/README.md). Each run is one
-# `zgca.py sync-rounds` pass over the experiments of the round files below: an
-# experiment already settled (its marker in .runtime/zgca/synced/ says
-# `released`, or `synced` for one that did not complete) costs nothing, any
-# other costs one remote query, and only one that has ended is copied, given its
-# pinned sandbox image tag and, when it completed, released on the instance (its
-# bulk freed under the storage quota, its records kept), as `zgca.py sync` does.
-# A running or not yet created experiment is left alone; one copied whose tag
-# was refused is only tagged again, every run, until the images agree; a failure
-# is one line and the next experiment still goes ahead; a stopped or
-# unreachable instance is one line and the next run tries again. Every run ends
-# with one timestamped summary line, or a line below for a run that found the
-# lock held or reached its time limit, so `tail -1 logs/zgca/sync_cron.log` and
-# its time show the state; it exits non-zero when something needs the operator.
-# It opens no Paper account.
+# Each run is one `zgca.py sync-rounds` pass over the experiments of the round
+# files below. What a pass copies, tags and releases, the lines it writes and
+# its exit status are in ops/zgca/README.md (sync, sync-rounds); `tail -1
+# logs/zgca/sync_cron.log` and its time show the state.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -27,11 +16,8 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # leaves before its file leaves the tree. Empty: each run only writes its line.
 ZGCA_ROUNDS=scripts/experiments/create_round_20261119.py
 
-# Every 30 minutes, all day: an experiment runs for hours and ends at no
-# particular hour. A copy of a 6-10 GB experiment takes about an hour through
-# the jump host; ops/cron/locked.sh writes one dated line for a run that falls
-# meanwhile (a copy leaves one or two, more in a row mean the run holding the
-# lock is stuck) and ends a run at 4 h (three such copies and a margin) with
-# everything it started, saying so in one line; the next run continues a copy
-# it cut short.
+# Every 30 minutes, all day: an experiment ends at no particular hour. A copy
+# of a 6-10 GB experiment takes about an hour through the jump host, so a run
+# can find the lock held, and ops/cron/locked.sh ends a run at 4 h: three such
+# copies and a margin.
 */30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && ops/cron/locked.sh .runtime/zgca/sync_cron.lock 4h "zgca sync" $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ZGCA_ROUNDS >> logs/zgca/sync_cron.log 2>&1

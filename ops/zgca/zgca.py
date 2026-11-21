@@ -1,40 +1,11 @@
 #!/usr/bin/env python3
 """The ZGCA A100 development instance, end to end: up, deploy, run, resume, status, sync, sync-rounds, down.
 
-Every step goes through the platform layer in ~/zgca-compute (`instance` to
-show, start and stop the instance as idempotent intents; `dev` to reach it:
-`bootstrap` for its base tools, `copy` for verified rsync transfers, `put`
-for an owner-only file, `report` for its GPUs, disks and tmux sessions, and
-plain commands for the steps of ops/zgca/remote.sh; both over `zenith`) and
-verifies its own result. up and down are `instance start` and `instance
-stop`, down refusing while experiments run on the instance. A deploy refuses
-a working tree that is not its commit, a research Pack whose payload differs
-from its manifest and running experiments, then carries the tracked files and
-that commit's id, the model gateways' keys from the local .env (only the keys
-the model profiles name), the named prebuilt view cache, the Packs' payloads
-(data/pack_payloads) and the research release that seed was built from
-(without the text and minute datasets its configuration does not read),
-prunes code the tree no longer tracks, prepares the instance (ripgrep, venv,
-a sandbox image that runs on the instance's GPU driver), and last copies the
-pretrained-model store every
-new experiment pins and mounts to the instance's own disk, or refuses when it does
-not fit there. A run refuses unless the last deploy shipped the local HEAD,
-then starts the console (restarting it onto the deployed
-checkout when no experiment runs) and a round launcher in tmux with
-AUTOTRADE_GPU_NAME set, and repeats a `--fill` launcher every ten minutes in
-a session of its own until its round has nothing pending, holding each pass
-while less than STORAGE_FLOOR is free under the storage quota; resume restarts
-a failed, terminated or interrupted experiment through the console under the
-same preconditions and that floor; status reads, the storage against its quota
-included, and sync copies an experiment back and gives it its pinned sandbox
-image tag here when the instance's image and this host's base bake the same
-strategy runtime, so a passed strategy can be followed on Paper, then releases
-the bulk of a completed one on the instance; sync-rounds is one pass of the
-sync cron (ops/cron/zgca_sync.cron), which syncs, once, every experiment of
-the named rounds that has ended on the instance. Beyond that fill loop and
-that cron nothing here schedules, caches an endpoint, keeps a secret in the
-repository or changes how the executor isolates a strategy container. See
-ops/zgca/README.md.
+Every command reaches the platform through ~/zgca-compute's `instance` and
+`dev` alone, runs its instance-side steps from ops/zgca/remote.sh and verifies
+its own result; the command list below says what each does. The rules behind
+them (deploy's checks and transfers, the fill loop and its storage floor,
+sync's markers, tag and release, the sync cron) are in ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> |
        run <round file> [launcher args...] | resume <experiment id> | status |
@@ -122,27 +93,14 @@ PRETRAINED_MANIFEST = "MANIFEST.sha256"
 TRACKED_LIST_NAME = "tracked.txt"
 # The commit whose tracked files the last deploy shipped; remote.sh's status shows it.
 DEPLOYED_COMMIT_NAME = "deployed_commit"
-# One marker per experiment `sync` brought back, in the state directory: it
-# says `copied` once both copies are verified, `synced` once the tag step has
-# succeeded too (or cannot succeed by retrying: the pinned image is gone from
-# the instance), and `released` once a copy of a completed experiment has also had
-# its bulk released on the instance. The release waits on the copy alone, so a
-# copy whose tag was refused stays `copied` and is released all the same, again
-# by every pass that retries its tag (a second release frees nothing). A sync
-# removes the marker before it copies, so an interrupted copy leaves none, and
-# so does `resume`, so a resumed experiment is copied again when it ends;
-# sync-rounds skips an experiment whose marker says `released`, or `synced`
-# with a copy that is not of a completed experiment.
+# One marker per experiment `sync` brought back, in the state directory, saying
+# how far it got: `copied`, `synced` or `released` (ops/zgca/README.md, sync).
 SYNCED_DIR_NAME = "synced"
 # Where the first copy of an experiment is made, in the state directory, under
-# its id: it enters experiments/ by one rename once verified. rsync copies an
-# experiment's artifacts/ before its hitl/, so a first copy cut short there (a
-# dropped link, the sync cron's time limit) would leave a directory whose
-# hitl/params.json has not arrived, which sync_target cannot tell from one of
-# unknown origin and refuses; cut short here it is continued by the next sync.
-# A copy over an earlier one is made in place, where that copy's params.json
-# stays throughout: without --delete rsync removes nothing, and it replaces a
-# file by renaming a finished temporary over it.
+# its id: it enters experiments/ by one rename once verified, so a copy cut
+# short never leaves there a directory without hitl/params.json, which
+# sync_target would refuse (rsync copies artifacts/ before hitl/). A copy over
+# an earlier one is made in place, where that copy's params.json stays.
 INCOMING_DIR_NAME = "incoming"
 # The experiment states (autotrade.pipelines.hitl_state.ExperimentState) sync
 # and resume decide by, named here because importing that module needs numpy,
@@ -644,15 +602,10 @@ class Workflow:
         return state == COMPLETED
 
     def tag_and_release(self, experiment_id: str, local: Path, *, tag: bool = True) -> WorkflowError | None:
-        """Tag a verified copy (when ``tag``) and release its bulk on the instance when it is of a completed experiment, neither waiting on the other.
+        """Tag a verified copy (when ``tag``) and release a completed one's bulk on the instance, neither waiting on the other.
 
-        The marker advances as SYNCED_DIR_NAME says; a refused tag leaves it
-        `copied`. The `release` step frees the PIT views, sandbox work root and
-        archived session workspaces and keeps the directory with the records; it
-        refuses, whatever the copy says, an experiment the instance does not show
-        completed and finished for good, and that refusal raises here. A copy of
-        any other state releases nothing: a failed, terminated or interrupted
-        experiment resumes in its workspace. Returns why no tag was made.
+        Advances the marker as ops/zgca/README.md (sync) says; a release the
+        instance refuses raises. Returns why no tag was made.
         """
         untagged = None
         if tag:
@@ -704,18 +657,9 @@ class Workflow:
         return list(module.ROUND.experiments)
 
     def sync_rounds(self, round_files: Sequence[str]) -> bool:
-        """One pass of the sync cron: sync every experiment of these rounds that has ended on the instance and is not back.
+        """One pass of the sync cron over these rounds' experiments (ops/zgca/README.md, sync-rounds).
 
-        An experiment whose marker says `released`, or `synced` with a copy
-        that is not of a completed experiment, costs nothing; a synced copy of a
-        completed one is only released on the instance (so one synced before
-        releases existed is released by the next pass); any other asks the
-        instance one cheap question first (`experiment-state`), and only one in
-        an ended state is copied, then tagged and, when completed, released; one
-        copied but not tagged is only tagged (and released) again. Each failure is one line and
-        leaves the next experiment to go ahead, and the pass ends with one
-        summary line. False when an experiment failed or is untagged, or the
-        instance could not be asked.
+        False when an experiment failed or is untagged, or the instance could not be asked.
         """
 
         _with_project_src()
@@ -855,15 +799,15 @@ def main(
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
-    deploy = commands.add_parser("deploy", help="refuse an uncommitted tree or running experiments; copy code, the model gateway keys, a seed and its release; prepare ripgrep, venv, image; copy the pretrained store")
+    deploy = commands.add_parser("deploy", help="refuse an uncommitted tree, a Pack payload unlike its manifest or running experiments; copy code, the model gateway keys, a seed, the Pack payloads and the seed's release; prepare ripgrep, venv, image; copy the pretrained store")
     deploy.add_argument("seed", help="prebuilt view cache directory, relative to the repository (data/pit_views_seed_...)")
-    run = commands.add_parser("run", help="refuse unless the instance runs this checkout's HEAD; start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it until nothing is pending")
+    run = commands.add_parser("run", help="refuse unless the instance runs this checkout's HEAD; start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it every ten minutes, holding a pass while the storage floor is not free, until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
     run.add_argument("args", nargs=argparse.REMAINDER, help="launcher arguments after the port (--dry-run, --fill, experiment ids)")
     resume = commands.add_parser("resume", help="refuse unless the instance runs this checkout's HEAD and the storage floor is free; restart a failed, terminated or interrupted experiment through the console and drop its sync marker")
     resume.add_argument("experiment_id", help="experiment id")
     commands.add_parser("status", help="instance, card-hours, GPU, disk, tmux, storage against its quota, deployed commit, console, experiments, image, round log")
-    sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here, tag its pinned sandbox image here when the runtimes agree, then release a completed one's bulk on the instance")
+    sync = commands.add_parser("sync", help="copy an experiment's records and worker log back here, release a completed one's bulk on the instance, and tag its pinned sandbox image here when the runtimes agree")
     sync.add_argument("experiment_id", help="experiment id")
     sync_rounds = commands.add_parser("sync-rounds", help="one pass of the sync cron: sync, once, every experiment of these rounds that has ended on the instance, releasing the completed ones there; one summary line")
     sync_rounds.add_argument("round_files", nargs="*", help="scripts/experiments/create_round_*.py")

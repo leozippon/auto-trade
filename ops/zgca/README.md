@@ -1,6 +1,6 @@
 # ZGCA A100 工作流
 
-`ops/zgca/zgca.py` 把在 ZGCA A100 开发机上跑一轮研究的整个周期做成八个子命令：`up`、`deploy`、`run`、`resume`、`status`、`sync`、`sync-rounds`、`down`。它只调用 `~/zgca-compute` 的平台入口：`instance` 查看与启停实例，`dev` 经跳板登录开发机，并用它的四个原语补装基础工具（`bootstrap`）、做带比对的传输（`copy`）、写仅属主可读的文件（`put`）和报告 GPU、磁盘与 tmux（`report`）。实例生命周期、传输吞吐、个人存储和火山 Docker 这些与项目无关的平台事实只记在 `~/zgca-compute`（规则在 `README.md`，带日期的观察在 `PLATFORM_RECORDS.md`），这里只写本项目的步骤。沙箱隔离按执行器原样：平台提供的 rootless Docker、`--network none`、非 root 的 agent 用户、只读的策略挂载，这里一概不动。开发机那一侧的步骤都在 `remote.sh` 里，每次调用把本地这份脚本原样发过去，在登录 shell 里执行，开发机上不会留下过期副本。
+`ops/zgca/zgca.py` 把在 ZGCA A100 开发机上跑一轮研究的整个周期做成八个子命令：`up`、`deploy`、`run`、`resume`、`status`、`sync`、`sync-rounds`、`down`。它只调用 `~/zgca-compute` 的平台入口：`instance` 查看与启停实例，`dev` 经跳板登录开发机，并用它的四个原语补装基础工具（`bootstrap`）、做带比对的传输（`copy`）、写仅属主可读的文件（`put`）和报告 GPU、磁盘与 tmux（`report`）。实例生命周期、传输吞吐、个人存储和火山 Docker 这些与项目无关的平台事实只记在 `~/zgca-compute`（规则在 `README.md`，带日期的观察在 `PLATFORM_RECORDS.md`），这里只写本项目的步骤。沙箱隔离按执行器原样：平台提供的 rootless Docker、`--network none`、非 root 的 agent 用户、只读的策略挂载，这里一概不动；除了填充循环和定时同步，这里不安排任何定时任务，不缓存平台端点，也不在仓库里存放密钥。开发机那一侧的步骤都在 `remote.sh` 里，每次调用把本地这份脚本原样发过去，在登录 shell 里执行，开发机上不会留下过期副本。
 
 ```bash
 python ops/zgca/zgca.py up
