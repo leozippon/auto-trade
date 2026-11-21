@@ -64,6 +64,7 @@ from autotrade.environment.sandbox import (
     attached_stdin,
     container_numeric_env,
     experiment_container_labels,
+    link_copytree,
 )
 from autotrade.environment.sandbox_images import (
     prepare_experiment_sandbox_image,
@@ -817,6 +818,29 @@ def test_registered_artifacts_copy_to_writable_fold_workspace_without_mutating_s
     assert stat.S_IMODE((Path(frozen.path) / "main.py").stat().st_mode) == 0o444
     assert (Path(frozen.path) / "main.py").read_text(encoding="utf-8") == strategy_text
     assert (Path(frozen.model_path) / "weights.bin").read_bytes() == b"parent-model"
+
+
+def test_relinking_a_tree_leaves_the_modes_of_files_it_replaces_alone(tmp_path: Path):
+    # The step tree is published by relinking it over the experiment's copy,
+    # whose files are hard links to the session's frozen node files: the old
+    # destination must go without touching the modes those inodes share.
+    frozen = tmp_path / "session" / "frozen.txt"
+    frozen.parent.mkdir()
+    frozen.write_text("node output\n", encoding="utf-8")
+    frozen.chmod(0o444)
+    dest = tmp_path / "published"
+    (dest / "node").mkdir(parents=True)
+    os.link(frozen, dest / "node" / "frozen.txt")
+    (dest / "node").chmod(0o555)
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "tree.json").write_text("{}\n", encoding="utf-8")
+
+    link_copytree(source, dest)
+
+    assert stat.S_IMODE(frozen.stat().st_mode) == 0o444
+    assert sorted(path.name for path in dest.iterdir()) == ["tree.json"]
+    assert (dest / "tree.json").stat().st_ino == (source / "tree.json").stat().st_ino
 
 
 def test_working_artifact_permission_restore_fails_closed(tmp_path: Path):

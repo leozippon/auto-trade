@@ -764,10 +764,12 @@ class DockerSandbox:
 
 
 def link_copytree(source: str | Path, dest: str | Path) -> Path:
+    """Replace ``dest`` with a hard-linked copy of ``source``. The old files
+    may be links to frozen files elsewhere (a published step tree links the
+    session's node snapshots), so they go without a chmod."""
+
     source, dest = Path(source), Path(dest)
-    if dest.exists():
-        chmod_tree(dest, file_mode=0o644, dir_mode=0o755)
-        shutil.rmtree(dest)
+    rmtree_keeping_file_modes(dest)
     shutil.copytree(source, dest, copy_function=link_or_copy)
     return dest
 

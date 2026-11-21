@@ -281,7 +281,8 @@ def rmtree_keeping_file_modes(root: Path, *, ignore_errors: bool = False) -> Non
     way out would also unfreeze every other link to it. PIT staging trees are
     hardlink copies of published views, so one such chmod turns every
     experiment's decision snapshot writable at once. Single source for the
-    PIT cache's staging and slot removals and for the host's part of
+    PIT cache's staging and slot removals, for ``sandbox.link_copytree``'s
+    replacement of a published step tree and for the host's part of
     ``sandbox.remove_sandbox_tree``, which removes what it can
     (``ignore_errors``) and leaves the rest to a container;
     :func:`chmod_tree`'s tolerant per-path policy applies to the directories
