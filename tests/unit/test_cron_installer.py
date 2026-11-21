@@ -2,6 +2,7 @@
 
 import importlib.util
 import os
+import re
 import tempfile
 import unittest
 from pathlib import Path
@@ -14,6 +15,33 @@ if SPEC is None or SPEC.loader is None:
 installer = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(installer)
 TEMPLATE, BEGIN, END = installer.BLOCKS["tushare"]
+HELPER = installer.REPO_ROOT / "ops" / "cron" / "locked.sh"
+# A job line run through the helper: its lock, limit, label, command and log.
+LOCKED = re.compile(r" && ops/cron/locked\.sh (\S+) (\S+) \"([^\"]+)\" (.+) >> (\S+) 2>&1$")
+DATED = r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d"
+
+
+def job_lines(block: str) -> list[str]:
+    template = installer.BLOCKS[block][0]
+    return [line for line in template.read_text(encoding="utf-8").splitlines() if line[:1] == "*" or line[:1].isdigit()]
+
+
+def stand_in_repository(root: Path) -> None:
+    """The helper where a job line run with REPO_ROOT=root finds it, waiting 1 s instead of GRACE before it kills."""
+    text = HELPER.read_text(encoding="utf-8")
+    if text.count("\nGRACE=10\n") != 1:
+        raise AssertionError("ops/cron/locked.sh no longer sets GRACE=10 once")
+    helper = root / "ops" / "cron" / "locked.sh"
+    helper.parent.mkdir(parents=True)
+    helper.write_text(text.replace("\nGRACE=10\n", "\nGRACE=1\n"), encoding="utf-8")
+    helper.chmod(0o755)
+
+
+def running(pid: int) -> bool:
+    try:
+        return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0] != "Z"
+    except FileNotFoundError:
+        return False
 
 
 class CronInstallerTest(unittest.TestCase):
@@ -87,20 +115,14 @@ class CronInstallerTest(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertIn(tushare, twice)
         self.assertEqual(twice.count(begin), 1)
-        jobs = [line for line in template.read_text(encoding="utf-8").splitlines() if line[:1].isdigit()]
-        self.assertTrue(jobs)
+        jobs = job_lines("paper")
+        self.assertEqual([job.split()[:2] for job in jobs], [["40", "5"], ["40", "6"], ["55", "7"]])
         for job in jobs:
-            # Weekdays only, never overlapping, logged under logs/paper/.
+            # Weekdays only, never overlapping (one lock), logged under logs/paper/.
             self.assertEqual(job.split()[4], "1-5")
             # Every book, in the run's own order (the hand-traded ones first):
             # the job names no book, so a deleted one cannot break the morning.
-            self.assertTrue(
-                job.endswith(
-                    " flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run"
-                    " >> logs/paper/cron.log 2>&1"
-                ),
-                job,
-            )
+            self.assertEqual(LOCKED.search(job).group(4), "$QUANT_PYTHON scripts/paper/run_paper.py run")
 
     def test_the_research_fill_block_installs_beside_the_paper_block(self) -> None:
         template, begin, end = installer.BLOCKS["research"]
@@ -113,12 +135,10 @@ class CronInstallerTest(unittest.TestCase):
         self.assertIn(paper, twice)
         self.assertEqual(twice.count(begin), 1)
         lines = template.read_text(encoding="utf-8").splitlines()
-        jobs = [line for line in lines if "--fill" in line and not line.startswith("#")]
+        jobs = job_lines("research")
         self.assertEqual(len(jobs), 1)
-        # Every ten minutes, every day, under its own lock and its own log.
+        # Every ten minutes, every day (its lock and log: the locked-jobs test).
         self.assertEqual(jobs[0].split()[:5], ["*/10", "*", "*", "*", "*"])
-        self.assertIn("flock -n .runtime/research/cron.lock", jobs[0])
-        self.assertTrue(jobs[0].endswith(" >> logs/research/cron.log 2>&1"), jobs[0])
         # The queue it fills has to be open round files this repository holds
         # (none while nothing is queued): a mistyped or closed one would fail
         # every ten minutes instead of once.
@@ -145,6 +165,7 @@ class CronInstallerTest(unittest.TestCase):
         command = job.split(None, 5)[5]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            stand_in_repository(root)
             calls = root / "calls"
             python = root / "python"
             # Records its arguments and fails the round named `refused`.
@@ -176,19 +197,13 @@ class CronInstallerTest(unittest.TestCase):
             log = (root / "logs/research/cron.log").read_text(encoding="utf-8")
             self.assertTrue(log.endswith("fill first\nfill refused\nfill last\n"), log)
 
-    def test_the_zgca_sync_block_runs_one_pass_over_its_rounds_under_its_own_lock(self) -> None:
+    def test_the_zgca_sync_block_runs_one_pass_over_its_rounds(self) -> None:
         """The block installs beside the others without touching them, its one job
-        runs every 30 minutes under its own lock into its own log, every round it
+        runs every 30 minutes (its lock and log: the locked-jobs test), every round it
         lists is a round file here (closed ones too: their experiments may still be
-        on the instance), and the job line hands all of them to one sync-rounds pass.
-        A run that finds the lock held writes one timestamped line saying so, and
-        a pass that fails is never taken for one: on 2026-11-21 a hung pass held
-        the lock for 4 h 27 min while every later run was skipped without a word.
-        A run reaching its time limit is ended with every process it started, so
-        the lock is free again, and writes its own line and exit status."""
-        import fcntl
+        on the instance), and the job line hands all of them to one sync-rounds pass,
+        whose output and exit status reach the log and cron as they are."""
         import subprocess
-        import time
 
         template, begin, end = installer.BLOCKS["zgca"]
         block = installer.build_managed_block(template, begin, end)
@@ -198,13 +213,9 @@ class CronInstallerTest(unittest.TestCase):
         for other in others:
             self.assertIn(other, once)
         lines = template.read_text(encoding="utf-8").splitlines()
-        jobs = [line for line in lines if line[:1] == "*" or line[:1].isdigit()]
+        jobs = job_lines("zgca")
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].split()[:5], ["*/30", "*", "*", "*", "*"])
-        self.assertIn("flock -n -E 75 .runtime/zgca/sync_cron.lock timeout 4h $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS;", jobs[0])
-        self.assertTrue(jobs[0].endswith(" >> logs/zgca/sync_cron.log 2>&1"), jobs[0])
-        # cron reads a % in a job line as a newline.
-        self.assertNotIn("%", jobs[0])
         rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
         for round_file in rounds.split():
             self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
@@ -212,6 +223,7 @@ class CronInstallerTest(unittest.TestCase):
         command = jobs[0].split(None, 5)[5]
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
+            stand_in_repository(root)
             python = root / "python"
             python.write_text('#!/bin/bash\necho "pass: $*"\nexit 1\n', encoding="utf-8")
             python.chmod(0o755)
@@ -221,46 +233,79 @@ class CronInstallerTest(unittest.TestCase):
                     run = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
                     self.assertEqual(run.returncode, 1)
                     self.assertEqual((root / "logs/zgca/sync_cron.log").read_text(encoding="utf-8").splitlines()[-1], expected)
-            log = root / "logs/zgca/sync_cron.log"
-            self.assertNotIn("skipped", log.read_text(encoding="utf-8"))
-            self.assertNotIn("stopped", log.read_text(encoding="utf-8"))
-            # The previous run still holds the lock: nothing runs, one line says so,
-            # stamped as the pass stamps its summary line.
-            with (root / ".runtime/zgca/sync_cron.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX)
-                run = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
-            self.assertEqual(run.returncode, 0)
-            logged = log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(logged[-2], "pass: ops/zgca/zgca.py sync-rounds first second")
-            self.assertRegex(
-                logged[-1],
-                r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d zgca sync skipped: "
-                r"the previous run still holds \.runtime/zgca/sync_cron\.lock$",
-            )
-            # A pass that hangs in a copy (here a grandchild, as rsync is under dev): the limit,
-            # 2 s instead of 4 h, ends the whole process group and one line says so.
-            child = root / "child.pid"
-            python.write_text(f'#!/bin/bash\necho "pass: $*"\nbash -c \'sleep 300 & echo $! > "$0"; wait\' {child}\n', encoding="utf-8")
-            self.assertEqual(command.count("timeout 4h "), 1)
-            run = subprocess.run(["bash", "-c", command.replace("timeout 4h ", "timeout 2s ")], env=env, capture_output=True, text=True, timeout=60)
-            self.assertEqual(run.returncode, 124)
-            logged = log.read_text(encoding="utf-8").splitlines()
-            self.assertEqual(logged[-2], "pass: ops/zgca/zgca.py sync-rounds first second")
-            self.assertRegex(logged[-1], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d zgca sync stopped: the run reached its time limit$")
 
-            def running(pid: int) -> bool:
-                try:
-                    return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0] != "Z"
-                except FileNotFoundError:
-                    return False
+    def test_every_locked_job_skips_and_stops_with_one_dated_line_in_its_own_log(self) -> None:
+        """Each job line run through ops/cron/locked.sh, run for real by bash in a stand-in
+        repository with a stand-in interpreter: the job's output and exit status reach its
+        log and cron as they are, with no line of the helper's; a run that finds the lock
+        held runs nothing, exits 0 and writes one dated line saying so (on 2026-11-21 a hung
+        sync pass held its lock for 4 h 27 min while every later run was skipped without a
+        word); a run reaching its limit (1 s here) is ended with every process it started,
+        one that ignores TERM included, so the lock is free again, and writes its own dated
+        line and exit status. Each block keeps its lock, limit and log."""
+        expected = {
+            "paper": (".runtime/paper/cron.lock", "6h", "paper run", "logs/paper/cron.log"),
+            "research": (".runtime/research/cron.lock", "12h", "research fill", "logs/research/cron.log"),
+            "zgca": (".runtime/zgca/sync_cron.lock", "4h", "zgca sync", "logs/zgca/sync_cron.log"),
+        }
+        for block, (lock, limit, label, log) in expected.items():
+            # The Paper block's three lines differ in their time alone.
+            commands = {job.split(None, 5)[5] for job in job_lines(block)}
+            self.assertEqual(len(commands), 1, block)
+            (command,) = commands
+            # cron reads a % in a job line as a newline.
+            self.assertNotIn("%", command)
+            locked = LOCKED.search(command)
+            self.assertIsNotNone(locked, command)
+            self.assertEqual((locked.group(1), locked.group(2), locked.group(3), locked.group(5)), (lock, limit, label, log))
+            with self.subTest(block=block):
+                self._exercise_locked_job(command, lock, limit, label, log)
 
-            pid, deadline = int(child.read_text(encoding="utf-8")), time.monotonic() + 10
-            while running(pid) and time.monotonic() < deadline:
+    def _exercise_locked_job(self, command: str, lock: str, limit: str, label: str, log: str) -> None:
+        import fcntl
+        import subprocess
+        import time
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            stand_in_repository(root)
+            python, pids = root / "python", root / "pids"
+            env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ROUNDS": "first"}
+
+            def run(line: str = command) -> subprocess.CompletedProcess[str]:
+                return subprocess.run(["bash", "-c", line], env=env, capture_output=True, text=True, timeout=60)
+
+            def logged() -> list[str]:
+                return (root / log).read_text(encoding="utf-8").splitlines()
+
+            python.write_text('#!/bin/bash\necho "job: $*"\nexit 3\n', encoding="utf-8")
+            python.chmod(0o755)
+            ran = run()
+            self.assertEqual(ran.returncode, 1 if label == "research fill" else 3)  # the fill loop reports any failure as 1
+            self.assertEqual(len(logged()), 1)
+            self.assertTrue(logged()[0].startswith("job: "), logged())
+            with (root / lock).open("a") as held:
+                fcntl.flock(held, fcntl.LOCK_EX)
+                skipped = run()
+            self.assertEqual(skipped.returncode, 0)
+            self.assertEqual(len(logged()), 2)
+            self.assertRegex(logged()[-1], rf"^{DATED} {label} skipped: the previous run still holds {re.escape(lock)}$")
+            # A job that hangs with two grandchildren, as rsync hangs under dev, one of them deaf to TERM.
+            python.write_text(f'#!/bin/bash\necho "job: $*"\nsleep 300 & echo $! >> {pids}\n'
+                              f'(trap "" TERM; exec sleep 300) & echo $! >> {pids}\nwait\n', encoding="utf-8")
+            self.assertEqual(command.count(f" {limit} "), 1)
+            stopped = run(command.replace(f" {limit} ", " 1s "))
+            self.assertEqual(stopped.returncode, 124)
+            self.assertEqual(logged()[-2], logged()[0])
+            self.assertRegex(logged()[-1], rf"^{DATED} {label} stopped: the run reached its time limit$")
+            left = [int(pid) for pid in pids.read_text(encoding="utf-8").split()]
+            self.assertEqual(len(left), 2)
+            deadline = time.monotonic() + 10
+            while any(map(running, left)) and time.monotonic() < deadline:
                 time.sleep(0.1)
-            self.assertFalse(running(pid))
-            # The grandchild held the lock it inherited; ended with it, the lock is free.
-            with (root / ".runtime/zgca/sync_cron.lock").open("a") as lock:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            self.assertFalse(any(map(running, left)))
+            with (root / lock).open("a") as free:
+                fcntl.flock(free, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_the_housekeeping_job_compresses_only_old_conversation_logs(self) -> None:
         """The weekly job line itself, run by bash in a stand-in repository: a

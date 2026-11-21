@@ -29,13 +29,9 @@ ROUNDS=scripts/experiments/create_round_20261119.py
 
 # Every 30 minutes, all day: an experiment runs for hours and ends at no
 # particular hour. A copy of a 6-10 GB experiment takes about an hour through
-# the jump host; a run that falls meanwhile finds the lock held and writes one
-# line saying so (`flock -E 75` tells a held lock from a pass that failed): a
-# copy leaves one or two, more in a row mean the run holding the lock is stuck.
-# `timeout 4h` (three such copies and a margin) ends a stuck run with its
-# process group, so `dev`, ssh and rsync end with it and leave the lock free,
-# and one line says so; the next run continues a copy it cut short (zgca.py
-# makes a first copy outside experiments/ and moves it in once verified). A
-# run that finds the lock held exits 0, one the limit ended 124, a pass that
-# failed with its own status.
-*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && { flock -n -E 75 .runtime/zgca/sync_cron.lock timeout 4h $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS; s=$?; case $s in 75) s=0; echo "$(date -Iseconds) zgca sync skipped: the previous run still holds .runtime/zgca/sync_cron.lock";; 124) echo "$(date -Iseconds) zgca sync stopped: the run reached its time limit";; esac; exit $s; } >> logs/zgca/sync_cron.log 2>&1
+# the jump host; ops/cron/locked.sh writes one dated line for a run that falls
+# meanwhile (a copy leaves one or two, more in a row mean the run holding the
+# lock is stuck) and ends a run at 4 h (three such copies and a margin) with
+# everything it started, saying so in one line; the next run continues a copy
+# it cut short.
+*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && ops/cron/locked.sh .runtime/zgca/sync_cron.lock 4h "zgca sync" $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS >> logs/zgca/sync_cron.log 2>&1

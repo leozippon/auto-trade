@@ -45,7 +45,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # does not cover a fit.
 #
 # 06:40 and 07:55 are retries for a morning whose data landed late or whose
-# first run was slow: flock skips a retry while an earlier run is still
+# first run was slow: the lock skips a retry while an earlier run is still
 # working, and a book whose session is already decided is a no-op re-render,
 # never a second decision. 07:55 is the last that still has the budget before
 # 09:10, and it follows the latest the PIT event build has run; 06:40 is a
@@ -63,6 +63,16 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # a card is still working: the retries skip while it waits, so a book that
 # failed in it for late data is retried only after it ends, or by hand with
 # run_paper.py run --book <book>.
-40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-40 6 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
-55 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && flock -n .runtime/paper/cron.lock $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+#
+# ops/cron/locked.sh writes one dated line for a run the lock skips and ends a
+# run at 6 h with everything it started, saying so in one line. No working run
+# reaches that: the 05:40 run looks for a card until 07:55, and a GPU book then
+# needs at most its two clocks (75 min) plus its unclocked PIT build and replay
+# (a whole book took 42 min under load), so it has ended by about 09:50, with
+# room for a second GPU book; the longest run logged took 168 min (2026-09-17).
+# Each retry gets the same 6 h. A stuck 05:40 run is ended at 11:40, a stuck
+# 07:55 retry at 13:55, early enough for a sheet run by hand to meet the
+# closing auction.
+40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && ops/cron/locked.sh .runtime/paper/cron.lock 6h "paper run" $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+40 6 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && ops/cron/locked.sh .runtime/paper/cron.lock 6h "paper run" $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
+55 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && ops/cron/locked.sh .runtime/paper/cron.lock 6h "paper run" $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
