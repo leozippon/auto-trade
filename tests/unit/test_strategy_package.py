@@ -39,7 +39,7 @@ from autotrade.pipelines.experiment import (
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
 
-from .fixtures_sandbox import TEMPLATE_DIR, docker_available
+from .fixtures_sandbox import TEMPLATE_DIR, real_docker
 
 MAIN ='''import numpy as np
 
@@ -435,7 +435,7 @@ def test_budgets_come_from_one_source_each():
         session_budgets(config, {"max_api_spend_usd": 50.01})
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_sandbox_runs_a_package_with_the_shipped_libraries(tmp_path: Path):
     image = "autotrade-sandbox:latest"
     if subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False).returncode:
@@ -464,7 +464,7 @@ def test_real_sandbox_runs_a_package_with_the_shipped_libraries(tmp_path: Path):
     assert (order["weight"], order["live"]) == (2.0, 4.0)
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_sandbox_resolves_a_deferred_package_import_to_the_same_module(tmp_path: Path):
     """The container is where a split module used to go unnoticed.
 

@@ -30,6 +30,9 @@ from tests.unit.synthetic_experiment import (
     make_experiment,
 )
 
+# Each test runs a synthetic experiment end to end before it checks a reading.
+pytestmark = pytest.mark.slow
+
 LEDGER = Path("ledgers") / "experiment_ledger.jsonl"
 
 

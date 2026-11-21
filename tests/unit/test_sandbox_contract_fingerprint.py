@@ -45,7 +45,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 
-from .fixtures_sandbox import docker_available
+from .fixtures_sandbox import real_docker
 
 REPO =Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "ops/docker/sandbox.Dockerfile"
@@ -240,7 +240,7 @@ def test_image_predating_the_recorded_digest_runs_containers_and_stops_a_session
     assert IMAGE_FINGERPRINT_PATH in str(raised.value)
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_unreadable_image_is_refused_rather_than_reported_as_drift() -> None:
     with pytest.raises(SandboxImageContractMismatch, match="cannot be read"):
         assert_image_contract_current(
@@ -248,7 +248,7 @@ def test_unreadable_image_is_refused_rather_than_reported_as_drift() -> None:
         )
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_base_image_reports_the_runtime_it_bakes() -> None:
     """The in-image half, against the image the host actually builds from."""
 

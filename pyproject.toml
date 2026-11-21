@@ -93,6 +93,12 @@ extend-immutable-calls = ["fastapi.Body"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# A mark the suite does not declare is an error, so a misspelt ``slow`` cannot
+# silently keep a test in the quick run.
+addopts = ["--strict-markers"]
+markers = [
+  "slow: end to end through the real worker, real processes, shell stand-ins or Docker; the full run includes it and `-m 'not slow'` is the quick run",
+]
 cache_dir = ".runtime/cache/pytest"
 tmp_path_retention_count = 1
 filterwarnings = [

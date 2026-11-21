@@ -26,11 +26,16 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import pytest
+
 from autotrade.pipelines.pack_payload import (
     PAYLOAD_MANIFEST,
     format_manifest,
     payload_digests,
 )
+
+# The ZGCA scripts run for real in bash against stand-in tools.
+pytestmark = pytest.mark.slow
 
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "ops" / "zgca" / "zgca.py"

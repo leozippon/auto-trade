@@ -48,6 +48,9 @@ from tests.unit.synthetic_experiment import (
     make_experiment,
 )
 
+# Each test runs the real worker over the synthetic PIT release.
+pytestmark = pytest.mark.slow
+
 # A calendar day as the session's facts, tool results and views spell it.
 DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
 

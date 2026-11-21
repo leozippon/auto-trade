@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 import shutil
 import subprocess
@@ -13,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pytest
 
 from autotrade.common.time import utc_now
 from autotrade.environment.artifacts import artifact_fingerprint
@@ -30,11 +32,11 @@ TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
 TS_CODE = "000001.SZ"
 
 
-def docker_available(docker_executable: str = "docker") -> bool:
-    """Whether a Docker daemon answers here: the skip condition of every test
-    that starts a real container."""
+@functools.cache
+def _docker_available() -> bool:
+    """Whether a Docker daemon answers here (asked once per run)."""
 
-    executable = shutil.which(docker_executable)
+    executable = shutil.which("docker")
     if executable is None:
         return False
     try:
@@ -42,6 +44,14 @@ def docker_available(docker_executable: str = "docker") -> bool:
     except (OSError, subprocess.SubprocessError):
         return False
     return completed.returncode == 0
+
+
+def real_docker(test):
+    """Marks a test that talks to the host's real Docker daemon: skipped where
+    none answers, and ``slow`` (outside the quick run)."""
+
+    skip = pytest.mark.skipif(not _docker_available(), reason="Docker is unavailable")
+    return pytest.mark.slow(skip(test))
 
 
 def finalize_snapshot_dir(snapshot_dir: str | Path, **fields: object) -> dict[str, object]:

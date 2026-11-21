@@ -23,7 +23,7 @@ from autotrade.paper.orders import (
     render_orders,
     write_orders,
 )
-from tests.unit.fixtures_sandbox import docker_available
+from tests.unit.fixtures_sandbox import real_docker
 from tests.unit.paper_book_fixture import (
     COUNTER_STRATEGY,
     PROFILE,
@@ -215,7 +215,7 @@ def test_a_superseded_state_that_cannot_be_removed_warns_until_a_later_decision_
     assert book.state()["warnings"] == []
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_superseded_state_with_a_container_written_subdirectory_is_pruned(
     tmp_path: Path,
 ):

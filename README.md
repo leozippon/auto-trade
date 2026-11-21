@@ -73,10 +73,16 @@ python scripts/experiments/run_experiment.py --help
 python scripts/experiments/run_audit_session.py --help
 ```
 
-Run the tests with plain pytest:
+Run the tests with plain pytest. The full run is the one that counts before a deploy, and `--durations=30` shows where its time goes:
 
 ```bash
-python -m pytest -q tests/unit
+python -m pytest -q tests/unit --durations=30
+```
+
+Tests marked `slow` run end to end: the real worker over a synthetic point-in-time release, real worker processes, the ops scripts in bash, and real Docker containers (skipped where no Docker daemon answers). They take most of the run; leave them out for a quick inner loop:
+
+```bash
+python -m pytest -q tests/unit -m "not slow"
 ```
 
 ## Documentation

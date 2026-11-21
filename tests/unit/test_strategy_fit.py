@@ -69,7 +69,7 @@ from tests.unit.fixtures_sandbox import (
     _pit_slot_paths,
     _write_corporate_actions,
     _write_domains,
-    docker_available,
+    real_docker,
 )
 
 TEMPLATE = Path(__file__).resolve().parents[2] / "configs" / "agent_output_template"
@@ -522,7 +522,7 @@ def test_fit_timeout_fails_explicitly_and_aborts_the_worker():
     remove.assert_called_once()
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_sandbox_fit_and_generate_orders_share_a_read_write_state_directory(tmp_path: Path):
     # The package directory is what gets bound; pytest's tmp_path itself is
     # 0700, so the package needs its own world-readable directory.
@@ -871,7 +871,7 @@ def generate_orders(context):
     assert not first_state.exists() and not second_state.exists()
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_sandbox_replay_discards_a_subdirectory_generate_orders_wrote(tmp_path: Path):
     """What a sandbox worker writes belongs to its subuid, and the host cannot
     unlink the entries of a directory the worker created. A replay whose

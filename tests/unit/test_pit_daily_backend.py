@@ -61,14 +61,14 @@ from tests.unit.fixtures_sandbox import (
     _write_provider_contract,
 )
 
-from .fixtures_sandbox import docker_available
+from .fixtures_sandbox import real_docker
 
 # The boards every profile below pins: the random baseline draws only on a
 # profile's own boards.
 BOARDS = ("main", "gem")
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_sandbox_daily_evaluation_reads_parquet_with_default_limits(
     tmp_path: Path,
 ) -> None:

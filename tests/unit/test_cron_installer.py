@@ -8,6 +8,8 @@ import unittest
 from pathlib import Path
 from stat import S_IMODE
 
+import pytest
+
 SCRIPT = Path(__file__).resolve().parents[2] / "ops" / "cron" / "install_cron.py"
 SPEC = importlib.util.spec_from_file_location("install_cron", SCRIPT)
 if SPEC is None or SPEC.loader is None:
@@ -235,6 +237,7 @@ class CronInstallerTest(unittest.TestCase):
                     self.assertEqual(run.returncode, 1)
                     self.assertEqual((root / "logs/zgca/sync_cron.log").read_text(encoding="utf-8").splitlines()[-1], expected)
 
+    @pytest.mark.slow  # runs each job line for real in bash, through a 1 s limit
     def test_every_locked_job_skips_and_stops_with_one_dated_line_in_its_own_log(self) -> None:
         """Each job line run through ops/cron/locked.sh, run for real by bash in a stand-in
         repository with a stand-in interpreter: the job's output and exit status reach its

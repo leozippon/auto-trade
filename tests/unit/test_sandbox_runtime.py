@@ -91,7 +91,7 @@ from autotrade.pipelines.session_tools import resource_reading
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
 from tests.unit.fixtures_sandbox import _executor_for_process
 
-from .fixtures_sandbox import docker_available
+from .fixtures_sandbox import real_docker
 from .gpu_probe import gpu_roster, stubbed_gpu_probe
 
 
@@ -397,7 +397,7 @@ def test_attached_stdin_delivers_its_data_and_stays_open_while_the_command_runs(
         assert completed.stdout.strip() == f"{data!r} open"
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_exec_input_reaches_the_payload_in_band_while_stdin_stays_open(tmp_path: Path):
     image = "autotrade-sandbox:latest"
     if subprocess.run(["docker", "image", "inspect", image], capture_output=True, check=False).returncode:
@@ -431,7 +431,7 @@ def test_real_exec_input_reaches_the_payload_in_band_while_stdin_stays_open(tmp_
         sandbox.stop()
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_persistent_timeout_kills_command_only_and_preserves_session(tmp_path: Path):
     image = "autotrade-sandbox:latest"
     inspected = subprocess.run(
@@ -814,7 +814,7 @@ def test_working_artifact_permission_restore_fails_closed(tmp_path: Path):
         restore_working_artifacts_writable(output, models)
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tmp_path: Path):
     image = "autotrade-sandbox:latest"
     inspected = subprocess.run(
@@ -904,7 +904,7 @@ def test_real_inherited_fold_workspace_is_writable_only_inside_agent_boundary(tm
     assert (Path(frozen.model_path) / "weights.bin").read_bytes() == b"parent"
 
 
-@pytest.mark.skipif(not docker_available(), reason="Docker is unavailable")
+@real_docker
 def test_real_shell_created_workspace_files_stay_writable_for_the_typed_writers(
     tmp_path: Path,
 ):

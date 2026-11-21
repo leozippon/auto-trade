@@ -32,6 +32,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 import autotrade
@@ -53,6 +54,9 @@ from autotrade.webui.manager import ManagerError
 from autotrade.webui.server import create_app
 from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
 from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
+
+# Every test drives real worker processes, some through a real SIGTERM grace.
+pytestmark = pytest.mark.slow
 
 SRC_ROOT = str(Path(autotrade.__file__).resolve().parents[1])
 
