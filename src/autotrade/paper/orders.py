@@ -26,6 +26,7 @@ from autotrade.common.time import CN_TZ
 from autotrade.environment.strategy import MARKET_CLOSE, MARKET_OPEN
 
 from .book import Book
+from .consistency import CONSISTENCY_NAME
 from .engine import (
     PAPER_STATE_NAME,
     REFERENCE_KEY,
@@ -272,7 +273,7 @@ def render_orders(book: Book, trade_date: str) -> str:
             + _fit_note(decision, str(state.get("last_fit_date") or ""))
         ),
         *_vintage_lines(decision),
-        f"- 重放此前决策 {decision['replayed_calls']} 次，其中 {decision['replayed_matching_journal']} 次与模拟账户记录的订单一致",
+        _consistency_line(book.root),
         (
             f"- 账户（{_day(str(state.get('settled_through') or decision['data_through']))} 收盘估值）："
             f"总资产 {_money(equity)}，现金 {_money(cash)}，持仓 {sheet['held_count']} 只"
@@ -470,10 +471,43 @@ def _positions_after(positions: Mapping[str, int], orders: Iterable[Mapping[str,
     return {symbol: quantity for symbol, quantity in sorted(result.items()) if quantity > 0}
 
 
+# The consistency check's statuses, levels and causes, as the sheet words them.
+_CHECK_STATUS = {"consistent": "一致", "differs": "不一致", "partial": "部分一致", "failed": "未能检查"}
+_CHECK_LEVEL = {"opening": "开盘除权除息", "orders": "到期订单", "fills": "成交", "close": "收盘账户"}
+_CHECK_CAUSE = {
+    "data_revised": "数据修订", "rule": "结算规则", "ex_date_timing": "除权日决策时序（已知差异）",
+    "nondeterministic": "策略结果不确定", "paper_decision_path": "模拟账户的决策路径", "unresolved": "原因未判明",
+}
+
+
+def _consistency_line(root: Path) -> str:
+    """The latest consistency check with a replay (``paper.consistency``):
+    its status and date, and its first difference."""
+    try:
+        record = read_json_object(root / CONSISTENCY_NAME, missing_ok=True)
+    except (OSError, ValueError):
+        return f"- 与回放一致性：{CONSISTENCY_NAME} 无法读取"
+    if not record:
+        return "- 与回放一致性：尚未检查"
+    status = str(record.get("status"))
+    notes = [f"{str(record.get('checked_at'))[:10]} 检查"]
+    if status in {"consistent", "partial"}:
+        notes.append(f"比较 {record.get('sessions_compared')} 个交易日")
+    first = record.get("first_difference")
+    if isinstance(first, Mapping):
+        notes.append(
+            f"首个差异在 {_day(str(first['trade_date']))} 的{_CHECK_LEVEL.get(first['level'], first['level'])}，"
+            f"{_CHECK_CAUSE.get(first['cause'], first['cause'])}"
+        )
+    if record.get("reason"):
+        notes.append(str(record["reason"]))
+    return f"- 与回放一致性：{_CHECK_STATUS.get(status, status)}（{'；'.join(notes)}）"
+
+
 def _vintage_lines(decision: Mapping[str, object]) -> list[str]:
-    """The vendor vintage of each mounted dataset behind the decision: when a
-    re-issued decision stops matching the journal, the vintage that moved
-    names the data that changed."""
+    """The vendor vintage of each mounted dataset behind the decision: a
+    vintage that moved names the data behind a difference the consistency
+    check finds."""
     vintages = decision.get("vintages") or {}
     if not isinstance(vintages, Mapping) or not vintages:
         return []

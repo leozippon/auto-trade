@@ -7,7 +7,8 @@ page reads it through eight projections, each from the book's own files —
 sessions still to record and every settled one against its simulated fill)
 and these seven:
 ``book_status`` (the status ladder, and whether the session ahead already has
-its order sheet), ``book_payload`` (identity, ``book.json``, and the stored Paper verdict),
+its order sheet), ``book_payload`` (identity, ``book.json``, the stored Paper verdict
+and the latest consistency check with a replay),
 ``signal_payload`` (the latest decision's order sheet), ``history_payload``
 (every earlier day's order sheet and fills), ``performance_payload`` (return against
 the book's benchmark, equity and cash tracks, statistics, and the source experiment's
@@ -59,6 +60,7 @@ from autotrade.paper.book import (
     validate_book_id,
 )
 from autotrade.paper.books import PAPER_STATE_DIR
+from autotrade.paper.consistency import CONSISTENCY_NAME
 from autotrade.paper.engine import (
     PAPER_STATE_NAME,
     REFERENCE_KEY,
@@ -91,6 +93,8 @@ TRADING_ENVS = ("paper",)
 # weekday before the open, so a weekend gap (~72 h) is normal and four days
 # means a scheduled run did not happen (a failed run shows export_error).
 STALE_SNAPSHOT_ALERT_SECONDS = 4 * 24 * 3600.0
+# A consistency check older than this reads as stale: it runs every Saturday.
+STALE_CHECK_DAYS = 8
 # Annualised return, Sharpe and maximum drawdown are served from this many
 # settled days; a shorter book reads "—" with its day count instead.
 MIN_STATISTICS_DAYS = 20
@@ -201,6 +205,7 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
     record, error = _read_json(root / BOOK_NAME)
     state, state_error = _read_json(root / PAPER_STATE_NAME)
     verdict, verdict_error = _read_json(root / VERDICT_NAME)
+    check, check_error = _read_json(root / CONSISTENCY_NAME)
     error = error or verdict_error
     status = "unreadable" if error or state_error else "ok" if record else "absent"
     identity = None
@@ -219,6 +224,7 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
         "error": error or state_error,
         "book": identity,
         "verdict": verdict,
+        "consistency": {"status": "unreadable", "reason": check_error} if check_error else _consistency(check),
         "start_date": _text(state.get("start_date")),
         "settled_through": _text(state.get("settled_through")),
         "last_fit_date": _text(state.get("last_fit_date")),
@@ -228,6 +234,52 @@ def book_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, ob
             omit_private_paths(text)
             for text in (warnings if isinstance(warnings, list) else ())
             if isinstance(text, str)
+        ],
+    }
+
+
+def _consistency(record: dict[str, object] | None) -> dict[str, object] | None:
+    """The latest consistency check (``paper.consistency``), whitelisted: its
+    status, window and per-session levels, and the numbers of its first
+    difference; never the work paths it names."""
+    if not record:
+        return None
+    first = as_mapping(record.get("first_difference"))
+    evidence = as_mapping(first.get("evidence"))
+    checked = _to_utc(record.get("checked_at"))
+    window = as_mapping(record.get("window"))
+    difference = None
+    if first:
+        orders = {key: evidence.get(key) for key in ("paper_only", "replay_only")}
+        difference = {
+            **{key: _text(first.get(key)) for key in ("trade_date", "level", "cause")},
+            "decision": _text(evidence.get("decision")),
+            **{key: len(value) if isinstance(value, list) else None for key, value in orders.items()},
+            "restated": [name for name in evidence.get("restated") or () if isinstance(name, str)],
+            "fills": [
+                {key: as_mapping(evidence.get(side)).get(key) for key in ("symbol", "action", "status", "price")}
+                for side in ("paper", "replay")
+            ] if first.get("level") == "fills" else None,
+        }
+    return {
+        "status": _text(record.get("status")),
+        "reason": omit_private_paths(str(record["reason"])) if record.get("reason") else None,
+        "checked_at": _utc_iso(checked),
+        "stale": checked is None or datetime.now(UTC) - checked > timedelta(days=STALE_CHECK_DAYS),
+        "start": _text(window.get("start")),
+        "end": _text(window.get("end")),
+        "generation_id": _text(as_mapping(record.get("release")).get("generation_id")),
+        "sessions_compared": _count(record.get("sessions_compared")),
+        "first_difference": difference,
+        "sessions": [
+            {
+                "trade_date": _text(row.get("trade_date")),
+                **{key: row.get(key) is True for key in ("opening", "orders", "fills", "close", "downstream")},
+                "cash_delta": finite_number(row.get("cash_delta")),
+                "equity_delta": finite_number(row.get("equity_delta")),
+            }
+            for row in record.get("sessions") or ()
+            if isinstance(row, dict)
         ],
     }
 
@@ -244,8 +296,6 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
         "data_through": _text(decision.get("data_through")),
         "generation_id": _text(decision.get("generation_id")),
         "fitted": decision.get("fitted") is True,
-        "replayed_calls": _count(decision.get("replayed_calls")),
-        "replayed_matching_journal": _count(decision.get("replayed_matching_journal")),
         "orders": [
             {
                 "execute_at": _text(row["execute_at"]),

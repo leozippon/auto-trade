@@ -165,6 +165,41 @@ def test_the_book_and_its_card_carry_the_stored_verdict_as_written(tmp_path: Pat
     assert response.status_code == 200 and response.json()["state"] == "unreadable"
 
 
+def test_the_book_carries_its_latest_consistency_check_whitelisted(tmp_path: Path):
+    """The page shows the check's status, window and first difference; the
+    work paths the record names never leave the host, and a check over a
+    week old reads as stale."""
+    root = engine_book(tmp_path, "20260105")
+    assert trading.book_payload(tmp_path, BOOK)["consistency"] is None
+    checked = datetime.now(ZoneInfo("Asia/Shanghai"))
+    record = {
+        "status": "differs", "checked_at": checked.isoformat(), "window": {"start": "20260105", "end": "20260107"},
+        "release": {"generation_id": "g1", "vintages": {"daily": "v1"}}, "sessions_compared": 3,
+        "first_difference": {"trade_date": "20260106", "level": "orders", "cause": "unresolved", "evidence": {
+            "decision": "20260106", "paper_only": [{"symbol": "000001.SZ", "metadata": {"call": 1}}], "replay_only": [],
+            "restated": ["daily"],
+        }},
+        "sessions": [{"trade_date": "20260105", "opening": True, "orders": True, "fills": True, "close": True,
+                      "downstream": False, "cash_delta": 0.0, "equity_delta": 0.0, "holdings": []}],
+        "result": str(tmp_path / ".runtime/paper_check/exp/results/heldout_x/result.json"),
+    }
+    (root / "consistency.json").write_text(json.dumps(record), encoding="utf-8")
+    check = trading.book_payload(tmp_path, BOOK)["consistency"]
+    assert (check["status"], check["stale"], check["start"], check["generation_id"]) == ("differs", False, "20260105", "g1")
+    assert check["first_difference"] == {
+        "trade_date": "20260106", "level": "orders", "cause": "unresolved", "decision": "20260106",
+        "paper_only": 1, "replay_only": 0, "restated": ["daily"], "fills": None,
+    }
+    assert check["sessions"][0]["close"] is True and str(tmp_path) not in json.dumps(check)
+    assert '"call"' not in json.dumps(check)
+    record["checked_at"] = (checked - timedelta(days=9)).isoformat()
+    (root / "consistency.json").write_text(json.dumps(record), encoding="utf-8")
+    assert trading.book_payload(tmp_path, BOOK)["consistency"]["stale"] is True
+    (root / "consistency.json").write_text("{", encoding="utf-8")
+    broken = trading.book_payload(tmp_path, BOOK)
+    assert broken["state"] == "ok" and broken["consistency"]["status"] == "unreadable"
+
+
 def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_day(tmp_path: Path):
     engine_book(tmp_path, "20260105")
     signal = trading.signal_payload(tmp_path, BOOK)["signal"]
@@ -1147,6 +1182,52 @@ def _js_top_level(script: str, opening: str) -> str:
         if (index := script.find(marker, start + 1)) != -1
     ]
     return script[start : min(ends)]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS formatters")
+def test_the_consistency_check_reads_as_one_sentence_and_one_caption_chip():
+    """The page says where the first difference is, with its numbers and its
+    cause, and the signal's caption carries the check's status and day where
+    the re-issue count used to be."""
+    script = _app_js()
+    harness = "\n".join(
+        [
+            _js_top_level(script, "const CONSISTENCY_STATUS ="),
+            _js_top_level(script, "const CONSISTENCY_LEVELS ="),
+            _js_top_level(script, "const CONSISTENCY_CAUSES ="),
+            _js_top_level(script, "function fmtDate("),
+            _js_top_level(script, "const TS_FMT ="),
+            _js_top_level(script, "function fmtTs("),
+            "const fmtPrice = (v) => v.toFixed(2), fmtAmountOpt = (v) => `¥${v.toFixed(2)}`;",
+            _js_top_level(script, "function consistencyDifference("),
+            _js_top_level(script, "function consistencyChip("),
+            (
+                "const orders = { first_difference: { trade_date: '20261118', level: 'orders', cause: 'unresolved',"
+                " decision: '20261118', paper_only: 46, replay_only: 0, restated: ['daily_basic'] }, sessions: [] };"
+                "const close = { first_difference: { trade_date: '20261119', level: 'close', cause: 'data_revised' },"
+                " sessions: [{ trade_date: '20261119', cash_delta: 0, equity_delta: 12.5 }] };"
+                "console.log(JSON.stringify([consistencyDifference(orders), consistencyDifference(close),"
+                " consistencyDifference({ first_difference: null }),"
+                " consistencyChip({ status: 'consistent', checked_at: '2026-11-21T02:00:00Z', stale: false }),"
+                " consistencyChip({ status: 'differs', checked_at: '2026-11-07T02:00:00Z', stale: true }),"
+                " consistencyChip(null)]));"
+            ),
+        ]
+    )
+    result = subprocess.run(
+        ["node", "-e", harness], capture_output=True, text=True, timeout=60, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [
+        "2026-11-18 的到期订单不一致：模拟账户独有 46 笔，回放独有 0 笔（2026-11-18 的决策） · 原因未判明；决策后修订的数据：daily_basic",
+        "2026-11-19 的收盘账户不一致：现金差 ¥0.00，总资产差 ¥12.50（回放减模拟账户） · 数据修订",
+        None,
+        "回放一致 · 2026-11-21",
+        "回放不一致 · 2026-11-07（过期）",
+        "回放一致性未检查",
+    ]
+    assert "consistencyChip(identity.consistency)" in _js_top_level(script, "function paperSignalPanel(")
+    assert "重放 " not in script
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node required for the JS formatters")

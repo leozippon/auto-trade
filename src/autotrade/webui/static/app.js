@@ -58,6 +58,26 @@ const VERDICT_STATUS = {
   confirmed: ["completed", "已确认"],
   killed: ["failed", "已终止"],
 };
+// Where a Paper account's consistency check with a replay of it stands
+// (paper/consistency.py): the status as [badge state, label], then the words
+// for the level and the cause of its first difference. The order sheet words
+// them the same way (paper/orders.py).
+const CONSISTENCY_STATUS = {
+  consistent: ["completed", "一致"],
+  differs: ["failed", "不一致"],
+  partial: ["waiting_user", "部分一致"],
+  failed: ["unknown", "未能检查"],
+  unreadable: ["unreadable", "无法读取"],
+};
+const CONSISTENCY_LEVELS = { opening: "开盘除权除息", orders: "到期订单", fills: "成交", close: "收盘账户" };
+const CONSISTENCY_CAUSES = {
+  data_revised: "数据修订",
+  rule: "结算规则",
+  ex_date_timing: "除权日决策时序（已知差异）",
+  nondeterministic: "策略结果不确定",
+  paper_decision_path: "模拟账户的决策路径",
+  unresolved: "原因未判明",
+};
 const VERDICT_REASON_LABELS = {
   account_drawdown_exceeded: "账户回撤超限",
   active_drawdown_exceeded: "主动回撤超限",
@@ -7549,6 +7569,7 @@ function renderBookBundle(bundle) {
         paperSignalPanel(bundle.signal, bundle.identity),
         paperFillsPanel(bundle.fills, status.book_id),
         paperVerdictPanel(bundle.identity),
+        paperConsistencyPanel(bundle.identity),
         paperEquityPanel(bundle.performance, bundle.pnl),
         paperPositionsPanel(bundle.snapshot),
         paperPnlPanel(bundle.pnl),
@@ -7675,6 +7696,96 @@ function paperVerdictPanel(payload) {
     { label: "主动最大回撤", value: verdict.active_max_drawdown, fmt: fmtPct },
   ]);
   if (tiles.length) panel.append(statTilesRow(tiles));
+  return panel;
+}
+
+/* The first difference of a consistency check in one sentence, with its
+   numbers; null when the check found none. */
+function consistencyDifference(check) {
+  const first = check.first_difference;
+  if (!first) return null;
+  const row = (check.sessions || []).find((item) => item.trade_date === first.trade_date) || {};
+  const [paper, replay] = first.fills || [];
+  const numbers =
+    first.level === "orders"
+      ? `：模拟账户独有 ${first.paper_only ?? "—"} 笔，回放独有 ${first.replay_only ?? "—"} 笔（${fmtDate(first.decision)} 的决策）`
+      : first.level === "fills" && paper && replay
+        ? `：${paper.symbol} 模拟账户 ${paper.status} @ ${fmtPrice(paper.price)}，回放 ${replay.status} @ ${fmtPrice(replay.price)}`
+        : first.level === "close"
+          ? `：现金差 ${fmtAmountOpt(row.cash_delta)}，总资产差 ${fmtAmountOpt(row.equity_delta)}（回放减模拟账户）`
+          : "";
+  const restated = (first.restated || []).length ? `；决策后修订的数据：${first.restated.join("、")}` : "";
+  return `${fmtDate(first.trade_date)} 的${CONSISTENCY_LEVELS[first.level] || first.level}不一致${numbers} · ${
+    CONSISTENCY_CAUSES[first.cause] || first.cause
+  }${restated}`;
+}
+
+/* The check's status and day, as the signal's caption carries it. */
+function consistencyChip(check) {
+  if (!check) return "回放一致性未检查";
+  const label = (CONSISTENCY_STATUS[check.status] || [])[1] || check.status;
+  const day = check.checked_at ? ` · ${fmtTs(check.checked_at).slice(0, 10)}` : "";
+  return `回放${label}${day}${check.stale ? "（过期）" : ""}`;
+}
+
+/* The latest consistency check with a replay of the book (run_paper.py
+   check, weekly): its status, window and first difference, and each
+   session's four levels behind a fold. A check over a week old is stale. */
+function paperConsistencyPanel(payload) {
+  const title = "与回放一致性";
+  const check = payload.consistency;
+  if (!check)
+    return el("div", { class: "panel section-gap" }, panelHead(title), el("div", { class: "empty" }, "尚未检查"));
+  const [badgeState, label] = CONSISTENCY_STATUS[check.status] || ["unknown", check.status];
+  const panel = el(
+    "div",
+    { class: "panel section-gap" },
+    panelHead(
+      title,
+      el("span", { class: `badge state-${badgeState}` }, label),
+      check.stale ? el("span", { class: "mode-note" }, "超过一周未检查") : null,
+    ),
+  );
+  const facts = [
+    check.checked_at ? `检查于 ${fmtTs(check.checked_at)}` : null,
+    check.start ? `回放 ${fmtDate(check.start)} 至 ${fmtDate(check.end)}` : null,
+    check.generation_id ? `发布 ${check.generation_id.slice(0, 8)}` : null,
+    Number.isFinite(check.sessions_compared) ? `比较 ${check.sessions_compared} 个交易日` : null,
+  ].filter(Boolean);
+  if (facts.length) panel.append(el("div", { class: "meta-line" }, facts.join(" · ")));
+  if (check.reason) panel.append(el("div", { class: "hint warn" }, check.reason));
+  const sentence = consistencyDifference(check);
+  if (sentence) panel.append(el("div", { class: "meta-line" }, sentence));
+  if ((check.sessions || []).length) {
+    const mark = (same) => (same ? "一致" : "不同");
+    panel.append(
+      el(
+        "details",
+        { class: "sub fold" },
+        el("summary", {}, "逐日比较"),
+        dataTable(
+          [
+            { label: "交易日" },
+            { label: "开盘" },
+            { label: "订单" },
+            { label: "成交" },
+            { label: "收盘" },
+            { label: "现金差", num: true, title: "回放减模拟账户" },
+            { label: "总资产差", num: true, title: "回放减模拟账户" },
+          ],
+          check.sessions.map((row) => [
+            `${fmtDate(row.trade_date)}${row.downstream ? "（其后）" : ""}`,
+            mark(row.opening),
+            mark(row.orders),
+            mark(row.fills),
+            mark(row.close),
+            fmtAmountOpt(row.cash_delta),
+            fmtAmountOpt(row.equity_delta),
+          ]),
+        ),
+      ),
+    );
+  }
   return panel;
 }
 
@@ -7912,9 +8023,7 @@ function paperSignalPanel(payload, identity) {
         `数据截至 ${fmtDate(signal.data_through)}`,
         signal.generation_id ? `发布 ${signal.generation_id.slice(0, 8)}` : null,
         !signal.fitted && lastFit ? `拟合于 ${fmtDate(lastFit)}` : null,
-        Number.isFinite(signal.replayed_calls) && Number.isFinite(signal.replayed_matching_journal)
-          ? `重放 ${signal.replayed_matching_journal}/${signal.replayed_calls}`
-          : null,
+        consistencyChip(identity.consistency),
       ]
         .filter(Boolean)
         .join(" · "),

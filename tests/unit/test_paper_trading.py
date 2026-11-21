@@ -338,7 +338,6 @@ def test_the_order_sheet_matches_the_journal(tmp_path: Path):
     assert "### 上午 · 开盘集合竞价 09:15–09:25 申报 · 按开盘价成交（1 笔）" in text
     assert "| 卖出 | 000001.SZ | 平安银行 | 100 | 开盘 | — | 12.50 | ¥1,250.00 | 上午 开盘集合竞价 09:15–09:25 |" in text
     assert "## 成交后目标持仓（0 只）" in text
-    assert "重放此前决策 2 次，其中 2 次与模拟账户记录的订单一致" in text
     idle = render_orders(sheet_book, "20260106")
     # An old sheet still renders from its own morning's record (20260105 close: 11.50).
     assert "今日无订单，持仓不变。" in idle and "| 000001.SZ | 平安银行 | 100 | 11.50 | ¥1,150.00 |" in idle
@@ -700,6 +699,23 @@ def test_a_release_holding_a_stale_dataset_is_refused_before_any_pit_view_is_bui
             schedule=load_config(Path(__file__).resolve().parents[2] / DEFAULT_CONFIG),
         )
     assert not (tmp_path / "paper" / "pit" / "g20211008" / "pit_views" / "decision").exists()
+
+
+def test_the_sheet_carries_the_latest_consistency_check_in_place_of_the_reissue_count(tmp_path: Path):
+    book = _Book(tmp_path, COUNTER_STRATEGY, sessions=("20260102", *SESSIONS))
+    book.run("20260105")
+    text = render_orders(_sheet_book(book), "20260105")
+    assert "- 与回放一致性：尚未检查" in text and "重放此前决策" not in text
+    (book.root / "consistency.json").write_text(json.dumps({
+        "status": "differs", "checked_at": "2026-01-10T10:00:00+08:00", "sessions_compared": 4,
+        "first_difference": {"trade_date": "20260106", "level": "orders", "cause": "unresolved"},
+    }), encoding="utf-8")
+    assert "- 与回放一致性：不一致（2026-01-10 检查；首个差异在 2026-01-06（周二） 的到期订单，原因未判明）" in render_orders(
+        _sheet_book(book), "20260105"
+    )
+    # A damaged record never costs the morning its sheet.
+    (book.root / "consistency.json").write_text("{", encoding="utf-8")
+    assert "- 与回放一致性：consistency.json 无法读取" in render_orders(_sheet_book(book), "20260105")
 
 
 def test_a_buy_of_a_name_currently_st_is_flagged():
