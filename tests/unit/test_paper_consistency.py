@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 from datetime import datetime
 from pathlib import Path
@@ -195,7 +196,7 @@ def test_a_real_fill_book_is_compared_until_its_account_leaves_the_simulation():
         DAYS[1]: {},
         DAYS[2]: {"09:30 sell 000001.SZ": {"ordered": 100, "simulated": simulated, "real": {**simulated, "quantity": 0}}},
     }}
-    result = compare(BookRecords(state, *list(records.__dict__.values())[1:]), replay, vintages=VINTAGES)
+    result = compare(dataclasses.replace(records, state=state), replay, vintages=VINTAGES)
     assert (result["status"], result["sessions_compared"]) == ("partial", 2)
     assert DAYS[2] in result["reason"]
 

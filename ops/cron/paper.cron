@@ -81,8 +81,9 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # consistency.json, which every later sheet and the console show. It holds the
 # same lock as the morning runs and refuses to start in their window on its
 # own. A book costs its view build, its fit and one replay call per decision,
-# a determinism replay more when a decision differs: hours for a long book,
-# so it gets 12 h.
+# and a second replay when a decision differs: the live book's three sessions
+# took 13 min on 2026-11-22, 10 of them the view build. A call may run up to
+# the decision clock, so a long book can take hours; it gets 12 h.
 40 5 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && ops/cron/locked.sh .runtime/paper/cron.lock 6h "paper run" $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 40 6 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && ops/cron/locked.sh .runtime/paper/cron.lock 6h "paper run" $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
 55 7 * * 1-5 cd $REPO_ROOT && mkdir -p logs/paper .runtime/paper && ops/cron/locked.sh .runtime/paper/cron.lock 6h "paper run" $QUANT_PYTHON scripts/paper/run_paper.py run >> logs/paper/cron.log 2>&1
