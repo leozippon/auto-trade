@@ -56,11 +56,11 @@ from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.paper.book import (
     PAPER_INITIAL_CASH,
-    VERDICT_LOG_NAME,
     Book,
     book_status,
     create_book,
     load_book,
+    terminal_transition,
     verify_book_artifact,
 )
 from autotrade.paper.books import (
@@ -83,7 +83,6 @@ from autotrade.paper.orders import (
     write_orders,
 )
 from autotrade.paper.pit import BookPITData
-from autotrade.paper.storage import read_jsonl
 from autotrade.paper.titles import require_landed_titles
 from autotrade.paper.verdict import record_verdict, record_verdict_locked
 from autotrade.paper.vintages import vintage_report
@@ -272,8 +271,7 @@ def run_book(
 def _killed_sheet(book: Book, trade_date: str) -> str:
     """The exit sheet of a killed book: its holdings, to sell by hand."""
 
-    transitions, _skipped = read_jsonl(book.root / VERDICT_LOG_NAME)
-    return render_killed(book, trade_date, transitions[0])
+    return render_killed(book, trade_date, terminal_transition(book.root))
 
 
 def _run_book_locked(

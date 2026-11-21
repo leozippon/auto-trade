@@ -370,7 +370,7 @@ def _outcome(value: object) -> dict[str, object]:
 
 def _key_view(day: str, key: str, names: dict[str, str], references: dict[str, object]) -> dict[str, object]:
     clock, action, symbol = fills.parse_key(key)
-    execute_at = datetime.combine(date.fromisoformat(day), time.fromisoformat(clock), tzinfo=CN_TZ)
+    execute_at = fills.key_time(day, key)
     return {
         "key": key, "time": clock, "window": order_window(execute_at),
         "window_label": window_text(execute_at, day)[0], "symbol": symbol,

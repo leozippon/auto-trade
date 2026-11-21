@@ -62,7 +62,7 @@ from autotrade.pipelines.verdict import BOOTSTRAP_BLOCK_DAYS, bootstrap_lower_bo
 
 from .book import VERDICT_LOG_NAME, Book, book_status, terminal_transition
 from .engine import PAPER_STATE_NAME, writer_lock
-from .fills import CORRECTIONS_NAME, key_text, mode, parse_key
+from .fills import CORRECTIONS_NAME, key_text, key_time, mode, parse_key
 from .pit import newest_replay_slot
 from .storage import (
     EQUITY_JOURNAL_NAME,
@@ -331,8 +331,8 @@ def _corrected(
     held: dict[tuple[str, str], list[dict[str, object]]] = {}
     for session, key in corrected:
         outcome = ledger[session][key]["real"]
-        clock, action, symbol = parse_key(key)
-        at = datetime.strptime(f"{session} {clock}", "%Y%m%d %H:%M").replace(tzinfo=CN_TZ).isoformat()
+        _clock, action, symbol = parse_key(key)
+        at = key_time(session, key).isoformat()
         named = next((row for identity, row in keyed if identity == (session, key)), {})
         held[(session, key)] = [
             {

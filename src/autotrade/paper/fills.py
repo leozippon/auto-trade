@@ -102,6 +102,15 @@ def parse_key(key: str) -> tuple[str, str, str]:
     return clock, action, symbol
 
 
+def key_time(session: str, key: str) -> datetime:
+    """The instant order ``key``'s clock names on ``session`` (YYYYMMDD), in
+    market time: the one reading of a key's time for the simulator's fills,
+    the verdict's corrected fills and the console."""
+
+    clock = parse_key(key)[0]
+    return datetime.combine(date.fromisoformat(session), time.fromisoformat(clock), tzinfo=CN_TZ)
+
+
 def order_key(order: StrategyOrder) -> str:
     return key_text(order.execute_at.astimezone(CN_TZ).strftime("%H:%M"), order.action, order.symbol)
 
@@ -521,8 +530,7 @@ class RealFills:
                 if parse_key(key)[0] != clock or record.outcome != FILLED:
                     continue  # a trade recorded and then withdrawn
                 _clock, action, symbol = parse_key(key)
-                execute_at = datetime.combine(date.fromisoformat(day), time.fromisoformat(clock), tzinfo=CN_TZ)
-                order = StrategyOrder(symbol, action, record.quantity, execute_at)
+                order = StrategyOrder(symbol, action, record.quantity, key_time(day, key))
                 rows.append({**self._recorded(broker, real[key], order, 0, record), "off_sheet": True})
             if broker.cash < -1e-6:
                 raise ValueError(
@@ -756,6 +764,7 @@ __all__ = [
     "compare",
     "enable",
     "key_text",
+    "key_time",
     "mode",
     "normalize_record",
     "order_key",
