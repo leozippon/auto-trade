@@ -5,7 +5,9 @@ is tracked and small. A paper Pack also carries what git should not -- the
 paper, its text, the authors' repository at one commit, wheels or weights. It
 lists them in ``PAYLOAD.sha256`` (sha256sum format, ``<sha256>  <path under
 refs/>``, sorted bytewise) and keeps them untracked under
-``data/pack_payloads/<pack>/`` at the same paths.
+``data/pack_payloads/<pack>/`` at the same paths; ``sources.json`` beside the
+manifest records where each paper came from and how
+``scripts/experiments/fetch_pack_payload.py`` fetches it again (``read_sources``).
 
 ``pack_payload`` is the one check. The worker's pre-flight (the console's
 create, a round's dry run, a run on the ZGCA instance), the session start that
@@ -16,20 +18,33 @@ experiment starts on a payload that is missing or differs from its manifest.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import stat
+from datetime import date
 from pathlib import Path, PurePosixPath
 
 PAYLOAD_MANIFEST = "PAYLOAD.sha256"
+PAYLOAD_SOURCES = "sources.json"
 # Repository-relative; one directory per Pack, named as the Pack's directory.
 PAYLOAD_ROOT = PurePosixPath("data/pack_payloads")
 
 _MANIFEST_LINE = re.compile(r"([0-9a-f]{64})  (.+)")
+# What each sources.json entry must and may carry; read_sources says what each means.
+SOURCE_FIELDS = ("slug", "title", "venue", "paper_url", "repo", "commit", "licence", "data_end", "strip")
+OPTIONAL_SOURCE_FIELDS = ("arxiv", "wheels", "weights", "dataset")
+_SLUG = re.compile(r"[a-z0-9][a-z0-9._-]*")
+_URL = re.compile(r"https?://\S+")
+_GITHUB_REPO = re.compile(r"https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
+_COMMIT = re.compile(r"[0-9a-f]{40}")
+# A versioned arXiv id (2401.01234v2, hep-th/9901001v1): its source never changes.
+_ARXIV = re.compile(r"\S+v[0-9]+")
+_PINNED_REQUIREMENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*==[A-Za-z0-9][A-Za-z0-9.+!_-]*")
 
 
 class PackPayloadError(ValueError):
-    """A Pack whose payload is not as its manifest lists it; the message names the Pack and the path."""
+    """A Pack whose payload or sources are not as its files state; the message names the Pack and the path."""
 
 
 def payload_dir(pack: Path, repo_root: Path) -> Path:
@@ -152,3 +167,82 @@ def pack_payload(pack: Path, repo_root: Path | None) -> list[tuple[str, Path]]:
             + (f" ({len(extra) - 1} more)" if len(extra) > 1 else "")
         )
     return [(relative, store / relative) for relative in listed]
+
+
+
+def _text(value: object, pattern: re.Pattern[str] | None = None) -> bool:
+    """A non-empty string, matching ``pattern`` in full when one is given."""
+
+    return isinstance(value, str) and bool(value.strip()) and (pattern is None or bool(pattern.fullmatch(value)))
+
+
+def read_sources(pack: Path) -> list[dict[str, object]]:
+    """The papers the Pack's ``sources.json`` lists, each entry checked.
+
+    Every entry carries ``slug`` (its directory under ``papers/``), ``title``,
+    ``venue`` (e.g. "ICLR 2024"), ``paper_url`` (the PDF itself), ``repo`` (a
+    GitHub repository URL) with ``commit`` (40 hex) or both null, ``licence``
+    (an SPDX id or "none stated"), ``data_end`` (the ISO date of the last day
+    of the paper's evaluation data when that data is financial, else null) and
+    ``strip`` (globs dropped from the repository). It may carry ``arxiv`` (a
+    versioned id, whose source becomes ``tex/``), ``wheels`` (pinned
+    ``name==version`` strings), ``weights`` (``{"url", "revision"}`` objects,
+    each URL naming its revision) and ``dataset`` (URLs).
+    """
+
+    def refuse(message: str) -> PackPayloadError:
+        return PackPayloadError(f"Pack {pack.name}: {PAYLOAD_SOURCES} {message}")
+
+    try:
+        entries = json.loads((pack / PAYLOAD_SOURCES).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise refuse(f"is unreadable: {exc}") from exc
+    if not isinstance(entries, list) or not entries:
+        raise refuse("is not a list of papers")
+    slugs: set[str] = set()
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise refuse(f"entry {index} is not an object")
+        missing = [name for name in SOURCE_FIELDS if name not in entry]
+        unknown = sorted(entry.keys() - {*SOURCE_FIELDS, *OPTIONAL_SOURCE_FIELDS})
+        if missing or unknown:
+            raise refuse(f"entry {index} lacks {missing} or carries unknown {unknown}")
+        slug = entry["slug"]
+        if not _text(slug, _SLUG) or slug in slugs:
+            raise refuse(f"entry {index} has slug {slug!r}: lowercase letters, digits, '.', '_' or '-', unique")
+        slugs.add(slug)
+        for name in ("title", "venue", "licence"):
+            if not _text(entry[name]):
+                raise refuse(f"{slug}: {name} is not a non-empty string")
+        if not _text(entry["paper_url"], _URL):
+            raise refuse(f"{slug}: paper_url is not an http(s) URL")
+        if (entry["repo"], entry["commit"]) != (None, None) and not (
+            _text(entry["repo"], _GITHUB_REPO) and _text(entry["commit"], _COMMIT)
+        ):
+            raise refuse(f"{slug}: repo must be https://github.com/<owner>/<name> with a 40-hex commit, or both null")
+        data_end = entry["data_end"]
+        if data_end is not None:
+            try:
+                valid = isinstance(data_end, str) and date.fromisoformat(data_end).isoformat() == data_end
+            except ValueError:
+                valid = False
+            if not valid:
+                raise refuse(f"{slug}: data_end {data_end!r} is not an ISO date (YYYY-MM-DD) or null")
+        if not isinstance(entry["strip"], list) or not all(_text(glob) for glob in entry["strip"]):
+            raise refuse(f"{slug}: strip is not a list of globs")
+        if "arxiv" in entry and not _text(entry["arxiv"], _ARXIV):
+            raise refuse(f"{slug}: arxiv is not a versioned id such as 2401.01234v2")
+        wheels = entry.get("wheels", [])
+        if not isinstance(wheels, list) or not all(_text(wheel, _PINNED_REQUIREMENT) for wheel in wheels):
+            raise refuse(f"{slug}: wheels is not a list of name==version requirements")
+        weights = entry.get("weights", [])
+        if not isinstance(weights, list) or not all(
+            isinstance(weight, dict) and weight.keys() == {"url", "revision"}
+            and _text(weight["url"], _URL) and _text(weight["revision"]) and weight["revision"] in weight["url"]
+            for weight in weights
+        ):
+            raise refuse(f"{slug}: weights is not a list of {{url, revision}}, each URL naming its revision")
+        dataset = entry.get("dataset", [])
+        if not isinstance(dataset, list) or not all(_text(url, _URL) for url in dataset):
+            raise refuse(f"{slug}: dataset is not a list of http(s) URLs")
+    return entries
