@@ -11,6 +11,7 @@ import os
 import re
 import time
 from datetime import UTC, date, datetime, timedelta
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -80,8 +81,6 @@ from .common import (
     augment_macro_frame,
     augment_stk_mins_frame,
     augment_text_frame,
-    by_ts_code_universe,
-    canonical_range_path,
     date_range_days,
     format_yyyymmdd,
     frame,
@@ -106,28 +105,20 @@ from .common import (
     quarter_periods,
     query_paged,
     resolve_revision_ledger,
-    retained_range_start,
     safe_partition_value,
     select_datasets,
-    selected_board_dc_hot_markets,
-    selected_board_dc_hot_types,
-    selected_board_hot_is_new,
-    selected_board_kpl_tags,
-    selected_board_ths_hot_markets,
-    selected_board_ths_limit_types,
     selected_board_trading_datasets,
     selected_daily_datasets,
-    selected_eco_filter_values,
     selected_fundamental_datasets,
     selected_intraday_datasets,
     selected_macro_datasets,
-    selected_news_sources,
     selected_text_datasets,
     spec_page_limit,
     stk_mins_by_date_path,
     undated_duplicate_mask,
     validate_stk_mins_by_date_frame,
     write_frame,
+    year_windows,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
 )
@@ -137,6 +128,12 @@ from .io import (
     parquet_rows,
     read_many,
     write_parquet,
+)
+from .layout import (
+    directory_name,
+    partitions,
+    range_partition,
+    refuse_moved_range_start,
 )
 from .versions import (
     DefectiveAnswer,
@@ -1136,8 +1133,7 @@ def download_macro(args: argparse.Namespace) -> int:
         elif spec.strategy == FetchStrategy.STATIC_FULL:
             download_macro_static_full(client, raw_dir, spec, spec_page_limit(spec, args.page_limit), revision_ledger)
         elif spec.strategy == FetchStrategy.DATE_YEAR_BY_TS_CODE:
-            codes = by_ts_code_universe(dataset, args)
-            download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), codes, revision_ledger)
+            download_macro_date_year_by_ts_code(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), args, revision_ledger)
         elif spec.strategy == FetchStrategy.ECO_CAL_MONTH:
             download_macro_eco_cal_month(client, raw_dir, spec, start_date, args.end_date, args.force, spec_page_limit(spec, args.page_limit), args, revision_ledger)
         else:
@@ -1146,10 +1142,10 @@ def download_macro(args: argparse.Namespace) -> int:
     return 0
 
 def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
-    start_date = retained_range_start(raw_dir / spec.api_name, start_date)
-    start_q = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
+    part = range_partition(raw_dir, spec, start_date)
+    refuse_moved_range_start(part.path)
+    path, (start_date, start_q) = part.path, part.unit
     end_q = yyyymmdd_to_quarter(end_date)
-    path = canonical_range_path(raw_dir / spec.api_name, start_q)
     coverage_params = {"start_date": start_date, "end_date": end_date}
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
@@ -1160,10 +1156,10 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Data
         print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
 def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
-    start_date = retained_range_start(raw_dir / spec.api_name, start_date)
-    start_m = max(yyyymmdd_to_month(start_date), spec.start_month)
+    part = range_partition(raw_dir, spec, start_date)
+    refuse_moved_range_start(part.path)
+    path, (start_date, start_m) = part.path, part.unit
     end_m = yyyymmdd_to_month(end_date)
-    path = canonical_range_path(raw_dir / spec.api_name, start_m)
     coverage_params = {"start_date": start_date, "end_date": end_date}
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
@@ -1183,11 +1179,9 @@ def download_macro_static_full(
     """Full registry refresh: small reference tables (contract/bond registries,
     announcement ledgers) are re-pulled whole on every run and written through
     the versioned write path."""
-    loops = spec.loop_values or ("",)
-    for value in loops:
-        params = {spec.loop_param: value} if value else {}
-        name = f"{spec.loop_param}={safe_partition_value(value)}.parquet" if value else "full.parquet"
-        path = raw_dir / spec.api_name / name
+    for part in partitions(raw_dir, spec):
+        params, path = dict(part.dims), part.path
+        name = path.name
         with answer_defects(path, ledger=revision_ledger):
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
             df = augment_macro_frame(frame(result), spec)
@@ -1206,12 +1200,12 @@ def download_macro_static_full(
 
 
 def download_macro_month_loop(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
-    windows = month_windows(start_date, end_date)
+    windows = partitions(raw_dir, spec, month_windows(start_date, end_date))
     written = 0
     skipped = 0
     total_rows = 0
-    for index, (window_start, window_end, month) in enumerate(windows, start=1):
-        path = raw_dir / spec.api_name / f"month={month}.parquet"
+    for index, part in enumerate(windows, start=1):
+        path, (window_start, window_end, month) = part.path, part.unit
         # Coverage params for EVERY month, not only the newest: skipping a
         # middle month on bare file existence would freeze a partition whose
         # recorded coverage stops mid-month once the window rolls past it.
@@ -1256,30 +1250,18 @@ def download_macro_trade_date(
     """Per-trade-date pulls for daily macro tables whose range endpoints cap the
     response server-side and ignore offset paging (ths/sw/ci index dailies:
     year-range pulls silently truncated at 3000/4000 rows)."""
-    trade_dates = list(load_sse_open_dates(raw_dir, start_date, end_date))
-    dataset_dir = raw_dir / spec.api_name
     written = 0
     skipped = 0
     total_rows = 0
     # Optional scope loop (e.g. opt_daily per financial exchange): one file per
-    # (loop value, trade date) so partition pruning by date keeps working; each
-    # loop value honours its own venue listing date.
-    loops = spec.loop_values or ("",)
-    tasks = [
-        (value, trade_date)
-        for value in loops
-        for trade_date in trade_dates
-        if not value or trade_date >= spec.loop_start_date(value)
-    ]
-    for index, (loop_value, trade_date) in enumerate(tasks, start=1):
-        directory = dataset_dir / f"{spec.loop_param}={safe_partition_value(loop_value)}" if loop_value else dataset_dir
-        path = directory / f"trade_date={trade_date}.parquet"
+    # (loop value, trade date) so partition pruning by date keeps working.
+    tasks = partitions(raw_dir, spec, load_sse_open_dates(raw_dir, start_date, end_date))
+    for index, part in enumerate(tasks, start=1):
+        path, trade_date = part.path, part.unit
         if should_skip_existing_partition(path, force=force) and parquet_rows(path) > 0:
             skipped += 1
             continue
-        params = {"trade_date": trade_date}
-        if loop_value:
-            params[spec.loop_param] = loop_value
+        params = {"trade_date": trade_date, **part.dims}
         with answer_defects(path, ledger=revision_ledger):
             result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
             df = augment_macro_frame(frame(result), spec)
@@ -1309,11 +1291,8 @@ def download_macro_date_year(client: TuShareClient, raw_dir: Path, spec: Dataset
     written = 0
     skipped = 0
     total_rows = 0
-    years = range(int(start_date[:4]), int(end_date[:4]) + 1)
-    for year in years:
-        year_start = max(start_date, f"{year}0101")
-        year_end = min(end_date, f"{year}1231")
-        path = raw_dir / spec.api_name / f"year={year}.parquet"
+    for part in partitions(raw_dir, spec, year_windows(start_date, end_date)):
+        path, (year_start, year_end, _) = part.path, part.unit
         params = {"start_date": year_start, "end_date": year_end}
         if should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
@@ -1348,46 +1327,42 @@ def download_macro_date_year_by_ts_code(
     end_date: str,
     force: bool,
     page_limit: int,
-    codes: list[str],
+    args: argparse.Namespace,
     revision_ledger: Path | str | None = None,
 ) -> None:
-    total_tasks = len(codes) * (int(end_date[:4]) - int(start_date[:4]) + 1)
+    tasks = partitions(raw_dir, spec, year_windows(start_date, end_date), args)
+    total_tasks = len(tasks)
     written = 0
     skipped = 0
     total_rows = 0
-    task_index = 0
-    for ts_code in codes:
-        for year in range(int(start_date[:4]), int(end_date[:4]) + 1):
-            task_index += 1
-            year_start = max(start_date, f"{year}0101")
-            year_end = min(end_date, f"{year}1231")
-            path = raw_dir / spec.api_name / f"ts_code={safe_partition_value(ts_code)}" / f"year={year}.parquet"
-            params = {"ts_code": ts_code, "start_date": year_start, "end_date": year_end}
-            if should_skip_existing_partition(path, force=force, requested_params=params):
-                skipped += 1
-                continue
-            with answer_defects(path, ledger=revision_ledger):
-                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                meta_params = dict(params)
-                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                df = augment_macro_frame(frame(result), spec)
-                did_write, rows = write_window_merged_partition(
-                    path,
-                    df,
-                    api_name=spec.api_name,
-                    params=meta_params,
-                    fields=list(df.columns),
-                    key_columns=list(spec.key_columns),
-                    date_columns=[spec.date_column, spec.time_column, "available_at"],
-                    start_date=year_start,
-                    end_date=year_end,
-                    revision_ledger=revision_ledger,
-                )
-                if did_write:
-                    written += 1
-                    total_rows += rows
-            if task_index % 25 == 0:
-                print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
+    for task_index, part in enumerate(tasks, start=1):
+        path, (year_start, year_end, _) = part.path, part.unit
+        params = {**part.dims, "start_date": year_start, "end_date": year_end}
+        if should_skip_existing_partition(path, force=force, requested_params=params):
+            skipped += 1
+            continue
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            df = augment_macro_frame(frame(result), spec)
+            did_write, rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.date_column, spec.time_column, "available_at"],
+                start_date=year_start,
+                end_date=year_end,
+                revision_ledger=revision_ledger,
+            )
+            if did_write:
+                written += 1
+                total_rows += rows
+        if task_index % 25 == 0:
+            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_macro_eco_cal_month(
@@ -1401,84 +1376,67 @@ def download_macro_eco_cal_month(
     args: argparse.Namespace,
     revision_ledger: Path | str | None = None,
 ) -> None:
-    countries = selected_eco_filter_values(args, "eco_country")
-    currencies = selected_eco_filter_values(args, "eco_currency")
-    events = selected_eco_filter_values(args, "eco_event")
-    windows = month_windows(start_date, end_date)
-    total_tasks = len(countries) * len(currencies) * len(events) * len(windows)
+    tasks = partitions(raw_dir, spec, month_windows(start_date, end_date), args)
+    total_tasks = len(tasks)
     written = 0
     skipped = 0
     total_rows = 0
-    task_index = 0
-    for country in countries:
-        for currency in currencies:
-            for event in events:
-                country_part = safe_partition_value(country) if country else "all"
-                currency_part = safe_partition_value(currency) if currency else "all"
-                event_part = safe_partition_value(event) if event else "all"
-                for start, end, month in windows:
-                    task_index += 1
-                    path = raw_dir / spec.api_name / f"country={country_part}" / f"currency={currency_part}" / f"event={event_part}" / f"month={month}.parquet"
-                    params: dict[str, Any] = {"start_date": start, "end_date": end}
-                    if country:
-                        params["country"] = country
-                    if currency:
-                        params["currency"] = currency
-                    if event:
-                        params["event"] = event
-                    if should_skip_existing_partition(path, force=force, requested_params=params):
-                        skipped += 1
-                        continue
-                    # The API clamps every response to 100 rows, sorts with
-                    # no stable tiebreak, and serves each event many times
-                    # over (measured ~8x), so offset-paging a whole month is
-                    # slow and repeats pages verbatim. Day windows bound each
-                    # paging run, repeated pages are tolerated as expected
-                    # source behavior, and the key dedup below collapses the
-                    # duplicates.
-                    with answer_defects(path, ledger=revision_ledger):
-                        day_frames: list[pd.DataFrame] = []
-                        day_windows = 0
-                        pages_total = 0
-                        day = parse_yyyymmdd(start)
-                        last_day = parse_yyyymmdd(end)
-                        while day <= last_day:
-                            day_params = dict(params)
-                            day_params["start_date"] = day_params["end_date"] = format_yyyymmdd(day)
-                            result, pages = query_paged(client, spec.api_name, day_params, spec.fields, page_limit, allow_repeated_pages=True)
-                            pages_total += pages
-                            day_windows += 1
-                            day_frames.append(frame(result))
-                            day += timedelta(days=1)
-                        combined = pd.concat(day_frames, ignore_index=True)
-                        if not combined.empty:
-                            combined = combined.drop_duplicates(subset=list(spec.key_columns), keep="first", ignore_index=True)
-                        meta_params = dict(params)
-                        meta_params.update({
-                            "country_partition": country_part,
-                            "currency_partition": currency_part,
-                            "event_partition": event_part,
-                            "month": month,
-                            "pagination": {"page_limit": page_limit, "pages": pages_total, "day_windows": day_windows},
-                        })
-                        df = augment_macro_frame(combined, spec)
-                        did_write, rows = write_window_merged_partition(
-                            path,
-                            df,
-                            api_name=spec.api_name,
-                            params=meta_params,
-                            fields=list(df.columns),
-                            key_columns=list(spec.key_columns),
-                            date_columns=[spec.date_column, spec.time_column, "available_at"],
-                            start_date=start,
-                            end_date=end,
-                            revision_ledger=revision_ledger,
-                        )
-                        if did_write:
-                            written += 1
-                            total_rows += rows
-                    if task_index % 24 == 0:
-                        print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
+    for task_index, part in enumerate(tasks, start=1):
+        path, (start, end, month) = part.path, part.unit
+        params: dict[str, Any] = {"start_date": start, "end_date": end}
+        params.update({key: value for key, value in part.dims.items() if value})
+        if should_skip_existing_partition(path, force=force, requested_params=params):
+            skipped += 1
+            continue
+        # The API clamps every response to 100 rows, sorts with no stable
+        # tiebreak, and serves each event many times over (measured ~8x), so
+        # offset-paging a whole month is slow and repeats pages verbatim. Day
+        # windows bound each paging run, repeated pages are tolerated as
+        # expected source behavior, and the key dedup below collapses the
+        # duplicates.
+        with answer_defects(path, ledger=revision_ledger):
+            day_frames: list[pd.DataFrame] = []
+            day_windows = 0
+            pages_total = 0
+            day = parse_yyyymmdd(start)
+            last_day = parse_yyyymmdd(end)
+            while day <= last_day:
+                day_params = dict(params)
+                day_params["start_date"] = day_params["end_date"] = format_yyyymmdd(day)
+                result, pages = query_paged(client, spec.api_name, day_params, spec.fields, page_limit, allow_repeated_pages=True)
+                pages_total += pages
+                day_windows += 1
+                day_frames.append(frame(result))
+                day += timedelta(days=1)
+            combined = pd.concat(day_frames, ignore_index=True)
+            if not combined.empty:
+                combined = combined.drop_duplicates(subset=list(spec.key_columns), keep="first", ignore_index=True)
+            meta_params = dict(params)
+            meta_params.update({
+                "country_partition": directory_name(part.dims["country"]),
+                "currency_partition": directory_name(part.dims["currency"]),
+                "event_partition": directory_name(part.dims["event"]),
+                "month": month,
+                "pagination": {"page_limit": page_limit, "pages": pages_total, "day_windows": day_windows},
+            })
+            df = augment_macro_frame(combined, spec)
+            did_write, rows = write_window_merged_partition(
+                path,
+                df,
+                api_name=spec.api_name,
+                params=meta_params,
+                fields=list(df.columns),
+                key_columns=list(spec.key_columns),
+                date_columns=[spec.date_column, spec.time_column, "available_at"],
+                start_date=start,
+                end_date=end,
+                revision_ledger=revision_ledger,
+            )
+            if did_write:
+                written += 1
+                total_rows += rows
+        if task_index % 24 == 0:
+            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows}")
 
 def download_event_flow(args: argparse.Namespace) -> int:
@@ -1610,8 +1568,8 @@ def download_event_trade_date_dataset(
     zero_skipped = 0
     total_rows = 0
     total_pages = 0
-    for index, trade_date in enumerate(trade_dates, start=1):
-        path = raw_dir / spec.api_name / f"trade_date={trade_date}.parquet"
+    for index, part in enumerate(partitions(raw_dir, spec, trade_dates), start=1):
+        path, trade_date = part.path, part.unit
         if path.exists() and not force:
             # A parquet whose sidecar is missing or carries another write ID is
             # an interrupted write, not a committed partition: re-attempt it.
@@ -1727,8 +1685,8 @@ def download_event_range_month(
     skipped = 0
     total_rows = 0
     total_pages = 0
-    for index, (start_date, end_date, month) in enumerate(windows, start=1):
-        path = raw_dir / spec.api_name / f"month={month}.parquet"
+    for index, part in enumerate(partitions(raw_dir, spec, windows), start=1):
+        path, (start_date, end_date, month) = part.path, part.unit
         params = {"start_date": start_date, "end_date": end_date}
         if should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
@@ -1790,13 +1748,13 @@ def download_board_trading(args: argparse.Namespace) -> int:
         elif spec.strategy == FetchStrategy.TRADE_DATE:
             download_board_trade_date_dataset(client, raw_dir, spec, dates, args.force, page_limit, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
-            download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, selected_board_kpl_tags(args), revision_ledger)
+            download_board_kpl_list(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
-            download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_limit_types(args), revision_ledger)
+            download_board_limit_list_ths(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET:
-            download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, selected_board_ths_hot_markets(args), selected_board_hot_is_new(args), revision_ledger)
+            download_board_hot_by_market(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
         elif spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE:
-            download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, selected_board_dc_hot_markets(args), selected_board_dc_hot_types(args), selected_board_hot_is_new(args), revision_ledger)
+            download_board_dc_hot(client, raw_dir, spec, dates, args.force, page_limit, args, revision_ledger)
         else:
             raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {dataset}")
     print(f"board-trading download finished under {raw_dir}")
@@ -1805,7 +1763,8 @@ def download_board_trading(args: argparse.Namespace) -> int:
 def download_board_static_dataset(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, revision_ledger: Path | str | None = None) -> None:
     """Full-table refresh on every run; an empty answer for a non-empty
     partition is a defect and keeps the current version."""
-    path = raw_dir / spec.api_name / f"{spec.api_name}.parquet"
+    [part] = partitions(raw_dir, spec)
+    path = part.path
     with answer_defects(path, ledger=revision_ledger):
         result = client.query(spec.api_name, {}, spec.fields)
         _, rows = write_frame(path, augment_board_frame(frame(result), spec, {}), spec, {}, revision_ledger)
@@ -1816,8 +1775,8 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
     skipped = 0
     total_rows = 0
     total_pages = 0
-    for index, trade_date in enumerate(trade_dates, start=1):
-        path = raw_dir / spec.api_name / f"trade_date={trade_date}.parquet"
+    for index, part in enumerate(partitions(raw_dir, spec, trade_dates), start=1):
+        path, trade_date = part.path, part.unit
         if should_skip_existing_partition(path, force=force):
             skipped += 1
             continue
@@ -1834,146 +1793,109 @@ def download_board_trade_date_dataset(client: TuShareClient, raw_dir: Path, spec
             print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, tags: list[str], revision_ledger: Path | str | None = None) -> None:
-    total_tasks = len(trade_dates) * len(tags)
-    task_index = 0
+def download_board_kpl_list(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
+    tasks = partitions(raw_dir, spec, trade_dates, args)
+    total_tasks = len(tasks)
     written = 0
     skipped = 0
     total_rows = 0
     total_pages = 0
-    for tag in tags:
-        tag_part = safe_partition_value(tag)
-        for trade_date in trade_dates:
-            task_index += 1
-            path = raw_dir / spec.api_name / f"tag={tag_part}" / f"trade_date={trade_date}.parquet"
-            if should_skip_existing_partition(path, force=force):
-                skipped += 1
-                continue
-            params = {"trade_date": trade_date, "tag": tag}
-            with answer_defects(path, ledger=revision_ledger):
-                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                meta_params = dict(params)
-                meta_params["tag_partition"] = tag_part
-                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-                total_rows += rows
-                total_pages += pages
-                written += landed
-            if task_index % 250 == 0:
-                print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+    for task_index, part in enumerate(tasks, start=1):
+        path = part.path
+        if should_skip_existing_partition(path, force=force):
+            skipped += 1
+            continue
+        params = {"trade_date": part.unit, **part.dims}
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["tag_partition"] = directory_name(part.dims["tag"])
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+            total_rows += rows
+            total_pages += pages
+            written += landed
+        if task_index % 250 == 0:
+            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, limit_types: list[str], revision_ledger: Path | str | None = None) -> None:
-    total_tasks = len(trade_dates) * len(limit_types)
-    task_index = 0
+def download_board_limit_list_ths(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
+    tasks = partitions(raw_dir, spec, trade_dates, args)
+    total_tasks = len(tasks)
     written = 0
     skipped = 0
     total_rows = 0
     total_pages = 0
-    for limit_type in limit_types:
-        limit_type_part = safe_partition_value(limit_type)
-        for trade_date in trade_dates:
-            task_index += 1
-            path = raw_dir / spec.api_name / f"limit_type={limit_type_part}" / f"trade_date={trade_date}.parquet"
-            if should_skip_existing_partition(path, force=force):
-                skipped += 1
-                continue
-            params = {"trade_date": trade_date, "limit_type": limit_type}
-            with answer_defects(path, ledger=revision_ledger):
-                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                meta_params = dict(params)
-                meta_params["limit_type_partition"] = limit_type_part
-                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-                total_rows += rows
-                total_pages += pages
-                written += landed
-            if task_index % 250 == 0:
-                print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+    for task_index, part in enumerate(tasks, start=1):
+        path = part.path
+        if should_skip_existing_partition(path, force=force):
+            skipped += 1
+            continue
+        params = {"trade_date": part.unit, **part.dims}
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["limit_type_partition"] = directory_name(part.dims["limit_type"])
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+            total_rows += rows
+            total_pages += pages
+            written += landed
+        if task_index % 250 == 0:
+            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_hot_by_market(
-    client: TuShareClient,
-    raw_dir: Path,
-    spec: DatasetSpec,
-    trade_dates: list[str],
-    force: bool,
-    page_limit: int,
-    markets: list[str],
-    is_new_values: list[str],
-    revision_ledger: Path | str | None = None,
-) -> None:
-    total_tasks = len(trade_dates) * len(markets) * len(is_new_values)
-    task_index = 0
+def download_board_hot_by_market(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
+    tasks = partitions(raw_dir, spec, trade_dates, args)
+    total_tasks = len(tasks)
     written = 0
     skipped = 0
     total_rows = 0
     total_pages = 0
-    for market in markets:
-        market_part = safe_partition_value(market)
-        for is_new in is_new_values:
-            for trade_date in trade_dates:
-                task_index += 1
-                path = raw_dir / spec.api_name / f"market={market_part}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet"
-                if should_skip_existing_partition(path, force=force):
-                    skipped += 1
-                    continue
-                params = {"trade_date": trade_date, "market": market, "is_new": is_new}
-                with answer_defects(path, ledger=revision_ledger):
-                    result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                    meta_params = dict(params)
-                    meta_params["market_partition"] = market_part
-                    meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                    landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-                    total_rows += rows
-                    total_pages += pages
-                    written += landed
-                if task_index % 250 == 0:
-                    print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+    for task_index, part in enumerate(tasks, start=1):
+        path = part.path
+        if should_skip_existing_partition(path, force=force):
+            skipped += 1
+            continue
+        params = {"trade_date": part.unit, **part.dims}
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["market_partition"] = directory_name(part.dims["market"])
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+            total_rows += rows
+            total_pages += pages
+            written += landed
+        if task_index % 250 == 0:
+            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
-def download_board_dc_hot(
-    client: TuShareClient,
-    raw_dir: Path,
-    spec: DatasetSpec,
-    trade_dates: list[str],
-    force: bool,
-    page_limit: int,
-    markets: list[str],
-    hot_types: list[str],
-    is_new_values: list[str],
-    revision_ledger: Path | str | None = None,
-) -> None:
-    total_tasks = len(trade_dates) * len(markets) * len(hot_types) * len(is_new_values)
-    task_index = 0
+def download_board_dc_hot(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, trade_dates: list[str], force: bool, page_limit: int, args: argparse.Namespace, revision_ledger: Path | str | None = None) -> None:
+    tasks = partitions(raw_dir, spec, trade_dates, args)
+    total_tasks = len(tasks)
     written = 0
     skipped = 0
     total_rows = 0
     total_pages = 0
-    for market in markets:
-        market_part = safe_partition_value(market)
-        for hot_type in hot_types:
-            hot_type_part = safe_partition_value(hot_type)
-            for is_new in is_new_values:
-                for trade_date in trade_dates:
-                    task_index += 1
-                    path = raw_dir / spec.api_name / f"market={market_part}" / f"hot_type={hot_type_part}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet"
-                    if should_skip_existing_partition(path, force=force):
-                        skipped += 1
-                        continue
-                    params = {"trade_date": trade_date, "market": market, "hot_type": hot_type, "is_new": is_new}
-                    with answer_defects(path, ledger=revision_ledger):
-                        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                        meta_params = dict(params)
-                        meta_params["market_partition"] = market_part
-                        meta_params["hot_type_partition"] = hot_type_part
-                        meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                        landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
-                        total_rows += rows
-                        total_pages += pages
-                        written += landed
-                    if task_index % 250 == 0:
-                        print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
+    for task_index, part in enumerate(tasks, start=1):
+        path = part.path
+        if should_skip_existing_partition(path, force=force):
+            skipped += 1
+            continue
+        params = {"trade_date": part.unit, **part.dims}
+        with answer_defects(path, ledger=revision_ledger):
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+            meta_params = dict(params)
+            meta_params["market_partition"] = directory_name(part.dims["market"])
+            meta_params["hot_type_partition"] = directory_name(part.dims["hot_type"])
+            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
+            landed, rows = write_frame(path, augment_board_frame(frame(result), spec, meta_params), spec, meta_params, revision_ledger)
+            total_rows += rows
+            total_pages += pages
+            written += landed
+        if task_index % 250 == 0:
+            print(f"{spec.api_name} {task_index}/{total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
     print(f"{spec.api_name} done tasks={total_tasks} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
 
 def query_share_float_to_path(
@@ -3285,9 +3207,9 @@ def download_text(args: argparse.Namespace) -> int:
         if spec.strategy == FetchStrategy.RANGE_MONTH:
             download_text_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, revision_ledger)
         elif spec.strategy == FetchStrategy.TIME_RANGE_MONTH:
-            download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args.major_news_src, revision_ledger)
+            download_text_time_range_month(client, raw_dir, spec, dataset_windows, args.force, page_limit, args, revision_ledger)
         elif spec.strategy == FetchStrategy.NEWS_SRC_DAY:
-            download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args.news_src, revision_ledger)
+            download_text_news_src_day(client, raw_dir, spec, dataset_days, args.force, page_limit, args, revision_ledger)
         elif spec.strategy == FetchStrategy.DAY:
             download_text_day(client, raw_dir, spec, dataset_days, args.force, revision_ledger)
         else:
@@ -3317,8 +3239,8 @@ def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: Datase
     written = 0
     skipped = 0
     total_rows = 0
-    for index, (start_date, end_date, month) in enumerate(windows, start=1):
-        path = raw_dir / spec.api_name / f"month={month}.parquet"
+    for index, part in enumerate(partitions(raw_dir, spec, windows), start=1):
+        path, (start_date, end_date, month) = part.path, part.unit
         params = {"start_date": start_date, "end_date": end_date}
         if should_skip_existing_partition(path, force=force, requested_params=params):
             skipped += 1
@@ -3361,17 +3283,16 @@ def download_text_time_range_month(
     windows: list[tuple[str, str, str]],
     force: bool,
     page_limit: int,
-    sources: list[str],
+    args: argparse.Namespace,
     revision_ledger: Path | str | None = None,
 ) -> None:
-    source_values = sources or [""]
-    for source in source_values:
-        source_suffix = f"src={safe_partition_value(source)}" if source else "src=all"
+    for source, group in groupby(partitions(raw_dir, spec, windows, args), key=lambda part: part.dims["src"]):
+        source_suffix = f"src={directory_name(source)}"
         written = 0
         skipped = 0
         total_rows = 0
-        for index, (start_date, end_date, month) in enumerate(windows, start=1):
-            path = raw_dir / spec.api_name / source_suffix / f"month={month}.parquet"
+        for index, part in enumerate(group, start=1):
+            path, (start_date, end_date, month) = part.path, part.unit
             params = {"start_date": as_datetime_window(start_date), "end_date": as_datetime_window(end_date, end=True)}
             if source:
                 params["src"] = source
@@ -3410,16 +3331,16 @@ def download_text_news_src_day(
     days: list[str],
     force: bool,
     page_limit: int,
-    sources: list[str],
+    args: argparse.Namespace,
     revision_ledger: Path | str | None = None,
 ) -> None:
-    for source in selected_news_sources(sources):
-        source_suffix = f"src={safe_partition_value(source)}"
+    for source, group in groupby(partitions(raw_dir, spec, days, args), key=lambda part: part.dims["src"]):
+        source_suffix = f"src={directory_name(source)}"
         written = 0
         skipped = 0
         total_rows = 0
-        for index, day in enumerate(days, start=1):
-            path = raw_dir / spec.api_name / source_suffix / f"date={day}.parquet"
+        for index, part in enumerate(group, start=1):
+            path, day = part.path, part.unit
             params = {"src": source, "start_date": as_datetime_window(day), "end_date": as_datetime_window(day, end=True)}
             if should_skip_existing_partition(path, force=force, requested_params=params):
                 skipped += 1
@@ -3440,8 +3361,8 @@ def download_text_day(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, d
     written = 0
     skipped = 0
     total_rows = 0
-    for index, day in enumerate(days, start=1):
-        path = raw_dir / spec.api_name / f"date={day}.parquet"
+    for index, part in enumerate(partitions(raw_dir, spec, days), start=1):
+        path, day = part.path, part.unit
         if should_skip_existing_partition(path, force=force):
             skipped += 1
             continue

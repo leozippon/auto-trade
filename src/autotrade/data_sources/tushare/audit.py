@@ -71,8 +71,6 @@ from .common import (
     active_year_windows,
     augment_board_frame,
     augment_event_frame,
-    by_ts_code_universe,
-    date_range_days,
     frame,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
@@ -86,7 +84,6 @@ from .common import (
     month_windows,
     quarter_periods,
     query_paged,
-    retained_range_start,
     safe_partition_value,
     select_datasets,
     selected_board_dc_hot_markets,
@@ -103,12 +100,9 @@ from .common import (
     selected_fx_codes,
     selected_index_codes,
     selected_intraday_datasets,
-    selected_news_sources,
     selected_text_datasets,
     stk_mins_by_date_path,
     validate_stk_mins_by_date_frame,
-    yyyymmdd_to_month,
-    yyyymmdd_to_quarter,
 )
 from .io import (
     CorruptSidecarError,
@@ -119,6 +113,7 @@ from .io import (
     parquet_rows,
     read_many,
 )
+from .layout import partitions, range_partition, time_units
 from .versions import diff_frames, revision_event
 
 # The one-line summary every audit prints last, and the pattern the cron runner
@@ -1920,24 +1915,8 @@ def audit_text_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pat
 
 
 def expected_text_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
-    start = max(start_date, spec.start_date)
-    if spec.strategy in {FetchStrategy.RANGE_MONTH, FetchStrategy.TIME_RANGE_MONTH}:
-        months = [month for _, _, month in month_windows(start, end_date)]
-        if spec.strategy == FetchStrategy.TIME_RANGE_MONTH:
-            sources = args.major_news_src or [""]
-            return {raw_dir / spec.api_name / (f"src={safe_partition_value(source)}" if source else "src=all") / f"month={month}.parquet" for source in sources for month in months}
-        return {raw_dir / spec.api_name / f"month={month}.parquet" for month in months}
-    if spec.strategy == FetchStrategy.NEWS_SRC_MONTH:
-        sources = selected_news_sources(getattr(args, "news_src", []))
-        months = [month for _, _, month in month_windows(start, end_date)]
-        return {raw_dir / spec.api_name / f"src={safe_partition_value(source)}" / f"month={month}.parquet" for source in sources for month in months}
-    if spec.strategy == FetchStrategy.NEWS_SRC_DAY:
-        sources = selected_news_sources(getattr(args, "news_src", []))
-        days = date_range_days(start, end_date)
-        return {raw_dir / spec.api_name / f"src={safe_partition_value(source)}" / f"date={day}.parquet" for source in sources for day in days}
-    if spec.strategy == FetchStrategy.DAY:
-        return {raw_dir / spec.api_name / f"date={day}.parquet" for day in date_range_days(start, end_date)}
-    raise RuntimeError(f"unsupported text strategy {spec.strategy} for {spec.api_name}")
+    units = time_units(raw_dir, spec, max(start_date, spec.start_date), end_date)
+    return {part.path for part in partitions(raw_dir, spec, units, args)}
 
 def audit_text_completeness(raw_dir: Path, args: argparse.Namespace, add) -> None:
     datasets = selected_text_datasets(getattr(args, "text_datasets", None))
@@ -1996,57 +1975,14 @@ def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
     return select_datasets(getattr(args, "datasets", None), default=MACRO_DATASETS, allowed=MACRO_SPECS, label="macro/global")
 
 def expected_macro_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
-    start = max(start_date, spec.start_date)
     if spec.strategy in {FetchStrategy.QUARTER_ONCE, FetchStrategy.MONTH_ONCE}:
         # Mirrors the downloader's retained floor: range pulls always cover
         # [floor, latest] and land in ONE canonical file regardless of the
         # audit window, so the expectation must not follow start/end_date --
         # and a file a backfill landed below the floor keeps its own start.
-        retained = retained_range_start(
-            raw_dir / spec.api_name, max(min(start_date, RESEARCH_HISTORY_FLOOR), spec.start_date)
-        )
-        if spec.strategy == FetchStrategy.QUARTER_ONCE:
-            start_q = max(yyyymmdd_to_quarter(retained), spec.start_quarter)
-            return {raw_dir / spec.api_name / f"range={start_q}_latest.parquet"}
-        start_m = max(yyyymmdd_to_month(retained), spec.start_month)
-        return {raw_dir / spec.api_name / f"range={start_m}_latest.parquet"}
-    if spec.strategy == FetchStrategy.MONTH_LOOP:
-        return {raw_dir / spec.api_name / f"month={month}.parquet" for _, _, month in month_windows(start, end_date)}
-    if spec.strategy == FetchStrategy.DATE_YEAR:
-        return {raw_dir / spec.api_name / f"year={year}.parquet" for year in range(int(start[:4]), int(end_date[:4]) + 1)}
-    if spec.strategy == FetchStrategy.TRADE_DATE:
-        open_dates = load_sse_open_dates(raw_dir, start, end_date)
-        if spec.loop_values:
-            return {
-                raw_dir / spec.api_name / f"{spec.loop_param}={safe_partition_value(value)}" / f"trade_date={d}.parquet"
-                for value in spec.loop_values
-                for d in open_dates
-                if d >= spec.loop_start_date(value)
-            }
-        return {raw_dir / spec.api_name / f"trade_date={d}.parquet" for d in open_dates}
-    if spec.strategy == FetchStrategy.STATIC_FULL:
-        directory = raw_dir / spec.api_name
-        if spec.loop_values:
-            return {directory / f"{spec.loop_param}={safe_partition_value(value)}.parquet" for value in spec.loop_values}
-        return {directory / "full.parquet"}
-    if spec.strategy == FetchStrategy.DATE_YEAR_BY_TS_CODE:
-        return {
-            raw_dir / spec.api_name / f"ts_code={safe_partition_value(ts_code)}" / f"year={year}.parquet"
-            for ts_code in by_ts_code_universe(spec.api_name, args)
-            for year in range(int(start[:4]), int(end_date[:4]) + 1)
-        }
-    if spec.strategy == FetchStrategy.ECO_CAL_MONTH:
-        countries = selected_eco_filter_values(args, "eco_country")
-        currencies = selected_eco_filter_values(args, "eco_currency")
-        events = selected_eco_filter_values(args, "eco_event")
-        return {
-            raw_dir / spec.api_name / f"country={safe_partition_value(country) if country else 'all'}" / f"currency={safe_partition_value(currency) if currency else 'all'}" / f"event={safe_partition_value(event) if event else 'all'}" / f"month={month}.parquet"
-            for country in countries
-            for currency in currencies
-            for event in events
-            for _, _, month in month_windows(start, end_date)
-        }
-    raise RuntimeError(f"unsupported macro strategy {spec.strategy} for {spec.api_name}")
+        return {range_partition(raw_dir, spec, max(min(start_date, RESEARCH_HISTORY_FLOOR), spec.start_date)).path}
+    units = time_units(raw_dir, spec, max(start_date, spec.start_date), end_date)
+    return {part.path for part in partitions(raw_dir, spec, units, args)}
 
 
 def macro_unit_rules() -> dict[str, list[dict[str, object]]]:
@@ -2167,16 +2103,10 @@ def audit_macro_only(args: argparse.Namespace) -> int:
     return 1 if counts["error"] else 0
 
 def expected_event_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str) -> set[Path]:
-    start = max(start_date, spec.start_date)
     if spec.strategy == FetchStrategy.TRADE_DATE:
-        trade_end_date = min(end_date, latest_sse_calendar_date(raw_dir))
-        trade_dates = load_sse_open_dates(raw_dir, start, trade_end_date)
-        return {raw_dir / spec.api_name / f"trade_date={trade_date}.parquet" for trade_date in trade_dates}
-    if spec.strategy == FetchStrategy.RANGE_MONTH:
-        return {raw_dir / spec.api_name / f"month={month}.parquet" for _, _, month in month_windows(start, end_date)}
-    if spec.strategy == FetchStrategy.DAY:
-        return {raw_dir / spec.api_name / f"date={day}.parquet" for day in date_range_days(start, end_date)}
-    raise RuntimeError(f"unsupported event/flow strategy {spec.strategy} for {spec.api_name}")
+        end_date = min(end_date, latest_sse_calendar_date(raw_dir))
+    units = time_units(raw_dir, spec, max(start_date, spec.start_date), end_date)
+    return {part.path for part in partitions(raw_dir, spec, units)}
 
 def audit_as_of(value: str | None) -> datetime:
     """The audit's clock: now, or an explicit time (naive means Asia/Shanghai).
@@ -2508,40 +2438,10 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
 def expected_board_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
     if spec.strategy == FetchStrategy.STATIC_FULL:
-        return {raw_dir / spec.api_name / f"{spec.api_name}.parquet"}
+        return {part.path for part in partitions(raw_dir, spec)}
     if start > end_date:
         return set()
-    trade_dates = load_sse_open_dates(raw_dir, start, end_date)
-    if spec.strategy == FetchStrategy.TRADE_DATE:
-        return {raw_dir / spec.api_name / f"trade_date={trade_date}.parquet" for trade_date in trade_dates}
-    if spec.strategy == FetchStrategy.TRADE_DATE_BY_TAG:
-        return {
-            raw_dir / spec.api_name / f"tag={safe_partition_value(tag)}" / f"trade_date={trade_date}.parquet"
-            for tag in selected_board_kpl_tags(args)
-            for trade_date in trade_dates
-        }
-    if spec.strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
-        return {
-            raw_dir / spec.api_name / f"limit_type={safe_partition_value(limit_type)}" / f"trade_date={trade_date}.parquet"
-            for limit_type in selected_board_ths_limit_types(args)
-            for trade_date in trade_dates
-        }
-    if spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET:
-        return {
-            raw_dir / spec.api_name / f"market={safe_partition_value(market)}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet"
-            for market in selected_board_ths_hot_markets(args)
-            for is_new in selected_board_hot_is_new(args)
-            for trade_date in trade_dates
-        }
-    if spec.strategy == FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE:
-        return {
-            raw_dir / spec.api_name / f"market={safe_partition_value(market)}" / f"hot_type={safe_partition_value(hot_type)}" / f"is_new={is_new}" / f"trade_date={trade_date}.parquet"
-            for market in selected_board_dc_hot_markets(args)
-            for hot_type in selected_board_dc_hot_types(args)
-            for is_new in selected_board_hot_is_new(args)
-            for trade_date in trade_dates
-        }
-    raise RuntimeError(f"unsupported board-trading strategy {spec.strategy} for {spec.api_name}")
+    return {part.path for part in partitions(raw_dir, spec, time_units(raw_dir, spec, start, end_date), args)}
 
 def audit_board_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Path], add) -> None:
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
