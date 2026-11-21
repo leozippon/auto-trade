@@ -26,7 +26,6 @@ running.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
@@ -40,6 +39,7 @@ from autotrade.environment.trace import (
 )
 
 from .config import ExperimentConfig
+from .experiment import SessionContext
 from .hitl_state import (
     ExperimentState,
     PlannedSession,
@@ -62,7 +62,7 @@ class ExperimentStopped(SessionInterrupt):
     """Raised at a session gate on a durable stop request."""
 
 
-SessionExecutor = Callable[[PlannedSession, dict[str, object]], None]
+SessionExecutor = Callable[[PlannedSession, SessionContext], None]
 
 # The record type that completes a planned session, by kind.
 _SESSION_RECORD_TYPES = {"research": "research_session", "forward": "forward"}
@@ -91,8 +91,6 @@ class InteractiveExperimentRunner:
         self.control_path = Path(control_path)
         self.status = StatusReporter(status_path)
         self.ref_store = ref_store
-        self._session_started_monotonic: float | None = None
-        self._session_started_at: str | None = None
 
     def run(self) -> dict[str, object]:
         completed = self._completed_sessions()
@@ -110,14 +108,12 @@ class InteractiveExperimentRunner:
                 if self._gate():
                     return self._restart_result(ran)
                 control = read_control(self.control_path)
-                context = {
-                    "directive": control.directives.get(session.session_key, ""),
-                    "resource_override": control.resource_overrides.get(session.session_key, {}),
-                    "sandbox_gpu_count": control.gpu_counts.get(session.session_key),
-                    "session_timing": self._session_timing,
-                    "progress_hook": self.progress_hook(session),
-                    "session_key": session.session_key,
-                }
+                context = SessionContext(
+                    directive=control.directives.get(session.session_key, ""),
+                    resource_override=control.resource_overrides.get(session.session_key, {}),
+                    sandbox_gpu_count=control.gpu_counts.get(session.session_key),
+                    progress_hook=self.progress_hook(session),
+                )
                 self._execute_with_retries(session, context)
                 # The session's own ledger append is what completes it, and the
                 # same append expires its inbox (pipelines/experiment.py).
@@ -154,9 +150,7 @@ class InteractiveExperimentRunner:
             return registered_record(records) is not None
         raise ValueError(f"unknown session kind: {session.kind}")
 
-    def _execute_with_retries(
-        self, session: PlannedSession, context: dict[str, object]
-    ) -> None:
+    def _execute_with_retries(self, session: PlannedSession, context: SessionContext) -> None:
         last_error: Exception | None = None
         for attempt in range(1, self.session_max_attempts + 1):
             self._begin_session(session)
@@ -206,13 +200,11 @@ class InteractiveExperimentRunner:
         return control.restart_pending and consume_restart_request(self.control_path)
 
     def _begin_session(self, session: PlannedSession) -> None:
-        self._session_started_monotonic = time.monotonic()
-        self._session_started_at = datetime.now(UTC).isoformat()
         self.status.set(
             state=ExperimentState.RUNNING_SESSION,
             session_key=session.session_key,
             session_kind=session.kind,
-            session_started_at=self._session_started_at,
+            session_started_at=datetime.now(UTC).isoformat(),
             run_id=None,
             environment_stage="preparing_session",
             environment_progress=None,
@@ -263,15 +255,6 @@ class InteractiveExperimentRunner:
             self.status.set(**values)
 
         return publish
-
-    def _session_timing(self) -> dict[str, float]:
-        if self._session_started_monotonic is None:
-            return {"run_wall_seconds": 0.0}
-        return {
-            "run_wall_seconds": round(
-                max(0.0, time.monotonic() - self._session_started_monotonic), 1
-            )
-        }
 
     def _completed_sessions(self) -> set[str]:
         return {

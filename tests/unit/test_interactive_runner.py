@@ -20,7 +20,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from autotrade.pipelines import interactive
+from autotrade.pipelines.experiment import SessionContext
 from autotrade.pipelines.hitl_state import (
     ControlState,
     PlannedSession,
@@ -51,11 +51,11 @@ class RecordingExecutor:
         self.ledger = ledger
         self.record = record
         self.outcomes = dict(outcomes or {})
-        self.calls: list[tuple[str, dict[str, object]]] = []
+        self.calls: list[tuple[str, SessionContext]] = []
         self.on_call = None
 
-    def __call__(self, session: PlannedSession, context: dict[str, object]):
-        self.calls.append((session.session_key, dict(context)))
+    def __call__(self, session: PlannedSession, context: SessionContext):
+        self.calls.append((session.session_key, context))
         if self.on_call is not None:
             self.on_call(session, context)
         if self.record:
@@ -153,7 +153,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         class Flaky(RecordingExecutor):
             def __call__(self, session, context):
                 if len(self.calls) < 2:
-                    self.calls.append((session.session_key, dict(context)))
+                    self.calls.append((session.session_key, context))
                     raise RuntimeError(f"boom{len(self.calls)}")
                 return super().__call__(session, context)
 
@@ -171,7 +171,7 @@ class InteractiveRunnerTest(RunnerTestCase):
             def __call__(self, session, context):
                 seen.append(read_status(status_path).get("error"))
                 if len(self.calls) < 1:
-                    self.calls.append((session.session_key, dict(context)))
+                    self.calls.append((session.session_key, context))
                     raise RuntimeError("boom")
                 return super().__call__(session, context)
 
@@ -184,9 +184,8 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertEqual(seen, [None, "RuntimeError: boom (attempt 1/3)", None])
         self.assertIsNone(read_status(self.status)["error"])
 
-    def test_each_attempt_refreshes_session_timing(self) -> None:
+    def test_each_attempt_restamps_the_session_start(self) -> None:
         started: list[str] = []
-        walls: list[float] = []
         stages: list[object] = []
         run_ids: list[object] = []
         status_path = self.status
@@ -197,12 +196,8 @@ class InteractiveRunnerTest(RunnerTestCase):
                 started.append(str(payload.get("session_started_at") or ""))
                 stages.append(payload.get("environment_stage"))
                 run_ids.append(payload.get("run_id"))
-                timing_fn = context["session_timing"]
-                timing = timing_fn() if callable(timing_fn) else {}
-                wall = timing.get("run_wall_seconds") if isinstance(timing, dict) else 0.0
-                walls.append(float(wall or 0.0))
                 if len(self.calls) < 1:
-                    self.calls.append((session.session_key, dict(context)))
+                    self.calls.append((session.session_key, context))
                     raise RuntimeError("boom")
                 return super().__call__(session, context)
 
@@ -214,12 +209,11 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.assertNotEqual(started[0], started[1])
         self.assertEqual(stages, ["preparing_session", "preparing_session"])
         self.assertEqual(run_ids, [None, None])
-        self.assertGreaterEqual(walls[1], 0.0)
 
     def test_registered_artifact_mutation_is_not_retried(self) -> None:
         class Mutating(RecordingExecutor):
             def __call__(self, session, context):
-                self.calls.append((session.session_key, dict(context)))
+                self.calls.append((session.session_key, context))
                 self.ledger.append(
                     {
                         "record_type": "forward",
@@ -265,7 +259,7 @@ class InteractiveRunnerTest(RunnerTestCase):
     def test_a_session_fails_the_experiment_after_the_attempt_budget(self) -> None:
         class AlwaysFail(RecordingExecutor):
             def __call__(self, session, context):
-                self.calls.append((session.session_key, dict(context)))
+                self.calls.append((session.session_key, context))
                 raise RuntimeError("still broken")
 
         executor = AlwaysFail(self.ledger)
@@ -311,11 +305,9 @@ class InteractiveRunnerTest(RunnerTestCase):
         )
         self.runner(PLAN, executor).run()
         _key, context = executor.calls[0]
-        self.assertEqual(context["directive"], "try momentum")
-        self.assertEqual(context["resource_override"], {"max_llm_calls": 2})
-        self.assertEqual(context["session_key"], "research")
-        for hook in ("progress_hook", "session_timing"):
-            self.assertTrue(callable(context[hook]), hook)
+        self.assertEqual(context.directive, "try momentum")
+        self.assertEqual(context.resource_override, {"max_llm_calls": 2})
+        self.assertTrue(callable(context.progress_hook))
         control = read_control(self.control)
         self.assertEqual((control.directives, control.resource_overrides), ({}, {}))
 
@@ -330,7 +322,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         self.set_control(gpu_counts={"research": 3})
         self.runner(PLAN, executor).run()
         self.assertEqual(
-            {key: context["sandbox_gpu_count"] for key, context in executor.calls},
+            {key: context.sandbox_gpu_count for key, context in executor.calls},
             {"research": 3, "forward": None},
         )
         self.assertEqual(read_control(self.control).gpu_counts, {})
@@ -361,9 +353,7 @@ class InteractiveRunnerTest(RunnerTestCase):
         There is no per-session approval any more: a worker the researcher
         started runs its planned sessions, and holding it is `pause`/`stop`.
         """
-        with patch.object(
-            interactive.time, "sleep", side_effect=AssertionError("gate slept")
-        ):
+        with patch("time.sleep", side_effect=AssertionError("gate slept")):
             self.runner(PLAN, RecordingExecutor(self.ledger, outcomes={"research": NO_EDGE})).run()
 
 class WorkerEntrypointTest(unittest.TestCase):

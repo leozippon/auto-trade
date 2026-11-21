@@ -14,7 +14,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -121,6 +121,28 @@ from .verdict import (
 # default research budget, two weeks, headroom for one slow session that still
 # bounds how long it runs unattended.
 _MAX_DEADLINE_OVERRIDE_MINUTES = 2 * DEFAULT_MAX_RESEARCH_MINUTES
+
+
+@dataclass(frozen=True)
+class SessionContext:
+    """What one planned session runs with beyond the experiment's config:
+    the operator's controls for it (a directive, budget overrides checked by
+    ``_session_budgets``, a sandbox GPU count) and the worker's progress
+    hook. Only the research session reads the controls."""
+
+    directive: str = ""
+    resource_override: Mapping[str, object] = field(default_factory=dict)
+    sandbox_gpu_count: int | None = None
+    progress_hook: Callable[[str, dict[str, object] | None], None] | None = None
+
+    def __post_init__(self) -> None:
+        count = self.sandbox_gpu_count
+        if count is not None and (
+            isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 4
+        ):
+            raise ValueError("sandbox_gpu_count override must be an integer in 0..4")
+        if self.progress_hook is not None and not callable(self.progress_hook):
+            raise TypeError("progress_hook must be callable")
 
 
 class EnvironmentBlockedAttempt(RuntimeError):
@@ -256,7 +278,7 @@ class ExperimentPipeline:
         return replace(research_span(validation, FULL_SPAN), label=VALIDATION_SPAN)
 
     def run_research_session(
-        self, *, session_context: dict[str, object] | None = None
+        self, *, session_context: SessionContext | None = None
     ) -> dict[str, object]:
         """Run the experiment's one research session and record its outcome.
 
@@ -289,9 +311,9 @@ class ExperimentPipeline:
         steps_before = load_recorded_steps(self.config.experiment_dir)
         run_started = time.monotonic()
         run_id = f"run_{uuid.uuid4().hex}"
-        context = dict(session_context or {})
-        progress = _optional_hook(context.get("progress_hook"), "progress_hook")
-        budgets = _session_budgets(self.config, context.get("resource_override"))
+        context = session_context or SessionContext()
+        progress = context.progress_hook
+        budgets = _session_budgets(self.config, context.resource_override)
         current_skills = self._current_skills()
         registered_id: str | None = None
         wrote_ledger_record = False
@@ -327,8 +349,8 @@ class ExperimentPipeline:
                         years=years,
                         validation=validation,
                         tests_before=tests_before,
-                        directive=str(context.get("directive") or ""),
-                        sandbox_gpu_count=_optional_gpu_count(context.get("sandbox_gpu_count")),
+                        directive=context.directive,
+                        sandbox_gpu_count=context.sandbox_gpu_count,
                         snapshot_config=_snapshot_config_record(self.snapshots),
                         progress_hook=progress,
                         skills_source_ref=(
@@ -438,7 +460,7 @@ class ExperimentPipeline:
                 "steps_tested": len(test_step_records(self.ledger.read())),
                 "attempts": session.attempt,
                 "budget_used": session.budget_used.to_record(),
-                **_session_timing(context, run_started),
+                "run_wall_seconds": round(max(0.0, time.monotonic() - run_started), 1),
             }
             self.ledger.append(record)
             wrote_ledger_record = True
@@ -684,7 +706,7 @@ class ExperimentPipeline:
     # ---- forward -------------------------------------------------------
 
     def run_forward(
-        self, *, session_context: dict[str, object] | None = None
+        self, *, session_context: SessionContext | None = None
     ) -> dict[str, object]:
         """Replay the registered artifact once over forward and Held-out and record
         its readout (:meth:`replay_registered`).
@@ -711,8 +733,7 @@ class ExperimentPipeline:
         ]
         forward = self.config.geometry.forward
         heldout = self.config.geometry.heldout(self.trading_days)
-        context = dict(session_context or {})
-        progress = _optional_hook(context.get("progress_hook"), "progress_hook")
+        progress = (session_context or SessionContext()).progress_hook
         run_id = f"run_{uuid.uuid4().hex}"
         link = link_head(self.config.experiment_id, SessionKind.FORWARD, run_id)
         attempt = {**link, "phase": SessionKind.FORWARD}
@@ -1581,43 +1602,9 @@ def _run_guarded_evaluation(
         return result, error, changed, restore_error
 
 
-def _optional_hook(value: object, name: str):
-    if value is None:
-        return None
-    if not callable(value):
-        raise TypeError(f"{name} must be callable")
-    return value
-
-
 def _publish_progress(hook, stage: str, **progress: object) -> None:
     if hook is not None:
         hook(stage, dict(progress) if progress else None)
-
-
-def _session_timing(
-    context: Mapping[str, object],
-    fallback_started: float,
-) -> dict[str, float]:
-    callback = context.get("session_timing")
-    if callable(callback):
-        value = callback()
-        if not isinstance(value, Mapping):
-            raise TypeError("session_timing must return a mapping")
-        wall = float(value.get("run_wall_seconds", 0.0))
-        if wall < 0:
-            raise ValueError("session timing values must be non-negative")
-        return {"run_wall_seconds": round(wall, 1)}
-    return {
-        "run_wall_seconds": round(max(0.0, time.monotonic() - fallback_started), 1)
-    }
-
-
-def _optional_gpu_count(value: object) -> int | None:
-    if value is None:
-        return None
-    if isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 4:
-        raise ValueError("sandbox_gpu_count override must be an integer in 0..4")
-    return value
 
 
 def _session_budgets(
@@ -1672,6 +1659,7 @@ __all__ = [
     "FROZEN_NULL_SEED",
     "EnvironmentBlockedAttempt",
     "ExperimentPipeline",
+    "SessionContext",
     "check_registration",
     "judged_replay",
     "one_line_change",

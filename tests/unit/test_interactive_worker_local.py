@@ -772,7 +772,7 @@ def test_model_roles_share_one_session_call_budget():
     assert shared.calls == 1
 
 
-def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
+def test_interactive_runner_publishes_the_session_progress(tmp_path: Path):
     session_key = "research"
     control_path = tmp_path / "control.json"
     status_path = tmp_path / "status.json"
@@ -781,14 +781,8 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
     captured: dict[str, object] = {}
 
     def execute(session, context):
-        progress = context["progress_hook"]
-        assert callable(progress)
-        progress("pit_snapshot", {"run_id": "run_001"})
-        status = read_status(status_path)
-        captured.update(status)
-        timing = context["session_timing"]
-        assert callable(timing)
-        captured["timing"] = timing()
+        context.progress_hook("pit_snapshot", {"run_id": "run_001"})
+        captured.update(read_status(status_path))
         # The real executor records the session through the pipeline, which is
         # also what stamps the session key; the runner never appends for it.
         ledger.append(
@@ -818,9 +812,6 @@ def test_interactive_runner_publishes_current_session_timing(tmp_path: Path):
     assert captured["run_id"] == "run_001"
     assert captured["environment_stage"] == "pit_snapshot"
     assert captured["environment_stage_started_at"]
-    timing = captured["timing"]
-    assert isinstance(timing, dict)
-    assert timing["run_wall_seconds"] >= 0.0
 
 
 def test_session_boundary_restart_keeps_the_finished_session_and_stops_the_next(
@@ -1239,7 +1230,7 @@ def test_a_cpu_only_allocation_survives_the_control_round_trip(tmp_path: Path) -
     """0 GPUs is a request, not an unset value.
 
     The console accepts 0..4 and every layer below honours 0 explicitly
-    (``_optional_gpu_count``, the developer's ``gpu=None, gpu_count=0``), so a
+    (``SessionContext.sandbox_gpu_count``, the developer's ``gpu=None, gpu_count=0``), so a
     reader that drops it silently runs the CPU-only session on the experiment
     default.
     """

@@ -63,7 +63,7 @@ from .config import (
     ExperimentConfig,
     acceptance_for,
 )
-from .experiment import ExperimentPipeline
+from .experiment import ExperimentPipeline, SessionContext
 from .experiment_params import (
     ExperimentParams,
     read_param,
@@ -847,7 +847,7 @@ def run_local_interactive_worker(
     # their whole restore step.
     latest_skills_snapshot(ledger.read(), experiment_dir=options.experiment_dir)
 
-    def execute(session: PlannedSession, context: dict[str, object]) -> None:
+    def execute(session: PlannedSession, context: SessionContext) -> None:
         if session.kind == "research":
             pipeline.run_research_session(session_context=context)
         else:
