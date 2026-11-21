@@ -24,18 +24,13 @@ from .common import (
     DatasetSpec,
     FetchStrategy,
     by_ts_code_universe,
+    cli_values,
     date_range_days,
     load_sse_open_dates,
     month_windows,
     retained_range_start,
     safe_partition_value,
-    selected_board_dc_hot_markets,
-    selected_board_dc_hot_types,
     selected_board_hot_is_new,
-    selected_board_kpl_tags,
-    selected_board_ths_hot_markets,
-    selected_board_ths_limit_types,
-    selected_eco_filter_values,
     selected_news_sources,
     year_windows,
     yyyymmdd_to_month,
@@ -80,20 +75,20 @@ def dimensions(spec: DatasetSpec, args: argparse.Namespace | None) -> list[dict[
     """The values of the dataset's non-time dimensions, outermost first."""
     strategy = spec.strategy
     if strategy == FetchStrategy.TRADE_DATE_BY_TAG:
-        return [{"tag": tag} for tag in selected_board_kpl_tags(args)]
+        return [{"tag": tag} for tag in cli_values(args, "kpl_tag")]
     if strategy == FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE:
-        return [{"limit_type": limit_type} for limit_type in selected_board_ths_limit_types(args)]
+        return [{"limit_type": limit_type} for limit_type in cli_values(args, "ths_limit_type")]
     if strategy == FetchStrategy.TRADE_DATE_BY_MARKET:
         return [
             {"market": market, "is_new": is_new}
-            for market in selected_board_ths_hot_markets(args)
+            for market in cli_values(args, "ths_hot_market")
             for is_new in selected_board_hot_is_new(args)
         ]
     if strategy == FetchStrategy.TRADE_DATE_BY_MARKET_HOT_TYPE:
         return [
             {"market": market, "hot_type": hot_type, "is_new": is_new}
-            for market in selected_board_dc_hot_markets(args)
-            for hot_type in selected_board_dc_hot_types(args)
+            for market in cli_values(args, "dc_hot_market")
+            for hot_type in cli_values(args, "dc_hot_type")
             for is_new in selected_board_hot_is_new(args)
         ]
     if strategy == FetchStrategy.DATE_YEAR_BY_TS_CODE:
@@ -101,9 +96,9 @@ def dimensions(spec: DatasetSpec, args: argparse.Namespace | None) -> list[dict[
     if strategy == FetchStrategy.ECO_CAL_MONTH:
         return [
             {"country": country, "currency": currency, "event": event}
-            for country in selected_eco_filter_values(args, "eco_country")
-            for currency in selected_eco_filter_values(args, "eco_currency")
-            for event in selected_eco_filter_values(args, "eco_event")
+            for country in cli_values(args, "eco_country")
+            for currency in cli_values(args, "eco_currency")
+            for event in cli_values(args, "eco_event")
         ]
     if strategy == FetchStrategy.TIME_RANGE_MONTH:
         return [{"src": source} for source in getattr(args, "major_news_src", None) or [""]]

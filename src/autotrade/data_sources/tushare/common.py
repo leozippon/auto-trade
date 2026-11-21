@@ -1991,30 +1991,37 @@ def spec_page_limit(spec, requested: int | None) -> int:
         return min(requested or spec.page_limit, spec.page_limit)
     return requested or 10000
 
-def selected_index_codes(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "index_code", None) or [] if str(value).strip()]
-    return values or list(DEFAULT_GLOBAL_INDEX_CODES)
+# What a repeatable filter option (add_macro_filter_args, add_board_filter_args)
+# means when it is not given; None is "no filter".
+CLI_LIST_DEFAULTS: dict[str, list[str] | list[None]] = {
+    "index_code": DEFAULT_GLOBAL_INDEX_CODES,
+    "cn_index_code": DEFAULT_CN_INDEX_CODES,
+    "fx_code": DEFAULT_FX_CODES,
+    "eco_country": [None],
+    "eco_currency": [None],
+    "eco_event": [None],
+    "kpl_tag": BOARD_KPL_TAGS,
+    "ths_limit_type": BOARD_THS_LIMIT_TYPES,
+    "ths_hot_market": BOARD_THS_HOT_MARKETS,
+    "dc_hot_market": BOARD_DC_HOT_MARKETS,
+    "dc_hot_type": BOARD_DC_HOT_TYPES,
+    "hot_is_new": BOARD_HOT_IS_NEW,
+}
 
-def selected_cn_index_codes(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "cn_index_code", None) or [] if str(value).strip()]
-    return values or list(DEFAULT_CN_INDEX_CODES)
-
-def selected_fx_codes(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "fx_code", None) or [] if str(value).strip()]
-    return values or list(DEFAULT_FX_CODES)
-
-def selected_eco_filter_values(args: argparse.Namespace, attr: str) -> list[str | None]:
+def cli_values(args: argparse.Namespace, attr: str) -> list:
+    """The non-blank values given for the repeatable option ``attr``, or its
+    default (CLI_LIST_DEFAULTS) when none is given."""
     values = [str(value).strip() for value in getattr(args, attr, None) or [] if str(value).strip()]
-    return values or [None]
+    return values or list(CLI_LIST_DEFAULTS[attr])
 
 def by_ts_code_universe(dataset: str, args: argparse.Namespace) -> list[str]:
     """The codes a by-ts_code macro dataset is pulled and audited over."""
     if dataset == "index_global":
-        return selected_index_codes(args)
+        return cli_values(args, "index_code")
     if dataset in ("index_daily", "index_dailybasic"):
-        return selected_cn_index_codes(args)
+        return cli_values(args, "cn_index_code")
     if dataset == "fx_daily":
-        return selected_fx_codes(args)
+        return cli_values(args, "fx_code")
     raise RuntimeError(f"no ts_code universe defined for by-ts_code macro dataset {dataset!r}")
 
 def write_frame(
@@ -2046,29 +2053,8 @@ def selected_event_flow_datasets(args: argparse.Namespace) -> list[str]:
 def selected_board_trading_datasets(args: argparse.Namespace) -> list[str]:
     return select_datasets(getattr(args, "datasets", None), default=BOARD_TRADING_DEFAULT_DATASETS, allowed=BOARD_TRADING_SPECS, label="board-trading")
 
-def selected_board_kpl_tags(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "kpl_tag", None) or [] if str(value).strip()]
-    return values or list(BOARD_KPL_TAGS)
-
-def selected_board_ths_limit_types(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "ths_limit_type", None) or [] if str(value).strip()]
-    return values or list(BOARD_THS_LIMIT_TYPES)
-
-def selected_board_ths_hot_markets(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "ths_hot_market", None) or [] if str(value).strip()]
-    return values or list(BOARD_THS_HOT_MARKETS)
-
-def selected_board_dc_hot_markets(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "dc_hot_market", None) or [] if str(value).strip()]
-    return values or list(BOARD_DC_HOT_MARKETS)
-
-def selected_board_dc_hot_types(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip() for value in getattr(args, "dc_hot_type", None) or [] if str(value).strip()]
-    return values or list(BOARD_DC_HOT_TYPES)
-
 def selected_board_hot_is_new(args: argparse.Namespace) -> list[str]:
-    values = [str(value).strip().upper() for value in getattr(args, "hot_is_new", None) or [] if str(value).strip()]
-    values = values or list(BOARD_HOT_IS_NEW)
+    values = [value.upper() for value in cli_values(args, "hot_is_new")]
     invalid = sorted(set(values) - {"Y", "N"})
     if invalid:
         raise RuntimeError(f"invalid hot is_new values: {invalid}; supported=['Y', 'N']")
