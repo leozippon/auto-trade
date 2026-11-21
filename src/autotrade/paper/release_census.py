@@ -4,10 +4,11 @@
 A release stays while the raw generation record names it, a seed (or a seed
 build's workspace pin) one or two levels under ``data/`` was built from it,
 an experiment under ``experiments/`` that has not ended pinned it or names a
-seed built from it, or a Paper account that is not killed has it pinned. The
-census lives here, the lowest package that sees every consumer (the
-experiments' HITL state and the Paper accounts), and the lake command takes
-it as an argument, so the ingest package imports neither.
+seed built from it, a Paper account that is not killed has it pinned, or a
+consistency check of a book is replaying on it. The census lives here, the
+lowest package that sees every consumer (the experiments' HITL state and the
+Paper accounts), and the lake command takes it as an argument, so the ingest
+package imports neither.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from autotrade.pipelines.hitl_state import (
 
 from .book import list_books, open_capped_books
 from .books import PAPER_STATE_DIR
+from .consistency import PAPER_CHECK_DIR
 from .pit import PIT_CACHE_NAME
 
 
@@ -78,6 +80,8 @@ def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
     for book_id in books:
         for cache in sorted((paper / book_id / PIT_CACHE_NAME).glob("*")):
             keep(pinned_generation(cache), f"Paper account {book_id}")
+    for pin in sorted((repo_root / PAPER_CHECK_DIR).glob(f"*/{PIT_CACHE_NAME}")):
+        keep(pinned_generation(pin), f"Paper consistency check {pin.parent.name}")
     return kept
 
 

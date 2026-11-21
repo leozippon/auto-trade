@@ -148,6 +148,10 @@ class ReleasePruneTest(unittest.TestCase):
         publish_release(self.root, "g8", datasets=("daily_basic",))
         self.assertEqual(self.kept(), {"g8": ["raw generation record"]})
 
+    def test_a_release_a_consistency_check_replays_on_stays_while_it_runs(self) -> None:
+        self._pin(self.root / ".runtime" / "paper_check" / "book_live" / "pit", "g6")
+        self.assertEqual(self.kept()["g6"], ["Paper consistency check book_live"])
+
     def _experiment_ends(self, name: str) -> None:
         self._write(
             self.root / "experiments" / name / "hitl" / "status.json",

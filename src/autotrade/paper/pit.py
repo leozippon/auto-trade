@@ -20,6 +20,7 @@ import uuid
 from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -41,7 +42,7 @@ from autotrade.environment.data.snapshot import (
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.timeview import Timeview
-from autotrade.paper.engine import PaperDataNotReady
+from autotrade.paper.engine import PaperDataFactory, PaperDataNotReady
 from autotrade.paper.freshness import require_fresh_release
 from autotrade.pipelines.calendar import load_sse_trading_days
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
@@ -56,6 +57,9 @@ from autotrade.pipelines.pit_backend import (
     slot_minute_source,
     span_daily,
 )
+
+if TYPE_CHECKING:
+    from autotrade.paper.book import Book
 
 PIT_CACHE_NAME = "pit"
 LIVE_GENERATION = "live"
@@ -97,17 +101,21 @@ class BookPITData:
         due_at: datetime,
         schedule: Mapping[str, object],
         max_intraday_row_group_rows: int = 2_000_000,
+        generation_id: str | None = None,
     ) -> None:
         """``due_at`` is the inference time of the decision on ``trade_date``
         and ``schedule`` the updater's schedule: together they say which
-        landing runs the pinned release must hold (``paper.freshness``)."""
+        landing runs the pinned release must hold (``paper.freshness``).
+        ``generation_id`` names a published release to read instead of the
+        newest (the consistency check's Paper-mode run, ``paper.consistency``)."""
         cache_root = Path(state_root).resolve() / PIT_CACHE_NAME
-        generation_dir = _pin_newest_release(
+        generation_dir = _pin_release(
             cache_root,
             raw_dir=raw_dir,
             fundamental_events_root=fundamental_events_root,
             fundamental_events_status=fundamental_events_status,
             snapshot_config=snapshot_config,
+            generation_id=generation_id,
         )
         provider = ResearchPITSnapshotProvider(
             experiment_dir=generation_dir,
@@ -238,6 +246,35 @@ class BookPITData:
         _discard_ephemeral_asof(self.asof_dir)
 
 
+def book_data_factory(
+    book: Book,
+    schedule: Mapping[str, object],
+    *,
+    state_root: Path | None = None,
+    generation_id: str | None = None,
+) -> PaperDataFactory:
+    """The ``PaperDataFactory`` of ``book`` under the updater's ``schedule``:
+    each run's window over the newest release, or ``generation_id``, cached
+    under ``state_root`` (the book's own root unless given)."""
+
+    def build(start: str, target: str) -> BookPITData:
+        return BookPITData(
+            state_root=state_root or book.root,
+            raw_dir=book.raw_dir,
+            fundamental_events_root=book.fundamental_events_root,
+            fundamental_events_status=book.fundamental_events_status,
+            snapshot_config=book.snapshot_config,
+            start=start,
+            trade_date=target,
+            due_at=book.schedule.at(target),
+            schedule=schedule,
+            max_intraday_row_group_rows=book.max_intraday_row_group_rows,
+            generation_id=generation_id,
+        )
+
+    return build
+
+
 def book_window(sessions: Sequence[str], start: str) -> tuple[str, datetime]:
     """The first session of the replay slot, and the instant the decision
     view is anchored at, of a book whose first decision is ``start``.
@@ -300,15 +337,17 @@ def require_audited_fundamentals(
         ) from exc
 
 
-def _pin_newest_release(
+def _pin_release(
     cache_root: Path,
     *,
     raw_dir: str | Path,
     fundamental_events_root: str | Path,
     fundamental_events_status: str | Path,
     snapshot_config: SnapshotConfig,
+    generation_id: str | None,
 ) -> Path:
-    """Pin the newest committed release into a directory named by its generation.
+    """Pin the newest committed release, or the published ``generation_id``,
+    into a directory named by its generation.
 
     A directory an earlier run of the same generation left under another view
     cache format is replaced: the provider never reuses such views, and an
@@ -322,6 +361,7 @@ def _pin_newest_release(
         fundamental_events_root=fundamental_events_root,
         fundamental_events_status=fundamental_events_status,
         required_raw_datasets=required_release_raw_datasets(snapshot_config),
+        generation_id=generation_id,
     )
     # A lake without the updater's lock and generation marker (a local or
     # synthetic root) is read live, as pin_research_release defines it.
@@ -352,4 +392,11 @@ def _remove_tree(root: Path) -> None:
     shutil.rmtree(root)
 
 
-__all__ = ["PIT_CACHE_NAME", "BookPITData", "book_window", "newest_replay_slot", "require_audited_fundamentals"]
+__all__ = [
+    "PIT_CACHE_NAME",
+    "BookPITData",
+    "book_data_factory",
+    "book_window",
+    "newest_replay_slot",
+    "require_audited_fundamentals",
+]
