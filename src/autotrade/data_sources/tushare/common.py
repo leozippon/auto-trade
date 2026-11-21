@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """What the TuShare ingest modules share: the run's exit codes and revision
 ledger, the SSE trading calendar (read, and extended when a pull needs more of
 it), dataset selection, date windows, the margin family's exchange rule,

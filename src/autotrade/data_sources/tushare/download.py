@@ -21,7 +21,6 @@ from autotrade.common.time import CN_TZ, cn_today
 from autotrade.environment.data.contracts import BOARD_TRADING_DATASETS
 from autotrade.environment.data.pit import concat_rows, first_seen_at, key_strings
 
-from . import common as core
 from . import versions
 from .auction import (
     AUCTION_CAPTURE_MIN_PREVIOUS_DAY_RATIO,
@@ -45,6 +44,11 @@ from .common import (
     NO_MUTATION_RETRY_EXIT_CODE,
     REVISION_EVENTS_PATH,
     WRITTEN_OUTCOMES,
+    add_board_filter_args,
+    add_intraday_by_date_common_args,
+    add_macro_filter_args,
+    add_raw_arg,
+    add_runtime_args,
     date_range_days,
     download_trade_cal,
     ensure_trade_cal_coverage,
@@ -1987,7 +1991,7 @@ def update_data(args: argparse.Namespace) -> int:
 def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("download", help="download TuShare raw data by semantic tier")
     parser.add_argument("--tier", required=True, choices=DOWNLOAD_TIER_CHOICES)
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--bak-start-date", default="20160101")
     parser.add_argument("--end-date", default=cn_today())
@@ -2022,15 +2026,15 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--page-limit", type=int, help="Optional requested page size; text evidence datasets are clamped to official per-call limits.")
     parser.add_argument("--news-src", action="append", default=[], help="News short-message source; repeatable. Defaults to all official TuShare sources; use all to expand explicitly.")
     parser.add_argument("--major-news-src", action="append", default=[], help="Optional major_news source filter; repeatable.")
-    core.add_board_filter_args(parser)
-    core.add_macro_filter_args(parser)
-    core.add_runtime_args(parser, min_interval=None, timeout=None)
+    add_board_filter_args(parser)
+    add_macro_filter_args(parser)
+    add_runtime_args(parser, min_interval=None, timeout=None)
     # Only update sets a retained macro floor; a tier download starts at --start-date.
     parser.set_defaults(macro_start_date=None)
 
 def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("update", help="fill missing TuShare data across all retained domains")
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--end-date", default=cn_today())
     parser.add_argument("--start-date", required=True, help="Fill missing data from this date through --end-date across all retained data domains.")
     parser.add_argument("--bak-start-date", help="Optional bak_basic lower bound. Defaults to --start-date.")
@@ -2155,14 +2159,14 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--page-limit", type=int)
     parser.add_argument("--news-src", action="append", default=[])
     parser.add_argument("--major-news-src", action="append", default=[])
-    core.add_board_filter_args(parser)
-    core.add_macro_filter_args(parser)
-    core.add_runtime_args(parser, min_interval=None, timeout=None)
+    add_board_filter_args(parser)
+    add_macro_filter_args(parser)
+    add_runtime_args(parser, min_interval=None, timeout=None)
 
 
 def add_auction_recheck_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("recheck-stk-auction", help="evening auction self-heal: re-read the latest open day, capture missing days in the window")
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--start-date", required=True)
     parser.add_argument("--end-date", required=True)
     parser.add_argument("--landing-job", default="cn_evening_auction_backfill")
@@ -2174,7 +2178,7 @@ def add_auction_recheck_parser(sub: argparse._SubParsersAction) -> None:
 
 def add_auction_capture_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("capture-open-auction", help="poll and atomically publish today's complete stk_auction frame")
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--trade-date", required=True)
     parser.add_argument("--page-limit", type=int, default=TRADE_DATE_PAGE_LIMIT)
     parser.add_argument("--max-wait-seconds", type=float, default=170.0)
@@ -2183,31 +2187,31 @@ def add_auction_capture_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--min-rows", type=int, default=AUCTION_CAPTURE_MIN_ROWS_FLOOR)
     parser.add_argument("--min-previous-day-ratio", type=float, default=AUCTION_CAPTURE_MIN_PREVIOUS_DAY_RATIO)
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=30)
+    add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=30)
 
 def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
     compact = sub.add_parser("compact-intraday-by-date", help="build final full-market daily minute files from stock-year source partitions")
-    core.add_intraday_by_date_common_args(compact)
+    add_intraday_by_date_common_args(compact)
     compact.add_argument("--force", action="store_true")
     compact.add_argument("--allow-empty", action="store_true")
     compact.add_argument("--allow-validation-warnings", action="store_true")
     compact.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
 
     update = sub.add_parser("update-intraday-by-date", help="download/retry trade dates directly into final daily minute files")
-    core.add_intraday_by_date_common_args(update, expected_codes_choices=["daily", "active", "minute"], expected_codes_default="minute")
+    add_intraday_by_date_common_args(update, expected_codes_choices=["daily", "active", "minute"], expected_codes_default="minute")
     update.add_argument("--force", action="store_true")
     update.add_argument("--allow-validation-warnings", action="store_true")
     update.add_argument("--max-retries", type=int, default=3)
     update.add_argument("--retry-delay-seconds", type=float, default=5.0)
     update.add_argument("--page-limit", type=int)
     update.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    core.add_runtime_args(update, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
+    add_runtime_args(update, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
     # Only update's open-window refresh forces a trailing tail.
     update.set_defaults(force_from=None)
 
 def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("download-share-float-complete", help="download share_float through ann_date and targeted ts_code rescue paths")
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--ann-start-date", default="20100101")
     parser.add_argument("--ann-end-date", default=cn_today())
     parser.add_argument("--float-start-date", default="20200101")
@@ -2228,7 +2232,7 @@ def add_share_float_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--write-union", action="store_true")
     parser.add_argument("--union-output", default="data/raw/share_float_complete/share_float_complete.parquet")
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=90)
+    add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=90)
     parser.add_argument("--output", help="Optional process report path. No status file is written by default; event-flow audit checks the union artifact.")
 
 def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:
@@ -2236,13 +2240,13 @@ def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:
         "repair-text-available-at",
         help="re-derive text available_at locally under the plausibility rule (no API calls)",
     )
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--datasets", nargs="+", default=["anns_d", "report_rc"], choices=sorted(TEXT_SPECS))
     event = sub.add_parser(
         "repair-event-available-at",
         help="re-derive trade-date event available_at locally under the current rule (no API calls)",
     )
-    core.add_raw_arg(event)
+    add_raw_arg(event)
     event.add_argument(
         "--datasets", nargs="+", required=True,
         choices=sorted(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE),

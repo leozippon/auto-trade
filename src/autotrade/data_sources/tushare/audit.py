@@ -37,7 +37,6 @@ from autotrade.environment.data.units import (
     rules_for,
 )
 
-from . import common as core
 from .client import (
     MIN_REQUEST_INTERVAL_SECONDS,
     TuShareClient,
@@ -46,6 +45,12 @@ from .client import (
     query_paged,
 )
 from .common import (
+    REVISION_EVENTS_PATH,
+    add_board_filter_args,
+    add_intraday_by_date_common_args,
+    add_macro_filter_args,
+    add_raw_arg,
+    add_runtime_args,
     cli_values,
     latest_sse_calendar_date,
     load_sse_open_dates,
@@ -55,6 +60,7 @@ from .common import (
     month_end_from_yyyymm,
     month_windows,
     quarter_periods,
+    resolve_revision_ledger,
     safe_partition_value,
     select_datasets,
     selected_board_hot_is_new,
@@ -326,7 +332,7 @@ def audit_revision_sentinel(args: argparse.Namespace) -> int:
     output = Path(args.output)
     if not output.is_absolute():
         output = repo_root / output
-    ledger = core.resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
+    ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
 
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     datasets = list(args.datasets or DAILY_REQUIRED_DATASETS)
@@ -2581,30 +2587,30 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
 
 def add_core_market_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("core-market", help="audit reference tables and daily market quotes/constraints")
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--end-date")
     parser.add_argument("--datasets", nargs="+", choices=DAILY_REQUIRED_DATASETS)
     parser.add_argument("--sample-limit", type=int, default=10)
-    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
+    add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {CORE_MARKET_STATUS_PATH}.")
 
 
 def add_fundamental_raw_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("fundamental-raw", help="audit raw financial statement/indicator/forecast/disclosure data")
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--end-date")
     parser.add_argument("--fundamental-start-date", default="20100101")
     parser.add_argument("--fundamental-end-date")
     parser.add_argument("--fundamental-datasets", nargs="+", choices=FUNDAMENTAL_DATASETS, dest="fundamental_datasets")
     parser.add_argument("--sample-limit", type=int, default=10)
-    core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
+    add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {FUNDAMENTAL_RAW_STATUS_PATH}.")
 
 def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("intraday", help="audit stock-year intraday minute raw data")
-    core.add_raw_arg(parser)
+    add_raw_arg(parser)
     parser.add_argument("--intraday-start-date", default="20200101")
     parser.add_argument("--intraday-end-date")
     parser.add_argument("--intraday-datasets", nargs="+", choices=INTRADAY_DATASETS + ["stk_mins"])
@@ -2614,23 +2620,23 @@ def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--output", help=f"Defaults to {INTRADAY_MINUTES_STATUS_PATH}.")
 
     by_date = sub.add_parser("intraday-by-date", help="audit final full-market daily minute files")
-    core.add_intraday_by_date_common_args(by_date)
+    add_intraday_by_date_common_args(by_date)
     by_date.add_argument("--full-scan", action="store_true")
     by_date.add_argument("--sample-limit", type=int, default=20)
     by_date.add_argument("--output", help=f"Defaults to {INTRADAY_MINUTES_STATUS_PATH}.")
 
     auction = sub.add_parser("auction-alignment", help="compare 09:30 minute auction bars with stk_auction and daily units")
-    core.add_raw_arg(auction)
+    add_raw_arg(auction)
     auction.add_argument("--start-date", required=True)
     auction.add_argument("--end-date", required=True)
     auction.add_argument("--output-dataset", default=STK_MINS_BY_DATE_DATASET)
     auction.add_argument("--max-trade-dates", type=int, default=8, help="Use the latest N open dates in the requested window; <=0 means all.")
     auction.add_argument("--output", help="Defaults to results/data_quality/process/auction_alignment_status.json.")
-    core.add_runtime_args(auction, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
+    add_runtime_args(auction, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event = sub.add_parser("event-flow", help="audit only event/flow raw data")
-    core.add_raw_arg(event)
+    add_raw_arg(event)
     event.add_argument("--start-date", default="20200101")
     event.add_argument("--end-date", default=cn_today())
     event.add_argument("--datasets", nargs="+", choices=EVENT_FLOW_DATASETS)
@@ -2638,15 +2644,15 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event.add_argument("--output", help=f"Defaults to {EVENT_FLOW_STATUS_PATH}.")
 
     macro = sub.add_parser("macro", help="audit macro, policy, and global-context raw data")
-    core.add_raw_arg(macro)
+    add_raw_arg(macro)
     macro.add_argument("--start-date", default="20100101")
     macro.add_argument("--end-date", default=cn_today())
     macro.add_argument("--datasets", nargs="+", choices=MACRO_DATASETS)
-    core.add_macro_filter_args(macro)
+    add_macro_filter_args(macro)
     macro.add_argument("--output", help=f"Defaults to {MACRO_CONTEXT_STATUS_PATH}.")
 
     text = sub.add_parser("text", help="audit only text-evidence raw data")
-    core.add_raw_arg(text)
+    add_raw_arg(text)
     text.add_argument("--start-date", dest="text_start_date", default="20100101")
     text.add_argument("--end-date", dest="text_end_date", default=cn_today())
     text.add_argument("--text-datasets", nargs="+", choices=TEXT_DATASETS, dest="text_datasets")
@@ -2656,16 +2662,16 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
 
 def add_board_parser(sub: argparse._SubParsersAction) -> None:
     board = sub.add_parser("board-trading", help="audit 打板专题 raw data")
-    core.add_raw_arg(board)
+    add_raw_arg(board)
     board.add_argument("--start-date", default="20200101")
     board.add_argument("--end-date", default=cn_today())
     board.add_argument("--datasets", nargs="+", choices=BOARD_TRADING_DATASETS)
-    core.add_board_filter_args(board)
+    add_board_filter_args(board)
     board.add_argument("--output", help=f"Defaults to {BOARD_TRADING_STATUS_PATH}.")
 
 def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision = sub.add_parser("revision-sentinel", help="sample TuShare source partitions and compare them with local raw data without overwriting raw files")
-    core.add_raw_arg(revision)
+    add_raw_arg(revision)
     revision.add_argument("--start-date", default="20200101")
     revision.add_argument("--end-date", default=cn_today())
     revision.add_argument(
@@ -2678,10 +2684,10 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision.add_argument("--sample-size", type=int, default=12, help="Deterministic sample size per dataset; <=0 checks all dates.")
     revision.add_argument("--seed", help="Deterministic sampling seed. Defaults to --end-date.")
     revision.add_argument("--page-limit", type=int, default=TRADE_DATE_PAGE_LIMIT)
-    revision.add_argument("--revision-ledger", default=core.REVISION_EVENTS_PATH)
+    revision.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     revision.add_argument("--output", default=REVISION_SUMMARY_PATH)
     revision.add_argument("--fail-on-revision", action="store_true", help="Return nonzero when source revisions are found.")
-    core.add_runtime_args(revision, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
+    add_runtime_args(revision, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
