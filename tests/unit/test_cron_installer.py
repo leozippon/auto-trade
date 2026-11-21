@@ -180,7 +180,11 @@ class CronInstallerTest(unittest.TestCase):
         """The block installs beside the others without touching them, its one job
         runs every 30 minutes under its own lock into its own log, every round it
         lists is a round file here (closed ones too: their experiments may still be
-        on the instance), and the job line hands all of them to one sync-rounds pass."""
+        on the instance), and the job line hands all of them to one sync-rounds pass.
+        A run that finds the lock held writes one timestamped line saying so, and
+        a pass that fails is never taken for one: on 2026-11-21 a hung pass held
+        the lock for 4 h 27 min while every later run was skipped without a word."""
+        import fcntl
         import subprocess
 
         template, begin, end = installer.BLOCKS["zgca"]
@@ -194,8 +198,10 @@ class CronInstallerTest(unittest.TestCase):
         jobs = [line for line in lines if line[:1] == "*" or line[:1].isdigit()]
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].split()[:5], ["*/30", "*", "*", "*", "*"])
-        self.assertIn("flock -n .runtime/zgca/sync_cron.lock", jobs[0])
+        self.assertIn("flock -n -E 75 .runtime/zgca/sync_cron.lock", jobs[0])
         self.assertTrue(jobs[0].endswith(" >> logs/zgca/sync_cron.log 2>&1"), jobs[0])
+        # cron reads a % in a job line as a newline.
+        self.assertNotIn("%", jobs[0])
         rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
         for round_file in rounds.split():
             self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
@@ -212,6 +218,21 @@ class CronInstallerTest(unittest.TestCase):
                     run = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
                     self.assertEqual(run.returncode, 1)
                     self.assertEqual((root / "logs/zgca/sync_cron.log").read_text(encoding="utf-8").splitlines()[-1], expected)
+            log = root / "logs/zgca/sync_cron.log"
+            self.assertNotIn("skipped", log.read_text(encoding="utf-8"))
+            # The previous run still holds the lock: nothing runs, one line says so,
+            # stamped as the pass stamps its summary line.
+            with (root / ".runtime/zgca/sync_cron.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                run = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(run.returncode, 0)
+            logged = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(logged[-2], "pass: ops/zgca/zgca.py sync-rounds first second")
+            self.assertRegex(
+                logged[-1],
+                r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d zgca sync skipped: "
+                r"the previous run still holds \.runtime/zgca/sync_cron\.lock$",
+            )
 
     def test_the_housekeeping_job_compresses_only_old_conversation_logs(self) -> None:
         """The weekly job line itself, run by bash in a stand-in repository: a

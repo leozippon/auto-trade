@@ -12,7 +12,8 @@
 # was refused is only tagged again, every run, until the images agree; a failure
 # is one line and the next experiment still goes ahead; a stopped or
 # unreachable instance is one line and the next run tries again. Every run ends
-# with one summary line, so `tail -1 logs/zgca/sync_cron.log` shows the state;
+# with one timestamped summary line, or the line below for a run that found the
+# lock held, so `tail -1 logs/zgca/sync_cron.log` and its time show the state;
 # it exits non-zero when something needs the operator. It opens no Paper account.
 
 SHELL=/bin/bash
@@ -27,5 +28,10 @@ ROUNDS=scripts/experiments/create_round_20261119.py
 
 # Every 30 minutes, all day: an experiment runs for hours and ends at no
 # particular hour. A copy of a 6-10 GB experiment takes about an hour through
-# the jump host; `flock -n` skips the runs that fall meanwhile.
-*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && flock -n .runtime/zgca/sync_cron.lock $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS >> logs/zgca/sync_cron.log 2>&1
+# the jump host; a run that falls meanwhile finds the lock held and writes one
+# line saying so (`flock -E 75` tells a held lock from a pass that failed): a
+# copy leaves one or two, more in a row mean the run holding the lock is stuck.
+# No time limit ends such a run: rsync copies an experiment's bulk (artifacts/)
+# before its hitl/, and every later pass refuses a copy cut short before
+# hitl/params.json arrived until its directory is removed by hand.
+*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && { flock -n -E 75 .runtime/zgca/sync_cron.lock $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS || { [ $? = 75 ] && echo "$(date -Iseconds) zgca sync skipped: the previous run still holds .runtime/zgca/sync_cron.lock"; }; } >> logs/zgca/sync_cron.log 2>&1
