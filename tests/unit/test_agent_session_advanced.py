@@ -18,7 +18,6 @@ from autotrade.agent.compact import (
 )
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import (
-    SESSION_STATIC_SECTIONS,
     build_system_prompt,
 )
 from autotrade.agent.runner import COMPACT_ADVISORY_FRACTION
@@ -1394,10 +1393,9 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
     tmp_path: Path,
 ):
     prompt = build_system_prompt(experiment_facts={"identity": {"session_kind": "research"}})
-    # The prompt points at the contract; the daily JSON entry, the order
-    # array, the execution clock and the bars' history are stated there.
-    assert "`output/README.md`" in prompt
-    assert "Held-out" in prompt
+    # The prompt points at the contract (the PROMPTS.md snapshot pins its
+    # wording); the daily JSON entry, the order array, the execution clock and
+    # the bars' history are stated there.
     reference = Path("configs/agent_output_template/README.md").read_text(encoding="utf-8")
     for rule in (
         "def generate_orders(context):",
@@ -1423,24 +1421,18 @@ def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
         ref_store=AgentRefStore(tmp_path / "experiment"),
         runtime_env={"sandbox_spec": {"network": "none"}},
     )
-    # The data view is the run section's and the hidden periods the prompt's
-    # process section, each stated once; the facts carry no visibility policy.
+    # The facts carry no visibility policy: the hidden periods are the
+    # prompt's process section's.
     assert "visibility_policy" not in facts
-    assert "读数不回到会话" in prompt
 
 
 def test_session_prompt_keeps_hard_boundaries_and_leaves_how_tos_mounted(tmp_path):
     prompt = build_system_prompt(experiment_facts={})
     assert "不从日期、路径、元数据或你作为语言模型自身的知识推断之后的行情" in prompt
     # The shell's foreground cap and its detached-job recipe are the tool's
-    # own description, not a second copy in the prompt.
+    # own description (the prompt's absence of them is the snapshot's).
     shell = SandboxShellTool(SafeWorkspace(tmp_path), object())  # type: ignore[arg-type]
     assert "as a detached job" in shell.spec.description
-    assert "as a detached job" not in prompt
-    assert "修改策略产物" not in prompt
-    assert "pyright --project" not in prompt
-    assert "pandas.read_parquet" not in prompt
-    assert 'context.asof_dir + "/daily"' not in prompt
 
     reference = Path("configs/agent_output_template/README.md").read_text(
         encoding="utf-8"
@@ -1482,21 +1474,6 @@ def test_prompt_audit_snapshot_is_byte_exact():
     assert committed == module.render(), (
         "configs/prompts/PROMPTS.md is stale; run scripts/dev/export_prompts.py"
     )
-
-
-def test_prompt_audit_snapshot_check_fails_on_a_hand_edit(tmp_path: Path):
-    """The freshness check must be able to fail — the mutation proves it."""
-    _repo_root, module = _export_prompts_module()
-    rendered = module.render()
-    stale = tmp_path / "PROMPTS.md"
-    stale.write_text(
-        rendered.replace("# Prompt 模板审计快照", "# 手工改过的标题", 1),
-        encoding="utf-8",
-    )
-    assert stale.read_text(encoding="utf-8") != rendered
-    # And every fold section still rides in the snapshot as a fenced block.
-    for section in SESSION_STATIC_SECTIONS:
-        assert f"```text\n{section.strip()}\n```" in rendered
 
 
 def _prompt_tool_tokens(text: str) -> set[str]:

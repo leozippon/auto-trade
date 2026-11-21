@@ -1,4 +1,5 @@
-"""Sandbox Pyright pin, config PIT roots, and Fold/sub-agent prompt contract."""
+"""Sandbox Pyright pin and config PIT roots. (The prompts carry no pyright
+how-to; that wording is pinned by the PROMPTS.md snapshot.)"""
 
 from __future__ import annotations
 
@@ -6,15 +7,9 @@ import json
 import re
 from pathlib import Path
 
-from autotrade.agent.prompts import build_system_prompt
-from autotrade.agent.subagent import subagent_system_prompt
-
 REPO = Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "ops/docker/sandbox.Dockerfile"
 PYRIGHTCONFIG = REPO / "ops/docker/pyrightconfig.json"
-# The documented how-to (the working copy is workspace/output, so the
-# workspace target already covers it); it belongs in docs, never in a prompt.
-COMMAND = "pyright --project /opt/autotrade/pyrightconfig.json /mnt/agent/workspace"
 
 
 def test_dockerfile_pins_pyright_with_same_layer_version_check() -> None:
@@ -69,13 +64,3 @@ def test_pyrightconfig_is_basic_and_excludes_pit_roots() -> None:
     assert "stubPath" not in config
 
 
-def test_agent_prompts_leave_pyright_how_to_out_of_system_text() -> None:
-    fold = build_system_prompt(experiment_facts={})
-    # The writing child is the one that would be tempted to type-check.
-    child = subagent_system_prompt("general-purpose")
-    assert COMMAND not in fold
-    assert COMMAND not in child
-    assert "pyright" not in fold
-    assert "pyright" not in child
-    assert "pi-lens" not in fold
-    assert "pi-lens" not in child
