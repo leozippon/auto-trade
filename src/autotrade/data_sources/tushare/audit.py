@@ -1836,6 +1836,7 @@ def audit_domain_keys(files: list[Path], key_columns: tuple[str, ...], blank_mod
     duplicate_key_rows = 0
     blank_key_fields: dict[str, int] = {}
     blank_available_at = 0
+    never_available_rows = 0
     unparseable_available_at_rows = 0
     missing_key_column_files: list[str] = []
     missing_available_at_files: list[str] = []
@@ -1860,6 +1861,7 @@ def audit_domain_keys(files: list[Path], key_columns: tuple[str, ...], blank_mod
         available = df["available_at"].astype(str).str.strip()
         if blank_mode == "available_at_total":
             blank_available_at += blank_count(df["available_at"])
+            never_available_rows += int(available.eq(core.NEVER_AVAILABLE_AT).sum())
         blank = available.eq("") | available.eq("nan") | available.eq("None")
         if blank_mode == "available_at_rows":
             blank_available_at += int(blank.sum())
@@ -1876,6 +1878,9 @@ def audit_domain_keys(files: list[Path], key_columns: tuple[str, ...], blank_mod
         details["blank_key_fields"] = blank_key_fields
     elif blank_mode == "available_at_total":
         details["blank_time_fields"] = blank_available_at
+        # Rows whose publication time is unknowable (a binding source time is
+        # missing): stamped beyond every decision, information only.
+        details["never_available_rows"] = never_available_rows
     else:
         details["blank_available_at_rows"] = blank_available_at
     details.update({

@@ -443,13 +443,13 @@
       "skip_if_already_ok": false
     },
     "manual_text_available_at_repair": {
-      "description": "Manual (not scheduled): re-derive available_at/available_at_rule of every stored anns_d (announcement-title) partition under the first-receipt rule, locally (no API calls). A partition whose stamp or rule label differs is written as a new file renamed over the old path, so published releases keep their hard-linked old files. Idempotent: a re-run rewrites nothing.",
+      "description": "Manual (not scheduled): re-derive available_at/available_at_rule of every stored partition of the text datasets in extra_args under the current rule, locally (no API calls). extra_args names the datasets whose rule last changed (irm_qa_sz: the reply's pub_time binds, and a row without one is never visible). A partition whose stamp or rule label differs is written as a new file renamed over the old path, so published releases keep their hard-linked old files. Idempotent: a re-run rewrites nothing.",
       "operation": "text_available_at_repair",
       "end_date_offset_days": 0,
       "end_date_mode": "sse_open_on_or_before",
       "extra_args": [
         "--datasets",
-        "anns_d"
+        "irm_qa_sz"
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": false

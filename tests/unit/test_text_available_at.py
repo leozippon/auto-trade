@@ -8,13 +8,20 @@ from unittest.mock import patch
 
 import pandas as pd
 
+from autotrade.data_sources.tushare import audit, download, versions
 from autotrade.data_sources.tushare import common as core
-from autotrade.data_sources.tushare import download, versions
 from autotrade.data_sources.tushare import io as tushare_io
+from autotrade.environment.data.snapshot import SnapshotBuilder, SnapshotConfig
+
+CN = "Asia/Shanghai"
 
 
 def anns_frame(rows):
     return pd.DataFrame(rows, columns=["ann_date", "ts_code", "name", "title", "url", "rec_time"])
+
+
+def irm_frame(rows):
+    return pd.DataFrame(rows, columns=["ts_code", "trade_date", "q", "a", "pub_time"])
 
 
 class TextAvailableAtPlausibilityTest(unittest.TestCase):
@@ -112,6 +119,75 @@ class TextAvailableAtPlausibilityTest(unittest.TestCase):
             self.assertEqual(len(list((Path(tmp) / "raw_versions").rglob("*-superseded.parquet"))), 1)
             again = core.repair_text_available_at(str(raw), ["anns_d"])
             self.assertEqual(again["files_rewritten"], 0)
+
+
+class InvestorQaAvailableAtTest(unittest.TestCase):
+    """Shenzhen Q&A rows hold the question (asked on trade_date) and its reply
+    (published at pub_time); Shanghai rows are dated by the reply and carry the
+    vendor's crawl time."""
+
+    def test_sz_reply_days_after_the_question_is_stamped_at_its_pub_time(self):
+        frame = irm_frame([
+            ("301002.SZ", "20250303", "q1", "a1", "2025-03-11 18:26:27"),
+            # A bare reply date is the end of that date.
+            ("000657.SZ", "20251107", "q2", "a2", "2026-01-05 00:00:00"),
+        ])
+        out = core.augment_text_frame(frame, core.TEXT_SPECS["irm_qa_sz"])
+        self.assertEqual(out["available_at"].tolist(), ["2025-03-11 18:26:27+08:00", "2026-01-05 23:59:59+08:00"])
+        self.assertEqual(out["available_at_rule"].tolist(), ["source:pub_time", "conservative_from:pub_time"])
+
+    def test_sz_row_without_a_reply_time_never_reaches_a_view(self):
+        frame = irm_frame([
+            ("301002.SZ", "20250303", "replied", "a", "2025-03-11 18:26:27"),
+            ("000001.SZ", "20250303", "unknown", "a", None),
+        ])
+        stamped = core.augment_text_frame(frame, core.TEXT_SPECS["irm_qa_sz"])
+        config = SnapshotConfig(
+            events_datasets=(), macro_datasets=(), fundamental_datasets=(),
+            text_datasets=("irm_qa_sz",), intraday_trade_days=1, include_industry=False,
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp) / "raw"
+            path = raw / "irm_qa_sz" / "date=20250303.parquet"
+            path.parent.mkdir(parents=True)
+            stamped.to_parquet(path, index=False)
+            builder = SnapshotBuilder(raw, Path(tmp) / "fund_events_missing")
+            titles = {}
+            for decision in ("2025-03-04 08:00", "2025-03-12 08:00", "2026-11-21 08:00"):
+                out_dir = Path(tmp) / decision[:10]
+                out_dir.mkdir()
+                index, _ = builder._build_text(
+                    config, pd.Timestamp(decision, tz=CN).to_pydatetime(), pd.Timestamp("2025-01-01", tz=CN), out_dir
+                )
+                titles[decision] = sorted(index["title"])
+            self.assertEqual(titles, {
+                "2025-03-04 08:00": [], "2025-03-12 08:00": ["replied"], "2026-11-21 08:00": ["replied"],
+            })
+            # The text audit counts the row as information, not as a blank or
+            # unparseable stamp.
+            keys = audit.audit_domain_keys([path], core.TEXT_SPECS["irm_qa_sz"].key_columns, "available_at_total", {str(path): 2})
+            self.assertEqual(
+                (keys["never_available_rows"], keys["blank_time_fields"], keys["unparseable_available_at_rows"]), (1, 0, 0)
+            )
+
+    def test_the_cap_and_the_date_fallback_hold_where_the_source_time_does_not_bind(self):
+        # The vendor crawled the 2023-24 Shanghai history on 2025-01-15.
+        sh = core.augment_text_frame(irm_frame([
+            ("600000.SH", "20230612", "q1", "a1", "2025-01-15 17:06:50"),
+            ("600000.SH", "20230612", "q2", "a2", None),
+        ]), core.TEXT_SPECS["irm_qa_sh"])
+        self.assertEqual(sh["available_at"].tolist(), ["2023-06-12 23:59:59+08:00"] * 2)
+        self.assertEqual(sh["available_at_rule"].tolist(), [
+            "conservative_from:trade_date:implausible_pub_time", "conservative_from:trade_date",
+        ])
+        anns = core.augment_text_frame(anns_frame([
+            ("20250303", "000001.SZ", "n", "t1", "u", "2025-03-11 18:26:27"),
+            ("20250303", "000001.SZ", "n", "t2", "u", ""),
+        ]), core.TEXT_SPECS["anns_d"])
+        self.assertEqual(anns["available_at"].tolist(), ["2025-03-03 23:59:59+08:00"] * 2)
+        self.assertEqual(anns["available_at_rule"].tolist(), [
+            "conservative_from:ann_date:implausible_rec_time", "conservative_from:ann_date",
+        ])
 
 
 class LakeReceiptStampTest(unittest.TestCase):

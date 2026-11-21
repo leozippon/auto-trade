@@ -8085,7 +8085,7 @@ class UuidCommitIdentityTest(unittest.TestCase):
         self.assertEqual(
             cron_update.build_job_commands(context),
             [["python", "scripts/data/tushare_download.py", "repair-text-available-at", "--raw-dir", "raw",
-              "--datasets", "anns_d"]],
+              "--datasets", "irm_qa_sz"]],
         )
         self.assertIn(job["operation"], cron_update.MUTATING_OPERATIONS)
 

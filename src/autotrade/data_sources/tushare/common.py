@@ -504,6 +504,10 @@ class DatasetSpec:
     # Fetched from the official service with OFFICIAL_TOKEN_ENV instead of the
     # relay (the relay's permission for it lapsed).
     official: bool = False
+    # time_column is when the row's whole text was published, at any lag after
+    # date_column: it binds without the plausibility cap, and a row without it
+    # is never visible (augment_text_frame).
+    source_time_binds: bool = False
     # ---- text and event families ----
     # The business key names one record, so duplicate keys in an answer are
     # artefacts and are dropped deterministically at ingest (versions.publish).
@@ -683,6 +687,9 @@ TEXT_SPECS = {
         time_column="create_time",
         date_column="report_date",
     ),
+    # Investor Q&A. SH: trade_date is the day the reply appeared and pub_time the
+    # vendor's crawl time, so the date rule holds. SZ: trade_date is the day the
+    # question was asked and pub_time when its reply was published, so it binds.
     "irm_qa_sh": DatasetSpec(
         api_name="irm_qa_sh",
         official=True,
@@ -702,6 +709,7 @@ TEXT_SPECS = {
         start_date="20220101",
         time_column="pub_time",
         date_column="trade_date",
+        source_time_binds=True,
     ),
     "news": DatasetSpec(
         api_name="news",
@@ -2504,9 +2512,14 @@ def safe_partition_value(value: str) -> str:
 # Nor is a time of exactly midnight one: it is a bare date (every 2015 anns_d
 # rec_time, most official-service rows since 2026-09-14). Such a row is stamped
 # from the lake's own first receipt when that lies in the same window, else
-# like a row without a source time (see augment_text_frame).
+# like a row without a source time (see augment_text_frame). A source time
+# that binds (DatasetSpec.source_time_binds) has no upper cap.
 TEXT_TIME_PLAUSIBLE_BEFORE_DAYS = 1.0
 TEXT_TIME_PLAUSIBLE_AFTER_DAYS = 3.0
+# The stamp of a row whose publication time is unknowable: no decision reaches
+# it, and it stays inside pandas' nanosecond range so every stamp parser and
+# the audit read it.
+NEVER_AVAILABLE_AT = "2200-01-01 00:00:00+08:00"
 
 
 def _landing_run(instant: pd.Series, spec: DatasetSpec) -> pd.Series:
@@ -2527,7 +2540,11 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec, first_seen: pd.Serie
     when ``first_seen`` (per row, when the lake first held the key; NaT where
     it keeps no such time) puts that in the same window, so a title the 23:15
     run lands reaches the next morning, and the views still hold it until the
-    instant itself. Every other row is stamped at the end of its date."""
+    instant itself. Every other row is stamped at the end of its date.
+
+    Where the source time binds (``spec.source_time_binds``) any lag after the
+    date is the publication time, a bare date is the end of that date, and a
+    row without a source time is stamped ``NEVER_AVAILABLE_AT``."""
     df = df.copy()
     if "available_at" not in df.columns:
         df["available_at"] = ""
@@ -2538,19 +2555,29 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec, first_seen: pd.Serie
     implausible = pd.Series(False, index=df.index)
     date_only = pd.Series(False, index=df.index)
     received = pd.Series(False, index=df.index)
+    has_source_time = pd.Series(False, index=df.index)
     if spec.time_column and spec.time_column in df.columns:
         source_time = df[spec.time_column].map(normalize_source_datetime)
         mask = source_time.ne("") & source_time.ne("nan") & source_time.ne("None")
+        has_source_time = mask
         if date_value is not None:
             base = pd.to_datetime(date_value, format="%Y%m%d", errors="coerce")
             parsed = pd.to_datetime(source_time.str.slice(0, 19), errors="coerce")
+            has_source_time = mask & parsed.notna()
             lag_days = (parsed - base).dt.total_seconds() / 86400.0
-            plausible = lag_days.between(-TEXT_TIME_PLAUSIBLE_BEFORE_DAYS, TEXT_TIME_PLAUSIBLE_AFTER_DAYS)
+            after_days = np.inf if spec.source_time_binds else TEXT_TIME_PLAUSIBLE_AFTER_DAYS
+            plausible = lag_days.between(-TEXT_TIME_PLAUSIBLE_BEFORE_DAYS, after_days)
             implausible = mask & base.notna() & ~plausible.fillna(False)
             mask = mask & (base.isna() | plausible.fillna(False))
             date_only = mask & base.notna() & parsed.eq(parsed.dt.normalize())
             mask = mask & ~date_only
-            if first_seen is not None and date_only.any():
+            if spec.source_time_binds:
+                # A bare publication date is the end of that date, not a first
+                # receipt: the lake can hold a key before its text is complete.
+                received = date_only
+                df.loc[received, "available_at"] = parsed[received].dt.strftime("%Y-%m-%d 23:59:59+08:00")
+                df.loc[received, "available_at_rule"] = f"conservative_from:{spec.time_column}"
+            elif first_seen is not None and date_only.any():
                 landed = _landing_run(first_seen, spec)
                 landed_lag = (landed.dt.tz_localize(None) - base).dt.total_seconds() / 86400.0
                 received = date_only & landed_lag.between(
@@ -2573,6 +2600,9 @@ def augment_text_frame(df: pd.DataFrame, spec: DatasetSpec, first_seen: pd.Serie
         df.loc[mask & date_only, "available_at_rule"] = (
             f"conservative_from:{spec.date_column}:date_only_{spec.time_column}"
         )
+    if spec.source_time_binds:
+        df.loc[~has_source_time, "available_at"] = NEVER_AVAILABLE_AT
+        df.loc[~has_source_time, "available_at_rule"] = f"never:missing_{spec.time_column}"
     return df
 
 def _rewrite_available_at(
