@@ -7343,11 +7343,13 @@ function actionCell(action) {
 }
 
 // The window each order is placed in comes worded from the server
-// (paper/orders.py window_text): the opening call auction 09:15–09:25 that
-// sets the open, the closing call auction 14:57–15:00 that sets the close, or
-// continuous trading at the order's minute. The page adds only a tint per
-// window, so a morning batch and an afternoon one never look alike.
-const ORDER_WINDOW_TINTS = { open_auction: "open", close_auction: "close", continuous: "intraday" };
+// (paper/orders.py window_text). The page adds only a tint per window, so a
+// morning batch and an afternoon one never look alike: the opening call
+// auction and the day limit orders entered with it (both 09:15–09:25) take
+// the morning's, the closing call auction (14:57–15:00) the afternoon's, and
+// orders worked through the day or placed at a minute of continuous trading
+// stay neutral.
+const ORDER_WINDOW_TINTS = { open_auction: "open", day_limit: "open", close_auction: "close" };
 
 function orderWindowLabel(row) {
   return (row && row.window_label) || "—";
