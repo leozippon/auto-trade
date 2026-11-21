@@ -21,6 +21,7 @@ from autotrade.environment.data.contracts import (
     DEFAULT_BENCHMARK_INDEX,
     benchmark_index_label,
 )
+from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
@@ -405,7 +406,7 @@ class AcceptanceRules:
             "graded_series": (
                 "every return statistic below is measured on the ACTIVE series: the node's "
                 "daily return after every cost minus the equal-weight mean of "
-                f"{verdict.BASELINE_DRAWS} random-name copies of its own filled trades (same "
+                f"{BASELINE_DRAWS} random-name copies of its own filled trades (same "
                 "entry and exit instants, money, Broker and costs; each name replaced by one "
                 "on the same side of benchmark_index membership that one board lot of that "
                 "money could buy; each copy read on the node's previous-day equity). Its "

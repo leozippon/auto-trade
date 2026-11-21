@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
     window_plain_excess,
@@ -67,7 +68,8 @@ def _analysis(*segments):
     names none gets a value leg of independent noise the book does not load
     on, and every segment a turnover leg of independent noise, so the factor
     fit is defined. Its random baseline is zero, so the active series is the
-    strategy's own (``_with_baselines`` sets another)."""
+    strategy's own (``_with_baselines`` sets another), and holds today's
+    ``BASELINE_DRAWS`` draws."""
 
     def legs(segment):
         days = segment[0]
@@ -88,6 +90,7 @@ def _analysis(*segments):
         "value_factor_daily": [[row[0], float(row[4])] for row in rows],
         "turnover_factor_daily": [[row[0], float(row[5])] for row in rows],
         "baseline_daily": [[row[0], 0.0] for row in rows],
+        "baseline": {"k": BASELINE_DRAWS},
     }
 
 
@@ -330,7 +333,7 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
         "forward_confidence": 0.8,
         "bootstrap_block_days": verdict.BOOTSTRAP_BLOCK_DAYS,
         "bootstrap_draws": verdict.BOOTSTRAP_DRAWS,
-        "baseline_draws": verdict.BASELINE_DRAWS,
+        "baseline_draws": BASELINE_DRAWS,
         "cost_stress_multiplier": 2.0,
     }
 
@@ -350,8 +353,30 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
     assert base["residual_reading"] == verdict.residual_reading(
         _with_baselines(analysis, np.zeros(len(FORWARD_DAYS))), start=FORWARD_START, end=FORWARD_END, alpha=0.05
     )
+
+
+def test_the_forward_slice_states_the_draws_its_replay_holds():
+    """A replay whose random baseline drew 20 copies, as every replay did
+    before ``BASELINE_DRAWS`` rose, is read today as 20 draws; a sidecar
+    that does not say how many it holds is refused, never credited with
+    today's count."""
+
+    rng = np.random.default_rng(43)
+    analysis = _analysis(_segment(FORWARD_DAYS, 0.10, rng))
+    assert BASELINE_DRAWS != 20
+    older = {**analysis, "baseline": {**analysis["baseline"], "k": 20}}
+    assert _forward(older)["parameters"]["baseline_draws"] == 20
+    unsaid = {key: value for key, value in analysis.items() if key != "baseline"}
+    with pytest.raises(ValueError, match="how many draws"):
+        _forward(unsaid)
+
+
 def _with_baselines(analysis, baselines):
+    """``analysis`` with the random baseline ``baselines``, and the draws
+    block a sidecar carries beside it where it has none yet."""
+
     return {
+        "baseline": {"k": BASELINE_DRAWS},
         **analysis,
         "baseline_daily": [
             [day, float(value)]

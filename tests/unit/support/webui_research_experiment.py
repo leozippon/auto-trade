@@ -27,6 +27,7 @@ from autotrade.environment.data.contracts import (
     benchmark_index_label,
 )
 from autotrade.environment.identity import AgentRefStore
+from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.style import STYLE_ARTIFACT_NAME, STYLE_SCHEMA_VERSION
 from autotrade.pipelines import validation_record
 from autotrade.pipelines.calendar import FULL_SPAN
@@ -187,6 +188,7 @@ def write_result(
             # Every replay carries its random baseline; a zero one leaves the
             # active figures the strategy's own (``_with_baselines`` sets others).
             "baseline_daily": [[day, 0.0] for day in dates],
+            "baseline": {"k": BASELINE_DRAWS},
             "value_factor_daily": [
                 [day, float(value)]
                 for day, value in zip(

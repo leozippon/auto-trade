@@ -21,6 +21,7 @@ import pytest
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.gpu import host_min_free_gpu_memory_mib
+from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.pipelines import verdict
 from autotrade.pipelines.calendar import ResearchGeometry
@@ -294,7 +295,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         # No validation block: the research years and the step length are the
         # geometry's, the validate allowance is budgets.validates_per_step.
         self.assertEqual(sorted(facts), ["forward", "graded_series", "registration", "significance"])
-        self.assertIn(str(verdict.BASELINE_DRAWS), facts["graded_series"])
+        self.assertIn(str(BASELINE_DRAWS), facts["graded_series"])
         self.assertIn("active.information_ratio", facts["graded_series"])
         statistic = facts["significance"]
         self.assertIn("intercept times sqrt(244) over the residual standard deviation", statistic["statistic"])

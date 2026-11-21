@@ -50,7 +50,6 @@ import numpy as np
 import pandas as pd
 
 from autotrade.common.records import finite_number
-from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
     active_analysis,
@@ -353,6 +352,18 @@ def _graded(analysis: Mapping[str, object]) -> Mapping[str, object]:
     if active is None:
         raise ValueError("the replay carries no random baseline, so its active series cannot be read")
     return active
+
+
+def _baseline_draws(analysis: Mapping[str, object]) -> int:
+    """How many random-name draws the random baseline of ``analysis`` averages:
+    what its replay drew (``baseline.k``), which for a replay made before
+    ``null_control.BASELINE_DRAWS`` last rose is fewer than today's count."""
+
+    block = analysis.get("baseline")
+    draws = block.get("k") if isinstance(block, Mapping) else None
+    if isinstance(draws, bool) or not isinstance(draws, int):
+        raise ValueError("the replay's random baseline does not say how many draws it holds")
+    return draws
 
 
 def graded_statistics(
@@ -853,7 +864,8 @@ def forward_slice(
     cost stress charges ``(cost_stress_multiplier − 1) × slippage_bps ×
     turnover × 1e−4``, annualised over the slice's days, against the plain
     excess (:func:`excess_at_cost_stress`). ``parameters`` states what the
-    readings were taken at.
+    readings were taken at, the random baseline's draws as the replay holds
+    them (:func:`_baseline_draws`).
     """
 
     start, end = _span(start, end)
@@ -910,7 +922,7 @@ def forward_slice(
             "forward_confidence": rules.forward_confidence,
             "bootstrap_block_days": BOOTSTRAP_BLOCK_DAYS,
             "bootstrap_draws": BOOTSTRAP_DRAWS,
-            "baseline_draws": BASELINE_DRAWS,
+            "baseline_draws": _baseline_draws(analysis),
             "cost_stress_multiplier": rules.cost_stress_multiplier,
         },
     }

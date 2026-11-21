@@ -9,6 +9,7 @@ from pathlib import Path
 
 import numpy as np
 
+from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.pipelines.calendar import ResearchGeometry
 from autotrade.pipelines.config import (
     EvaluationResult,
@@ -123,6 +124,7 @@ def _write_result(directory: Path, days: list[str], *, alpha: float, seed: int) 
                 # The random baseline: random names on the book's skeleton,
                 # riding the market as the book does.
                 "baseline_daily": [[day, float(0.9 * value)] for day, value in zip(days, benchmark)],
+                "baseline": {"k": BASELINE_DRAWS},
             }
         ),
         encoding="utf-8",
