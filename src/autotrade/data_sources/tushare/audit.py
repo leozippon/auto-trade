@@ -131,6 +131,32 @@ AUDIT_SUMMARY_RE = re.compile(
 )
 
 
+class Findings(list):
+    """The findings of one audit run; calling it records one."""
+
+    def __call__(self, severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
+        self.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+
+
+def write_audit(
+    label: str,
+    output: Path,
+    findings: Findings,
+    *,
+    report_type: str,
+    scope: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    **summary: object,
+) -> int:
+    """Write one audit's status report, print its summary line, and return
+    its exit code: 1 when it found an error."""
+    report = build_quality_report(report_type=report_type, scope=scope, findings=findings, metadata=metadata)
+    counts = report["finding_counts"]
+    write_quality_report(output, report)
+    print(audit_summary_line(label, report["status"], errors=counts["error"], warnings=counts["warning"], **summary, output=output))
+    return 1 if counts["error"] else 0
+
+
 def audit_summary_line(name: str, status: str, **fields: object) -> str:
     """Format one audit's final summary line. ``name`` must be a single token."""
 
@@ -419,10 +445,7 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
     output = (repo_root / args.output).resolve() if args.output else (repo_root / INTRADAY_MINUTES_STATUS_PATH).resolve()
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     dataset_dir = raw_dir / args.output_dataset
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     paths = {trade_date: stk_mins_by_date_path(raw_dir, args.output_dataset, trade_date) for trade_date in trade_dates}
     present = [trade_date for trade_date in trade_dates if paths[trade_date].exists()]
@@ -506,7 +529,10 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
         "allow_missing_codes": args.allow_missing_codes,
     })
 
-    report = build_quality_report(
+    return write_audit(
+        "intraday_by_date",
+        output,
+        add,
         report_type="intraday_minutes",
         scope={
             "data_root": str(raw_dir),
@@ -515,7 +541,6 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
             "datasets": [args.output_dataset],
             "expected_codes_source": args.expected_codes_source,
         },
-        findings=findings,
         metadata={
             "unit_rules": {
                 args.output_dataset: {
@@ -527,11 +552,6 @@ def audit_intraday_by_date(args: argparse.Namespace) -> int:
             },
         },
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("intraday_by_date", status, errors=counts["error"], warnings=counts["warning"], output=output))
-    return 1 if counts["error"] else 0
 
 def numeric_ratio(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
     left = pd.to_numeric(numerator, errors="coerce")
@@ -562,10 +582,7 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
     trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
     if args.max_trade_dates > 0:
         trade_dates = trade_dates[-args.max_trade_dates :]
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
     correction = AuctionCorrectionConfig()
@@ -635,7 +652,10 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         "expected_ratios": {"vol": "minute shares / daily hands ~= 100", "amount": "minute CNY / daily thousand CNY ~= 1000"},
     })
 
-    report = build_quality_report(
+    return write_audit(
+        "auction_alignment",
+        output,
+        add,
         report_type="auction_alignment",
         scope={
             "data_root": str(raw_dir),
@@ -645,15 +665,8 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
             "trade_dates_checked": trade_dates,
             "output_dataset": args.output_dataset,
         },
-        findings=findings,
-        metadata={
-        },
+        metadata={},
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("auction_alignment", status, errors=counts["error"], warnings=counts["warning"], output=output))
-    return 1 if counts["error"] else 0
 
 def expected_stk_mins_paths(raw_dir: Path, args: argparse.Namespace) -> set[Path]:
     universe_args = argparse.Namespace(codes=getattr(args, "intraday_codes", None), max_codes=getattr(args, "intraday_max_codes", None))
@@ -1931,15 +1944,15 @@ def audit_text_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
     output = (repo_root / (args.output or TEXT_EVIDENCE_STATUS_PATH)).resolve()
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     datasets = selected_text_datasets(getattr(args, "text_datasets", None))
     audit_integrated_filesystem(raw_dir, datasets, add)
     audit_text_completeness(raw_dir, args, add)
-    report = build_quality_report(
+    return write_audit(
+        "text",
+        output,
+        add,
         report_type="text_evidence",
         scope={
             "data_root": str(raw_dir),
@@ -1947,7 +1960,6 @@ def audit_text_only(args: argparse.Namespace) -> int:
             "end_date": args.text_end_date,
             "datasets": datasets,
         },
-        findings=findings,
         metadata={
             "doc_refs": {
                 dataset: INTEGRATED_DOC_REFS[dataset]
@@ -1955,11 +1967,6 @@ def audit_text_only(args: argparse.Namespace) -> int:
             },
         },
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("text", status, errors=counts["error"], warnings=counts["warning"], output=output))
-    return 1 if counts["error"] else 0
 
 def selected_audit_macro_datasets(args: argparse.Namespace) -> list[str]:
     return select_datasets(getattr(args, "datasets", None), default=MACRO_DATASETS, allowed=MACRO_SPECS, label="macro/global")
@@ -2051,16 +2058,16 @@ def audit_macro_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
     output = (repo_root / (args.output or MACRO_CONTEXT_STATUS_PATH)).resolve()
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     datasets = selected_audit_macro_datasets(args)
     audit_integrated_filesystem(raw_dir, datasets, add)
     audit_macro_completeness(raw_dir, args, add)
     unresolved_columns = audit_snapshot_unit_coverage(raw_dir, "macro.parquet", add)
-    report = build_quality_report(
+    return write_audit(
+        "macro",
+        output,
+        add,
         report_type="macro_context",
         scope={
             "data_root": str(raw_dir),
@@ -2073,7 +2080,6 @@ def audit_macro_only(args: argparse.Namespace) -> int:
             "eco_currency": selected_eco_filter_values(args, "eco_currency"),
             "eco_event": selected_eco_filter_values(args, "eco_event"),
         },
-        findings=findings,
         metadata={
             "unit_rules": macro_unit_rules(),
             "doc_refs": {
@@ -2081,12 +2087,8 @@ def audit_macro_only(args: argparse.Namespace) -> int:
                 for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
             },
         },
+        unresolved_columns=unresolved_columns,
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("macro", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
-    return 1 if counts["error"] else 0
 
 def expected_event_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str) -> set[Path]:
     if spec.strategy == FetchStrategy.TRADE_DATE:
@@ -2322,10 +2324,7 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
     output = (repo_root / (args.output or EVENT_FLOW_STATUS_PATH)).resolve()
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     datasets = selected_event_flow_datasets(args)
     filesystem_datasets = [dataset for dataset in datasets if dataset != "share_float" or not share_float_complete_union_exists(raw_dir)]
@@ -2393,7 +2392,10 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
     audit_full_market_coverage(raw_dir, datasets, add)
     unresolved_columns = audit_snapshot_unit_coverage(raw_dir, "events.parquet", add)
 
-    report = build_quality_report(
+    return write_audit(
+        "event_flow",
+        output,
+        add,
         report_type="event_flow",
         scope={
             "data_root": str(raw_dir),
@@ -2401,7 +2403,6 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
             "end_date": args.end_date,
             "datasets": datasets,
         },
-        findings=findings,
         metadata={
             "unit_rules": event_unit_rules(),
             "pit_rules": declared_pit_rules(EVENT_FLOW_SPECS),
@@ -2410,12 +2411,8 @@ def audit_event_flow_only(args: argparse.Namespace) -> int:
                 for dataset in sorted(set(datasets) & set(INTEGRATED_DOC_REFS))
             },
         },
+        unresolved_columns=unresolved_columns,
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("event_flow", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
-    return 1 if counts["error"] else 0
 
 def expected_board_paths(raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, args: argparse.Namespace) -> set[Path]:
     start = max(start_date, spec.start_date)
@@ -2451,10 +2448,7 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
     output = (repo_root / (args.output or BOARD_TRADING_STATUS_PATH)).resolve()
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     datasets = selected_board_trading_datasets(args)
     audit_integrated_filesystem(raw_dir, datasets, add)
@@ -2476,7 +2470,10 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
         expected = expected_board_paths(raw_dir, spec, args.start_date, args.end_date, args)
         audit_board_dataset(raw_dir, spec, expected, add)
 
-    report = build_quality_report(
+    return write_audit(
+        "board_trading",
+        output,
+        add,
         report_type="board_trading",
         scope={
             "data_root": str(raw_dir),
@@ -2484,7 +2481,6 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
             "end_date": args.end_date,
             "datasets": datasets,
         },
-        findings=findings,
         metadata={
             "unit_rules": board_unit_rules(),
             "pit_rules": declared_pit_rules(BOARD_TRADING_SPECS),
@@ -2494,11 +2490,6 @@ def audit_board_trading_only(args: argparse.Namespace) -> int:
             },
         },
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("board_trading", status, errors=counts["error"], warnings=counts["warning"], output=output))
-    return 1 if counts["error"] else 0
 
 def audit_daily_direct(raw_dir: Path, args: argparse.Namespace, add) -> set[str]:
     try:
@@ -2544,10 +2535,7 @@ def audit_core_market(args: argparse.Namespace) -> int:
     raw_dir = (repo_root / args.raw_dir).resolve()
     args.end_date = resolve_audit_end_date(raw_dir, args.end_date)
     output = (repo_root / (args.output or CORE_MARKET_STATUS_PATH)).resolve()
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     daily_datasets = selected_daily_datasets(args, default=DAILY_REQUIRED_DATASETS)
     datasets = REFERENCE_DATASETS + daily_datasets
@@ -2571,7 +2559,10 @@ def audit_core_market(args: argparse.Namespace) -> int:
     audit_stock_universe_semantics(raw_dir, all_codes, add)
     audit_pit_availability(raw_dir, add)
 
-    report = build_quality_report(
+    return write_audit(
+        "core_market",
+        output,
+        add,
         report_type="core_market",
         scope={
             "data_root": str(raw_dir),
@@ -2579,7 +2570,6 @@ def audit_core_market(args: argparse.Namespace) -> int:
             "end_date": args.end_date,
             "datasets": datasets,
         },
-        findings=findings,
         metadata={
             "unit_rules": core_market_unit_rules(),
             "doc_refs": {
@@ -2588,11 +2578,6 @@ def audit_core_market(args: argparse.Namespace) -> int:
             },
         },
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("core_market", status, errors=counts["error"], warnings=counts["warning"], output=output))
-    return 1 if counts["error"] else 0
 
 
 def audit_fundamental_raw(args: argparse.Namespace) -> int:
@@ -2603,10 +2588,7 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
     raw_dir = (repo_root / args.raw_dir).resolve()
     args.end_date = resolve_audit_end_date(raw_dir, args.end_date)
     output = (repo_root / (args.output or FUNDAMENTAL_RAW_STATUS_PATH)).resolve()
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     datasets = selected_fundamental_datasets(getattr(args, "fundamental_datasets", None))
     audit_integrated_filesystem(raw_dir, datasets, add)
@@ -2614,7 +2596,10 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
     audit_fundamental_unit_and_pit_semantics(raw_dir, add)
     unresolved_columns = audit_snapshot_unit_coverage(raw_dir, "fundamentals.parquet", add)
 
-    report = build_quality_report(
+    return write_audit(
+        "fundamental_raw",
+        output,
+        add,
         report_type="fundamental_raw",
         scope={
             "data_root": str(raw_dir),
@@ -2622,7 +2607,6 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
             "end_date": args.end_date,
             "datasets": datasets,
         },
-        findings=findings,
         metadata={
             "unit_rules": fundamental_unit_rules(),
             "doc_refs": {
@@ -2636,12 +2620,8 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
                 },
             },
         },
+        unresolved_columns=unresolved_columns,
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("fundamental_raw", status, errors=counts["error"], warnings=counts["warning"], unresolved_columns=unresolved_columns, output=output))
-    return 1 if counts["error"] else 0
 
 def audit_intraday_only(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -2649,17 +2629,17 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
     if getattr(args, "intraday_end_date", None) is None:
         args.intraday_end_date = cn_today()
     output = (repo_root / (args.output or INTRADAY_MINUTES_STATUS_PATH)).resolve()
-    findings: list[dict[str, Any]] = []
-
-    def add(severity: str, check: str, message: str, details: dict[str, Any] | None = None) -> None:
-        findings.append({"severity": severity, "check": check, "message": message, "details": details or {}})
+    add = Findings()
 
     intraday_datasets = selected_intraday_datasets(getattr(args, "intraday_datasets", None))
     audit_integrated_filesystem(raw_dir, intraday_datasets, add)
     if STK_MINS_DATASET in intraday_datasets:
         audit_stk_mins_completeness(raw_dir, args, add)
 
-    report = build_quality_report(
+    return write_audit(
+        "intraday",
+        output,
+        add,
         report_type="intraday_minutes",
         scope={
             "data_root": str(raw_dir),
@@ -2669,7 +2649,6 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
             "intraday_codes": getattr(args, "intraday_codes", None),
             "intraday_max_codes": getattr(args, "intraday_max_codes", None),
         },
-        findings=findings,
         metadata={
             "unit_rules": {
                 STK_MINS_DATASET: {
@@ -2681,11 +2660,6 @@ def audit_intraday_only(args: argparse.Namespace) -> int:
             "doc_refs": {STK_MINS_DATASET: INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
         },
     )
-    counts = report["finding_counts"]
-    status = report["status"]
-    write_quality_report(output, report)
-    print(audit_summary_line("intraday", status, errors=counts["error"], warnings=counts["warning"], output=output))
-    return 1 if counts["error"] else 0
 
 
 def add_core_market_parser(sub: argparse._SubParsersAction) -> None:
