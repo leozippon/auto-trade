@@ -1,0 +1,35 @@
+[
+  {
+    "slug": "timesfm",
+    "title": "A decoder-only foundation model for time-series forecasting",
+    "venue": "ICML 2024",
+    "paper_url": "https://cdn.jsdelivr.net/gh/mlresearch/v235@a6e7a82d46bf2f2e91bbb1f611453b53041007ef/assets/das24c/das24c.pdf",
+    "arxiv": "2310.10688v4",
+    "repo": "https://github.com/google-research/timesfm",
+    "commit": "918df02c9d366b2145bc5876135fa2131d3ed2a6",
+    "licence": "Apache-2.0",
+    "data_end": null,
+    "strip": [
+      "*.png",
+      "*.gif",
+      "*/output",
+      ".github",
+      "AGENTS.md",
+      "timesfm-forecasting/SKILL.md",
+      "timesfm-forecasting/scripts",
+      "timesfm-forecasting/examples/global-temperature",
+      "timesfm-forecasting/examples/anomaly-detection",
+      "src/timesfm3",
+      "timesfm3-usage",
+      "tests/test_forecaster_*",
+      "tests/test_cpm_anchor_selection.py",
+      "tests/test_timesfm3_*",
+      "v1/poetry.lock"
+    ],
+    "dataset": [
+      "https://cdn.jsdelivr.net/gh/zhouhaoyi/ETDataset@1d16c8f4f943005d613b5bc962e9eeb06058cf07/ETT-small/ETTh1.csv",
+      "https://cdn.jsdelivr.net/gh/zhouhaoyi/ETDataset@1d16c8f4f943005d613b5bc962e9eeb06058cf07/ETT-small/ETTh2.csv",
+      "https://cdn.jsdelivr.net/gh/zhouhaoyi/ETDataset@1d16c8f4f943005d613b5bc962e9eeb06058cf07/LICENSE"
+    ]
+  }
+]
