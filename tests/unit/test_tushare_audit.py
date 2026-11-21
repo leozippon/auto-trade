@@ -616,22 +616,6 @@ class AuditTest(LakeTestCase):
         self.assertEqual(severity, "warning")
         self.assertEqual(details["stock_basic_codes_without_namechange"], 10)
 
-    def test_ths_member_coverage_error_on_missing_catalog_code(self):
-        (self.raw_dir / "ths_index").mkdir(parents=True, exist_ok=True)
-        (self.raw_dir / "ths_member").mkdir(parents=True, exist_ok=True)
-        pd.DataFrame({
-            "ts_code": ["885001.TI", "885002.TI", "700900.TI"],
-            "name": ["a", "b", "c"], "type": ["N", "N", "S"],
-        }).to_parquet(self.raw_dir / "ths_index" / "catalog.parquet", index=False)
-        pd.DataFrame({"ts_code": ["885001.TI"], "con_code": ["000001.SZ"], "con_name": ["x"]}).to_parquet(
-            self.raw_dir / "ths_member" / "ts_code=885001.TI.parquet", index=False
-        )
-        findings: list[tuple[str, str, str, dict]] = []
-        audit.audit_ths_membership(self.raw_dir, lambda *f: findings.append(f))
-        severity, _, _, details = findings[0]
-        self.assertEqual(severity, "error")
-        self.assertEqual(details["missing_sample"], ["885002.TI"])  # type S intentionally not expected
-
     def test_expected_macro_paths_cover_new_strategies(self):
         import argparse
 
@@ -974,16 +958,10 @@ class AuditTest(LakeTestCase):
 
         audit.audit_pit_availability(self.raw_dir, add)
         audit.audit_fundamental_unit_and_pit_semantics(self.raw_dir, add)
-        company = self.raw_dir / "stock_company"
-        company.mkdir(parents=True, exist_ok=True)
-        pd.DataFrame([{"ts_code": "000001.SZ", "exchange": "SZSE", "com_name": "平安银行"}]).to_parquet(company / "exchange=SZSE.parquet", index=False)
-        stock_basic = pd.DataFrame([{"ts_code": "000001.SZ"}, {"ts_code": "000002.SZ"}])
-        audit.audit_stock_company(self.raw_dir, stock_basic, add)
 
         by_check = {item["check"]: item["severity"] for item in findings}
         self.assertEqual(by_check["pit_available_at"], "info")
         self.assertEqual(by_check["fundamental_unit_and_pit_semantics"], "info")
-        self.assertEqual(by_check["stock_company_vs_stock_basic"], "info")
 
     def test_latest_parquet_schema_reads_the_newest_partition(self):
         dataset_dir = self.raw_dir / "daily"

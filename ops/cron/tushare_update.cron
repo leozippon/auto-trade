@@ -124,7 +124,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 45 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_disclosure_full
 
 # Weekly deep sweeps (Saturday, market closed; end date resolves to Friday):
-# slow-moving per-code reference loops and the 90-day fundamental/dividend
+# the slow per-code namechange loop and the 90-day fundamental/dividend
 # correction window, moved off the nightly critical path.
 35 12 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_reference_deep
 

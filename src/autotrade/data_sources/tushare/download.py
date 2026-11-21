@@ -202,22 +202,6 @@ def download_reference(args: argparse.Namespace) -> int:
             ledger=revision_ledger,
         )
 
-    company_fields = "ts_code,com_name,com_id,exchange,chairman,manager,secretary,reg_capital,setup_date,province,city,introduction"
-    for exchange in ("SSE", "SZSE", "BSE"):
-        path = raw_dir / "stock_company" / f"exchange={exchange}.parquet"
-        if path.exists() and not should_force("stock_company"):
-            continue
-        params = {"exchange": exchange}
-        result, _pages = query_paged(client, "stock_company", params, company_fields, REFERENCE_PAGE_LIMIT)
-        write_reference_query_result(
-            path,
-            result,
-            api_name="stock_company",
-            params=params,
-            required_nonempty=True,
-            ledger=revision_ledger,
-        )
-
     open_dates = download_trade_cal(client, raw_dir, args.start_date, trade_cal_end_date, should_force("trade_cal"), ledger=revision_ledger)
     open_dates = [trade_date for trade_date in open_dates if trade_date <= args.end_date]
     if not args.skip_bak_basic:
@@ -233,7 +217,6 @@ def download_reference(args: argparse.Namespace) -> int:
     classify = download_index_classify(client, raw_dir, should_force("index_classify"), ledger=revision_ledger)
     download_index_member_all(client, raw_dir, classify["SW2021"], should_force("index_member_all"), ledger=revision_ledger)
     download_index_member_history(client, raw_dir, classify["SW2014"], should_force("index_member"), ledger=revision_ledger)
-    download_ths_catalog(client, raw_dir, should_force("ths_index"), ledger=revision_ledger)
     download_index_reference(client, raw_dir, should_force("index_basic"), ledger=revision_ledger)
     download_index_weight(
         client,
@@ -380,27 +363,6 @@ def download_index_member_history(
             required_nonempty=True,
             ledger=ledger,
         )
-
-def download_ths_catalog(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> None:
-    """THS concept/industry index catalog + per-index membership."""
-    path = raw_dir / "ths_index" / "catalog.parquet"
-    fields = "ts_code,name,count,exchange,list_date,type"
-    if not path.exists() or force:
-        result, _pages = query_paged(client, "ths_index", {"exchange": "A"}, fields, REFERENCE_PAGE_LIMIT)
-        write_reference_query_result(path, result, api_name="ths_index", params={"exchange": "A"}, required_nonempty=True, ledger=ledger)
-    catalog = pd.read_parquet(path)
-    member_fields = "ts_code,con_code,con_name"
-    # N = concept, I = industry; other types (S regional etc.) are noise for us.
-    codes = catalog.loc[catalog["type"].astype(str).isin(["N", "I"]), "ts_code"].dropna().astype(str)
-    for code in sorted(codes):
-        member_path = raw_dir / "ths_member" / f"ts_code={code}.parquet"
-        if member_path.exists() and not force:
-            continue
-        result = client.query("ths_member", {"ts_code": code}, member_fields)
-        write_reference_query_result(
-            member_path, result, api_name="ths_member", params={"ts_code": code}, required_nonempty=False, ledger=ledger
-        )
-
 
 def download_index_reference(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> None:
     """Index metadata catalog. Must page: the unpaged call silently truncated
@@ -2057,7 +2019,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         "--refresh-reference-datasets",
         nargs="+",
         choices=REFERENCE_DATASETS,
-        default=["stock_basic", "stock_company", "namechange", "index_classify", "index_member_all"],
+        default=["stock_basic", "namechange", "index_classify", "index_member_all"],
         help="Reference datasets to force-refresh during daily update; heavier datasets should be explicit.",
     )
     parser.add_argument(

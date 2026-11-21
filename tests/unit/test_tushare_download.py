@@ -87,8 +87,6 @@ class ReferenceClient:
         rows = []
         if api_name == "stock_basic" and params.get("list_status") == "L":
             rows = [["000001.SZ" if field == "ts_code" else params.get("list_status", "") if field == "list_status" else "" for field in result_fields]]
-        elif api_name == "stock_company":
-            rows = [["000001.SZ" if field == "ts_code" else params.get("exchange", "") if field == "exchange" else "" for field in result_fields]]
         elif api_name == "namechange":
             rows = [[params.get("ts_code", ""), "sample", "20200101", "", "20200101", "name"]]
         elif api_name == "index_classify":
@@ -97,10 +95,6 @@ class ReferenceClient:
             rows = [["801010.SI" if field == "l1_code" else "000001.SZ" if field == "ts_code" else "" for field in result_fields]]
         elif api_name == "index_member":
             rows = [[params.get("index_code", "") if field == "index_code" else "000001.SZ" if field == "con_code" else "20111010" if field == "in_date" else "N" if field == "is_new" else "" for field in result_fields]]
-        elif api_name == "ths_index":
-            rows = [["885001.TI" if field == "ts_code" else "N" if field == "type" else "sample" for field in result_fields]]
-        elif api_name == "ths_member":
-            rows = [[params.get("ts_code", "") if field == "ts_code" else "000001.SZ" if field == "con_code" else "" for field in result_fields]]
         elif api_name == "index_basic":
             rows = [["000300.SH" if field == "ts_code" else "sample" for field in result_fields]]
         elif api_name == "index_weight":
@@ -822,10 +816,6 @@ class DownloadTest(LakeTestCase):
             path = self.raw_dir / "stock_basic" / f"list_status={status}.parquet"
             path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame([{"ts_code": "999999.SZ", "list_status": status}]).to_parquet(path, index=False)
-        for exchange in ("SSE", "SZSE", "BSE"):
-            path = self.raw_dir / "stock_company" / f"exchange={exchange}.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame([{"ts_code": "999999.SZ", "exchange": exchange}]).to_parquet(path, index=False)
         namechange = self.raw_dir / "namechange" / "namechange.parquet"
         namechange.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"ts_code": "999999.SZ", "name": "old"}]).to_parquet(namechange, index=False)
@@ -843,7 +833,7 @@ class DownloadTest(LakeTestCase):
             bak_start_date="20200102",
             skip_bak_basic=True,
             force=False,
-            refresh_reference_datasets=["stock_basic", "stock_company", "namechange", "index_classify", "index_member_all"],
+            refresh_reference_datasets=["stock_basic", "namechange", "index_classify", "index_member_all"],
             trade_cal_end_date=None,
             min_interval_seconds=0,
             timeout_seconds=1,
@@ -856,7 +846,6 @@ class DownloadTest(LakeTestCase):
 
         called_apis = [api_name for api_name, _ in client.calls]
         self.assertEqual(called_apis.count("stock_basic"), 3)
-        self.assertEqual(called_apis.count("stock_company"), 3)
         self.assertIn("namechange", called_apis)
         self.assertIn("index_classify", called_apis)
         self.assertIn("index_member_all", called_apis)
@@ -870,8 +859,10 @@ class DownloadTest(LakeTestCase):
         self.assertEqual(member_is_new, {"Y", "N"})
         self.assertTrue((self.raw_dir / "index_member" / "l1_code=801010.SI.parquet").exists())
         # New reference statics download on first run (files absent).
-        for api in ("ths_index", "ths_member", "index_basic", "index_weight"):
+        for api in ("index_basic", "index_weight"):
             self.assertIn(api, called_apis)
+        # The tables retired on 2026-11-21 are never requested.
+        self.assertFalse({"stock_company", "ths_index", "ths_member"} & set(called_apis))
 
         # SW2014 membership is frozen history: a second run without force must
         # not re-request it while the classify refresh still runs.
@@ -880,15 +871,15 @@ class DownloadTest(LakeTestCase):
             self.assertEqual(download.download_reference(args), 0)
         self.assertNotIn("index_member", [api for api, _ in client.calls])
 
-    def test_reference_refresh_does_not_overwrite_existing_stock_company_on_empty_response(self):
+    def test_reference_refresh_does_not_overwrite_existing_index_classify_on_empty_response(self):
         self._write_trade_cal("20200102")
         for status in ("L", "D", "P"):
             stock_path = self.raw_dir / "stock_basic" / f"list_status={status}.parquet"
             stock_path.parent.mkdir(parents=True, exist_ok=True)
             pd.DataFrame([{"ts_code": "000001.SZ", "list_status": status}]).to_parquet(stock_path, index=False)
-        path = self.raw_dir / "stock_company" / "exchange=SSE.parquet"
+        path = self.raw_dir / "index_classify" / "src=SW2014.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
-        original = pd.DataFrame([{"ts_code": "000001.SH", "exchange": "SSE", "com_name": "old"}])
+        original = pd.DataFrame([{"index_code": "801010.SI", "level": "L1", "src": "SW2014"}])
         original.to_parquet(path, index=False)
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
@@ -897,7 +888,7 @@ class DownloadTest(LakeTestCase):
             bak_start_date="20200102",
             skip_bak_basic=True,
             force=False,
-            refresh_reference_datasets=["stock_company"],
+            refresh_reference_datasets=["index_classify"],
             trade_cal_end_date=None,
             min_interval_seconds=0,
             timeout_seconds=1,
@@ -905,7 +896,7 @@ class DownloadTest(LakeTestCase):
         )
 
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyClient()):
-            with self.assertRaisesRegex(RuntimeError, "required reference partition"):
+            with self.assertRaisesRegex(RuntimeError, "index_classify params=.* required reference partition"):
                 download.download_reference(args)
         self.assertTrue(pd.read_parquet(path).equals(original))
 
@@ -927,7 +918,7 @@ class DownloadTest(LakeTestCase):
         with self.assertRaisesRegex(RuntimeError, "zero rows for required reference partition"):
             download.download_index_member_all(EmptyClient(), self.raw_dir, classify_missing, True, ledger=None)
 
-    def test_update_parser_force_refreshes_stock_company_by_default(self):
+    def test_update_parser_force_refreshes_the_cheap_reference_tables_by_default(self):
         argv = [
             "download.py",
             "update",
@@ -939,11 +930,7 @@ class DownloadTest(LakeTestCase):
         with patch.object(sys, "argv", argv):
             args = download.parse_args()
 
-        self.assertIn("stock_basic", args.refresh_reference_datasets)
-        self.assertIn("stock_company", args.refresh_reference_datasets)
-        self.assertIn("namechange", args.refresh_reference_datasets)
-        self.assertIn("index_classify", args.refresh_reference_datasets)
-        self.assertIn("index_member_all", args.refresh_reference_datasets)
+        self.assertEqual(args.refresh_reference_datasets, ["stock_basic", "namechange", "index_classify", "index_member_all"])
         self.assertEqual(args.refresh_daily_datasets, [])
         self.assertEqual(args.macro_start_date, "20200101")
 

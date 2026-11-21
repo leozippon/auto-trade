@@ -1048,36 +1048,6 @@ def audit_stock_basic(raw_dir: Path, add) -> pd.DataFrame:
     add("error" if has_error else "info", "stock_basic", "stock_basic key and required-field checks", details)
     return df
 
-def audit_stock_company(raw_dir: Path, stock_basic: pd.DataFrame, add) -> None:
-    df = read_many(sorted((raw_dir / "stock_company").glob("exchange=*.parquet")))
-    if df.empty:
-        add("warning", "stock_company", "stock_company is empty or missing")
-        return
-    # One file per exchange; a missing slice silently shrinks the union.
-    missing_slices = sorted(
-        exchange for exchange in ("SSE", "SZSE", "BSE")
-        if not (raw_dir / "stock_company" / f"exchange={exchange}.parquet").exists()
-    )
-    details = {
-        "rows": len(df), "unique_ts_code": int(df["ts_code"].nunique()),
-        "duplicate_ts_code_rows": int(df.duplicated(["ts_code"]).sum()),
-        "blank_ts_code": blank_count(df["ts_code"]), "blank_com_name": blank_count(df["com_name"]),
-        "missing_exchange_slices": missing_slices,
-    }
-    add("warning" if details["blank_com_name"] or missing_slices else "info", "stock_company", "stock_company key and name checks", details)
-    if not stock_basic.empty:
-        basic_codes = set(stock_basic["ts_code"].dropna().astype(str))
-        company_codes = set(df["ts_code"].dropna().astype(str))
-        # Structural coverage difference (company table lags/leads by design);
-        # the anomaly judgment lives in stock_universe_semantics. Info keeps a
-        # healthy day at status ok.
-        add("info", "stock_company_vs_stock_basic", "stock_company and stock_basic coverage differs", {
-            "stock_basic_missing_in_company": len(basic_codes - company_codes),
-            "stock_company_missing_in_basic": len(company_codes - basic_codes),
-            "stock_basic_missing_sample": sorted(basic_codes - company_codes)[:20],
-            "stock_company_missing_sample": sorted(company_codes - basic_codes)[:20],
-        })
-
 def audit_trade_cal(raw_dir: Path, add) -> set[str]:
     calendars: dict[str, pd.DataFrame] = {}
     for exchange in ("SSE", "SZSE", "BSE"):
@@ -1149,28 +1119,6 @@ def audit_namechange(raw_dir: Path, stock_basic: pd.DataFrame, add) -> None:
     has_error = details["blank_ts_code"] or details["duplicate_full_rows"]
     has_warning = bool(details.get("missing_ratio", 0.0) > 0.01)
     add("error" if has_error else "warning" if has_warning else "info", "namechange", "final namechange table checks", details)
-
-def audit_ths_membership(raw_dir: Path, add) -> None:
-    catalog_path = raw_dir / "ths_index" / "catalog.parquet"
-    if not catalog_path.exists():
-        add("error", "ths_member_coverage", "ths_index catalog is missing", {})
-        return
-    catalog = pd.read_parquet(catalog_path)
-    # The downloader fetches membership for concept (N) and industry (I)
-    # indices only; other types are intentionally skipped, so the coverage
-    # expectation must use the same filter.
-    expected = set(catalog.loc[catalog["type"].astype(str).isin(["N", "I"]), "ts_code"].dropna().astype(str))
-    member_files = {partition_value(path) for path in (raw_dir / "ths_member").glob("ts_code=*.parquet")}
-    missing = sorted(expected - member_files)
-    stale = sorted(member_files - expected)
-    add("error" if missing else "info", "ths_member_coverage", "ths_member files cover the N/I catalog", {
-        "catalog_n_i_codes": len(expected),
-        "member_files": len(member_files),
-        "missing_member_files": len(missing),
-        "missing_sample": missing[:20],
-        "member_files_not_in_catalog": len(stale),
-        "stale_sample": stale[:10],
-    })
 
 def audit_index_classify(raw_dir: Path, add) -> dict[str, pd.DataFrame]:
     frames: dict[str, pd.DataFrame] = {}
@@ -1496,10 +1444,8 @@ def api_frame(client: TuShareClient, api_name: str, params: dict[str, Any], fiel
 
 def audit_stock_universe_semantics(raw_dir: Path, all_codes: dict[str, set[str]], add) -> None:
     stock_basic = read_many(sorted((raw_dir / "stock_basic").glob("list_status=*.parquet")), columns=["ts_code", "name", "market", "exchange", "list_status", "list_date", "delist_date"])
-    stock_company = read_many(sorted((raw_dir / "stock_company").glob("exchange=*.parquet")), columns=["ts_code", "exchange", "com_name"])
     index_member = read_many(sorted((raw_dir / "index_member_all").glob("l1_code=*.parquet")), columns=["ts_code", "l1_code", "l1_name", "in_date", "out_date"])
     basic_codes = set(stock_basic["ts_code"].dropna().astype(str)) if not stock_basic.empty else set()
-    company_codes = set(stock_company["ts_code"].dropna().astype(str)) if not stock_company.empty else set()
     member_codes = set(index_member["ts_code"].dropna().astype(str)) if not index_member.empty else set()
     daily_codes = all_codes.get("daily", set())
     listed_codes = set(stock_basic.loc[stock_basic["list_status"].astype(str) == "L", "ts_code"].astype(str)) if not stock_basic.empty else set()
@@ -1512,11 +1458,6 @@ def audit_stock_universe_semantics(raw_dir: Path, all_codes: dict[str, set[str]]
         "stock_basic_status_counts": json_count_dict(stock_basic["list_status"]) if not stock_basic.empty else {},
         "stock_basic_exchange_counts": json_count_dict(stock_basic["exchange"]) if not stock_basic.empty else {},
         "stock_basic_market_counts": json_count_dict(stock_basic["market"]) if not stock_basic.empty else {},
-        "stock_company_rows": len(stock_company),
-        "stock_company_missing_stock_basic_codes": len(basic_codes - company_codes),
-        "stock_company_extra_codes_vs_stock_basic": len(company_codes - basic_codes),
-        "stock_company_missing_sample": sorted(basic_codes - company_codes)[:20],
-        "stock_company_extra_sample": sorted(company_codes - basic_codes)[:20],
         "daily_unique_codes": len(daily_codes),
         "daily_codes_missing_in_stock_basic": len(daily_codes - basic_codes),
         "daily_missing_in_stock_basic_sample": sorted(daily_codes - basic_codes)[:20],
@@ -1535,8 +1476,8 @@ def audit_stock_universe_semantics(raw_dir: Path, all_codes: dict[str, set[str]]
         "industry_member_codes_missing_in_stock_basic": len(member_codes - basic_codes),
         "industry_member_missing_sample": sorted(member_codes - basic_codes)[:20],
     }
-    has_diff = any(details[key] for key in ("stock_company_missing_stock_basic_codes", "stock_company_extra_codes_vs_stock_basic", "daily_codes_missing_in_stock_basic", "listed_stock_basic_codes_missing_in_daily", "bj_daily_codes_missing_in_stock_basic", "industry_member_codes_missing_in_stock_basic"))
-    add("warning" if has_diff else "info", "stock_universe_semantics", "North-board, delisted, stock_company, daily, and industry-member coverage differences", details)
+    has_diff = any(details[key] for key in ("daily_codes_missing_in_stock_basic", "listed_stock_basic_codes_missing_in_daily", "bj_daily_codes_missing_in_stock_basic", "industry_member_codes_missing_in_stock_basic"))
+    add("warning" if has_diff else "info", "stock_universe_semantics", "North-board, delisted, daily, and industry-member coverage differences", details)
 
 def audit_pit_availability(raw_dir: Path, add) -> None:
     dataset_columns = {dataset: latest_parquet_schema(raw_dir, dataset) for dataset in ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d", "bak_basic", "namechange")}
@@ -2465,11 +2406,9 @@ def audit_core_market(args: argparse.Namespace) -> int:
     audit_integrated_filesystem(raw_dir, datasets, add)
 
     stock_basic = audit_stock_basic(raw_dir, add)
-    audit_stock_company(raw_dir, stock_basic, add)
     sse_open = audit_trade_cal(raw_dir, add)
     audit_bak_basic(raw_dir, sse_open, args.end_date, add)
     audit_namechange(raw_dir, stock_basic, add)
-    audit_ths_membership(raw_dir, add)
     classify = audit_index_classify(raw_dir, add)
     audit_index_member_all(raw_dir, classify["SW2021"], stock_basic, add)
     audit_index_member_history(raw_dir, classify["SW2014"], add)

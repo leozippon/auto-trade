@@ -46,7 +46,6 @@
         "suspend_d",
         "--refresh-reference-datasets",
         "stock_basic",
-        "stock_company",
         "bak_basic",
         "index_classify",
         "index_member_all",
@@ -340,15 +339,14 @@
       "skip_if_already_ok": true
     },
     "cn_weekly_reference_deep": {
-      "description": "Weekly deep refresh of slow-moving per-code reference sweeps (namechange full per-code loop, ths_index membership) moved off the nightly critical path; ~57 min of per-code calls once a week instead of nightly.",
+      "description": "Weekly deep refresh of the slow per-code reference sweep (the namechange full per-code loop) moved off the nightly critical path; about 80 min of per-code calls once a week instead of nightly.",
       "operation": "download_tier",
       "tier": "reference",
       "end_date_offset_days": 0,
       "end_date_mode": "sse_open_on_or_before",
       "extra_args": [
         "--refresh-reference-datasets",
-        "namechange",
-        "ths_index"
+        "namechange"
       ],
       "lock_wait_seconds": 1800,
       "skip_if_already_ok": true
@@ -602,16 +600,6 @@
       "doc_ref": "https://tushare.pro/document/2?doc_id=25"
     },
     {
-      "dataset": "stock_company",
-      "api": "stock_company",
-      "domain": "reference",
-      "frequency": "low_frequency",
-      "official_update": "上市公司基础信息；官方未标具体入库时刻。",
-      "cron_policy": "daily_force_refresh",
-      "history_repull": "window_only",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=112"
-    },
-    {
       "dataset": "trade_cal",
       "api": "trade_cal",
       "domain": "reference",
@@ -670,26 +658,6 @@
       "cron_policy": "download_once_skip_existing",
       "history_repull": "window_only",
       "doc_ref": "https://tushare.pro/document/2?doc_id=182"
-    },
-    {
-      "dataset": "ths_index",
-      "api": "ths_index",
-      "domain": "reference",
-      "frequency": "low_frequency",
-      "official_update": "同花顺概念与行业指数目录（exchange=A 全量分页）；官方入库时刻未收录，目录中 type=N/I 的指数驱动 ths_member 下载。",
-      "cron_policy": "weekly_force_refresh",
-      "history_repull": "window_only",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=259"
-    },
-    {
-      "dataset": "ths_member",
-      "api": "ths_member",
-      "domain": "reference",
-      "frequency": "low_frequency",
-      "official_update": "同花顺概念/行业指数成分；官方入库时刻未收录，按 ths_index 目录逐指数下载，与目录同批刷新。",
-      "cron_policy": "weekly_force_refresh_with_ths_index",
-      "history_repull": "window_only",
-      "doc_ref": "https://tushare.pro/document/2?doc_id=261"
     },
     {
       "dataset": "index_basic",

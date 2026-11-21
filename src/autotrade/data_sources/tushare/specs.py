@@ -17,17 +17,17 @@ from autotrade.environment.data.contracts import (
 
 DOWNLOAD_TIER_CHOICES = ("reference", "daily", "fundamental", "intraday", "event_flow", "board_trading", "text_evidence", "macro", "global")
 
+# stock_company, ths_index and ths_member were retired on 2026-11-21: nothing
+# read them, so they are no longer downloaded or audited. Their directories
+# stay in the lake as they were last written.
 REFERENCE_DATASETS = [
     "stock_basic",
-    "stock_company",
     "trade_cal",
     "bak_basic",
     "namechange",
     "index_classify",
     "index_member_all",
     "index_member",
-    "ths_index",
-    "ths_member",
     "index_basic",
     "index_weight",
 ]
@@ -194,7 +194,6 @@ SEMANTIC_DOC_REFS = {
 
 INTEGRATED_DOC_REFS = {
     **SEMANTIC_DOC_REFS,
-    "stock_company": "https://tushare.pro/document/2?doc_id=112",
     "namechange": "https://tushare.pro/document/2?doc_id=100",
     "index_classify": "https://tushare.pro/document/2?doc_id=181",
     "index_member_all": "https://tushare.pro/document/2?doc_id=335",
@@ -234,8 +233,6 @@ INTEGRATED_DOC_REFS = {
     "us_tltr": "https://tushare.pro/document/2?doc_id=222",
     "index_daily": "https://tushare.pro/document/2?doc_id=95",
     "index_dailybasic": "https://tushare.pro/document/2?doc_id=128",
-    "ths_index": "https://tushare.pro/document/2?doc_id=259",
-    "ths_member": "https://tushare.pro/document/2?doc_id=261",
     "index_basic": "https://tushare.pro/document/2?doc_id=94",
     "index_weight": "https://tushare.pro/document/2?doc_id=96",
     "irm_qa_sh": "https://tushare.pro/document/2?doc_id=366",
