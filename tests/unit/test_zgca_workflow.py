@@ -571,17 +571,36 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertTrue((root / "experiments" / "empty").is_dir())
 
     def test_the_image_build_and_the_instance_name_the_files_the_deploy_ships(self) -> None:
-        """Three places name each file: the Dockerfile fetches the DuckDB CLI
-        by default and the compatibility package only when told, the deploy
-        pins and ships both, remote.sh verifies and serves them."""
-        dockerfile = (REPO / "ops" / "docker" / "sandbox.Dockerfile").read_text(encoding="utf-8")
+        """Three places name each file: the Dockerfile pins and fetches the
+        DuckDB CLI by default and the compatibility package only when told,
+        with the digest told beside it; the deploy reads the CLI's pins from
+        the Dockerfile, pins the package and ships both; remote.sh verifies
+        and serves them and tells the build the package's digest."""
+        dockerfile = zgca.SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
+        self.assertEqual(zgca.SANDBOX_DOCKERFILE, REPO / "ops" / "docker" / "sandbox.Dockerfile")
         self.assertIn(zgca.DUCKDB_CLI_URL, dockerfile)
-        self.assertIn("ARG CUDA_COMPAT_URL=\n", dockerfile)
+        self.assertTrue(zgca.DUCKDB_CLI_URL.startswith("https://github.com/"))
+        self.assertIn("ARG CUDA_COMPAT_URL=\nARG CUDA_COMPAT_SHA256=\n", dockerfile)
         self.assertIn("ENV LD_LIBRARY_PATH=${CUDA_COMPAT_URL:+/usr/local/cuda-compat}\n", dockerfile)
         self.assertEqual(zgca.CUDA_COMPAT_URL.rsplit("/", 1)[1], zgca.CUDA_COMPAT_NAME)
         remote = zgca.REMOTE_SCRIPT.read_text(encoding="utf-8")
         self.assertIn(f"=.runtime/zgca/{zgca.DUCKDB_CLI_NAME}\n", remote)
         self.assertIn(f"=.runtime/zgca/{zgca.CUDA_COMPAT_NAME}\n", remote)
+        self.assertIn('--build-arg "CUDA_COMPAT_SHA256=$compat_digest"', remote)
+
+    def test_a_dockerfile_that_does_not_pin_a_release_once_is_an_error(self) -> None:
+        """The deploy reads the CLI's pins out of the Dockerfile: a default that
+        is missing, malformed or given twice stops it rather than being guessed."""
+        dockerfile = Path(self.temp.name) / "sandbox.Dockerfile"
+        self.addCleanup(setattr, zgca, "SANDBOX_DOCKERFILE", zgca.SANDBOX_DOCKERFILE)
+        zgca.SANDBOX_DOCKERFILE = dockerfile
+        pinned = "ARG DUCKDB_CLI_SHA256=" + "0" * 64 + "\n"
+        dockerfile.write_text(pinned, encoding="utf-8")
+        self.assertEqual(zgca.dockerfile_pin("DUCKDB_CLI_SHA256", "([0-9a-f]{64})"), "0" * 64)
+        for text in ("", "ARG DUCKDB_CLI_SHA256=00\n", pinned * 2):
+            dockerfile.write_text(text, encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "does not give build arg DUCKDB_CLI_SHA256 one default"):
+                zgca.dockerfile_pin("DUCKDB_CLI_SHA256", "([0-9a-f]{64})")
 
     def test_the_dirs_step_links_the_store_to_the_instance_disk_and_refuses_anything_else(self) -> None:
         """Run for real against temporary roots: the link, its idempotence, and the refusals."""

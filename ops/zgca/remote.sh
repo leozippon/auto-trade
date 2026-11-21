@@ -204,7 +204,9 @@ idle() {
 # The legacy builder on the platform's bridge network (no buildx, no host
 # networking); --force-rm so a failed step leaves no multi-GB container behind.
 # The shipped DuckDB CLI and CUDA compatibility package are served to the build
-# from this host, on the bridge gateway only, for the build's duration.
+# from this host, on the bridge gateway only, for the build's duration; the
+# build checks each download against its digest again (the Dockerfile pins the
+# CLI's, the compatibility package's comes in a build arg beside its URL).
 build_image() {
     local log=$1 duckdb_digest=$2 compat_digest=$3 gateway server status base
     echo "$duckdb_digest  $DUCKDB_CLI" | sha256sum -c --quiet \
@@ -221,7 +223,8 @@ build_image() {
     echo "building $IMAGE (log $ROOT/$log)"
     DOCKER_BUILDKIT=0 docker build --force-rm -t "$IMAGE" -f ops/docker/sandbox.Dockerfile \
         --build-arg "DUCKDB_CLI_URL=$base/$(basename "$DUCKDB_CLI")" \
-        --build-arg "CUDA_COMPAT_URL=$base/$(basename "$CUDA_COMPAT")" . 2>&1 | tee "$log"
+        --build-arg "CUDA_COMPAT_URL=$base/$(basename "$CUDA_COMPAT")" \
+        --build-arg "CUDA_COMPAT_SHA256=$compat_digest" . 2>&1 | tee "$log"
     status=${PIPESTATUS[0]}
     kill "$server" 2>/dev/null
     wait "$server" 2>/dev/null || true

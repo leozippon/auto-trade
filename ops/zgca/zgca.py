@@ -64,16 +64,30 @@ LOCAL_ROOT = f"{LOCAL_DISK}/auto-trade"
 LOCAL_DISK_RESERVE = 20 * 2**30
 RELEASES = "data/research_releases"
 UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
-# The DuckDB CLI release the sandbox image installs (ops/docker/sandbox.Dockerfile,
-# build arg DUCKDB_CLI_URL). GitHub is unreachable from the instance and its
-# release proxies answer or refuse by the day, so the deploy fetches the
-# release where GitHub is reachable (through the proxy RELEASE_PROXY_ENV names,
-# then directly), verifies it against this digest (two independent routes
-# agreed on it on 2026-10-15), ships it, and the build reads it from the
-# instance host through that build arg.
-DUCKDB_CLI_URL = "https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip"
-DUCKDB_CLI_NAME = "duckdb_cli-linux-amd64.zip"
-DUCKDB_CLI_SHA256 = "efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43"
+# The DuckDB CLI release the sandbox image installs, pinned by version and
+# SHA-256 in the image's Dockerfile alone (build args DUCKDB_CLI_URL and
+# DUCKDB_CLI_SHA256) and read from there: the release's GitHub URL out of the
+# default, which reaches it through a release proxy, and the digest. GitHub is
+# unreachable from the instance and its release proxies answer or refuse by
+# the day, so the deploy fetches the release where GitHub is reachable
+# (through the proxy RELEASE_PROXY_ENV names, then directly), verifies it
+# against the digest, ships it, and the build reads it from the instance host
+# through that build arg and verifies it again.
+SANDBOX_DOCKERFILE = Path(__file__).resolve().parents[1] / "docker" / "sandbox.Dockerfile"
+
+
+def dockerfile_pin(name: str, value: str) -> str:
+    """What the group in the pattern ``value`` matches of the one default SANDBOX_DOCKERFILE gives build arg ``name``."""
+
+    found = re.findall(rf"^ARG {name}={value}$", SANDBOX_DOCKERFILE.read_text(encoding="utf-8"), re.MULTILINE)
+    if len(found) != 1:
+        raise RuntimeError(f"{SANDBOX_DOCKERFILE} does not give build arg {name} one default matching {value}")
+    return found[0]
+
+
+DUCKDB_CLI_URL = dockerfile_pin("DUCKDB_CLI_URL", r"\S*?(https://github\.com/\S+)")
+DUCKDB_CLI_NAME = DUCKDB_CLI_URL.rsplit("/", 1)[1]
+DUCKDB_CLI_SHA256 = dockerfile_pin("DUCKDB_CLI_SHA256", "([0-9a-f]{64})")
 # A URL prefix tried before a GitHub release's own URL, e.g. https://ghfast.top/.
 RELEASE_PROXY_ENV = "ZGCA_GITHUB_PROXY"
 # NVIDIA's CUDA forward-compatibility package for CUDA 13.0 (the user-mode
@@ -81,8 +95,10 @@ RELEASE_PROXY_ENV = "ZGCA_GITHUB_PROXY"
 # kernel driver is 535 (CUDA 12.2), and an A100 may run a newer user-mode
 # driver on an older kernel driver; the instance's image build installs it
 # (build arg CUDA_COMPAT_URL), other builds do not. Pinned to the digest of
-# NVIDIA's Debian 12 package index, after a probe on the instance
-# (~/zgca-compute/PLATFORM_RECORDS.md, GPU 驱动).
+# NVIDIA's Debian 12 package index (rechecked 2026-11-21, with the index held
+# to the repository's Release file), after a probe on the instance
+# (~/zgca-compute/PLATFORM_RECORDS.md, GPU 驱动); the build checks its
+# download against the digest too (build arg CUDA_COMPAT_SHA256).
 CUDA_COMPAT_URL = "https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-compat-13-0_580.196.07-1_amd64.deb"
 CUDA_COMPAT_NAME = "cuda-compat-13-0_580.196.07-1_amd64.deb"
 CUDA_COMPAT_SHA256 = "d2d3262512046b23215ff197fe79a6ca0d44299ed0e665275ac05bb28b79e4e3"

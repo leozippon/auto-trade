@@ -11,6 +11,9 @@
 # with --network=host. Proxy build args without an explicit value forward the
 # current process environment without baking proxy credentials into the image.
 # Nothing here needs BuildKit, so the classic builder (DOCKER_BUILDKIT=0) works.
+# Every file a step fetches by URL is checked, before anything uses it, against
+# the SHA-256 recorded beside its version: a source serving other bytes fails
+# the build, whichever source the build was pointed at.
 # Project-level build identity is assigned after a successful offline smoke
 # test by the host lifecycle; this build consumes the declared Python tag.
 FROM python:3.11-slim
@@ -189,10 +192,16 @@ ENV HF_HUB_OFFLINE=1 \
 # Declared here rather than at the top: a build arg is part of the cache key of
 # every RUN after its declaration, so another download source (a mirror that
 # is down, the instance serving its shipped copy) rebuilds only from here.
+# The digest is the release zip's. DuckDB publishes no checksum file for it;
+# two independent routes served these bytes on 2026-10-15, and GitHub itself
+# and the proxy below again on 2026-11-21. ops/zgca/zgca.py reads both pins
+# from here.
 ARG DUCKDB_CLI_URL=https://ghfast.top/https://github.com/duckdb/duckdb/releases/download/v1.1.3/duckdb_cli-linux-amd64.zip
+ARG DUCKDB_CLI_SHA256=efd0fccdb1a28d9ec7a6ebfcde59900068b8ba43a846c9b553c0fd2bbe4acf43
 RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
         "${DUCKDB_CLI_URL}" \
         -o /tmp/duckdb_cli.zip \
+    && echo "${DUCKDB_CLI_SHA256}  /tmp/duckdb_cli.zip" | sha256sum -c - \
     && python -c "import zipfile; zipfile.ZipFile('/tmp/duckdb_cli.zip').extractall('/usr/local/bin')" \
     && chmod +x /usr/local/bin/duckdb \
     && rm /tmp/duckdb_cli.zip \
@@ -256,25 +265,35 @@ RUN mkdir -p /mnt/snapshot \
 WORKDIR /mnt/agent
 
 # Static-check advisor for the Agent session. Runtime is offline, so pin
-# globally here.
+# globally here. npm installs the release tarball once it matches the SHA-256
+# below (bytes whose SHA-512 registry.npmjs.org lists as the release's
+# integrity), so the registry mirror cannot substitute other bytes.
 # Same layer verifies the binary; do not install via pip or at session start.
-RUN npm install -g --prefix /usr/local --no-fund --no-audit --registry "${NPM_CONFIG_REGISTRY}" pyright@1.1.411 \
+RUN curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
+        "${NPM_CONFIG_REGISTRY}/pyright/-/pyright-1.1.411.tgz" \
+        -o /tmp/pyright.tgz \
+    && echo "bd5c488fc20fa237a944279bf32cae2f986cf10d5d5d9e8705819859daeb2f4a  /tmp/pyright.tgz" | sha256sum -c - \
+    && npm install -g --prefix /usr/local --no-fund --no-audit --registry "${NPM_CONFIG_REGISTRY}" /tmp/pyright.tgz \
+    && rm /tmp/pyright.tgz \
     && /usr/local/bin/pyright --version
 
 # CUDA forward compatibility, for a host whose NVIDIA driver predates CUDA 13
 # (the ZGCA A100 instance runs 535): NVIDIA's cuda-compat package carries a
 # newer user-mode driver, which a datacenter GPU runs on its older kernel
 # driver. Only a build that names the package gets it -- ops/zgca serves the
-# pinned file to the instance's build -- and only then is LD_LIBRARY_PATH set
+# pinned file to the instance's build and names its SHA-256 beside it, without
+# which the build fails -- and only then is LD_LIBRARY_PATH set
 # (to an empty value otherwise), since the host's GPU hook injects its own
 # older libcuda and does not pick up compat libraries by itself. Every other
 # build, the L20 host's (driver 580 or later) included, leaves this layer empty
 # and its containers on the driver the host injects. Last, so the layers above
 # stay shared with builds that do not name it.
 ARG CUDA_COMPAT_URL=
+ARG CUDA_COMPAT_SHA256=
 RUN if [ -n "${CUDA_COMPAT_URL}" ]; then \
         curl -fL --retry 8 --retry-all-errors --retry-delay 3 --connect-timeout 30 --max-time 600 \
             "${CUDA_COMPAT_URL}" -o /tmp/cuda-compat.deb \
+        && echo "${CUDA_COMPAT_SHA256}  /tmp/cuda-compat.deb" | sha256sum -c - \
         && dpkg-deb -x /tmp/cuda-compat.deb /tmp/cuda-compat \
         && mv /tmp/cuda-compat/usr/local/cuda-*/compat /usr/local/cuda-compat \
         && rm -r /tmp/cuda-compat /tmp/cuda-compat.deb \

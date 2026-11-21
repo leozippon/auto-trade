@@ -15,9 +15,14 @@ PYRIGHTCONFIG = REPO / "ops/docker/pyrightconfig.json"
 def test_dockerfile_pins_pyright_with_same_layer_version_check() -> None:
     text = DOCKERFILE.read_text(encoding="utf-8")
     assert "COPY ops/docker/pyrightconfig.json /opt/autotrade/pyrightconfig.json" in text
+    # The pinned release tarball, checked (tests/unit/test_sandbox_downloads.py)
+    # and installed from the file, then the binary's own version check.
     match = re.search(
-        r'npm install -g --prefix /usr/local --no-fund --no-audit --registry '
-        r'"\$\{NPM_CONFIG_REGISTRY\}" pyright@1\.1\.411\s*\\\s*\n\s*'
+        r'"\$\{NPM_CONFIG_REGISTRY\}/pyright/-/pyright-1\.1\.411\.tgz"\s*\\\s*\n\s*'
+        r"-o /tmp/pyright\.tgz\s*\\\s*\n.*\n\s*"
+        r'&& npm install -g --prefix /usr/local --no-fund --no-audit --registry '
+        r'"\$\{NPM_CONFIG_REGISTRY\}" /tmp/pyright\.tgz\s*\\\s*\n\s*'
+        r"&& rm /tmp/pyright\.tgz\s*\\\s*\n\s*"
         r"&& /usr/local/bin/pyright --version",
         text,
     )
@@ -32,15 +37,6 @@ def test_dockerfile_pins_pyright_with_same_layer_version_check() -> None:
     assert '"${DUCKDB_CLI_URL}"' in text
     assert "ENV HTTP_PROXY" not in text
     assert "ENV HTTPS_PROXY" not in text
-    lowered = text.lower()
-    for project_hash_contract in (
-        "pyright_sha256",
-        "sha256sum",
-        "@sha256:",
-        "repodigest",
-        "checksum",
-    ):
-        assert project_hash_contract not in lowered
 
 
 def test_pyrightconfig_is_basic_and_excludes_pit_roots() -> None:
