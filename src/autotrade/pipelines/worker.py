@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import math
 import os
-import re
 import shutil
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
@@ -62,6 +60,11 @@ from .calendar import (
 from .config import (
     ExperimentConfig,
     acceptance_for,
+    docker_size,
+    nonnegative_int,
+    nonnegative_number,
+    positive_int,
+    positive_number,
 )
 from .experiment import ExperimentPipeline, SessionContext
 from .experiment_params import (
@@ -331,7 +334,7 @@ def resolve_worker_options(
     repository = Path(repo_root).resolve(strict=True)
     # The deployment's template file is identical for every create on a host,
     # so its absence is not a property of the request.
-    repo_file = _repo_path if preflight else _repo_file
+    existing_file = not preflight
     # Every key a parameter, every value of its declared type
     # (``experiment_params.ExperimentParams``). The checks below read the file through
     # ``read_param``: a key it leaves out takes the parameter's one declared
@@ -354,18 +357,13 @@ def resolve_worker_options(
     experiment_id = _required_text(params, "experiment_id")
     if directory.name != experiment_id:
         raise ValueError("experiment_id does not match the experiment directory")
-    if params.get("experiments_root") is not None:
-        configured_root = _path_value(
-            params["experiments_root"], repository, "experiments_root"
-        )
-        if configured_root != directory.parent:
-            raise ValueError(
-                "experiments_root does not match the experiment directory parent"
-            )
-    work_root = _path_value(read_param(params, "work_root"), repository, "work_root")
-    if repository != work_root and repository not in work_root.parents:
-        raise ValueError("work_root must stay inside the repository")
-    baseline = repo_file(repository, read_param(params, "strategy_path"), "baseline strategy")
+    configured_root = params.get("experiments_root")
+    if configured_root is not None and (repository / str(configured_root)).resolve() != directory.parent:
+        raise ValueError("experiments_root does not match the experiment directory parent")
+    work_root = _repo_path(repository, read_param(params, "work_root"), "work_root")
+    baseline = _repo_path(
+        repository, read_param(params, "strategy_path"), "baseline strategy", file=existing_file
+    )
     requested_backend = params.get("data_backend")
     if requested_backend in (None, ""):
         production_raw = repository / "data" / "raw"
@@ -380,7 +378,7 @@ def resolve_worker_options(
     if data_backend not in {"daily", "pit"}:
         raise ValueError("data_backend must be daily or pit")
     daily = (
-        repo_file(repository, params.get("daily_path"), "daily Parquet")
+        _repo_path(repository, params.get("daily_path"), "daily Parquet", file=existing_file)
         if data_backend == "daily"
         else None
     )
@@ -484,22 +482,20 @@ def resolve_worker_options(
         str(read_param_or_default(params, "strategy_period")),  # type: ignore[arg-type]
         str(read_param_or_default(params, "inference_time")),
     )
-    initial_cash = _positive_float(read_param(params, "initial_cash"), "initial_cash")
+    initial_cash = positive_number(read_param(params, "initial_cash"), "initial_cash")
     config = ExperimentConfig(
         experiment_id=experiment_id,
         experiments_root=directory.parent,
         geometry=geometry,
         benchmark_index=benchmark_index,
-        # The integer budgets and timeouts pass as stated: ``ExperimentParams``
-        # has checked their type, and the config refuses a null and checks
-        # every range. The spend cap, CPUs and Docker sizes are still read
-        # here, into the float or string the config records, a null refused by
-        # name.
+        # The budgets, timeouts, spend cap, CPUs and Docker sizes pass as
+        # stated: ``ExperimentParams`` has checked their type, and the config
+        # refuses a null and checks every range by name.
         window_months=read_param(params, "window_months"),
         max_null_controls=read_param(params, "max_null_controls"),
         batch_validate_max_concurrency=read_param(params, "batch_validate_max_concurrency"),
         max_llm_calls=read_param(params, "max_llm_calls"),
-        max_api_spend_usd=_positive_float(read_param(params, "max_api_spend_usd"), "max_api_spend_usd"),
+        max_api_spend_usd=read_param(params, "max_api_spend_usd"),
         session_max_attempts=read_param(params, "session_max_attempts"),
         max_research_minutes=read_param(params, "max_research_minutes"),
         research_directive=str(read_param_or_default(params, "research_directive")),
@@ -513,11 +509,9 @@ def resolve_worker_options(
         per_call_timeout_seconds=read_param(params, "per_call_timeout_seconds"),
         strategy_fit_timeout_seconds=read_param(params, "strategy_fit_timeout_seconds"),
         strategy_inference_timeout_seconds=read_param(params, "strategy_inference_timeout_seconds"),
-        strategy_cpus=_positive_float(read_param(params, "strategy_cpus"), "strategy_cpus"),
-        strategy_memory=_memory_limit(read_param(params, "strategy_memory"), "strategy_memory"),
-        strategy_state_disk=_memory_limit(
-            read_param(params, "strategy_state_disk"), "strategy_state_disk"
-        ),
+        strategy_cpus=read_param(params, "strategy_cpus"),
+        strategy_memory=read_param(params, "strategy_memory"),
+        strategy_state_disk=read_param(params, "strategy_state_disk"),
         # A tracking mandate exactly where the request named a cap; every
         # limit absent or null takes its default, and the rules check each
         # value's type and range (``config.acceptance_for``).
@@ -525,8 +519,8 @@ def resolve_worker_options(
         schedule=schedule,
         broker_profile=BrokerProfile(
             initial_cash=initial_cash,
-            commission_bps=_nonnegative_float(read_param(params, "commission_bps"), "commission_bps"),
-            slippage_bps=_nonnegative_float(read_param(params, "slippage_bps"), "slippage_bps"),
+            commission_bps=nonnegative_number(read_param(params, "commission_bps"), "commission_bps"),
+            slippage_bps=nonnegative_number(read_param(params, "slippage_bps"), "slippage_bps"),
             dividend_tax=True,
             # Stamped at creation; an experiment without the key buys on every board.
             permitted_boards=stamped_permitted_boards(params),
@@ -555,7 +549,7 @@ def resolve_worker_options(
         pit_views_seed=pit_views_seed,
         pit_views_seed_required=seed_generation is not None,
         snapshot_config=snapshot_config,
-        max_intraday_row_group_rows=_positive_int(
+        max_intraday_row_group_rows=positive_int(
             read_param(params, "max_intraday_row_group_rows"), "max_intraday_row_group_rows"
         ),
         llm=llm_settings,
@@ -989,62 +983,25 @@ def _terminal_status(
     }
 
 
-def _repo_file(repo_root: Path, value: object, label: str) -> Path:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{label} path is required")
-    raw = Path(value)
-    path = (
-        (repo_root / raw).resolve(strict=True)
-        if not raw.is_absolute()
-        else raw.resolve(strict=True)
-    )
-    if repo_root != path and repo_root not in path.parents:
-        raise ValueError(f"{label} must stay inside the repository")
-    if not path.is_file():
-        raise ValueError(f"{label} must be a file")
-    return path
+def _repo_path(repo_root: Path, value: object, label: str, *, file: bool = False) -> Path:
+    """``value`` resolved against the repository, which it must stay inside;
+    ``file`` also requires an existing file.
 
-
-def _repo_dir(repo_root: Path, value: object, label: str) -> Path:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{label} path is required")
-    raw = Path(value)
-    path = (
-        (repo_root / raw).resolve(strict=True)
-        if not raw.is_absolute()
-        else raw.resolve(strict=True)
-    )
-    if repo_root != path and repo_root not in path.parents:
-        raise ValueError(f"{label} must stay inside the repository")
-    if not path.is_dir():
-        raise ValueError(f"{label} must be a directory")
-    return path
-
-
-def _repo_path(repo_root: Path, value: object, label: str) -> Path:
-    """Resolve an input path without requiring the mutable live copy to exist.
-
-    An experiment reads its data from a pinned immutable research release: a
-    lake being written falls back to one, the quality status lives inside it, and
-    a deployment that carries only releases and seeds (the A100 instance) has
-    no live lake at all. Requiring the live roots here would refuse all of
-    them; a read that does need the live lake fails where it reads.
+    Without ``file`` the path need not exist: an experiment reads its data
+    from a pinned immutable research release (a lake being written falls back
+    to one, the quality status lives inside it), and a deployment that
+    carries only releases and seeds has no live lake at all. A read that does
+    need the live path fails where it reads.
     """
 
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} path is required")
-    raw = Path(value)
-    path = (repo_root / raw).resolve() if not raw.is_absolute() else raw.resolve()
+    path = (repo_root / value).resolve(strict=file)
     if repo_root != path and repo_root not in path.parents:
         raise ValueError(f"{label} must stay inside the repository")
+    if file and not path.is_file():
+        raise ValueError(f"{label} must be a file")
     return path
-
-
-def _path_value(value: object, repo_root: Path, name: str) -> Path:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must be a non-empty path string")
-    path = Path(value)
-    return (repo_root / path).resolve() if not path.is_absolute() else path.resolve()
 
 
 def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
@@ -1090,7 +1047,7 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
         raise ValueError("screen_exclude_st must be boolean")
     screen_boards = selection("screen_boards", BOARDS)
     return SnapshotConfig(
-        window_months=_positive_int(read_param(params, "window_months"), "window_months"),
+        window_months=positive_int(read_param(params, "window_months"), "window_months"),
         daily_window_months=_optional_positive_int(
             read_param(params, "daily_window_months"), "daily_window_months"
         ),
@@ -1106,7 +1063,7 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
         text_window_months=_optional_positive_int(
             read_param(params, "text_window_months"), "text_window_months"
         ),
-        intraday_trade_days=_positive_int(
+        intraday_trade_days=positive_int(
             read_param(params, "intraday_trade_days"), "intraday_trade_days"
         ),
         fundamental_datasets=datasets(
@@ -1122,7 +1079,7 @@ def _snapshot_config(params: dict[str, object]) -> SnapshotConfig:
         replay_include_text=include_text,
         replay_include_minutes=include_intraday,
         screen_exclude_st=screen_exclude_st,
-        screen_exclude_new_listed_days=_nonnegative_int(
+        screen_exclude_new_listed_days=nonnegative_int(
             read_param(params, "screen_exclude_new_listed_days"),
             "screen_exclude_new_listed_days",
         ),
@@ -1148,11 +1105,9 @@ def _llm_settings(
     *,
     preflight: bool = False,
 ) -> tuple[LLMWorkerSettings, SandboxSpec]:
-    env_file = _path_value(read_param(params, "llm_env_file"), repository, "llm_env_file")
-    if repository != env_file and repository not in env_file.parents:
-        raise ValueError("llm_env_file must stay inside the repository")
+    env_file = _repo_path(repository, read_param(params, "llm_env_file"), "llm_env_file")
     fold_model, subagent_model, compact_model = session_models(params)
-    compact_max_tokens = _positive_int(
+    compact_max_tokens = positive_int(
         read_param(params, "compact_max_tokens"), "compact_max_tokens"
     )
     # None = derived from the model windows; ``compaction_for`` sets the
@@ -1162,14 +1117,14 @@ def _llm_settings(
     )
     compaction = ContextCompactionConfig(
         token_threshold=configured_threshold or ContextCompactionConfig.token_threshold,
-        keep_recent_messages=_positive_int(
+        keep_recent_messages=positive_int(
             read_param(params, "compact_keep_recent_messages"),
             "compact_keep_recent_messages",
         ),
         max_response_tokens=effective_max_output_tokens(
             compact_model, compact_max_tokens
         ),
-        max_calls=_nonnegative_int(
+        max_calls=nonnegative_int(
             read_param(params, "compact_max_calls"), "compact_max_calls"
         ),
     )
@@ -1178,13 +1133,13 @@ def _llm_settings(
         model=fold_model,
         subagent_model=subagent_model,
         compact_model=compact_model,
-        timeout_seconds=_positive_float(
+        timeout_seconds=positive_number(
             params.get("llm_timeout_seconds")
             if params.get("llm_timeout_seconds") is not None
             else read_param(params, "per_call_timeout_seconds"),
             "llm_timeout_seconds",
         ),
-        retry_backoff_seconds=_positive_float(
+        retry_backoff_seconds=positive_number(
             read_param(params, "llm_retry_backoff_seconds"), "llm_retry_backoff_seconds"
         ),
         temperature=_bounded_float(
@@ -1234,10 +1189,10 @@ def _llm_settings(
     )
     sandbox = SandboxSpec(
         image=str(read_param_or_default(params, "agent_sandbox_image")),
-        cpus=_positive_float(read_param(params, cpus_key), cpus_key),
-        memory=_memory_limit(read_param(params, memory_key), memory_key),
-        pids=_positive_int(read_param(params, "agent_sandbox_pids"), "agent_sandbox_pids"),
-        tmpfs_size=_memory_limit(read_param(params, "agent_sandbox_tmpfs"), "agent_sandbox_tmpfs"),
+        cpus=positive_number(read_param(params, cpus_key), cpus_key),
+        memory=docker_size(read_param(params, memory_key), memory_key),
+        pids=positive_int(read_param(params, "agent_sandbox_pids"), "agent_sandbox_pids"),
+        tmpfs_size=docker_size(read_param(params, "agent_sandbox_tmpfs"), "agent_sandbox_tmpfs"),
         gpu=None if gpu_count == 0 else GpuMode.AUTO,
         gpu_count=gpu_count,
         # The store the experiment pinned at creation; an experiment created before the store
@@ -1342,9 +1297,10 @@ def _optional_workspace_reference(value: object, repo_root: Path) -> str:
     # console and the round launcher report ValueError, not an OSError). So is
     # a paper Pack's payload that is missing or differs from its manifest
     # (PackPayloadError is a ValueError), here as at every session start.
-    if not (repo_root / text).is_dir():
+    directory = _repo_path(repo_root, text, "workspace_reference")
+    if not directory.is_dir():
         raise ValueError(f"workspace_reference {text} is not a directory in the repository")
-    pack_payload(_repo_dir(repo_root, text, "workspace_reference"), repo_root)
+    pack_payload(directory, repo_root)
     return text
 
 
@@ -1355,15 +1311,11 @@ def _required_text(params: dict[str, object], key: str) -> str:
     return value.strip()
 
 
-def _positive_int(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise ValueError(f"{name} must be a positive integer")
-    return value
 
 
 def _gpu_count(value: object) -> int:
     """Per-session GPU allocation shares this range with `set_gpu_count`."""
-    count = _nonnegative_int(value, "gpu_count")
+    count = nonnegative_int(value, "gpu_count")
     if count > 4:
         raise ValueError("gpu_count must be between 0 and 4")
     return count
@@ -1385,57 +1337,34 @@ def _reasoning_effort(value: object) -> str:
 def _optional_positive_int(value: object, name: str) -> int | None:
     if value in (None, ""):
         return None
-    return _positive_int(value, name)
+    return positive_int(value, name)
 
 
 def _optional_nonnegative_float(value: object, name: str) -> float | None:
     if value in (None, ""):
         return None
-    return _nonnegative_float(value, name)
+    return nonnegative_number(value, name)
 
 
 def _optional_positive_float(value: object, name: str) -> float | None:
     if value in (None, ""):
         return None
-    return _positive_float(value, name)
+    return positive_number(value, name)
 
 
-def _nonnegative_int(value: object, name: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise ValueError(f"{name} must be a non-negative integer")
-    return value
 
 
-def _positive_float(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{name} must be a positive finite number")
-    number = float(value)
-    if not math.isfinite(number) or number <= 0:
-        raise ValueError(f"{name} must be a positive finite number")
-    return number
 
 
-def _nonnegative_float(value: object, name: str) -> float:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise TypeError(f"{name} must be a non-negative finite number")
-    number = float(value)
-    if not math.isfinite(number) or number < 0:
-        raise ValueError(f"{name} must be a non-negative finite number")
-    return number
 
 
 def _bounded_float(value: object, name: str, lower: float, upper: float) -> float:
-    number = _nonnegative_float(value, name)
+    number = nonnegative_number(value, name)
     if not lower <= number <= upper:
         raise ValueError(f"{name} must be between {lower} and {upper}")
     return number
 
 
-def _memory_limit(value: object, name: str) -> str:
-    text = str(value)
-    if not re.fullmatch(r"[1-9][0-9]*(?:[kKmMgG])?", text):
-        raise ValueError(f"{name} must be a positive Docker memory limit")
-    return text
 
 
 __all__ = [

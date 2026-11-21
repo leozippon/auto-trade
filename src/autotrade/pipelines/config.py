@@ -22,7 +22,7 @@ from autotrade.environment.data.contracts import (
     benchmark_index_label,
 )
 from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
+from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import StrategySchedule
 
 from . import verdict
@@ -182,6 +182,47 @@ def _open_unit(value: object, name: str, *, include_one: bool) -> float:
     if not ok:
         raise ValueError(f"{name} must be in {'(0, 1]' if include_one else '(0, 1)'}")
     return number
+
+
+def positive_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
+
+
+def nonnegative_int(value: object, name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"{name} must be a non-negative integer")
+    return value
+
+
+def positive_number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a positive finite number")
+    number = float(value)
+    if not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{name} must be a positive finite number")
+    return number
+
+
+def nonnegative_number(value: object, name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"{name} must be a non-negative finite number")
+    number = float(value)
+    if not math.isfinite(number) or number < 0:
+        raise ValueError(f"{name} must be a non-negative finite number")
+    return number
+
+
+def docker_size(value: object, name: str) -> str:
+    """A Docker memory or disk size under the executor's own rule (the one
+    ``SandboxConfig`` holds its ``state_disk`` to), refused under ``name``."""
+
+    try:
+        SandboxConfig(state_disk=value)  # type: ignore[arg-type]
+    except ValueError:
+        raise ValueError(f"{name} must be a positive Docker memory limit") from None
+    return str(value)
 
 
 def _rule(default: object, text: str) -> Any:
@@ -613,20 +654,13 @@ class ExperimentConfig:
             "strategy_fit_timeout_seconds",
             "strategy_inference_timeout_seconds",
         ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-        # The executor's own checks on a CPU quota, a Docker memory limit and a
-        # state disk quota.
-        SandboxSpec(cpus=self.strategy_cpus, memory=self.strategy_memory, gpu=None)
-        SandboxConfig(state_disk=self.strategy_state_disk)
-        for name in (
-            "max_null_controls",
-            "deadline_grace_minutes",
-        ):
-            value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-                raise ValueError(f"{name} must be a non-negative integer")
+            positive_int(getattr(self, name), name)
+        # The strategy container's CPU quota and Docker sizes, by the executor's rules.
+        object.__setattr__(self, "strategy_cpus", positive_number(self.strategy_cpus, "strategy_cpus"))
+        docker_size(self.strategy_memory, "strategy_memory")
+        docker_size(self.strategy_state_disk, "strategy_state_disk")
+        for name in ("max_null_controls", "deadline_grace_minutes"):
+            nonnegative_int(getattr(self, name), name)
         width = self.batch_validate_max_concurrency
         if (
             isinstance(width, bool)
@@ -637,7 +671,7 @@ class ExperimentConfig:
                 "batch_validate_max_concurrency must be an integer from 1 to "
                 f"{BATCH_VALIDATE_MAX_CANDIDATES}"
             )
-        positive_spend_cap(self.max_api_spend_usd)
+        object.__setattr__(self, "max_api_spend_usd", positive_spend_cap(self.max_api_spend_usd))
         benchmark_index_label(self.benchmark_index)
         # The research years must leave at least one validation year, and the
         # validation years must tile into whole test steps.
@@ -1208,7 +1242,12 @@ __all__ = [
     "acceptance_default",
     "acceptance_for",
     "defaulted_acceptance",
+    "docker_size",
     "experiment_default",
+    "nonnegative_int",
+    "nonnegative_number",
+    "positive_int",
+    "positive_number",
     "positive_spend_cap",
     "research_span",
     "session_deadline_seconds",
