@@ -60,7 +60,7 @@ from autotrade.pipelines.pit_backend import (
 )
 from autotrade.pipelines.verdict import BOOTSTRAP_BLOCK_DAYS, bootstrap_lower_bound
 
-from .book import VERDICT_LOG_NAME, Book, book_status
+from .book import VERDICT_LOG_NAME, Book, book_status, terminal_transition
 from .engine import PAPER_STATE_NAME, writer_lock
 from .fills import CORRECTIONS_NAME, key_text, mode, parse_key
 from .pit import newest_replay_slot
@@ -133,8 +133,7 @@ def evidence_reading(
 
     rules = book.verdict_rules
     checkpoint = int(rules["checkpoint_days"])
-    stored = book_status(book.root)
-    transition = _stored_transition(book.root) if stored != "observing" else None
+    transition = terminal_transition(book.root)
     checked = int((previous or {}).get("checked_through") or 0)
     dates = [str(row["trade_date"]) for row in equity]
     reading: dict[str, object] = {
@@ -150,7 +149,8 @@ def evidence_reading(
     }
     if not dates:
         return {
-            **reading, "status": stored, "transition": transition, "checked_through": checked,
+            **reading, "status": transition["status"] if transition else "observing", "transition": transition,
+            "checked_through": checked,
             "next_checkpoint": checkpoint, "plain": None, "account_return": None,
             "index_return": None, "account_max_drawdown": None, "active_max_drawdown": None, "baseline": None,
         }
@@ -356,11 +356,6 @@ def _identity(row: Mapping[str, object]) -> tuple[str, str]:
 
     at = datetime.fromisoformat(str(row["execute_at"])).astimezone(CN_TZ)
     return at.strftime("%Y%m%d"), key_text(at.strftime("%H:%M"), str(row["action"]), str(row["symbol"]))
-
-
-def _stored_transition(root: Path) -> dict[str, object]:
-    rows, _skipped = read_jsonl(root / VERDICT_LOG_NAME)
-    return rows[0]
 
 
 __all__ = ["VERDICT_NAME", "evidence_reading", "paper_reading", "record_verdict", "record_verdict_locked"]

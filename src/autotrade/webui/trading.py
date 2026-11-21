@@ -54,12 +54,11 @@ from autotrade.paper.book import (
     BOOK_NAME,
     SOURCE_HISTORY_NAME,
     SOURCE_HISTORY_SCHEMA_VERSION,
-    VERDICT_LOG_NAME,
+    list_books,
+    terminal_transition,
+    validate_book_id,
 )
-from autotrade.paper.book import (
-    book_status as persisted_book_status,
-)
-from autotrade.paper.books import PAPER_STATE_DIR, list_books, validate_book_id
+from autotrade.paper.books import PAPER_STATE_DIR
 from autotrade.paper.engine import (
     PAPER_STATE_NAME,
     REFERENCE_KEY,
@@ -301,14 +300,14 @@ def signal_payload(repo_root: Path, book: str, env: str = "paper") -> dict[str, 
     root = book_dir(repo_root, book, env)
     state, error = _read_json(root / PAPER_STATE_NAME)
     try:
-        if persisted_book_status(root) == "killed":
+        transition = terminal_transition(root)
+        if transition is not None and transition["status"] == "killed":
             if state is None or error:
                 return {"env": env, "state": "unreadable", "error": error or "Paper account state is missing", "signal": None}
-            transitions, _skipped = read_jsonl(root / VERDICT_LOG_NAME)
             holdings = exit_holdings(state)
             return {"env": env, "state": "ok", "error": error, "signal": {
                 "instruction": "exit", "trade_date": datetime.now(CN_TZ).strftime("%Y%m%d"),
-                "transition": {key: _text(transitions[0].get(key)) for key in ("status", "date", "reason")},
+                "transition": {key: _text(transition.get(key)) for key in ("status", "date", "reason")},
                 "orders": [], "groups": [],
                 "target": [{"symbol": _text(row["symbol"]), "name": _text(row["name"]),
                             "quantity": _quantity(row["quantity"]), "reference_price": finite_number(row["reference_price"])}

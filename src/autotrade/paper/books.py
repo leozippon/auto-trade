@@ -10,7 +10,6 @@ first; one book's failure is reported for that book and never stops the others.
 
 from __future__ import annotations
 
-import re
 import uuid
 from collections.abc import Callable
 from pathlib import Path
@@ -19,34 +18,12 @@ from autotrade.common.records import read_json_object
 from autotrade.environment.sandbox import GpuMode, remove_sandbox_tree
 from autotrade.pipelines.ledger import ExperimentLedger, paper_candidate
 
-from .book import BOOK_NAME, create_book, load_book
+from .book import BOOK_NAME, create_book, list_books, load_book, validate_book_id
 from .engine import writer_lock
 from .fills import FILLS_NAME
 
 # The Paper state root, relative to the repository root.
 PAPER_STATE_DIR = Path("data/trading/paper")
-# One path segment: experiment ids already satisfy it, so a book created from
-# an experiment is named after it by default.
-BOOK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
-
-
-def validate_book_id(book_id: str) -> str:
-    if not BOOK_ID_PATTERN.fullmatch(book_id) or ".." in book_id:
-        raise ValueError(f"invalid Paper account id {book_id!r}: letters, digits, '_', '.', '-'")
-    return book_id
-
-
-def list_books(state_root: str | Path) -> list[str]:
-    """The ids of the books under ``state_root``, sorted."""
-
-    root = Path(state_root)
-    if not root.is_dir():
-        return []
-    return sorted(
-        entry.name
-        for entry in root.iterdir()
-        if entry.is_dir() and BOOK_ID_PATTERN.fullmatch(entry.name) and (entry / BOOK_NAME).is_file()
-    )
 
 
 def experiment_books(state_root: str | Path, experiment_id: str) -> list[str]:
@@ -160,8 +137,9 @@ def delete_book(state_root: str | Path, book_id: str) -> None:
             raise OSError(f"Paper account {book_id} is deleted, but files remain under {removed}")
 
 
+# list_books and validate_book_id are book.py's (create_book's cap reads the
+# roster), re-exported here beside the rest of the multi-book API.
 __all__ = [
-    "BOOK_ID_PATTERN",
     "PAPER_STATE_DIR",
     "delete_book",
     "follows_real_fills",

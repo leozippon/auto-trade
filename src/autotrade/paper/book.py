@@ -31,6 +31,7 @@ book's Broker and its verdict's random baseline both read that one field.
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass, replace
 from datetime import datetime, time
@@ -66,6 +67,10 @@ from .pit import require_audited_fundamentals
 from .storage import read_jsonl
 
 BOOK_NAME = "book.json"
+# A book's id names its directory under the Paper state root: one path segment.
+# Experiment ids already satisfy it, so a book created from an experiment is
+# named after it by default.
+BOOK_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}")
 # 5: the strategy sandbox carries the state directory's disk quota
 # (``SandboxConfig.state_disk``); 4 dropped the candidate source, since every
 # book trades its experiment's registered strategy; 3 added the pinned verdict
@@ -380,28 +385,51 @@ def verify_book_artifact(book: Book) -> None:
         raise ValueError("Paper artifact fingerprint mismatch; refusing to execute the strategy or models")
 
 
-def book_status(state_root: str | Path) -> str:
-    """``observing`` until the book's one terminal transition, then its status
-    (``confirmed`` or ``killed``) for good."""
+def terminal_transition(state_root: str | Path) -> dict[str, object] | None:
+    """The book's one terminal verdict transition (``paper/verdict.py``), or
+    None while it is observing."""
 
     path = Path(state_root) / VERDICT_LOG_NAME
     rows, skipped = read_jsonl(path)
     if skipped or len(rows) > 1:
         raise ValueError(f"{path} must hold at most one whole transition")
-    return str(rows[0]["status"]) if rows else "observing"
+    return rows[0] if rows else None
+
+
+def book_status(state_root: str | Path) -> str:
+    """``observing`` until the book's one terminal transition, then its status
+    (``confirmed`` or ``killed``) for good."""
+
+    transition = terminal_transition(state_root)
+    return str(transition["status"]) if transition is not None else "observing"
+
+
+def validate_book_id(book_id: str) -> str:
+    if not BOOK_ID_PATTERN.fullmatch(book_id) or ".." in book_id:
+        raise ValueError(f"invalid Paper account id {book_id!r}: letters, digits, '_', '.', '-'")
+    return book_id
+
+
+def list_books(paper_root: str | Path) -> list[str]:
+    """The ids of the books under ``paper_root``, sorted. A hidden directory is
+    a book being deleted (``books.delete_book``)."""
+
+    root = Path(paper_root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in root.iterdir()
+        if entry.is_dir() and BOOK_ID_PATTERN.fullmatch(entry.name) and (entry / BOOK_NAME).is_file()
+    )
 
 
 def open_capped_books(paper_root: str | Path) -> list[str]:
-    """The ids of the books under ``paper_root`` that are not killed. A hidden
-    directory is a book being deleted (``books.delete_book``)."""
+    """The ids of the books under ``paper_root`` that are not killed: the ones
+    that count against ``BOOK_CAP`` and still run."""
 
     root = Path(paper_root)
-    books = sorted(path.parent for path in root.glob(f"*/{BOOK_NAME}")) if root.is_dir() else []
-    return [
-        book.name
-        for book in books
-        if not book.name.startswith(".") and book_status(book) != "killed"
-    ]
+    return [book for book in list_books(root) if book_status(root / book) != "killed"]
 
 
 def require_book_place(paper_root: str | Path, book_id: str) -> None:
@@ -418,6 +446,7 @@ def require_book_place(paper_root: str | Path, book_id: str) -> None:
 
 __all__ = [
     "BOOK_CAP",
+    "BOOK_ID_PATTERN",
     "BOOK_NAME",
     "PAPER_DECISION_TIMEOUT_SECONDS",
     "PAPER_INITIAL_CASH",
@@ -428,8 +457,11 @@ __all__ = [
     "book_status",
     "copy_source_history",
     "create_book",
+    "list_books",
     "load_book",
     "open_capped_books",
     "require_book_place",
+    "terminal_transition",
+    "validate_book_id",
     "verify_book_artifact",
 ]

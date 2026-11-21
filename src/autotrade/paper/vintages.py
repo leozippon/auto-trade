@@ -19,8 +19,7 @@ from autotrade.environment.data.contracts import (
 )
 from autotrade.pipelines.pit_backend import required_release_raw_datasets
 
-from .book import book_status, load_book
-from .books import list_books
+from .book import load_book, open_capped_books
 from .pit import LIVE_GENERATION, PIT_CACHE_NAME
 
 
@@ -57,11 +56,7 @@ def vintage_report(state_root: str | Path) -> dict[str, dict[str, object]]:
     """``book_vintage_changes`` of every book that is not killed."""
 
     root = Path(state_root)
-    return {
-        book_id: book_vintage_changes(root / book_id)
-        for book_id in list_books(root)
-        if book_status(root / book_id) != "killed"
-    }
+    return {book_id: book_vintage_changes(root / book_id) for book_id in open_capped_books(root)}
 
 
 __all__ = ["book_vintage_changes", "vintage_report"]
