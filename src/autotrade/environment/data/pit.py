@@ -423,8 +423,6 @@ def to_cn_timestamps(series: pd.Series) -> pd.Series:
 
 
 def yyyymmdd(value: date | datetime | str) -> str:
-    if isinstance(value, datetime):
-        return value.strftime("%Y%m%d")
     if isinstance(value, date):
         return value.strftime("%Y%m%d")
     text = str(value).strip()
