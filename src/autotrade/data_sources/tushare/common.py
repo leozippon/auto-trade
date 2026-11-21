@@ -154,44 +154,7 @@ REFERENCE_DATASETS = [
 DAILY_DOWNLOAD_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d"]
 DAILY_REQUIRED_DATASETS = [*DAILY_DOWNLOAD_DATASETS, "stk_auction"]
 
-FUNDAMENTAL_DATASETS = [
-    "income_vip",
-    "balancesheet_vip",
-    "cashflow_vip",
-    "fina_indicator_vip",
-    "forecast_vip",
-    "express_vip",
-    "dividend",
-    "fina_audit",
-    "fina_mainbz_vip",
-    "disclosure_date",
-]
-
 INTRADAY_DATASETS = ["stk_mins_1min"]
-
-EVENT_FLOW_DATASETS = [
-    "margin",
-    "margin_detail",
-    "margin_secs",
-    "moneyflow",
-    "moneyflow_dc",
-    "moneyflow_ths",
-    "moneyflow_ind_dc",
-    "moneyflow_ind_ths",
-    "moneyflow_cnt_ths",
-    "cyq_perf",
-    "bak_daily",
-    "stk_holdernumber",
-    "top10_holders",
-    "top10_floatholders",
-    "pledge_detail",
-    "stk_surv",
-    "new_share",
-    "stk_holdertrade",
-    "repurchase",
-    "share_float",
-    "block_trade",
-]
 
 BOARD_TRADING_DEFAULT_DATASETS = list(BOARD_TRADING_DATASETS)
 
@@ -226,44 +189,6 @@ SHARE_FLOAT_UNLOCK_TITLE_PATTERN = re.compile(
 # the earliest one on disk. A range file already on disk is never moved to an
 # earlier start either (`layout.refuse_moved_range_start` refuses it).
 RESEARCH_HISTORY_FLOOR = "20200101"
-
-MACRO_DATASETS = [
-    "cn_schedule",
-    "cn_gdp",
-    "cn_cpi",
-    "cn_ppi",
-    "cn_pmi",
-    "cn_m",
-    "sf_month",
-    "shibor",
-    "shibor_quote",
-    "shibor_lpr",
-    "repo_daily",
-    "us_tycr",
-    "us_trycr",
-    "us_tbr",
-    "us_tltr",
-    "index_daily",
-    "broker_recommend",
-    "ths_daily",
-    "index_dailybasic",
-    "sw_daily",
-    "ci_daily",
-    "daily_info",
-    "sz_daily_info",
-    "moneyflow_mkt_dc",
-    "index_global",
-    "fx_daily",
-    "eco_cal",
-    "fut_basic",
-    "fut_mapping",
-    "fut_daily",
-    "opt_basic",
-    "opt_daily",
-    "cb_basic",
-    "cb_daily",
-    "cb_call",
-]
 
 MACRO_REGIME_DEFAULT_DATASETS = [
     "cn_schedule",
@@ -538,7 +463,6 @@ class FetchStrategy(StrEnum):
     RANGE_MONTH = "range_month"
     TIME_RANGE_MONTH = "time_range_month"
     NEWS_SRC_DAY = "news_src_day"
-    NEWS_SRC_MONTH = "news_src_month"
     MONTH_LOOP = "month_loop"
     MONTH_ONCE = "month_once"
     QUARTER_ONCE = "quarter_once"
@@ -587,8 +511,6 @@ class DatasetSpec:
     # trades).
     unique_key: bool = False
     # ---- macro family ----
-    start_month: str = "201001"
-    start_quarter: str = "2010Q1"
     month_param: str = "m"  # month_loop query param name (broker_recommend uses "month")
     # static_full registry pulls: one canonical file per loop value
     # (e.g. exchange=CFFEX.parquet), or a single full.parquet when empty.
@@ -689,6 +611,8 @@ FUNDAMENTAL_SPECS = {
         period_param="end_date",
     ),
 }
+
+FUNDAMENTAL_DATASETS = list(FUNDAMENTAL_SPECS)
 
 # The relay token lost every text interface but ``report_rc`` on 2026-09-10
 # (each answers "没有接口访问权限"; ``major_news`` only inside a
@@ -811,7 +735,6 @@ MACRO_SPECS = {
         fields="quarter,gdp,gdp_yoy,pi,pi_yoy,si,si_yoy,ti,ti_yoy",
         key_columns=("quarter",),
         date_column="quarter",
-        start_quarter="2010Q1",
     ),
     "cn_cpi": DatasetSpec(
         api_name="cn_cpi",
@@ -1108,6 +1031,8 @@ MACRO_SPECS = {
     ),
 }
 
+MACRO_DATASETS = list(MACRO_SPECS)
+
 EVENT_FLOW_SPECS = {
     "margin": DatasetSpec(
         api_name="margin",
@@ -1343,6 +1268,8 @@ EVENT_FLOW_SPECS = {
         availability=AvailabilityRule("21:00:00", "official_21_from:trade_date"),
     ),
 }
+
+EVENT_FLOW_DATASETS = list(EVENT_FLOW_SPECS)
 
 BOARD_TRADING_SPECS = {
     "kpl_list": DatasetSpec(

@@ -55,7 +55,6 @@ from .common import (
     MACRO_SPECS,
     REFERENCE_DATASETS,
     RESEARCH_HISTORY_FLOOR,
-    REVISION_SUMMARY_PATH,
     SEMANTIC_DOC_REFS,
     SHARE_FLOAT_ROW_LIMIT,
     STK_MINS_API_NAME,
@@ -280,7 +279,7 @@ def sentinel_event_is_structural(event: dict) -> bool:
 def audit_revision_sentinel(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
     raw_dir = (repo_root / args.raw_dir).resolve()
-    output = Path(args.output or REVISION_SUMMARY_PATH)
+    output = Path(args.output)
     if not output.is_absolute():
         output = repo_root / output
     ledger = core.resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)

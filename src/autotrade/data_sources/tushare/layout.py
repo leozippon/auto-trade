@@ -64,7 +64,6 @@ _TIME_KEYS = {
     FetchStrategy.NEWS_SRC_DAY: "date",
     FetchStrategy.RANGE_MONTH: "month",
     FetchStrategy.TIME_RANGE_MONTH: "month",
-    FetchStrategy.NEWS_SRC_MONTH: "month",
     FetchStrategy.MONTH_LOOP: "month",
     FetchStrategy.ECO_CAL_MONTH: "month",
     FetchStrategy.DATE_YEAR: "year",
@@ -108,7 +107,7 @@ def dimensions(spec: DatasetSpec, args: argparse.Namespace | None) -> list[dict[
         ]
     if strategy == FetchStrategy.TIME_RANGE_MONTH:
         return [{"src": source} for source in getattr(args, "major_news_src", None) or [""]]
-    if strategy in {FetchStrategy.NEWS_SRC_DAY, FetchStrategy.NEWS_SRC_MONTH}:
+    if strategy == FetchStrategy.NEWS_SRC_DAY:
         return [{"src": source} for source in selected_news_sources(getattr(args, "news_src", None))]
     if strategy == FetchStrategy.TRADE_DATE and spec.loop_values:
         return [{spec.loop_param: value} for value in spec.loop_values]
@@ -152,13 +151,13 @@ def range_partition(raw_dir: Path, spec: DatasetSpec, start_date: str) -> Partit
     """The one ``range=<start>_latest`` file of a quarter_once/month_once
     dataset pulled from ``start_date``. Its unit is ``(start date, start
     quarter or month)``, the start never later than the stored file's
-    (:func:`retained_range_start`)."""
+    (:func:`retained_range_start`) nor earlier than the spec's."""
     directory = Path(raw_dir) / spec.api_name
     start_date = retained_range_start(directory, start_date)
     if spec.strategy == FetchStrategy.QUARTER_ONCE:
-        start = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
+        start = yyyymmdd_to_quarter(max(start_date, spec.start_date))
     elif spec.strategy == FetchStrategy.MONTH_ONCE:
-        start = max(yyyymmdd_to_month(start_date), spec.start_month)
+        start = yyyymmdd_to_month(max(start_date, spec.start_date))
     else:
         raise ValueError(f"{spec.api_name}: strategy {spec.strategy} has no range file")
     return Partition(directory / f"range={start}_latest.parquet", (start_date, start))
