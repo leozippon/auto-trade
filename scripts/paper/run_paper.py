@@ -23,7 +23,12 @@ before executing any new strategy decision or publishing the sheet; a reading
 that fails writes a failure sheet. A killed book
 decides nothing: its sheet lists the holdings to exit by hand, and it is
 skipped, not failed. ``verdict`` reads every book's verdict (or ``--book``'s)
-and prints it as JSON.
+and prints it as JSON. ``check`` replays every book that is not killed (or
+``--book``) from its first decision and compares the replay with the book's
+journals (``paper/consistency.py``); it writes the result to the book's
+``consistency.json``, never starts in the morning run's window, and exits 0
+when every book is consistent (or partial), 1 when one differs and 2 when one
+could not be checked.
 """
 
 from __future__ import annotations
@@ -35,6 +40,7 @@ import sys
 import time
 from collections.abc import Callable
 from datetime import datetime
+from datetime import time as clock_time
 from functools import partial
 from pathlib import Path
 from typing import NamedTuple
@@ -56,10 +62,12 @@ from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.sandbox import GpuMode, SandboxConfig
 from autotrade.paper.book import (
     PAPER_INITIAL_CASH,
+    PAPER_SHEET_DUE,
     Book,
     book_status,
     create_book,
     load_book,
+    open_capped_books,
     terminal_transition,
     verify_book_artifact,
 )
@@ -70,6 +78,7 @@ from autotrade.paper.books import (
     run_order,
     validate_book_id,
 )
+from autotrade.paper.consistency import PAPER_CHECK_DIR, check_book
 from autotrade.paper.engine import (
     DailyPaperEngine,
     docker_executor,
@@ -82,7 +91,7 @@ from autotrade.paper.orders import (
     render_orders,
     write_orders,
 )
-from autotrade.paper.pit import BookPITData
+from autotrade.paper.pit import book_data_factory
 from autotrade.paper.titles import require_landed_titles
 from autotrade.paper.verdict import record_verdict, record_verdict_locked
 from autotrade.paper.vintages import vintage_report
@@ -101,6 +110,9 @@ DEFAULT_VINTAGE_REPORT = Path("results/data_quality/paper_vintages.json")
 # later than the last retry's would be.
 GPU_WAIT_MINUTES = 135
 GPU_POLL_SECONDS = 60
+# The morning run's window on a weekday, Beijing time: from its first run
+# (ops/cron/paper.cron) to the sheet's due time. A check never starts in it.
+MORNING_START = clock_time(5, 40)
 
 
 class CardWait(NamedTuple):
@@ -184,6 +196,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     vintages.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
     vintages.add_argument("--output", type=Path, default=DEFAULT_VINTAGE_REPORT)
+    check = commands.add_parser(
+        "check", help="Replay each book from its first decision and compare the replay with its journals."
+    )
+    check.add_argument("--book", help="This book only; default: every book that is not killed.")
+    check.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    check.add_argument("--release", help="Replay on this published research release instead of the newest one.")
+    check.add_argument(
+        "--paper-mode", action="store_true",
+        help="When a decision differs, also run the Paper engine over the book's decisions through it.",
+    )
     return parser
 
 
@@ -240,14 +262,22 @@ def _executor_on_free_gpus(
     decides nothing that day.
     """
 
-    spec = sandbox.spec
-    if spec.gpu == GpuMode.AUTO:
-        def take() -> list[int]:
-            return select_gpus(REPO_ROOT / "experiments", spec.gpu_count, require_name=spec.gpu_name_filter)
+    devices = _take_cards(sandbox, card_wait, label)
+    return docker_executor(strategy_path, sandbox.on_devices(devices), view, state_dir, models_dir)
 
-        devices = take() if card_wait is None else wait_for_cards(take, card_wait, label)
-        sandbox = sandbox.on_devices(tuple(devices))
-    return docker_executor(strategy_path, sandbox, view, state_dir, models_dir)
+
+def _take_cards(sandbox: SandboxConfig, card_wait: CardWait | None, label: str) -> tuple[int, ...] | None:
+    """The cards a book's container asks for, taken now, or None when it asks
+    for none (``gpu`` not ``auto``)."""
+
+    spec = sandbox.spec
+    if spec.gpu != GpuMode.AUTO:
+        return None
+
+    def take() -> list[int]:
+        return select_gpus(REPO_ROOT / "experiments", spec.gpu_count, require_name=spec.gpu_name_filter)
+
+    return tuple(take() if card_wait is None else wait_for_cards(take, card_wait, label))
 
 
 def run_book(
@@ -288,22 +318,6 @@ def _run_book_locked(
         print(f"[{book_id}] killed; nothing decided, exit sheet written to {write_orders(sheets, trade_date, text)}", file=sys.stderr)
         return
 
-    schedule = load_config(REPO_ROOT / DEFAULT_CONFIG)
-
-    def data_factory(start: str, target: str) -> BookPITData:
-        return BookPITData(
-            state_root=book.root,
-            raw_dir=book.raw_dir,
-            fundamental_events_root=book.fundamental_events_root,
-            fundamental_events_status=book.fundamental_events_status,
-            snapshot_config=book.snapshot_config,
-            start=start,
-            trade_date=target,
-            due_at=book.schedule.at(target),
-            schedule=schedule,
-            max_intraday_row_group_rows=book.max_intraday_row_group_rows,
-        )
-
     verify_book_artifact(book)
 
     def verdict_gate() -> bool:
@@ -318,7 +332,7 @@ def _run_book_locked(
         strategy_path=book.strategy_path,
         strategy_revision=book.artifact_id,
         state_root=book.root,
-        data_factory=data_factory,
+        data_factory=book_data_factory(book, load_config(REPO_ROOT / DEFAULT_CONFIG)),
         models_dir=book.models_dir,
         schedule=book.schedule,
         profile=book.profile,
@@ -357,6 +371,55 @@ def vintages(args: argparse.Namespace) -> int:
     return 0
 
 
+def in_morning_window(now: datetime) -> bool:
+    now = now.astimezone(CN_TZ)
+    return now.weekday() < 5 and MORNING_START <= now.time() < PAPER_SHEET_DUE
+
+
+def check(args: argparse.Namespace) -> int:
+    if in_morning_window(datetime.now(CN_TZ)):
+        print(
+            f"the consistency check does not start between {MORNING_START:%H:%M} and {PAPER_SHEET_DUE:%H:%M} "
+            "on a weekday, the morning Paper run's window", file=sys.stderr,
+        )
+        return 2
+    book_ids = [validate_book_id(args.book)] if args.book else open_capped_books(args.state_root)
+    if not book_ids:
+        print(f"no open Paper accounts under {args.state_root}", file=sys.stderr)
+        return 2
+    card_wait = CardWait(time.monotonic() + GPU_WAIT_MINUTES * 60, GPU_POLL_SECONDS)
+    schedule = load_config(REPO_ROOT / DEFAULT_CONFIG)
+    statuses: dict[str, str] = {}
+
+    def check_one(book_id: str, root: Path) -> None:
+        book = load_book(root)
+        result = check_book(
+            book,
+            work_dir=REPO_ROOT / PAPER_CHECK_DIR / book_id,
+            take_devices=lambda: _take_cards(book.sandbox, card_wait, f"[{book_id}]"),
+            generation_id=args.release,
+            paper_mode=args.paper_mode,
+            updater_schedule=schedule,
+        )
+        statuses[book_id] = str(result["status"])
+        first = result.get("first_difference") or {}
+        print(audit_summary_line(
+            "paper_consistency", result["status"], book=book_id, sessions=result.get("sessions_compared", 0),
+            first=":".join(str(first[key]) for key in ("trade_date", "level", "cause")) if first else "none",
+        ))
+        if result.get("reason"):
+            print(f"[{book_id}] {result['reason']}", file=sys.stderr)
+
+    _resources("before")
+    failures = run_books(args.state_root, book_ids, check_one)
+    _resources("after")
+    for book_id, exc in failures.items():
+        print(f"[{book_id}] could not be checked: {type(exc).__name__}: {exc}", file=sys.stderr)
+    if failures or "failed" in statuses.values():
+        return 2
+    return 1 if "differs" in statuses.values() else 0
+
+
 def run(args: argparse.Namespace) -> int:
     if args.gpu_wait_minutes < 0 or args.gpu_poll_seconds <= 0:
         raise ValueError("--gpu-wait-minutes must be at least 0 and --gpu-poll-seconds more than 0")
@@ -381,7 +444,7 @@ def run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    commands = {"init": init, "run": run, "verdict": verdict, "vintages": vintages}
+    commands = {"init": init, "run": run, "verdict": verdict, "vintages": vintages, "check": check}
     return commands[args.command](args)
 
 

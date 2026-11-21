@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +17,7 @@ from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.sandbox import SandboxConfig
-from autotrade.environment.strategy import StrategySchedule
+from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.paper.book import Book
 from autotrade.paper.consistency import (
     CONSISTENCY_NAME,
@@ -27,7 +28,14 @@ from autotrade.paper.consistency import (
 )
 from autotrade.paper.engine import DailyPaperEngine, writer_lock
 from autotrade.paper.pit import book_data_factory
-from tests.unit.support.paper_book_fixture import COUNTER_STRATEGY, _Book
+from tests.unit.support.paper_book_fixture import (
+    COUNTER_STRATEGY,
+    _Book,
+    _registered_book,
+    _repo,
+    _run_paper,
+    paper_root,
+)
 from tests.unit.support.snapshot_fixture import (
     build_fundamental_events,
     build_raw,
@@ -231,6 +239,23 @@ def test_a_check_that_cannot_read_the_book_fails_and_writes_nothing_else(tmp_pat
     after = _files(paper.root)
     assert json.loads(after.pop(CONSISTENCY_NAME)) == damaged
     assert after == before
+
+
+def test_the_check_command_keeps_out_of_the_morning_and_exits_2_for_a_book_it_cannot_compare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    cli = _run_paper()
+    # Monday 2026-11-23: the morning run's window is closed to the check, a Saturday is not.
+    assert cli.in_morning_window(datetime(2026, 11, 23, 5, 40, tzinfo=CN_TZ))
+    assert not cli.in_morning_window(datetime(2026, 11, 23, 9, 10, tzinfo=CN_TZ))
+    assert not cli.in_morning_window(datetime(2026, 11, 21, 6, 0, tzinfo=CN_TZ))
+    monkeypatch.setattr(cli, "in_morning_window", lambda _now: False)
+    monkeypatch.setattr(cli, "REPO_ROOT", _repo(tmp_path))
+    book = _registered_book(tmp_path)  # never run: nothing settled yet
+    assert cli.main(["check", "--state-root", str(paper_root(tmp_path))]) == 2
+    result = json.loads((book.root / CONSISTENCY_NAME).read_text(encoding="utf-8"))
+    assert (result["status"], result["reason"]) == ("failed", "CheckFailed: the book has no settled session to compare")
+    assert "paper_consistency " in capsys.readouterr().out
 
 
 LAKE_CONFIG = SnapshotConfig(

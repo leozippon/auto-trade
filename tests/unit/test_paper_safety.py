@@ -11,6 +11,7 @@ from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.strategy_loader import StrategyLoadError
+from autotrade.paper import pit
 from autotrade.paper.engine import (
     PAPER_STATE_NAME,
     RUN_STATUS_NAME,
@@ -70,7 +71,7 @@ def _setup(tmp_path, monkeypatch, *, losing=False):
     _ok(repo, last, f"{last[:4]}-{last[4:6]}-{last[6:]}T15:16:00+00:00")
     monkeypatch.setattr(cli, "REPO_ROOT", repo)
     monkeypatch.setattr(cli, "load_sse_trading_days", lambda _raw: BOOK_SESSIONS)
-    monkeypatch.setattr(cli, "BookPITData", data)
+    monkeypatch.setattr(pit, "BookPITData", data)
     monkeypatch.setattr(cli, "_executor_on_free_gpus", executor)
     return cli, book, calls
 

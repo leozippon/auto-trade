@@ -117,7 +117,7 @@ class CronInstallerTest(unittest.TestCase):
         self.assertEqual(once, twice)
         self.assertIn(tushare, twice)
         self.assertEqual(twice.count(begin), 1)
-        jobs = job_lines("paper")
+        *jobs, check = job_lines("paper")
         self.assertEqual([job.split()[:2] for job in jobs], [["40", "5"], ["40", "6"], ["55", "7"]])
         for job in jobs:
             # Weekdays only, never overlapping (one lock), logged under logs/paper/.
@@ -125,6 +125,13 @@ class CronInstallerTest(unittest.TestCase):
             # Every book, in the run's own order (the hand-traded ones first):
             # the job names no book, so a deleted one cannot break the morning.
             self.assertEqual(LOCKED.search(job).group(4), "$QUANT_PYTHON scripts/paper/run_paper.py run")
+        # The weekly consistency check, Saturday morning, under the morning runs' lock and log.
+        self.assertEqual(check.split()[:5], ["0", "10", "*", "*", "6"])
+        self.assertEqual(
+            LOCKED.search(check).groups(),
+            (".runtime/paper/cron.lock", "12h", "paper check", "$QUANT_PYTHON scripts/paper/run_paper.py check",
+             "logs/paper/cron.log"),
+        )
 
     def test_the_research_fill_block_installs_beside_the_paper_block(self) -> None:
         template, begin, end = installer.BLOCKS["research"]
@@ -253,8 +260,8 @@ class CronInstallerTest(unittest.TestCase):
             "zgca": (".runtime/zgca/sync_cron.lock", "4h", "zgca sync", "logs/zgca/sync_cron.log"),
         }
         for block, (lock, limit, label, log) in expected.items():
-            # The Paper block's three lines differ in their time alone.
-            commands = {job.split(None, 5)[5] for job in job_lines(block)}
+            # The Paper block's three morning lines differ in their time alone.
+            commands = {job.split(None, 5)[5] for job in job_lines(block) if f'"{label}"' in job}
             self.assertEqual(len(commands), 1, block)
             (command,) = commands
             # cron reads a % in a job line as a newline.
