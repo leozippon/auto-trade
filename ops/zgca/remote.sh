@@ -13,6 +13,10 @@
 set -euo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
+# A step whose subject is not on the instance exits ABSENT (zgca.py's
+# REMOTE_ABSENT), which the workflow tells from a step that failed.
+ABSENT=3
+absent() { echo "ERROR: $*" >&2; exit "$ABSENT"; }
 
 [ $# -ge 7 ] || die "usage: remote.sh <root> <venv> <local dir> <storage> <quota bytes> <floor bytes> <step> [args...]"
 ROOT=$1
@@ -565,7 +569,7 @@ PY
 image_runtime() {
     require_venv
     docker image inspect "$1" >/dev/null 2>&1 \
-        || die "image $1 is not on the instance (tags are lost across stop/start), so the strategy runtime it baked cannot be read"
+        || absent "image $1 is not on the instance (tags are lost across stop/start), so the strategy runtime it baked cannot be read"
     "$VENV/bin/python" - "$1" <<'PY'
 import sys
 

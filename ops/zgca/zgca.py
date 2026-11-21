@@ -124,11 +124,15 @@ TRACKED_LIST_NAME = "tracked.txt"
 DEPLOYED_COMMIT_NAME = "deployed_commit"
 # One marker per experiment `sync` brought back, in the state directory: it
 # says `copied` once both copies are verified, `synced` once the tag step has
-# succeeded too, and `released` once a copy of a completed experiment has had
-# its bulk released on the instance. A sync removes it before it copies, so an
-# interrupted copy leaves none, and so does `resume`, so a resumed experiment is
-# copied again when it ends; sync-rounds skips an experiment whose marker says
-# `released`, or `synced` with a copy that is not of a completed experiment.
+# succeeded too (or cannot succeed by retrying: the pinned image is gone from
+# the instance), and `released` once a copy of a completed experiment has also had
+# its bulk released on the instance. The release waits on the copy alone, so a
+# copy whose tag was refused stays `copied` and is released all the same, again
+# by every pass that retries its tag (a second release frees nothing). A sync
+# removes the marker before it copies, so an interrupted copy leaves none, and
+# so does `resume`, so a resumed experiment is copied again when it ends;
+# sync-rounds skips an experiment whose marker says `released`, or `synced`
+# with a copy that is not of a completed experiment.
 SYNCED_DIR_NAME = "synced"
 # Where the first copy of an experiment is made, in the state directory, under
 # its id: it enters experiments/ by one rename once verified. rsync copies an
@@ -149,6 +153,8 @@ COMPLETED = "completed"
 NOT_RESUMED = ("completed", "stopped")
 # What a sync-rounds pass counts, in its summary line's order.
 SYNC_COUNTS = ("synced", "untagged", "running", "interrupted", "pending", "failed")
+# remote.sh's exit status (its ABSENT) for a step whose subject is not on the instance.
+REMOTE_ABSENT = 3
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Every transfer keeps contents, times and modes; the instance's root owns what lands there.
 PRESERVE = ("-a", "--no-owner", "--no-group")
@@ -158,6 +164,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 class WorkflowError(Exception):
     """A step that did not reach its verified result; the message says why."""
+
+
+class PinnedImageAbsent(WorkflowError):
+    """The image a synced experiment pins is gone from the instance; retrying its tag cannot bring it back."""
 
 
 def say(message: str) -> None:
@@ -596,9 +606,9 @@ class Workflow:
         self.require_running()
         self.remote("experiment-state", experiment_id)
         self.copy_back(experiment_id, local)
-        self.tag_pinned_image(experiment_id, local)
-        self.sync_marker(experiment_id).write_text("synced\n", encoding="utf-8")
-        self.release_completed(experiment_id, local)
+        untagged = self.tag_and_release(experiment_id, local)
+        if untagged:
+            raise untagged
 
     def sync_target(self, experiment_id: str) -> Path:
         """Where a sync of ``experiment_id`` lands: never over an experiment of this host."""
@@ -631,18 +641,32 @@ class Workflow:
             return False
         return state == COMPLETED
 
-    def release_completed(self, experiment_id: str, local: Path) -> None:
-        """Release a synced experiment's bulk on the instance when the verified copy here is of it completed.
+    def tag_and_release(self, experiment_id: str, local: Path, *, tag: bool = True) -> WorkflowError | None:
+        """Tag a verified copy (when ``tag``) and release its bulk on the instance when it is of a completed experiment, neither waiting on the other.
 
-        The `release` step frees its PIT views, sandbox work root and archived
-        session workspaces and keeps its directory with the records; it refuses,
-        whatever the copy says, an experiment the instance does not show completed
-        and finished for good. A copy of any other state releases nothing: a
-        failed, terminated or interrupted experiment resumes in its workspace.
+        The marker advances as SYNCED_DIR_NAME says; a refused tag leaves it
+        `copied`. The `release` step frees the PIT views, sandbox work root and
+        archived session workspaces and keeps the directory with the records; it
+        refuses, whatever the copy says, an experiment the instance does not show
+        completed and finished for good, and that refusal raises here. A copy of
+        any other state releases nothing: a failed, terminated or interrupted
+        experiment resumes in its workspace. Returns why no tag was made.
         """
+        untagged = None
+        if tag:
+            try:
+                self.tag_pinned_image(experiment_id, local)
+            except WorkflowError as exc:
+                untagged = exc
+        settled = untagged is None or isinstance(untagged, PinnedImageAbsent)
+        marker = self.sync_marker(experiment_id)
+        if settled:
+            marker.write_text("synced\n", encoding="utf-8")
         if self.completed_copy(local):
             self.remote("release", experiment_id, quiet=True)
-            self.sync_marker(experiment_id).write_text("released\n", encoding="utf-8")
+            if settled:
+                marker.write_text("released\n", encoding="utf-8")
+        return untagged
 
     def copy_back(self, experiment_id: str, local: Path) -> None:
         """Copy the experiment without pit_views and its worker log; the marker is gone meanwhile and says `copied` once both copies are verified.
@@ -685,8 +709,8 @@ class Workflow:
         completed one is only released on the instance (so one synced before
         releases existed is released by the next pass); any other asks the
         instance one cheap question first (`experiment-state`), and only one in
-        an ended state is copied, then tagged, then released when completed; one
-        copied but not tagged is only tagged again. Each failure is one line and
+        an ended state is copied, then tagged and, when completed, released; one
+        copied but not tagged is only tagged (and released) again. Each failure is one line and
         leaves the next experiment to go ahead, and the pass ends with one
         summary line. False when an experiment failed or is untagged, or the
         instance could not be asked.
@@ -746,14 +770,12 @@ class Workflow:
                 return "interrupted"
             say(f"{line}: ended, syncing")
             self.copy_back(experiment_id, local)
-        if stage != "synced":
-            try:
-                self.tag_pinned_image(experiment_id, local)
-            except WorkflowError as exc:
-                say(f"{experiment_id}: copied, not tagged, tried again next pass: {exc}")
-                return "untagged"
-            self.sync_marker(experiment_id).write_text("synced\n", encoding="utf-8")
-        self.release_completed(experiment_id, local)
+        untagged = self.tag_and_release(experiment_id, local, tag=stage != "synced")
+        if isinstance(untagged, PinnedImageAbsent):
+            say(f"{experiment_id}: synced without a tag, and no later pass tries again: {untagged}")
+        elif untagged:
+            say(f"{experiment_id}: copied, not tagged, tried again next pass: {untagged}")
+            return "untagged"
         return "synced"
 
     def tag_pinned_image(self, experiment_id: str, local: Path) -> None:
@@ -786,7 +808,16 @@ class Workflow:
             SandboxSpec(image=image)
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise WorkflowError(f"experiments/{experiment_id}/hitl/{SANDBOX_IMAGE_STATE_NAME} names no usable image tag: {exc!r}") from exc
-        remote = self.remote("image-runtime", image, capture=True, quiet=True).split()[-1:]
+        shown = self.remote_run("image-runtime", image, capture=True, quiet=True)
+        if shown.returncode == REMOTE_ABSENT:
+            raise PinnedImageAbsent(
+                f"experiments/{experiment_id} is synced, but its pinned image {image} is no longer on the instance "
+                "(tags are lost across stop/start), so the strategy runtime it baked cannot be read: no tag is made "
+                "here and its strategy cannot be followed on Paper here"
+            )
+        if shown.returncode != 0:
+            raise WorkflowError(f"remote step image-runtime failed (exit {shown.returncode})" + _said(shown))
+        remote = (shown.stdout or b"").decode("utf-8", errors="replace").split()[-1:]
         try:
             base = read_image_contract(DEFAULT_IMAGE).runtime
         except SandboxImageContractMismatch as exc:

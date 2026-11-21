@@ -752,10 +752,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
             (hitl / "sandbox_image.json").write_text(json.dumps({"experiment_id": experiment, "image_ref": image}), encoding="utf-8")
 
     def test_only_a_synced_copy_of_a_completed_experiment_is_released_on_the_instance(self) -> None:
-        """The release follows the verified copy: one synced and completed is released (one synced
+        """The release follows the verified copy alone: one synced and completed is released (one synced
         before releases existed included) and marked `released`, which costs nothing afterwards; a
-        synced copy of a failed experiment and one copied but not tagged release nothing; a refused
-        release is one line and is tried again next pass; a sync by hand releases as a pass does."""
+        synced copy of a failed experiment releases nothing; a completed copy whose tag was refused is
+        released all the same, stays `copied` and has its tag (and release) tried again by every pass
+        until the images agree; a refused release is one line and is tried again next pass; a sync by
+        hand releases as a pass does."""
         image = "autotrade-sandbox:exp_copied-base-11111111-1111-4111-8111-111111111111"
         root, round_file = self._sync_round({
             "exp_done": {"state": "completed", "pid": None},
@@ -779,8 +781,9 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 1, err)
         self.assertEqual(ran(), [
             ["experiment-state", "exp_done"], [f"{self.repo}/experiments/exp_done/"], [f"{self.repo}/logs/workers/exp_done.log"],
-            ["release", "exp_done"], ["release", "exp_old"], ["image-runtime", image],
+            ["release", "exp_done"], ["release", "exp_old"], ["image-runtime", image], ["release", "exp_copied"],
         ])
+        self.assertIn("exp_copied: copied, not tagged, tried again next pass: experiments/exp_copied is synced, but its strategy cannot be followed", self.out)
         self.assertTrue(self.out.splitlines()[-1].endswith(": 4 experiments: 3 synced, 1 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"))
         self.assertEqual({experiment: self.marker(experiment) for experiment in ("exp_done", "exp_old", "exp_failed", "exp_copied")},
                          {"exp_done": "released\n", "exp_old": "released\n", "exp_failed": "synced\n", "exp_copied": "copied\n"})
@@ -790,10 +793,11 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.log.unlink()
         code, err = self.run_main("sync-rounds", round_file, **env, MOCK_LOCAL_RUNTIME="b" * 64, MOCK_STEP_EXIT_RELEASE="1")
         self.assertEqual(code, 1)
-        self.assertEqual(ran(), [["release", "exp_old"], ["image-runtime", image]])
-        self.assertIn("exp_old: failed, retried next pass: remote step release failed (exit 1)", self.out)
-        self.assertTrue(self.out.splitlines()[-1].endswith(": 4 experiments: 2 synced, 1 untagged, 0 running, 0 interrupted, 0 pending, 1 failed"))
-        self.assertEqual(self.marker("exp_old"), "synced\n")
+        self.assertEqual(ran(), [["release", "exp_old"], ["image-runtime", image], ["release", "exp_copied"]])
+        for experiment in ("exp_old", "exp_copied"):
+            self.assertIn(f"{experiment}: failed, retried next pass: remote step release failed (exit 1)", self.out)
+        self.assertTrue(self.out.splitlines()[-1].endswith(": 4 experiments: 2 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 2 failed"))
+        self.assertEqual([self.marker("exp_old"), self.marker("exp_copied")], ["synced\n", "copied\n"])
 
         # Released next pass; the copied one, tagged once the images agree, is released in the same pass.
         self.log.unlink()
@@ -816,6 +820,41 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(code, 0, err)
                 self.assertEqual([self.remote(call) or call["args"][:1] for call in self.calls("dev")], after)
                 self.assertEqual(self.marker(experiment), "synced\n" if experiment == "exp_failed" else "released\n")
+
+    def test_a_copy_whose_pinned_image_is_gone_from_the_instance_is_released_and_settled_in_one_line(self) -> None:
+        """Tags are lost across stop/start and an out-of-disk rebuild prunes every unused image, so a
+        copied experiment's pinned image can be gone for good. The pass still releases it, says so in one
+        line, marks it settled and succeeds, and no later pass asks about it again; a sync by hand
+        releases it the same way and fails saying that no tag was made."""
+        image = "autotrade-sandbox:exp_lost-base-11111111-1111-4111-8111-111111111111"
+        root, round_file = self._sync_round({"exp_lost": {"state": "completed", "pid": None}})
+        self._copy_here("exp_lost", "completed", image)
+        markers = self.repo / ".runtime" / "zgca" / zgca.SYNCED_DIR_NAME
+        markers.mkdir(parents=True)
+        (markers / "exp_lost").write_text("copied\n", encoding="utf-8")
+        env = {"MOCK_REMOTE_ROOT": str(root), "MOCK_STEP_EXIT_IMAGE_RUNTIME": str(zgca.REMOTE_ABSENT)}
+
+        code, err = self.run_main("sync-rounds", round_file, **env)
+        self.assertEqual(code, 0, err)
+        self.assertEqual([self.remote(call) for call in self.calls("dev")], [["image-runtime", image], ["release", "exp_lost"]])
+        self.assertFalse(self.calls("docker"))
+        said = self.out.splitlines()
+        self.assertEqual(len(said), 2, said)
+        self.assertIn(f"exp_lost: synced without a tag, and no later pass tries again: experiments/exp_lost is synced, but its pinned "
+                      f"image {image} is no longer on the instance", said[0])
+        self.assertTrue(said[1].endswith(": 1 experiments: 1 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"), said[1])
+        self.assertEqual(self.marker("exp_lost"), "released\n")
+        for _ in range(2):
+            self.log.unlink(missing_ok=True)
+            self.assertEqual(self.run_main("sync-rounds", round_file, **env)[0], 0)
+            self.assertFalse(self.calls())
+
+        self.log.unlink(missing_ok=True)
+        code, err = self.run_main("sync", "exp_lost", **env)
+        self.assertEqual(code, 1)
+        self.assertIn(f"its pinned image {image} is no longer on the instance", err)
+        self.assertEqual([self.step(call) for call in self.calls("dev")], ["experiment-state", "copy", "copy", "image-runtime", "release"])
+        self.assertEqual(self.marker("exp_lost"), "released\n")
 
     def test_the_release_step_frees_a_completed_experiments_bulk_once_and_refuses_anything_else(self) -> None:
         """Run for real against a temporary instance root, with prune_pit_views.py deciding: a completed
@@ -961,7 +1000,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         env = {**os.environ, "PATH": f"{stubs}:{os.environ['PATH']}", "PYTHONPATH": str(REPO / "src")}
         image = "autotrade-sandbox:experiment-base-11111111-1111-4111-8111-111111111111"
         absent = self.remote_step(root, "image-runtime", image, env=env)
-        self.assertEqual(absent.returncode, 1)
+        self.assertEqual(absent.returncode, zgca.REMOTE_ABSENT)
         self.assertIn(f"image {image} is not on the instance", absent.stderr)
         shown = self.remote_step(root, "image-runtime", image, env=env | {"PRESENT": image})
         self.assertEqual((shown.returncode, shown.stdout), (0, "r\n"), shown.stderr)
