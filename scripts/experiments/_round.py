@@ -142,7 +142,7 @@ from autotrade.pipelines.worker import build_experiment_pipeline, resolve_worker
 from autotrade.webui.manager import gpu_request, uses_local_model
 
 EXPERIMENTS_ROOT = REPO_ROOT / "experiments"
-# Where an experiment's reference workspace lives when the experiment does not name one.
+# Where the Packs (reference workspaces) an experiment names live.
 PACKS_DIR = "configs/workspace_refs"
 # The id the round-level dry-run validates under. Never created: it only
 # carries the parameters every experiment shares through the pre-flight.
@@ -187,7 +187,6 @@ BASE_EXPECTED_DEFAULTS: dict[str, object] = {
     # fit budget of this size.
     "strategy_fit_timeout_seconds": 3600,
     "skill_library": "curated",
-    "initial_control_mode": "auto",
     "reasoning_effort": "xhigh",
     "inference_time": "08:00",
     "strategy_period": "day",
@@ -270,7 +269,6 @@ ROUND_REPORT_KEYS: tuple[str, ...] = (
     "cost_stress_multiplier",
     "gpu_count",
     "reasoning_effort",
-    "initial_control_mode",
     "inference_time",
     "strategy_period",
     "model",
@@ -549,8 +547,8 @@ class Round:
     """One round definition: its experiments and what it decides differently.
 
     ``experiments`` maps experiment id to the per-experiment part of the create request --
-    normally ``research_directive`` (the reference workspace defaults to the one named after
-    the experiment, see :meth:`request_params`), plus any parameter that experiment alone
+    normally ``research_directive`` and ``workspace_reference`` (the Pack it mounts, none
+    when neither it nor the round names one), plus any parameter that experiment alone
     changes. ``overrides`` is what the whole round decides on top of
     BASE_OVERRIDES -- normally its dataset selection, and any default every experiment
     shares -- and ``pit_views_seed`` the prebuilt view tree every experiment hardlinks
@@ -615,9 +613,7 @@ class Round:
         """The create request body: console defaults, the round's decisions, the id.
 
         ``PROBE_ID`` stands for the part every experiment shares; any other id must be
-        one of the round's experiments. An experiment's reference workspace is the one named after it,
-        ``configs/workspace_refs/<id>``, unless the experiment or the round names
-        another (``""`` for none); the pre-flight refuses one that is missing.
+        one of the round's experiments.
         """
         base = {
             key: (list(value) if isinstance(value, tuple) else value)
@@ -625,8 +621,6 @@ class Round:
         }
         common = self.common_overrides
         own = {} if experiment_id == PROBE_ID else dict(self.experiments[experiment_id])
-        if experiment_id != PROBE_ID and "workspace_reference" not in {*own, *common}:
-            own["workspace_reference"] = f"{PACKS_DIR}/{experiment_id}"
         return {**base, **common, **own, "experiment_id": experiment_id}
 
     def validated(self, experiment_id: str) -> tuple[dict[str, object] | None, str]:

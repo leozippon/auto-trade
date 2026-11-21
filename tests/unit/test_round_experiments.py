@@ -313,37 +313,31 @@ def test_an_eight_year_round_refuses_star_50_and_fundamentals(
     assert err[-1] == "refused: eight_year_star50_test, eight_year_fundamentals_test"
 
 
-def test_an_experiment_mounts_the_pack_named_after_it_unless_it_names_another(
+def test_an_experiment_mounts_the_pack_it_or_its_round_names_and_none_otherwise(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An experiment may leave out its pack when the pack is configs/workspace_refs/<id>.
-
-    Every checked-in experiment that names exactly that path sends the same create
-    request byte for byte without it; an experiment or a round that names another
-    pack, or "" for none, keeps it; and a default pack that is not there is
-    refused like a named one."""
+    """The Pack is what the experiment or its round names, and none (the console's
+    default) when neither does; a named Pack that is not there is refused."""
     rnd = _sealed_round(
         experiments={
-            "conventional_test": {},
-            "elsewhere_test": {"workspace_reference": "configs/workspace_refs/shared"},
-            "packless_test": {"workspace_reference": ""},
+            "named_test": {"workspace_reference": "configs/workspace_refs/named"},
+            "packless_test": {},
         },
         pit_views_seed="data/seed_probe",
     )
     assert {experiment: rnd.request_params(experiment)["workspace_reference"] for experiment in rnd.experiments} == {
-        "conventional_test": "configs/workspace_refs/conventional_test",
-        "elsewhere_test": "configs/workspace_refs/shared",
-        "packless_test": "",
+        "named_test": "configs/workspace_refs/named",
+        "packless_test": WEB_CREATE_DEFAULTS["workspace_reference"],
     }
-    assert rnd.request_params(PROBE_ID)["workspace_reference"] == WEB_CREATE_DEFAULTS["workspace_reference"]
+    assert WEB_CREATE_DEFAULTS["workspace_reference"] == ""
     shared = _sealed_round(experiments={"seed_a": {}}, overrides={"workspace_reference": "configs/workspace_refs/shared"})
     assert shared.request_params("seed_a")["workspace_reference"] == "configs/workspace_refs/shared"
     _synthetic_repo(tmp_path, monkeypatch, rnd)
-    (tmp_path / "configs/workspace_refs/conventional_test").rmdir()
+    (tmp_path / "configs/workspace_refs/named").rmdir()
     assert rnd.main([LAUNCHER, "0", "--dry-run"]) == 1
     err = capsys.readouterr().err
-    assert "conventional_test: parameters rejected" in err and "workspace_reference" in err
-    assert err.splitlines()[-1] == "refused: conventional_test"
+    assert "named_test: parameters rejected" in err and "workspace_reference" in err
+    assert err.splitlines()[-1] == "refused: named_test"
 
 
 def test_a_paper_packs_payload_passes_the_dry_run_only_as_listed_and_reaches_refs(
@@ -353,7 +347,10 @@ def test_a_paper_packs_payload_passes_the_dry_run_only_as_listed_and_reaches_ref
     repository passes the round's pre-flight, a session's refs/ then holds the
     tracked Pack and the payload, and the pre-flight refuses the experiment once
     a listed file is gone."""
-    rnd = _sealed_round(experiments={"paper_test": {}}, pit_views_seed="data/seed_probe")
+    rnd = _sealed_round(
+        experiments={"paper_test": {"workspace_reference": "configs/workspace_refs/paper_test"}},
+        pit_views_seed="data/seed_probe",
+    )
     _synthetic_repo(tmp_path, monkeypatch, rnd)
     pack = tmp_path / "configs/workspace_refs/paper_test"
     (pack / "README.md").write_text("Reproduce papers/demo/ and evaluate it here.\n", encoding="utf-8")
