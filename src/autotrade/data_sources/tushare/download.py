@@ -3129,45 +3129,39 @@ def landing_first_seen(path: Path, answer: pd.DataFrame, key_columns: list[str] 
 
 
 def download_text_range_month(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, windows: list[tuple[str, str, str]], force: bool, page_limit: int, revision_ledger: Path | str | None = None) -> None:
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for index, part in enumerate(partitions(raw_dir, spec, windows), start=1):
-        path, (start_date, end_date, month) = part.path, part.unit
-        params = {"start_date": start_date, "end_date": end_date}
-        if should_skip_existing_partition(path, force=force, requested_params=params):
-            skipped += 1
-            continue
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["month"] = month
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            answer = frame(result)
-            df = augment_text_frame(answer, spec, landing_first_seen(path, answer, spec.key_columns))
-            did_write, rows = write_window_merged_partition(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=list(df.columns),
-                key_columns=list(spec.key_columns),
-                # range_month queries window on the DATE column (ann_date/report_date);
-                # retention must match it — keying on the collection-time column keeps
-                # out-of-window rec_time rows forever, so source revisions/retractions
-                # of anns_d/report_rc could never be purged.
-                date_columns=[spec.date_column, spec.time_column, "available_at"],
-                start_date=start_date,
-                end_date=end_date,
-                revision_ledger=revision_ledger,
-                deduplicate=spec.unique_key,
-            )
-            if did_write:
-                written += 1
-                total_rows += rows
-        if index % 24 == 0:
-            print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
+    def request(part: Partition) -> dict[str, str]:
+        start_date, end_date, _ = part.unit
+        return {"start_date": start_date, "end_date": end_date}
+
+    def pull(part: Partition) -> tuple[bool, int, int]:
+        params = request(part)
+        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        answer = frame(result)
+        df = augment_text_frame(answer, spec, landing_first_seen(part.path, answer, spec.key_columns))
+        did_write, rows = write_window_merged_partition(
+            part.path,
+            df,
+            api_name=spec.api_name,
+            params={**params, "month": part.unit[2], "pagination": {"page_limit": page_limit, "pages": pages}},
+            fields=list(df.columns),
+            key_columns=list(spec.key_columns),
+            # range_month queries window on the DATE column (ann_date/report_date);
+            # retention must match it — keying on the collection-time column keeps
+            # out-of-window rec_time rows forever, so source revisions/retractions
+            # of anns_d/report_rc could never be purged.
+            date_columns=[spec.date_column, spec.time_column, "available_at"],
+            start_date=params["start_date"],
+            end_date=params["end_date"],
+            revision_ledger=revision_ledger,
+            deduplicate=spec.unique_key,
+        )
+        return did_write, rows, pages
+
+    land(
+        partitions(raw_dir, spec, windows), pull,
+        skip=lambda part: should_skip_existing_partition(part.path, force=force, requested_params=request(part)),
+        revision_ledger=revision_ledger, name=spec.api_name, unit="months", every=24,
+    )
 
 def download_text_time_range_month(
     client: TuShareClient,
@@ -3179,43 +3173,38 @@ def download_text_time_range_month(
     args: argparse.Namespace,
     revision_ledger: Path | str | None = None,
 ) -> None:
+    def request(part: Partition) -> dict[str, str]:
+        start_date, end_date, _ = part.unit
+        params = {"start_date": as_datetime_window(start_date), "end_date": as_datetime_window(end_date, end=True)}
+        if part.dims["src"]:
+            params["src"] = part.dims["src"]
+        return params
+
+    def pull(part: Partition) -> tuple[bool, int, int]:
+        start_date, end_date, month = part.unit
+        params = request(part)
+        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        df = augment_text_frame(frame(result), spec)
+        did_write, rows = write_window_merged_partition(
+            part.path,
+            df,
+            api_name=spec.api_name,
+            params={**params, "month": month, "pagination": {"page_limit": page_limit, "pages": pages}},
+            fields=list(df.columns),
+            key_columns=list(spec.key_columns),
+            date_columns=[spec.time_column, spec.date_column, "available_at"],
+            start_date=start_date,
+            end_date=end_date,
+            revision_ledger=revision_ledger,
+        )
+        return did_write, rows, pages
+
     for source, group in groupby(partitions(raw_dir, spec, windows, args), key=lambda part: part.dims["src"]):
-        source_suffix = f"src={directory_name(source)}"
-        written = 0
-        skipped = 0
-        total_rows = 0
-        for index, part in enumerate(group, start=1):
-            path, (start_date, end_date, month) = part.path, part.unit
-            params = {"start_date": as_datetime_window(start_date), "end_date": as_datetime_window(end_date, end=True)}
-            if source:
-                params["src"] = source
-            if should_skip_existing_partition(path, force=force, requested_params=params):
-                skipped += 1
-                continue
-            with answer_defects(path, ledger=revision_ledger):
-                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                meta_params = dict(params)
-                meta_params["month"] = month
-                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                df = augment_text_frame(frame(result), spec)
-                did_write, rows = write_window_merged_partition(
-                    path,
-                    df,
-                    api_name=spec.api_name,
-                    params=meta_params,
-                    fields=list(df.columns),
-                    key_columns=list(spec.key_columns),
-                    date_columns=[spec.time_column, spec.date_column, "available_at"],
-                    start_date=start_date,
-                    end_date=end_date,
-                    revision_ledger=revision_ledger,
-                )
-                if did_write:
-                    written += 1
-                    total_rows += rows
-            if index % 24 == 0:
-                print(f"{spec.api_name}/{source_suffix} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
-        print(f"{spec.api_name}/{source_suffix} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
+        land(
+            list(group), pull,
+            skip=lambda part: should_skip_existing_partition(part.path, force=force, requested_params=request(part)),
+            revision_ledger=revision_ledger, name=f"{spec.api_name}/src={directory_name(source)}", unit="months", every=24,
+        )
 
 def download_text_news_src_day(
     client: TuShareClient,
@@ -3227,47 +3216,35 @@ def download_text_news_src_day(
     args: argparse.Namespace,
     revision_ledger: Path | str | None = None,
 ) -> None:
+    def request(part: Partition) -> dict[str, str]:
+        return {"src": part.dims["src"], "start_date": as_datetime_window(part.unit), "end_date": as_datetime_window(part.unit, end=True)}
+
+    def pull(part: Partition) -> tuple[bool, int, int]:
+        params = request(part)
+        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        meta_params = {**params, "date": part.unit, "pagination": {"page_limit": page_limit, "pages": pages}}
+        landed, rows = write_frame(part.path, augment_text_frame(frame(result), spec), spec, meta_params, revision_ledger)
+        return landed, rows, pages
+
     for source, group in groupby(partitions(raw_dir, spec, days, args), key=lambda part: part.dims["src"]):
-        source_suffix = f"src={directory_name(source)}"
-        written = 0
-        skipped = 0
-        total_rows = 0
-        for index, part in enumerate(group, start=1):
-            path, day = part.path, part.unit
-            params = {"src": source, "start_date": as_datetime_window(day), "end_date": as_datetime_window(day, end=True)}
-            if should_skip_existing_partition(path, force=force, requested_params=params):
-                skipped += 1
-                continue
-            with answer_defects(path, ledger=revision_ledger):
-                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-                meta_params = dict(params)
-                meta_params["date"] = day
-                meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-                landed, rows = write_frame(path, augment_text_frame(frame(result), spec), spec, meta_params, revision_ledger)
-                written += landed
-                total_rows += rows
-            if index % 250 == 0:
-                print(f"{spec.api_name}/{source_suffix} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
-        print(f"{spec.api_name}/{source_suffix} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
+        land(
+            list(group), pull,
+            skip=lambda part: should_skip_existing_partition(part.path, force=force, requested_params=request(part)),
+            revision_ledger=revision_ledger, name=f"{spec.api_name}/src={directory_name(source)}", unit="days", every=250,
+        )
 
 def download_text_day(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, days: list[str], force: bool, revision_ledger: Path | str | None = None) -> None:
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for index, part in enumerate(partitions(raw_dir, spec, days), start=1):
-        path, day = part.path, part.unit
-        if should_skip_existing_partition(path, force=force):
-            skipped += 1
-            continue
-        params = {spec.date_column or "date": day}
-        with answer_defects(path, ledger=revision_ledger):
-            result = client.query(spec.api_name, params, spec.fields)
-            landed, rows = write_frame(path, augment_text_frame(frame(result), spec), spec, params, revision_ledger)
-            written += landed
-            total_rows += rows
-        if index % 250 == 0:
-            print(f"{spec.api_name} days {index}/{len(days)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done days={len(days)} skipped={skipped} written={written} rows_written={total_rows}")
+    def pull(part: Partition) -> tuple[bool, int, int]:
+        params = {spec.date_column or "date": part.unit}
+        result = client.query(spec.api_name, params, spec.fields)
+        landed, rows = write_frame(part.path, augment_text_frame(frame(result), spec), spec, params, revision_ledger)
+        return landed, rows, 0
+
+    land(
+        partitions(raw_dir, spec, days), pull,
+        skip=lambda part: should_skip_existing_partition(part.path, force=force),
+        revision_ledger=revision_ledger, name=spec.api_name, unit="days", every=250,
+    )
 
 def set_download_defaults(args: argparse.Namespace) -> None:
     if args.min_interval_seconds is None:
