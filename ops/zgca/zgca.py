@@ -8,13 +8,15 @@ for an owner-only file, `report` for its GPUs, disks and tmux sessions, and
 plain commands for the steps of ops/zgca/remote.sh; both over `zenith`) and
 verifies its own result. up and down are `instance start` and `instance
 stop`, down refusing while experiments run on the instance. A deploy refuses
-a working tree that is not its commit and running experiments, then carries
-the tracked files and that commit's id, the model gateways' keys from the
-local .env (only the keys the model profiles name), the named prebuilt view cache
-and the research release that seed was built from (without the text and
-minute datasets its configuration does not read), prunes code the tree no
-longer tracks, prepares the instance (ripgrep, venv, a sandbox image that runs
-on the instance's GPU driver), and last copies the pretrained-model store every
+a working tree that is not its commit, a research Pack whose payload differs
+from its manifest and running experiments, then carries the tracked files and
+that commit's id, the model gateways' keys from the local .env (only the keys
+the model profiles name), the named prebuilt view cache, the Packs' payloads
+(data/pack_payloads) and the research release that seed was built from
+(without the text and minute datasets its configuration does not read),
+prunes code the tree no longer tracks, prepares the instance (ripgrep, venv,
+a sandbox image that runs on the instance's GPU driver), and last copies the
+pretrained-model store every
 new experiment pins and mounts to the instance's own disk, or refuses when it does
 not fit there. A run refuses unless the last deploy shipped the local HEAD,
 then starts the console (restarting it onto the deployed
@@ -435,6 +437,7 @@ class Workflow:
         listed = self.git("ls-files", "-z")
         if not listed:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
+        payloads = self.require_pack_payloads(listed)
         store_bytes = _tree_bytes(pretrained)
         duckdb_cli = self.release_file(DUCKDB_CLI_URL, DUCKDB_CLI_NAME, DUCKDB_CLI_SHA256)
         cuda_compat = self.release_file(CUDA_COMPAT_URL, CUDA_COMPAT_NAME, CUDA_COMPAT_SHA256)
@@ -463,6 +466,10 @@ class Workflow:
         self.remote("tracked")
         say(f"deploy: {seed}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{seed_dir}/", f"dev:{root}/{seed_path.as_posix()}/")
+        # Mirrored whole, so a payload removed here (its Pack left the tree) goes there too.
+        shipped = payloads.relative_to(self.repo_root).as_posix()
+        say(f"deploy: {shipped}")
+        self.dev("copy", *PRESERVE, "--delete", f"{payloads}/", f"dev:{root}/{shipped}/")
         # Excluded directories are also kept on the instance (--delete without
         # --delete-excluded): another seed of the same release may read them.
         say(f"deploy: {RELEASES}/{generation} without {', '.join(excluded) or 'nothing'}")
@@ -488,6 +495,32 @@ class Workflow:
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{store}/")
         self.dev("report")
         say("deploy: done")
+
+    def require_pack_payloads(self, listed: bytes) -> Path:
+        """Hold every tracked Pack with a payload manifest to it, as an experiment's pre-flight does on the instance.
+
+        Returns the payload store, created empty here when no Pack has a
+        payload yet so the deploy mirrors it all the same.
+        """
+
+        _with_project_src()
+        from autotrade.pipelines.pack_payload import (
+            PAYLOAD_MANIFEST,
+            PAYLOAD_ROOT,
+            PackPayloadError,
+            pack_payload,
+        )
+
+        for entry in listed.split(b"\0"):
+            path = Path(os.fsdecode(entry))
+            if entry and path.name == PAYLOAD_MANIFEST:
+                try:
+                    pack_payload(self.repo_root / path.parent, self.repo_root)
+                except PackPayloadError as exc:
+                    raise WorkflowError(f"{exc}: scripts/experiments/fetch_pack_payload.py fetches it") from exc
+        payloads = self.repo_root / PAYLOAD_ROOT
+        payloads.mkdir(parents=True, exist_ok=True)
+        return payloads
 
     def run(self, round_file: str, args: Sequence[str]) -> None:
         tracked = subprocess.run(

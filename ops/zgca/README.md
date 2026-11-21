@@ -20,7 +20,7 @@ python ops/zgca/zgca.py --instance <平台实例 id> status
 
 `up` 就是 `instance start`：已是 RUNNING 就只确认 SSH，否则发出一次启动请求（平台暂时拒绝时由 `instance` 退避重试），等到实例显示 RUNNING 且 SSH 能登录，最后打印本周卡时。
 
-`deploy <种子目录>` 先在本机核对：预构建视图目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下、并记着种子的快照配置，`.env` 存在且设了模型档案点名的键，预训练模型库 `data/pretrained/` 带着它的 `MANIFEST.sha256`（开发机上新建的实验钉住并挂载这份库），工作树就是它的提交（`git status --porcelain` 为空，否则要求先提交：受管文件按工作树里的内容传过去，开发机上记下的是这个提交）。镜像构建要装的两个文件开发机都取不到：GitHub 上的 DuckDB CLI 发布包，和 NVIDIA 的 CUDA 前向兼容包（见下文 [GPU 驱动](#gpu-驱动)）。所以由本机下载一次、缓存在 `.runtime/zgca/`：设了 `ZGCA_GITHUB_PROXY` 时 GitHub 的发布包先经代理、再直连，只有与钉住的 SHA-256 相符的下载才进缓存，缓存里摘要不符的文件直接拒绝（causal-conv1d 在镜像里从 PyPI 源码编译，开发机经清华镜像取得，不必带过去）。核对都通过、实例在运行，才开始动开发机：有实验在跑时直接拒绝、什么也不改，因为部署会改写和清理它们导入的代码，以 `--delete` 镜像它们读的种子、release 与模型库，还可能重建它们的镜像；tmux 会话 `autotrade-round` 或 `autotrade-fill` 里还有启动器时同样拒绝，因为它可能在部署中途建出实验；否则先 `dev bootstrap`（新实例的镜像不带 rsync 和 tmux），建好运行时目录，并让 `data/pretrained` 成为指向实例盘上模型库目录的链接（那里是真实目录或指向别处时拒绝），再依次传输，每一次都由 `dev copy` 传完后以同样参数 dry-run 比对，有差异就停下：
+`deploy <种子目录>` 先在本机核对：预构建视图目录在 `data/` 下且预构建已完成（没有 `prebuild_unfinished.json`），它的 `provider.json` 指向的 research release 已经发布在 `data/research_releases/` 下、并记着种子的快照配置，`.env` 存在且设了模型档案点名的键，预训练模型库 `data/pretrained/` 带着它的 `MANIFEST.sha256`（开发机上新建的实验钉住并挂载这份库），工作树就是它的提交（`git status --porcelain` 为空，否则要求先提交：受管文件按工作树里的内容传过去，开发机上记下的是这个提交），每个带载荷清单 `PAYLOAD.sha256` 的受管研究包，它在 `data/pack_payloads/<包>/` 下的载荷都与清单一致（与实验预检同一个检查，缺文件、多文件或摘要不符即拒绝；载荷由 `scripts/experiments/fetch_pack_payload.py` 取得）。镜像构建要装的两个文件开发机都取不到：GitHub 上的 DuckDB CLI 发布包，和 NVIDIA 的 CUDA 前向兼容包（见下文 [GPU 驱动](#gpu-驱动)）。所以由本机下载一次、缓存在 `.runtime/zgca/`：设了 `ZGCA_GITHUB_PROXY` 时 GitHub 的发布包先经代理、再直连，只有与钉住的 SHA-256 相符的下载才进缓存，缓存里摘要不符的文件直接拒绝（causal-conv1d 在镜像里从 PyPI 源码编译，开发机经清华镜像取得，不必带过去）。核对都通过、实例在运行，才开始动开发机：有实验在跑时直接拒绝、什么也不改，因为部署会改写和清理它们导入的代码，以 `--delete` 镜像它们读的种子、研究包载荷、release 与模型库，还可能重建它们的镜像；tmux 会话 `autotrade-round` 或 `autotrade-fill` 里还有启动器时同样拒绝，因为它可能在部署中途建出实验；否则先 `dev bootstrap`（新实例的镜像不带 rsync 和 tmux），建好运行时目录，并让 `data/pretrained` 成为指向实例盘上模型库目录的链接（那里是真实目录或指向别处时拒绝），再依次传输，每一次都由 `dev copy` 传完后以同样参数 dry-run 比对，有差异就停下：
 
 | 内容 | 方式 |
 | --- | --- |
@@ -28,6 +28,7 @@ python ops/zgca/zgca.py --instance <平台实例 id> status
 | 模型网关的 key：本机 `.env` 里模型档案点名的那些行（各档案的 key 与地址变量，加上中转站的备用 key） | `dev put` 写成开发机的 `.env`，仅 root 可读，本机不落临时文件，写完核对摘要 |
 | 两个构建用文件、受管文件清单和这次部署的提交号 | 复制到开发机的 `.runtime/zgca/`，提交号在 `deployed_commit` 里，`status` 会显示 |
 | 预构建视图目录 | 精确镜像（`--delete`，硬链接保留） |
+| 研究包载荷 `data/pack_payloads/` | 整个目录精确镜像（`--delete`）：本机删掉的载荷（它的包已离开仓库）在开发机上也删掉 |
 | 该 release 目录 | 同上，但不带种子快照配置不读的文本数据集与分钟线（新闻与分钟线是 release 的大头：b50c220f 的 51.75 GB 里 38.5 GB）；跳过的目录在开发机上保留不删（`--delete` 不带 `--delete-excluded`），同一 release 的另一份预构建视图可能要读 |
 | 预训练模型库 | 最后一步，精确镜像到实例自己的盘 `/ebs/auto-trade/pretrained`，只在放得下时（见下） |
 
@@ -65,7 +66,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 本项目在每个资源区用两处存储。个人存储上的 `/personal_fast_storage/auto-trade` 是这个区的仓库根：代码、`.env`、种子、release、实验和日志都在这里，同一资源区的实例共用这一份。实验的 `pit_views/` 硬链接种子的文件，所以种子和 `experiments/` 必须在同一个文件系统上。
 
-个人存储 `/personal_fast_storage` 是 GPFS 上有 100 GiB 硬配额的一块（工具包的平台记录；`zgca.py` 的 `STORAGE_QUOTA`）。`df` 和 `statvfs` 在那里看到的是整个 3.8 PB 的共享文件系统，所以 `dev report`、控制台建实验时的余量检查和 Agent 工具的余量下限都看不到配额；容器里也没有任何配额工具，`remote.sh` 只能用 `du` 量整棵树，硬链接只算一次，与配额的算法一致，2026-11-20 量一次约一秒。量的结果由 `status` 显示；填充循环和 `resume` 在配额下的余量不足 40 GiB（`STORAGE_FLOOR`）或量不出来时不起新实验，因为一次会话的沙箱工作区长到过 20 GiB，worker 在每次尝试结束时又把工作区（单个超过 64 MiB 的文件除外）归档进实验的 `artifacts/run_*/workspace`。2026-11-20 配额写满：一条跑了 18 小时的会话以 `Disk quota exceeded` 失败，随后的填充又建了同轮的两条实验，都当场失败。已完成的实验同步回本机之后由 `sync` 释放它在开发机上的大件（见上文），其余的配额由种子、release、venv、日志和还可能续跑的实验占着。
+个人存储 `/personal_fast_storage` 是 GPFS 上有 100 GiB 硬配额的一块（工具包的平台记录；`zgca.py` 的 `STORAGE_QUOTA`）。`df` 和 `statvfs` 在那里看到的是整个 3.8 PB 的共享文件系统，所以 `dev report`、控制台建实验时的余量检查和 Agent 工具的余量下限都看不到配额；容器里也没有任何配额工具，`remote.sh` 只能用 `du` 量整棵树，硬链接只算一次，与配额的算法一致，2026-11-20 量一次约一秒。量的结果由 `status` 显示；填充循环和 `resume` 在配额下的余量不足 40 GiB（`STORAGE_FLOOR`）或量不出来时不起新实验，因为一次会话的沙箱工作区长到过 20 GiB，worker 在每次尝试结束时又把工作区（单个超过 64 MiB 的文件除外）归档进实验的 `artifacts/run_*/workspace`。2026-11-20 配额写满：一条跑了 18 小时的会话以 `Disk quota exceeded` 失败，随后的填充又建了同轮的两条实验，都当场失败。已完成的实验同步回本机之后由 `sync` 释放它在开发机上的大件（见上文），其余的配额由种子、release、研究包载荷、venv、日志和还可能续跑的实验占着；载荷每包至多 512 MiB，每次尝试开局另复制一份进会话工作区的 `refs/`，尝试结束时随工作区归档（单个超过 64 MiB 的文件除外）。
 
 预训练模型库放在实例自己的盘上，`/ebs/auto-trade/pretrained`，仓库根的 `data/pretrained` 是指向它的链接。库放在个人存储上会和种子、release 与实验抢这份配额。实验只钉住库清单的摘要，容器启动时解析这条链接、挂载它指向的目录，所以除了这条链接没有别处知道库在哪。容器挂载的只有库和实验的视图；release 只由宿主侧的 worker 读，所以留在个人存储上。
 

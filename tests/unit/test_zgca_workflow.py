@@ -26,6 +26,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autotrade.pipelines.pack_payload import (
+    PAYLOAD_MANIFEST,
+    format_manifest,
+    payload_digests,
+)
+
 REPO = Path(__file__).resolve().parents[2]
 SCRIPT = REPO / "ops" / "zgca" / "zgca.py"
 SPEC = importlib.util.spec_from_file_location("zgca", SCRIPT)
@@ -355,7 +361,8 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(ran, [
             ["idle", "deploy"], ["bootstrap"], ["dirs"], ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
             ["copy", f"dev:{remote}/.runtime/zgca/"], ["tracked"],
-            ["copy", f"dev:{remote}/data/pit_views_seed_test/"], ["copy", f"dev:{remote}/data/research_releases/gen_test/"],
+            ["copy", f"dev:{remote}/data/pit_views_seed_test/"], ["copy", f"dev:{remote}/data/pack_payloads/"],
+            ["copy", f"dev:{remote}/data/research_releases/gen_test/"],
             ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256], ["local-disk"],
             ["copy", f"dev:{local}/pretrained/"], ["report"],
         ])
@@ -377,16 +384,20 @@ class ZgcaWorkflowTest(unittest.TestCase):
             transfers[1]["args"][-5:-1],
             [str(state / zgca.DUCKDB_CLI_NAME), str(state / zgca.CUDA_COMPAT_NAME), str(manifest), str(commit)],
         )
-        # The seed, the release and the store are mirrored, hard links kept.
-        for transfer in transfers[2:5]:
+        # The seed, the release and the store are mirrored, hard links kept;
+        # so is the Packs' payload store, empty while no Pack has a payload.
+        seed, payloads, release, store = transfers[2:6]
+        for transfer in (seed, release, store):
             self.assertIn("--delete", transfer["args"])
             self.assertIn("-H", transfer["args"])
-        self.assertEqual(transfers[4]["args"][-2], f"{self.repo / zgca.PRETRAINED}/")
+        self.assertEqual(store["args"][-2], f"{self.repo / zgca.PRETRAINED}/")
+        self.assertIn("--delete", payloads["args"])
+        self.assertEqual(payloads["args"][-2], f"{self.repo / 'data' / 'pack_payloads'}/")
         self.assertNotIn("--delete", transfers[0]["args"])
         # The release leaves behind exactly the text and minute datasets the
         # seed's configuration does not read, and keeps them where an earlier
         # deploy put them (no --delete-excluded).
-        release = transfers[3]["args"]
+        release = release["args"]
         self.assertEqual(
             [arg for arg in release if arg.startswith("--exclude")],
             [f"--exclude=/raw/{name}/" for name in ("research_report", "report_rc", "irm_qa_sh", "irm_qa_sz",
@@ -400,6 +411,49 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertTrue((state / zgca.CUDA_COMPAT_NAME).is_file())
         self.assertEqual(self.run_main("deploy", "data/pit_views_seed_test")[0], 0)
         self.assertEqual(len(self.calls("curl")), 2)
+
+    def test_deploy_holds_every_paper_pack_to_its_manifest_and_mirrors_the_payloads(self) -> None:
+        """A tracked Pack's payload that differs from its manifest stops the deploy
+        before anything is fetched or reaches the instance; one as listed is
+        mirrored there (rsync makes the directory, as it makes the seed's), and
+        a payload no longer here is removed there."""
+        self._tracked_repo()
+        self._seed()
+        self._pretrained()
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
+        pack = self.repo / "configs" / "workspace_refs" / "paper_test"
+        pack.mkdir(parents=True)
+        (pack / "README.md").write_text("Reproduce papers/demo/.\n", encoding="utf-8")
+        text = self.repo / "data" / "pack_payloads" / "paper_test" / "papers" / "demo" / "paper.txt"
+        text.parent.mkdir(parents=True)
+        text.write_text("Abstract\n", encoding="utf-8")
+        (pack / PAYLOAD_MANIFEST).write_text(format_manifest(payload_digests(self.repo / "data" / "pack_payloads" / "paper_test", "store")), encoding="utf-8")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run([*git, "add", "configs"], cwd=self.repo, check=True)
+        subprocess.run([*git, "commit", "-q", "-m", "paper pack"], cwd=self.repo, check=True)
+        text.write_text("Another text\n", encoding="utf-8")
+        code, err = self.run_main("deploy", "data/pit_views_seed_test")
+        self.assertEqual(code, 1)
+        self.assertIn("Pack paper_test: data/pack_payloads/paper_test/papers/demo/paper.txt has sha256", err)
+        self.assertFalse(self.calls())
+        text.write_text("Abstract\n", encoding="utf-8")
+        # The instance's file system as the dirs step leaves it.
+        instance = Path(self.temp.name) / "instance"
+        root = Path(str(instance) + zgca.REMOTE_ROOT)
+        for directory in (root / ".runtime" / "zgca", root / "data" / "research_releases", Path(str(instance) + zgca.LOCAL_ROOT)):
+            directory.mkdir(parents=True)
+        shipped = root / "data" / "pack_payloads"
+        for retired in ((), ("retired_pack", "paper.txt")):
+            with self.subTest(retired=retired):
+                if retired:
+                    (shipped / retired[0]).mkdir()
+                    (shipped.joinpath(*retired)).write_text("old\n", encoding="utf-8")
+                code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_RSYNC=str(instance))
+                self.assertEqual(code, 0, err)
+                self.assertEqual(sorted(path.relative_to(shipped).as_posix() for path in shipped.rglob("*") if path.is_file()),
+                                 ["paper_test/papers/demo/paper.txt"])
+                self.assertEqual((shipped / "paper_test" / "papers" / "demo" / "paper.txt").read_text(encoding="utf-8"), "Abstract\n")
+        self.assertTrue((root / "configs" / "workspace_refs" / "paper_test" / PAYLOAD_MANIFEST).is_file())
 
     def test_release_exclusions_follow_the_seeds_configuration(self) -> None:
         """Only text and minute datasets the configuration does not name stay behind; a seed naming them takes them."""
