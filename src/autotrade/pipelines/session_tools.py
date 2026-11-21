@@ -87,6 +87,7 @@ from .config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
     BATCH_VALIDATE_MIN_CANDIDATES,
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
+    DEFAULT_MAX_NULL_CONTROLS,
     RESEARCH_PHASE,
     AcceptanceRules,
     EvaluationBackend,
@@ -2784,6 +2785,24 @@ def _replicate_cell(handle: str, row: Mapping[str, object] | str) -> dict[str, o
     return {"handle": handle, **_rounded_row({key: row[key] for key in REPLICATE_STEP_KEYS})}
 
 
+def _null_control_description(max_calls: int) -> str:
+    """``run_null_control``'s description at a per-session cap of ``max_calls``."""
+
+    return (
+        "Rank a complete research-span Validation node of this session against "
+        f"{BASELINE_DRAWS} host replays of its own trade skeleton over its span, "
+        "each name replaced by a random one on the same side of the "
+        "benchmark_index membership (the float-cap decile without index_weight) "
+        "that one board lot of the same money could buy: the null control the "
+        "Pipeline runs at registration, which reuses this cached block. "
+        "excess_percentile near 0.5 means the names added nothing the timing "
+        f"and sizing did not. At most {max_calls} calls per session "
+        "(budgets.max_null_controls; a call the host cannot set up costs none); "
+        "refused for any other node, once spent, and while a sub-agent that can "
+        "write runs. Use it on full-span finalists."
+    )
+
+
 class NullControlTool(SessionTimeBudgetAware):
     """Rank one complete Validation against random-name replays of its trades.
 
@@ -2801,7 +2820,7 @@ class NullControlTool(SessionTimeBudgetAware):
         # is the result/ledger block it produces, and one name for both made
         # every mention of the block read as a tool reference.
         "run_null_control",
-        "Random-portfolio null control of one complete Validation node.",
+        _null_control_description(DEFAULT_MAX_NULL_CONTROLS),
         {
             "type": "object",
             "properties": {
@@ -2829,23 +2848,7 @@ class NullControlTool(SessionTimeBudgetAware):
         self.used = 0
         # Successful blocks by node id, exactly as the ledger records them.
         self.blocks: dict[str, dict[str, object]] = {}
-        self.spec = ToolSpec(
-            self.spec.name,
-            "Rank a complete research-span Validation node of this session against "
-            f"{BASELINE_DRAWS} host replays of its own trade skeleton over its span, "
-            "each name replaced by a random one on the same side of the "
-            "benchmark_index membership (the float-cap decile without index_weight) "
-            "that one board lot of the same money could buy: the null control the "
-            "Pipeline runs at registration, which reuses this cached block. "
-            "excess_percentile near 0.5 means the names added nothing the timing "
-            f"and sizing did not. At most {max_calls} calls per session "
-            "(budgets.max_null_controls; a call the host cannot set up costs none); "
-            "refused for any other node, once spent, and while a sub-agent that can "
-            "write runs. Use it on full-span finalists.",
-            self.spec.input_schema,
-            mutating=True,
-            example=self.spec.example,
-        )
+        self.spec = replace(self.spec, description=_null_control_description(max_calls))
 
     @property
     def session_time_budget(self) -> InferenceTimeBudget:
