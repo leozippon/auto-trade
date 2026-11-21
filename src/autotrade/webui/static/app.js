@@ -2337,8 +2337,9 @@ function confirmDeleteBook(bookId) {
               });
               toast("已删除");
               closeModal();
-              location.hash = "#/trading/paper";
-              renderTradingPage();
+              // The card sits on the overview, so the hash does not move and
+              // no route() runs: read the overview again in place.
+              await tradingView?.refresh();
             } catch (error) {
               toast(error.message, true);
             }
