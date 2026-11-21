@@ -3,47 +3,31 @@
 from __future__ import annotations
 
 import argparse
-import json
 import os
-import shutil
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from autotrade.data_sources.tushare import cron_update
-from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, job_state_path
+from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.engine import PaperTitlesNotLanded
 from autotrade.paper.orders import render_failure
 from autotrade.paper.titles import require_landed_titles
-from tests.unit.support.paper_book_fixture import COUNTER_STRATEGY, _Book, _sheet_book
+from tests.unit.support.paper_book_fixture import (
+    COUNTER_STRATEGY,
+    TITLE_JOB,
+    _Book,
+    _ok,
+    _record,
+    _repo,
+    _sheet_book,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-JOB = "cn_nightly_anns_full"
 TITLE_BOOK = SnapshotConfig(text_datasets=("anns_d",))
-
-
-def _repo(tmp_path: Path) -> Path:
-    """A repository root with the real schedule and no job state yet."""
-
-    root = tmp_path / "repo"
-    (root / DEFAULT_CONFIG).parent.mkdir(parents=True)
-    shutil.copy(REPO_ROOT / DEFAULT_CONFIG, root / DEFAULT_CONFIG)
-    return root
-
-
-def _record(repo: Path, **state: object) -> None:
-    """The title job's state, as the scheduler records it."""
-
-    path = job_state_path(JOB, repo)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps({"log_path": "logs/tushare/cron/anns.log", **state}), encoding="utf-8")
-
-
-def _ok(repo: Path, end_date: str, finished: str) -> None:
-    _record(repo, status="ok", returncode=0, start_date="20200101", end_date=end_date, updated_at=finished)
 
 
 def _refused(repo: Path, day: str) -> str:
@@ -82,11 +66,11 @@ def test_a_failed_title_run_refuses_the_decision_after_settling(tmp_path: Path, 
     assert "PaperTitlesNotLanded" in state["last_error"]
 
     sheet = render_failure(_sheet_book(book), "20260924", caught.value)
-    assert f"{JOB} 2026-09-23 23:15 那一轮" in sheet
+    assert f"{TITLE_JOB} 2026-09-23 23:15 那一轮" in sheet
     assert "失败，返回码 77：OfficialAccessError" in sheet
     assert "最近一次成功：2026-09-22 23:16 结束、覆盖到 20260923 的那一次" in sheet
     assert "把有效的 TUSHARE_TOKEN_TMP 写进仓库根目录的 .env" in sheet
-    assert f"--job {JOB} --end-date 20260924 --force-run" in sheet
+    assert f"--job {TITLE_JOB} --end-date 20260924 --force-run" in sheet
     assert "run_paper.py run --trade-date 20260924" in sheet
     values = [value for value in os.environ.values() if len(value) >= 8]
     assert secret in values and not [value for value in values if value in sheet]
@@ -110,7 +94,7 @@ def test_the_due_run_is_the_previous_evening_of_the_real_schedule(tmp_path: Path
     # exchange holidays have their own runs and a decision needs the last one.
     [line] = [
         line for line in (REPO_ROOT / "ops/cron/tushare_update.cron").read_text(encoding="utf-8").splitlines()
-        if line.rstrip().endswith(f"--job {JOB}")
+        if line.rstrip().endswith(f"--job {TITLE_JOB}")
     ]
     assert line.split()[:5] == ["15", "23", "*", "*", "*"]
     repo = _repo(tmp_path)
@@ -151,7 +135,7 @@ def test_the_evening_run_fetches_the_titles_dated_for_the_next_decision(tmp_path
     monkeypatch.delenv("TUSHARE_UPDATE_START_DATE", raising=False)
     repo = _repo(tmp_path)
     ctx = cron_update.build_context(argparse.Namespace(
-        config=str(repo / DEFAULT_CONFIG), job=JOB, start_date=None, end_date=None, dry_run=False, force_run=False,
+        config=str(repo / DEFAULT_CONFIG), job=TITLE_JOB, start_date=None, end_date=None, dry_run=False, force_run=False,
     ))
     assert (ctx.start_date, ctx.end_date) == ("20260908", "20261008")
     [command] = cron_update.build_job_commands(ctx)

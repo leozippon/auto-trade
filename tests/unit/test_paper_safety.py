@@ -25,11 +25,12 @@ from tests.unit.support.paper_book_fixture import (
     PROFILE,
     _bars,
     _Data,
+    _ok,
     _registered_book,
+    _repo,
     _run_paper,
 )
 from tests.unit.support.paper_reconcile_fixture import _write_slot
-from tests.unit.test_paper_titles import _ok, _repo
 
 
 def _setup(tmp_path, monkeypatch, *, losing=False):

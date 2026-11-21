@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 from pathlib import Path
 
 import pandas as pd
 
+from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, job_state_path
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.replay.engine import StrategyDataView
@@ -204,3 +206,28 @@ def _run_paper():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+# The announcement-title job a title-reading book waits on, as the scheduler records it.
+TITLE_JOB = "cn_nightly_anns_full"
+
+
+def _repo(tmp_path: Path) -> Path:
+    """A repository root with the real schedule and no job state yet."""
+
+    root = tmp_path / "repo"
+    (root / DEFAULT_CONFIG).parent.mkdir(parents=True)
+    shutil.copy(REPO_ROOT / DEFAULT_CONFIG, root / DEFAULT_CONFIG)
+    return root
+
+
+def _record(repo: Path, **state: object) -> None:
+    """The title job's state, as the scheduler records it."""
+
+    path = job_state_path(TITLE_JOB, repo)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"log_path": "logs/tushare/cron/anns.log", **state}), encoding="utf-8")
+
+
+def _ok(repo: Path, end_date: str, finished: str) -> None:
+    _record(repo, status="ok", returncode=0, start_date="20200101", end_date=end_date, updated_at=finished)
