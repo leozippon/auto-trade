@@ -1050,7 +1050,7 @@ def write_window_merged_partition(
 
 def land(
     parts: list[Partition],
-    pull: Callable[[Partition], tuple[bool, int, int]],
+    pull: Callable[[Partition], tuple[bool | None, int, int]],
     *,
     skip: Callable[[Partition], bool],
     revision_ledger: Path | str | None,
@@ -1058,19 +1058,26 @@ def land(
     unit: str = "",
     every: int | None = None,
     pages: bool = False,
-) -> int:
+) -> tuple[int, int]:
     """Pull every partition of ``parts`` that ``skip`` does not rule out.
 
     Each pull runs under :func:`answer_defects`: a defective answer leaves its
     partition as it is and the loop goes on. ``pull(part)`` returns whether it
-    wrote the partition, the rows it wrote and the pages it read. Prints the
-    tally every ``every`` partitions (counted with the skipped ones; a skipped
-    partition prints nothing) and at the end, ``unit`` naming what is counted;
-    returns the partitions written."""
-    written = skipped = rows_written = pages_read = 0
+    wrote the partition (None when it declined the answer: no rows, or not
+    every exchange, where the dataset requires them), the rows it wrote and
+    the pages it read. Prints the tally every ``every`` partitions (counted
+    with the skipped ones; a skipped partition prints nothing) and at the end,
+    ``unit`` naming what is counted; returns the partitions written and the
+    declined ones."""
+    written = skipped = declined = rows_written = pages_read = 0
 
     def tally() -> str:
-        return f"skipped={skipped} written={written} rows_written={rows_written}" + (f" pages={pages_read}" if pages else "")
+        return (
+            f"skipped={skipped} written={written}"
+            + (f" zero_skipped={declined}" if declined else "")
+            + f" rows_written={rows_written}"
+            + (f" pages={pages_read}" if pages else "")
+        )
 
     for index, part in enumerate(parts, start=1):
         if skip(part):
@@ -1078,13 +1085,14 @@ def land(
             continue
         with answer_defects(part.path, ledger=revision_ledger):
             wrote, rows, read = pull(part)
-            written += wrote
+            written += wrote is True
+            declined += wrote is None
             rows_written += rows
             pages_read += read
         if every and index % every == 0:
             print(f"{name} {unit + ' ' if unit else ''}{index}/{len(parts)} {tally()}")
     print(f"{name} done {unit or 'tasks'}={len(parts)} {tally()}")
-    return written
+    return written, declined
 
 def download_trade_date_dataset(
     client: TuShareClient,
@@ -1095,56 +1103,43 @@ def download_trade_date_dataset(
     page_limit: int,
     revision_ledger: Path,
 ) -> int:
+    """Returns the trade dates whose answer was declined or kept out as a defect."""
     page_limit = page_limit or TRADE_DATE_PAGE_LIMIT
-    dataset_dir = raw_dir / spec.api_name
-    written = 0
-    skipped = 0
-    zero_skipped = 0
-    total_rows = 0
-    for index, trade_date in enumerate(trade_dates, start=1):
-        path = dataset_dir / f"trade_date={trade_date}.parquet"
-        # A parquet whose sidecar is missing or carries another write ID is
-        # an interrupted write, not a committed partition: re-attempt it.
-        if not force and committed_partition_intact(path) and (spec.zero_rows_ok or parquet_rows(path) > 0):
-            skipped += 1
-            if index % 250 == 0:
-                print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written}")
-            continue
-        params = {"trade_date": trade_date}
-        with answer_defects(path, ledger=revision_ledger):
-            try:
-                result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            except DefectiveAnswer:
-                raise
-            except Exception as exc:
-                raise RuntimeError(f"{spec.api_name} trade_date={trade_date} failed: {exc}") from exc
-            df = frame(result)
-            if spec.dedup_exact and not df.empty:
-                df = df.drop_duplicates().reset_index(drop=True)
-            if df.empty and not spec.zero_rows_ok:
-                zero_skipped += 1
-                print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
-                continue
-            meta_params = dict(params)
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            outcome = publish(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=result.fields,
-                key_columns=list(spec.key_columns),
-                ledger=revision_ledger,
-            )
-            if outcome in WRITTEN_OUTCOMES:
-                total_rows += len(df)
-                written += 1
-            elif outcome == "defect":
-                zero_skipped += 1
-        if index % 250 == 0:
-            print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows}")
-    return zero_skipped
+
+    def pull(part: Partition) -> tuple[bool | None, int, int]:
+        params = {"trade_date": part.unit}
+        try:
+            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        except DefectiveAnswer:
+            raise
+        except Exception as exc:
+            raise RuntimeError(f"{spec.api_name} trade_date={part.unit} failed: {exc}") from exc
+        df = frame(result)
+        if spec.dedup_exact and not df.empty:
+            df = df.drop_duplicates().reset_index(drop=True)
+        if df.empty and not spec.zero_rows_ok:
+            print(f"{spec.api_name} trade_date={part.unit} returned zero rows; skipped_write")
+            return None, 0, pages
+        outcome = publish(
+            part.path,
+            df,
+            api_name=spec.api_name,
+            params={**params, "pagination": {"page_limit": page_limit, "pages": pages}},
+            fields=result.fields,
+            key_columns=list(spec.key_columns),
+            ledger=revision_ledger,
+        )
+        written = outcome in WRITTEN_OUTCOMES
+        return None if outcome == "defect" else written, len(df) if written else 0, pages
+
+    # A parquet whose sidecar is missing or carries another write ID is an
+    # interrupted write, not a committed partition: re-attempt it.
+    _, declined = land(
+        partitions(raw_dir, spec, trade_dates), pull,
+        skip=lambda part: should_skip_existing_partition(part.path, force=force) and (spec.zero_rows_ok or parquet_rows(part.path) > 0),
+        revision_ledger=revision_ledger, name=spec.api_name, every=250,
+    )
+    return declined
 
 def download_macro(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()
@@ -1543,69 +1538,54 @@ def download_event_trade_date_dataset(
     *,
     trading_dates: list[str] | None = None,
 ) -> tuple[int, int]:
+    """Returns the trade dates written and those whose answer was declined or
+    kept out as a defect."""
     page_limit = page_limit or spec.page_limit
-    written = 0
-    skipped = 0
-    zero_skipped = 0
-    total_rows = 0
-    total_pages = 0
-    for index, part in enumerate(partitions(raw_dir, spec, trade_dates), start=1):
-        path, trade_date = part.path, part.unit
-        if path.exists() and not force:
-            # A parquet whose sidecar is missing or carries another write ID is
-            # an interrupted write, not a committed partition: re-attempt it.
-            complete = committed_partition_intact(path) and (spec.zero_rows_ok or parquet_rows(path) > 0)
-            exchange_column = margin_exchange_column(spec.api_name)
-            if complete and exchange_column is not None:
-                # A committed partial day (missing exchanges) must be re-attempted
-                # by any covering run, not treated as done.
-                present = pd.read_parquet(path, columns=[exchange_column])
-                complete = not margin_family_missing_exchanges(spec.api_name, trade_date, present)
-            if complete:
-                skipped += 1
-                if index % 250 == 0:
-                    print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows}")
-                continue
-        params = {"trade_date": trade_date}
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            meta_params = dict(params)
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
-            if df.empty and not spec.zero_rows_ok:
-                zero_skipped += 1
-                total_pages += pages
-                print(f"{spec.api_name} trade_date={trade_date} returned zero rows; skipped_write")
-                continue
-            if not df.empty:
-                missing = margin_family_missing_exchanges(spec.api_name, trade_date, df)
-                if missing:
-                    # Exchanges publish independently; a partial response poisons
-                    # market-wide aggregates, so it rides the same not-ready/retry
-                    # contract as an empty one instead of being committed.
-                    zero_skipped += 1
-                    total_pages += pages
-                    print(f"{spec.api_name} trade_date={trade_date} missing exchanges {missing}; skipped_write")
-                    continue
-            outcome = publish(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=list(df.columns),
-                key_columns=list(spec.key_columns),
-                ledger=revision_ledger,
-            )
-            if outcome in WRITTEN_OUTCOMES:
-                total_rows += len(df)
-                written += 1
-            elif outcome == "defect":
-                zero_skipped += 1
-            total_pages += pages
-        if index % 250 == 0:
-            print(f"{spec.api_name} {index}/{len(trade_dates)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{spec.api_name} done dates={len(trade_dates)} skipped={skipped} written={written} zero_skipped={zero_skipped} rows_written={total_rows} pages={total_pages}")
-    return written, zero_skipped
+
+    def complete(part: Partition) -> bool:
+        # A parquet whose sidecar is missing or carries another write ID is
+        # an interrupted write, not a committed partition: re-attempt it.
+        if not (should_skip_existing_partition(part.path, force=force) and (spec.zero_rows_ok or parquet_rows(part.path) > 0)):
+            return False
+        # A committed partial day (missing exchanges) must be re-attempted by
+        # any covering run, not treated as done.
+        exchange_column = margin_exchange_column(spec.api_name)
+        if exchange_column is None:
+            return True
+        present = pd.read_parquet(part.path, columns=[exchange_column])
+        return not margin_family_missing_exchanges(spec.api_name, part.unit, present)
+
+    def pull(part: Partition) -> tuple[bool | None, int, int]:
+        params = {"trade_date": part.unit}
+        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        df = augment_event_frame(frame(result), spec, trading_dates=trading_dates)
+        if df.empty and not spec.zero_rows_ok:
+            print(f"{spec.api_name} trade_date={part.unit} returned zero rows; skipped_write")
+            return None, 0, pages
+        missing = margin_family_missing_exchanges(spec.api_name, part.unit, df) if not df.empty else []
+        if missing:
+            # Exchanges publish independently; a partial response poisons
+            # market-wide aggregates, so it rides the same not-ready/retry
+            # contract as an empty one instead of being committed.
+            print(f"{spec.api_name} trade_date={part.unit} missing exchanges {missing}; skipped_write")
+            return None, 0, pages
+        outcome = publish(
+            part.path,
+            df,
+            api_name=spec.api_name,
+            params={**params, "pagination": {"page_limit": page_limit, "pages": pages}},
+            fields=list(df.columns),
+            key_columns=list(spec.key_columns),
+            ledger=revision_ledger,
+        )
+        written = outcome in WRITTEN_OUTCOMES
+        return None if outcome == "defect" else written, len(df) if written else 0, pages
+
+    return land(
+        partitions(raw_dir, spec, trade_dates), pull,
+        skip=complete,
+        revision_ledger=revision_ledger, name=spec.api_name, every=250, pages=True,
+    )
 
 def query_event_window(
     client: TuShareClient,
@@ -1681,13 +1661,14 @@ def download_event_range_month(
         )
         return did_write, rows, pages
 
-    return land(
+    written, _ = land(
         partitions(raw_dir, spec, windows), pull,
         skip=lambda part: should_skip_existing_partition(
             part.path, force=force, requested_params={"start_date": part.unit[0], "end_date": part.unit[1]}
         ),
         revision_ledger=revision_ledger, name=spec.api_name, unit="months", every=24, pages=True,
     )
+    return written
 
 BOARD_TRADE_DATE_STRATEGIES = frozenset({
     FetchStrategy.TRADE_DATE,

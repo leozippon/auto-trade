@@ -50,6 +50,7 @@ class Partition:
 
 
 _TIME_KEYS = {
+    FetchStrategy.DAILY_FAMILY: "trade_date",
     FetchStrategy.TRADE_DATE: "trade_date",
     FetchStrategy.TRADE_DATE_BY_TAG: "trade_date",
     FetchStrategy.TRADE_DATE_BY_LIMIT_TYPE: "trade_date",
