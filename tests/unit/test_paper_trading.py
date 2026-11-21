@@ -537,6 +537,45 @@ def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_pa
     assert not any((state_root / "pit" / "live" / "runtime").rglob("asof"))
 
 
+def test_a_book_shows_its_strategy_the_bars_a_replay_from_its_first_decision_shows(tmp_path: Path):
+    """The slot opens one session before the book's first decision (book_window),
+    but the Broker and ``context.bars`` start at the decision, as in a replay of
+    the book that starts there; the extra session reaches the strategy only
+    through the Timeview."""
+
+    from autotrade.paper.pit import BookPITData, newest_replay_slot
+    from tests.unit.support.snapshot_fixture import (
+        build_fundamental_events,
+        build_raw,
+        write_fundamental_status,
+    )
+
+    raw = tmp_path / "data" / "raw"
+    build_raw(raw)
+    events_root = tmp_path / "data" / "pit" / "fundamental_events"
+    build_fundamental_events(events_root)
+    status = tmp_path / "results" / "data_quality" / "fundamental_events_status.json"
+    status.parent.mkdir(parents=True)
+    write_fundamental_status(status)
+    data = BookPITData(
+        state_root=tmp_path / "paper", raw_dir=raw, fundamental_events_root=events_root,
+        fundamental_events_status=status,
+        snapshot_config=SnapshotConfig(
+            events_datasets=(), macro_datasets=(), text_datasets=(), fundamental_datasets=("income_vip",),
+            include_intraday=False, include_industry=False,
+        ),
+        start="20211011", trade_date="20211011",
+        due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ), schedule={},
+    )
+    try:
+        slot = pd.read_parquet(newest_replay_slot(tmp_path / "paper") / "daily.parquet")
+        assert sorted(set(slot["trade_date"].astype(str))) == ["20211008"]
+        assert data.market.trade_dates == ()
+        assert data.market.visible_count(datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ)) == 0
+    finally:
+        data.close()
+
+
 def test_late_data_is_refused_before_any_pit_view_is_built(tmp_path: Path):
     from autotrade.paper.pit import BookPITData
     from tests.unit.support.snapshot_fixture import (

@@ -54,6 +54,7 @@ from autotrade.pipelines.pit_backend import (
     load_slot_corporate_actions,
     required_release_raw_datasets,
     slot_minute_source,
+    span_daily,
 )
 
 PIT_CACHE_NAME = "pit"
@@ -151,9 +152,13 @@ class BookPITData:
         _require_read_only_tree(self.snapshot_dir)
         manifest = load_snapshot_manifest(replay_dir)
         replay = _open_replay_rows(replay_dir)
-        daily = pd.read_parquet(replay_dir / "daily.parquet")
-        self.market = DailyMarketData(daily, load_slot_corporate_actions(replay_dir, manifest))
-        self._daily = daily
+        # The Broker and context.bars start at the book's first decision, as in
+        # a replay of the book (span_daily): the slot's extra session reaches
+        # the strategy through the Timeview only. The sheet's quotes read it.
+        self.market = DailyMarketData(
+            span_daily([replay_dir], start, trade_date), load_slot_corporate_actions(replay_dir, manifest)
+        )
+        self._daily = pd.read_parquet(replay_dir / "daily.parquet")
         runtime = generation_dir / "runtime" / trade_date
         if runtime.exists():
             _remove_tree(runtime)
