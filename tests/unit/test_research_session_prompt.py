@@ -183,3 +183,23 @@ def test_the_run_section_states_the_session_budgets() -> None:
     del facts["budgets"]["max_llm_calls"]  # type: ignore[attr-defined]
     assert prompts.build_run_section(facts).endswith(f"\n- 预算（整个会话共用）：{clock}{rules}")
     assert "预算" not in prompts.build_run_section(_run_facts())
+
+
+def test_the_run_section_states_the_workspace_storage_allowance() -> None:
+    """The owner's 20 GiB in words, after the session budgets: what counts
+    toward it, how to measure it, and that the session keeps to it itself,
+    since the host does not check it. Facts without it add no line."""
+
+    from autotrade.pipelines.config import WORKSPACE_STORAGE_ALLOWANCE_BYTES
+
+    facts = _run_facts()
+    facts["budgets"].update(  # type: ignore[attr-defined]
+        deadline_seconds=600_000.0, workspace_storage_bytes=WORKSPACE_STORAGE_ALLOWANCE_BYTES
+    )
+    run = prompts.build_run_section(facts)
+    assert run.endswith(
+        "\n- 工作区存储：额度 20 GiB，工作区里的全部文件都算，缓存、中间数组与留下的模型文件在内"
+        "（用 `du -sh` 量）；宿主不检查，由你守住，不再需要的文件及时删。"
+    )
+    assert run.index("- 预算（整个会话共用）") < run.index("- 工作区存储")
+    assert "工作区存储" not in prompts.build_run_section(_run_facts())

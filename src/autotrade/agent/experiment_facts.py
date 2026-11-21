@@ -322,6 +322,9 @@ def _budget_facts(
             # How the two strategy clocks scale with it is the validate
             # description's rule.
             "batch_validate_max_concurrency": budgets.get("batch_validate_max_concurrency"),
+            # The storage the whole workspace may hold, which the run section
+            # states in words: an allowance, not a quota the host measures.
+            "workspace_storage_bytes": budgets.get("workspace_storage_bytes"),
             "context_compaction": context_compaction,
         }
     )

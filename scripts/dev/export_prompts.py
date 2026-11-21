@@ -84,7 +84,7 @@ def render() -> str:
         "",
         "## 1. 研究会话系统提示词",
         "",
-        "无标题的开场段与五个区块按「开场 → 会话怎样推进 → 研究取向 → 读数 → 不可越过的边界 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值、`validate` 次数与会话预算只在由运行事实生成的「本次运行」一段里，本实验的数只在运行事实里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里（工作方式第一条指向它），文件工具的根名寻址与 `shell` 的路径写法只在工作方式里说一次。研究取向只定目标的创新性与深度：预算用于深入研究（另写出本实验策略单次调用的两项超时、说明它们不是每天的额度，Sandbox 挂有 GPU 时另加一条说明卡是给哪些方法用的），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。",
+        "无标题的开场段与五个区块按「开场 → 会话怎样推进 → 研究取向 → 读数 → 不可越过的边界 → 工作方式」的顺序拼接，再接「环境」动态部分（第 5 节）。提示写宿主执行的规则、Agent 自己查不到的事实与运营者定下的研究取向，每条只写一次：本次运行的日期、步数、门槛数值、`validate` 次数、会话预算与工作区存储额度只在由运行事实生成的「本次运行」一段里，本实验的数只在运行事实里，参数、限制与返回字段的含义只在工具的描述与 schema 里，策略合同只在只读的 `output/README.md` 里（工作方式第一条指向它），文件工具的根名寻址与 `shell` 的路径写法只在工作方式里说一次。研究取向只定目标的创新性与深度：预算用于深入研究（另写出本实验策略单次调用的两项超时、说明它们不是每天的额度，Sandbox 挂有 GPU 时另加一条说明卡是给哪些方法用的），不定方法，具体怎样研究由 Agent 自己决定，参考工作区可以给出可以不采纳的建议。",
         "",
         "### 1.1 开场段",
         "",
@@ -173,14 +173,14 @@ def render() -> str:
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
-            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice}\n\n"
+            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice；工作区存储的额度、哪些文件算在内、宿主不检查}\n\n"
             f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts 的紧凑 JSON（不缩进），含 inputs/skills_index.json 引用}\n\n"
             f"{build_exploration_section('[存在时注入]')}\n\n"
             f"{build_session_directive_section('[存在时注入]')}"
         ),
         "",
-        "「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `test_horizon`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.significance` 的 `alpha`、`threshold_over_one_year`、`threshold_over_validation_period`，以及 `budgets` 的 `validates_per_step`、`deadline_seconds`、`max_llm_calls` 与 `max_api_spend_usd`（运行事实没有的预算项不写），所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：",
+        "「本次运行」一段由 `prompts.build_run_section` 从同一份运行事实读出：`research_geometry` 的 `test_horizon`、`research_period`、`years`、`validation_period`、`step`、`steps`、`steps_tested`，`artifact_contract.acceptance_rules.significance` 的 `alpha`、`threshold_over_one_year`、`threshold_over_validation_period`，以及 `budgets` 的 `validates_per_step`、`deadline_seconds`、`max_llm_calls`、`max_api_spend_usd` 与 `workspace_storage_bytes`（运行事实没有的预算项不写），所以文字与 JSON 不会不一致。`experiment_facts` 的主要分区包括：",
         "",
         "| 分区 | 内容 |",
         "| --- | --- |",
@@ -188,7 +188,7 @@ def render() -> str:
         "| `source_refs` | 运行 manifest、runtime environment、data summary、skills 索引与信号筛选脚本的受信引用 |",
         "| `research_geometry` | 研究年（`years` 只列研究年及其日期）、验证期与测试终点的日期，决策时点、会话的输入窗口与 span 写法 |",
         "| `visible_timeline` | 快照窗口、日级时钟、历史研究域可用性，以及股票池筛选（只在实验设了筛选时出现） |",
-        "| `budgets` | 推理时间、模型调用、API 花费、随机对照与 `validate` 次数，策略容器超时与资源、`validate` 并发路数，压缩预算；只有数，没有说明文字 |",
+        "| `budgets` | 推理时间、模型调用、API 花费、随机对照与 `validate` 次数，策略容器超时与资源、`validate` 并发路数，工作区存储额度，压缩预算；只有数，没有说明文字 |",
         "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量与门槛、登记条件与前推报告什么 |",
         "| `broker_replay` | 资金、费用、手数、T+1、调度（`schedule`）与精确执行价格来源 |",
         f"| `runtime_tools` | Python、可用本地工具、网络模式和安装策略、Sandbox 的 GPU（`sandbox_gpus`：卡数 × 卡型，如 `1 × A100`；没有卡时为 `{NO_SANDBOX_GPUS}`），以及各读文件根在 `shell` 里的挂载路径 |",

@@ -28,6 +28,7 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
     DEFAULT_DEADLINE_GRACE_MINUTES,
+    WORKSPACE_STORAGE_ALLOWANCE_BYTES,
     experiment_default,
     session_deadline_seconds,
 )
@@ -185,7 +186,10 @@ def test_research_preview_states_the_pipeline_budgets_and_window(tmp_path: Path)
         "strategy_memory_bytes": sandbox.spec.memory_bytes,
         "strategy_state_disk_bytes": sandbox.state_disk_bytes,
         "batch_validate_max_concurrency": DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,
+        "workspace_storage_bytes": WORKSPACE_STORAGE_ALLOWANCE_BYTES,
     }
+    # The run section states that allowance in words.
+    assert "- 工作区存储：额度 20 GiB，" in prompt
     # The research years, read at their end, are the geometry's years; the
     # validation years are named as the period the tests reveal.
     geometry = facts["research_geometry"]

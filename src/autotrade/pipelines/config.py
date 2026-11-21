@@ -53,6 +53,13 @@ DEFAULT_MAX_LLM_CALLS = 6400
 # What one experiment's research session may spend on hosted model APIs, in USD at the
 # catalog's list prices (``environment.llm.pricing``); the local model is free.
 DEFAULT_MAX_API_SPEND_USD = 50.0
+# The workspace storage a research session is told it may keep (the owner's
+# decision of 2026-11-21): everything under its workspace counts, caches and
+# kept model files included. The session keeps to it itself; the host neither
+# measures nor enforces it. It exists because the workspace sits on storage it
+# shares with other runs (on the ZGCA instance, a hard quota that ``df`` does
+# not show).
+WORKSPACE_STORAGE_ALLOWANCE_BYTES = 20 * 1024**3
 # ``validate``: one formal step that fans out a pre-registered candidate
 # set over one span. Audited sessions reached at most two formal Validations
 # each when every candidate was its own serial step, each branching off the
@@ -1191,6 +1198,7 @@ __all__ = [
     "TEST_STEP_MONTHS",
     "TEST_STEP_NAMES",
     "VALIDATION_PERIOD_COMPLETE",
+    "WORKSPACE_STORAGE_ALLOWANCE_BYTES",
     "AcceptanceRules",
     "ArtifactRevision",
     "ArtifactStore",

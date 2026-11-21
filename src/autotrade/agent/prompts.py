@@ -25,9 +25,10 @@ strategy-side mechanic (what persists between calls, days and replays
 included) is ``output/README.md``, measured facts are the skills, the run's
 values are the facts JSON, and how to research within that orientation is the
 Agent's own call. The dynamic part is the environment block: the run's dates,
-steps, threshold, validate allowance and session budgets generated from the
-run facts (:func:`build_run_section`), the facts themselves as compact JSON,
-then the experiment's direction and the researcher's directive.
+steps, threshold, validate allowance, session budgets and workspace storage
+allowance generated from the run facts (:func:`build_run_section`), the facts
+themselves as compact JSON, then the experiment's direction and the
+researcher's directive.
 Rendered copies for human audit are exported by ``scripts/dev/export_prompts.py``
 into ``configs/prompts/PROMPTS.md``.
 """
@@ -250,9 +251,10 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
     ``budgets.validates_per_step``. Empty for facts whose geometry states no
     test horizon; a geometry that does state one must carry every other key.
     The session budgets (``budgets.deadline_seconds``, ``max_llm_calls``,
-    ``max_api_spend_usd``) add a closing line with their totals, how inference
-    time is counted and when the host reports use (:func:`_run_budget_line`);
-    a budget the facts do not carry is left out of it.
+    ``max_api_spend_usd``) add a line with their totals, how inference time is
+    counted and when the host reports use (:func:`_run_budget_line`); a budget
+    the facts do not carry is left out of it. ``budgets.workspace_storage_bytes``
+    adds the closing storage line (:func:`_run_storage_line`).
     """
 
     geometry = experiment_facts.get("research_geometry")
@@ -275,9 +277,9 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
         f"- 门槛：α = {significance['alpha']}；一年区间约 {significance['threshold_over_one_year']}，整个验证期约 {significance['threshold_over_validation_period']}。",
         f"- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 {allowance} 次。",
     ]
-    budget_line = _run_budget_line(budgets)  # type: ignore[arg-type]
-    if budget_line:
-        lines.append(budget_line)
+    for line in (_run_budget_line(budgets), _run_storage_line(budgets)):  # type: ignore[arg-type]
+        if line:
+            lines.append(line)
     return "\n".join(lines)
 
 
@@ -307,6 +309,21 @@ def _run_budget_line(budgets: Mapping[str, object]) -> str:
     return (
         f"- 预算（整个会话共用）：{'、'.join(totals)}；没有 token 预算，上下文靠压缩（`compact`）管理。"
         f"每项用到 {fractions} 时宿主各提醒一次（`budget_notice`，或最后一档的收尾提示），没收到提醒就是还没用到 {BUDGET_NOTICE_FRACTIONS[0]:.0%}。"
+    )
+
+
+def _run_storage_line(budgets: Mapping[str, object]) -> str:
+    """The workspace storage allowance, what counts toward it and that the
+    session keeps to it itself; empty when the facts carry none. Without it
+    sessions filled the shared storage with derived arrays until writes
+    failed, and ``df`` there shows the shared filesystem, not the quota."""
+
+    allowance = budgets.get("workspace_storage_bytes")
+    if allowance is None:
+        return ""
+    return (
+        f"- 工作区存储：额度 {int(allowance) / 1024**3:g} GiB，工作区里的全部文件都算，"  # type: ignore[call-overload]
+        "缓存、中间数组与留下的模型文件在内（用 `du -sh` 量）；宿主不检查，由你守住，不再需要的文件及时删。"
     )
 
 

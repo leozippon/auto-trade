@@ -118,6 +118,7 @@ from .config import (
     DEFAULT_MAX_API_SPEND_USD,
     TEST_STEP_NAMES,
     VALIDATION_PERIOD_COMPLETE,
+    WORKSPACE_STORAGE_ALLOWANCE_BYTES,
     AcceptanceRules,
     BudgetUsed,
     EvaluationBackend,
@@ -1557,6 +1558,9 @@ def session_manifest(
             # How many replays one validate call runs at once, and so the
             # factor both strategy wall clocks are scaled by.
             "batch_validate_max_concurrency": batch_validate_max_concurrency,
+            # What the session's workspace may hold, an allowance it keeps
+            # to itself rather than a limit the host enforces.
+            "workspace_storage_bytes": WORKSPACE_STORAGE_ALLOWANCE_BYTES,
             # The totals above are the experiment's; what earlier attempts
             # already spent of them.
             "used_before_this_attempt": used.to_record(),
