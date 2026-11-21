@@ -22,7 +22,11 @@ from typing import TYPE_CHECKING
 import pandas as pd
 
 from autotrade.agent.compact import ContextCompactionConfig
-from autotrade.agent.experiment_facts import build_experiment_facts
+from autotrade.agent.experiment_facts import (
+    DATA_SUMMARY_REF,
+    RUNTIME_ENV_REF,
+    build_experiment_facts,
+)
 from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.environment.artifacts import (
     WORKSPACE_DIR_MODE,
@@ -138,6 +142,7 @@ from .skills import (
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
     MemorySource,
+    SkillsStats,
     WriteSkillTool,
     ensure_skill_library_snapshot,
     install_skill_library,
@@ -787,8 +792,8 @@ class LLMResearchDeveloper:
                     },
                 },
                 "conversation_id": request.run_id,
-                "runtime_env_ref": "/mnt/artifacts/runtime_env.json",
-                "data_summary_ref": "/mnt/artifacts/data_summary.json",
+                "runtime_env_ref": RUNTIME_ENV_REF,
+                "data_summary_ref": DATA_SUMMARY_REF,
                 "research": research_geometry_record(
                     request.years,
                     research_years=request.research_years,
@@ -910,7 +915,7 @@ class LLMResearchDeveloper:
         )
         # The mounted memory and refs are re-copied on a resume (their content
         # is fixed); the skills tree is the Agent's own work and stays.
-        _remove_mounted_tree(workspace_root / SKILL_LIBRARY_DIRNAME)
+        rmtree_keeping_file_modes(workspace_root / SKILL_LIBRARY_DIRNAME)
         mounted_memory = install_skill_library(workspace_root, self.experiment_dir)
         manifest.update(
             skill_library=_skill_library_record(memory_snapshot, mounted_memory)
@@ -925,15 +930,8 @@ class LLMResearchDeveloper:
             skills_stats = write_skills_index(
                 workspace_root / "skills", inputs_dir / "skills_index.json"
             )
-        manifest.update(
-            skills={
-                "index_path": SKILLS_INDEX_PATH,
-                "count": skills_stats.count,
-                "files": skills_stats.files,
-                "bytes": skills_stats.bytes,
-            }
-        )
-        _remove_mounted_tree(workspace_root / _WORKSPACE_REFS_DIR)
+        manifest.update(skills=_skills_record(skills_stats))
+        rmtree_keeping_file_modes(workspace_root / _WORKSPACE_REFS_DIR)
         install_workspace_reference(
             workspace_root,
             self.workspace_reference,
@@ -1290,14 +1288,7 @@ class LLMResearchDeveloper:
             workspace_root / "skills", inputs_dir / "skills_index.json"
         )
         chmod_tree(inputs_dir, file_mode=0o444, dir_mode=0o555)
-        manifest.update(
-            skills={
-                "index_path": SKILLS_INDEX_PATH,
-                "count": final_skills.count,
-                "files": final_skills.files,
-                "bytes": final_skills.bytes,
-            }
-        )
+        manifest.update(skills=_skills_record(final_skills))
         steps = tuple(backtest.steps)
         recorded = {step.step_id for step in steps}
         named = {node_id, *seed_replicates}
@@ -1357,7 +1348,7 @@ class LLMResearchDeveloper:
         target = local.paths.current_snapshot
         end = yyyymmdd(request.decision_time)
         start = months_before(end, request.window_months)
-        _remove_mounted_tree(target)
+        rmtree_keeping_file_modes(target)
         if source.is_dir():
             local.bind_snapshot_view(source)
         elif source.is_file():
@@ -1533,6 +1524,17 @@ def research_geometry_record(
     }
 
 
+def _skills_record(stats: SkillsStats) -> dict[str, object]:
+    """The run manifest's ``skills`` block: where the index is and what it counts."""
+
+    return {
+        "index_path": SKILLS_INDEX_PATH,
+        "count": stats.count,
+        "files": stats.files,
+        "bytes": stats.bytes,
+    }
+
+
 def start_record() -> dict[str, object]:
     """Which template seeded the session's working copy and its contract files.
 
@@ -1602,7 +1604,7 @@ def session_workspace_map(workspace: str | Path) -> dict[str, str]:
         "strategy": "output/main.py",
         "models": "models/",
         "session_context": f"inputs/{SESSION_CONTEXT_NAME}",
-        "data_summary": "/mnt/artifacts/data_summary.json",
+        "data_summary": DATA_SUMMARY_REF,
         "snapshot_in_sandbox": "/mnt/snapshot",
     }
     if (Path(workspace) / _WORKSPACE_REFS_DIR).is_dir():
@@ -1730,16 +1732,6 @@ def seed_output_from_starter(
     if not (starter / "main.py").is_file():
         return ()
     return overlay_artifact(starter, output_dir)
-
-
-def _remove_mounted_tree(path: Path) -> None:
-    """Drop a read-only mount an earlier attempt or test left, so it can be
-    re-copied. The payload files may be hardlinks to a published PIT view
-    (``LocalSandbox.bind_snapshot_view``), so only the directories are made
-    writable: a chmod on the files would unfreeze the view every replay
-    opens on."""
-
-    rmtree_keeping_file_modes(path)
 
 
 def _skip_workspace_reference_name(name: str) -> bool:

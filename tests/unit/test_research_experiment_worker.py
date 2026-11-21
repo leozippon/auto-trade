@@ -1080,7 +1080,7 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     from autotrade.environment.llm import ProviderResponse, ToolCall
-    from autotrade.pipelines.research_session import _remove_mounted_tree
+    from autotrade.environment.runtime import rmtree_keeping_file_modes
     from tests.unit.test_interactive_worker_local import _NominatingLLM, _NoShellRunner
 
     repo, experiment = make_experiment(tmp_path, developer_mode="llm", session_max_attempts=1)
@@ -1090,7 +1090,7 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
         run_local_interactive_worker(
             options, llm=_NominatingLLM([]), command_runner_factory=lambda _workspace: _NoShellRunner()
         )
-    _remove_mounted_tree(options.work_root / options.experiment_id / "research")
+    rmtree_keeping_file_modes(options.work_root / options.experiment_id / "research")
 
     with pytest.raises(RuntimeError, match="workspace of the interrupted attempt is missing"):
         run_local_interactive_worker(

@@ -59,6 +59,11 @@ SEARCH_ROOT_SHELL_NOTE = (
     "（Step 产物树即 `/mnt/artifacts/steps`）。只有根 `trace` 在容器里没有路径，"
     "transcript 只能用 `read_file`/`grep` 读。"
 )
+# The trusted run files inside the session container, under the read-only
+# /mnt/artifacts mount; the run manifest names the last two by these paths.
+RUN_MANIFEST_REF = "/mnt/artifacts/run_manifest.json"
+RUNTIME_ENV_REF = "/mnt/artifacts/runtime_env.json"
+DATA_SUMMARY_REF = "/mnt/artifacts/data_summary.json"
 
 
 def build_experiment_facts(
@@ -96,9 +101,9 @@ def build_experiment_facts(
             }
         ),
         "source_refs": {
-            "run_manifest_ref": "/mnt/artifacts/run_manifest.json",
-            "runtime_env_ref": str(manifest.get("runtime_env_ref") or "/mnt/artifacts/runtime_env.json"),
-            "data_summary_ref": str(manifest.get("data_summary_ref") or "/mnt/artifacts/data_summary.json"),
+            "run_manifest_ref": RUN_MANIFEST_REF,
+            "runtime_env_ref": RUNTIME_ENV_REF,
+            "data_summary_ref": DATA_SUMMARY_REF,
             "skills_index_ref": str(
                 _as_mapping(manifest.get("skills")).get("index_path")
                 or "inputs/skills_index.json"
