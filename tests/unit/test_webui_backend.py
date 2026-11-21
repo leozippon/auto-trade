@@ -53,6 +53,7 @@ from autotrade.webui.manager import (
     ManagerError,
 )
 from autotrade.webui.public_identity import PublicIdentity
+from autotrade.webui.registry import ORDER_TABLE_ROWS
 from autotrade.webui.server import create_app, is_loopback_host, run
 from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
 from tests.unit.gpu_probe import stubbed_gpu_probe
@@ -748,9 +749,7 @@ class WebuiBackendTest(unittest.TestCase):
         missing = self.client.get("/api/experiments/exp_replaying/results/valid_nope/orders.csv")
         self.assertEqual(missing.status_code, 404)
 
-    def test_result_orders_cap_the_table_at_five_hundred_rows_but_not_the_export(
-        self,
-    ) -> None:
+    def test_result_orders_cap_the_table_but_not_the_export(self) -> None:
         """`row_count` and the stats describe the whole stream, `rows` is capped.
 
         The pane renders 「共 M 条」 from `row_count`, so a cap that also shrank
@@ -769,18 +768,18 @@ class WebuiBackendTest(unittest.TestCase):
                 "status": "filled",
                 "price": 10.0,
             }
-            for _ in range(501)
+            for _ in range(ORDER_TABLE_ROWS + 1)
         ]
         result.write_text(json.dumps(payload), encoding="utf-8")
         base = f"/api/experiments/exp_replaying/results/{result.parent.name}"
         data = self.client.get(f"{base}/orders").json()
-        self.assertEqual(len(data["rows"]), 500)
-        self.assertEqual(data["row_count"], 501)
-        self.assertEqual(data["stats"]["orders"], 501)
-        self.assertEqual(data["stats"]["filled"], 501)
+        self.assertEqual(len(data["rows"]), ORDER_TABLE_ROWS)
+        self.assertEqual(data["row_count"], ORDER_TABLE_ROWS + 1)
+        self.assertEqual(data["stats"]["orders"], ORDER_TABLE_ROWS + 1)
+        self.assertEqual(data["stats"]["filled"], ORDER_TABLE_ROWS + 1)
         csv_response = self.client.get(f"{base}/orders.csv")
         self.assertEqual(csv_response.status_code, 200)
-        self.assertEqual(len(csv_response.text.strip().splitlines()), 502)
+        self.assertEqual(len(csv_response.text.strip().splitlines()), ORDER_TABLE_ROWS + 2)
 
     def test_a_result_the_ledger_names_outside_the_experiment_is_not_served(self) -> None:
         self._build_hitl_experiment("exp_replaying", "forward")

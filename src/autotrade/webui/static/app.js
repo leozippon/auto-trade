@@ -6233,10 +6233,10 @@ function ordersNode(experimentId, result) {
   const body = el("div", {}, el("div", { class: "loading" }, "加载交易明细…"));
   api(`${base}/orders`)
     .then((data) => {
-      const rows = data.rows || [];
+      // The server lists the table's first rows (registry.ORDER_TABLE_ROWS).
+      const shown = data.rows || [];
       const stats = data.stats || {};
       const byAction = stats.by_action || {};
-      const shown = rows.slice(0, 80);
       body.replaceChildren(
         el(
           "div",
@@ -6287,7 +6287,7 @@ function ordersNode(experimentId, result) {
             ),
           ),
         );
-      if (!rows.length) return;
+      if (!shown.length) return;
       body.append(
         dataTable(
           ORDER_TABLE_COLUMNS.map(([, label, num]) => ({ label, num })),

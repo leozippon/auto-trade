@@ -1591,8 +1591,12 @@ def result_style(root: Path, experiment_id: str, name: str) -> dict[str, object]
     return payload
 
 
+# The rows a result's order table lists; the CSV export carries every row.
+ORDER_TABLE_ROWS = 80
+
+
 def result_orders(
-    root: Path, experiment_id: str, name: str, *, max_rows: int | None = 500
+    root: Path, experiment_id: str, name: str, *, max_rows: int | None = ORDER_TABLE_ROWS
 ) -> dict[str, object]:
     """Order stream + aggregate stats for one ledger-named result.
 
