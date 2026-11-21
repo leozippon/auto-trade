@@ -833,12 +833,11 @@ def _distribution(observed: float, values: Sequence[float]) -> dict[str, object]
 
 
 def _benchmark_return(dates: Sequence[str], benchmark: Mapping[str, float]) -> float:
-    total = 1.0
-    for date in dates:
-        daily = benchmark.get(date)
-        if daily is not None:
-            total *= 1.0 + float(daily)
-    return total - 1.0
+    """The benchmark compounded over the days of ``dates`` it has a return for."""
+
+    return compounded_return(
+        float(daily) for date in dates if (daily := benchmark.get(date)) is not None
+    )
 
 
 def _step_bounds(step: tuple[str, str]) -> tuple[str, str]:

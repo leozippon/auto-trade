@@ -47,12 +47,12 @@ from autotrade.environment.replay.null_control import (
     BASELINE_DRAWS,
     NullControlSetupError,
 )
-from autotrade.environment.replay.stats import plain_statistics
-from autotrade.environment.replay.style import (
-    FACTOR_SERIES,
+from autotrade.environment.replay.stats import (
     active_analysis,
+    plain_statistics,
     series_pairs,
 )
+from autotrade.environment.replay.style import FACTOR_SERIES
 from autotrade.environment.runtime import (
     AGENT_VISIBLE_BACKTEST_SUMMARY_KEYS,
     RunManifest,

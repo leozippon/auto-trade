@@ -34,13 +34,13 @@ from itertools import pairwise
 from autotrade.environment.replay.stats import (
     compounded_drawdown,
     compounded_return,
+    series_pairs,
     window_activity,
     window_fees,
 )
 from autotrade.environment.replay.style import (
     FACTOR_SERIES,
     VERSION_3_FACTOR_SERIES,
-    series_pairs,
     stored_factor_series,
 )
 

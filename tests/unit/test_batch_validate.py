@@ -46,8 +46,8 @@ from autotrade.environment.executor import (
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.replay.null_control import NullControlSetupError
-from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import FACTOR_SERIES, active_analysis
+from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR, active_analysis
+from autotrade.environment.replay.style import FACTOR_SERIES
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.step_tree import StepTree

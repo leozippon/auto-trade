@@ -47,9 +47,9 @@ from autotrade.environment.replay.stats import (
     ReplayResult,
     compounded_path,
     compounded_return,
+    daily_returns_from_curve,
 )
 from autotrade.environment.replay.style import (
-    daily_returns_from_curve,
     slot_benchmark,
     slot_membership,
 )

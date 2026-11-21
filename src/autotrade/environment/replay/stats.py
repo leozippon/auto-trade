@@ -1,8 +1,11 @@
-"""Replay result container and the return-statistics reducer.
+"""Replay result container, the return-statistics reducer and the series math.
 
 ``ReplayResult`` is what one full daily replay produces; ``compute_return_stats``
 reduces it to the ``detailed_return.json`` payload (docs/ENVIRONMENT_DESIGN.md
-§3.8). Pure result→dict math — no replay logic.
+§3.8). This module is also the one home of the series arithmetic every reader
+of a result shares: daily returns from an equity curve, gross exposure, stored
+``[[date, value]]`` series, the active series, compounding and the plain
+statistics of a daily series. Pure result→dict math — no replay logic.
 """
 
 from __future__ import annotations
@@ -13,8 +16,11 @@ from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date
+from typing import TypeVar
 
 from autotrade.environment.runtime import utc_now_iso
+
+from .market import date_text
 
 # A-share trading calendar (~244 sessions/year); style_analysis annualizes with
 # the same constant so detailed_return and the Barra-lite sidecar agree.
@@ -32,6 +38,7 @@ RESEARCH_YEAR_KIND = "research_year"
 # Sub-window figures are read as a table, not compounded further: six decimals
 # keep the block small enough to ride inline in an Agent observation.
 _SUB_WINDOW_DIGITS = 6
+_Day = TypeVar("_Day")
 
 
 class PhaseTimer:
@@ -131,8 +138,8 @@ def compute_return_stats(
     # Day-0 baseline: daily returns and drawdown are measured against the initial
     # equity, so the first day's return (initial -> day-1 close) and a peak below
     # the initial level are never dropped. The persisted equity_curve and the
-    # trade-day count stay end-of-day-based; style_analysis.daily_returns_from_curve
-    # seeds the same baseline for attribution.
+    # trade-day count stay end-of-day-based; daily_returns_from_curve seeds the
+    # same baseline for attribution.
     # The whole window is the one-bucket case of the sub-window statistics:
     # same day-0 opening, same n-1 variance, same 0.0-on-degenerate rule.
     sharpe = _annualized_sharpe(initial, values)
@@ -327,20 +334,22 @@ def _filled_notional(order: Mapping[str, object]) -> float:
     return float(price) * int(order.get("quantity") or 0)
 
 
-def _gross_exposures(curve: Sequence[Mapping[str, object]]) -> list[float]:
-    """Daily gross exposure: end-of-day market value over same-day equity.
+def gross_exposure(row: Mapping[str, object]) -> float | None:
+    """One curve day's gross exposure: end-of-day market value over same-day
+    equity.
 
-    Days whose curve row carries no cash split are not measurable and are
-    excluded rather than reported as zero exposure.
+    ``None`` for a row that carries no cash split: that day is not measurable
+    and is excluded rather than reported as zero exposure.
     """
 
-    return [
-        (float(row["equity"]) - float(row["cash"])) / float(row["equity"])
-        if float(row["equity"]) > 0
-        else 0.0
-        for row in curve
-        if isinstance(row.get("cash"), (int, float))
-    ]
+    if not isinstance(row.get("cash"), (int, float)):
+        return None
+    equity = float(row["equity"])
+    return (equity - float(row["cash"])) / equity if equity > 0 else 0.0
+
+
+def _gross_exposures(curve: Sequence[Mapping[str, object]]) -> list[float]:
+    return [value for row in curve if (value := gross_exposure(row)) is not None]
 
 
 def _pnl_concentration(realized: Sequence[Mapping[str, object]]) -> dict[str, object]:
@@ -472,7 +481,7 @@ def attach_sub_window_benchmark(
     leaves the fields ``None`` rather than reporting a fabricated zero.
 
     A replay that carries a random baseline also gets the year's active excess
-    (``style.window_plain_excess`` of its active series: the annualised mean
+    (:func:`window_plain_excess` of its active series: the annualised mean
     of the book's daily return minus the random baseline's, no regression), the figure
     the registration check counts positive years on, and the random-baseline composite's own
     return over the year, compounded like the benchmark's: the year's return,
@@ -480,29 +489,11 @@ def attach_sub_window_benchmark(
     index and zero skill on the same skeleton.
     """
 
-    # Deferred: ``style`` imports this module for the trading-day constant and
-    # the equity-curve helpers, so the functions it owns can only be reached
-    # from here at call time.
-    from .style import active_analysis, series_pairs, window_plain_excess
-
     rows = summary.get("sub_windows")
     if not isinstance(rows, list):
         return summary
     active = active_analysis(style_analysis)
-    daily: dict[str, float] = {}
-    series = style_analysis.get("benchmark_daily")
-    if isinstance(series, Sequence) and not isinstance(series, (str, bytes)):
-        for item in series:
-            if (
-                not isinstance(item, Sequence)
-                or isinstance(item, (str, bytes))
-                or len(item) != 2
-            ):
-                continue
-            try:
-                daily[str(item[0])] = float(item[1])
-            except (TypeError, ValueError):
-                continue
+    daily = dict(series_pairs(style_analysis.get("benchmark_daily")))
     if not daily:
         return summary
     for row in rows:
@@ -654,13 +645,56 @@ def _fill_date(order: Mapping[str, object]) -> str:
     return digits[:8] if len(digits) >= 8 else ""
 
 
-def _annualized_sharpe(opening: float, equities: Sequence[float]) -> float:
+def _close_returns(
+    opening: float, closes: Iterable[tuple[_Day, float]]
+) -> list[tuple[_Day, float]]:
+    """Each day's close over the previous one (``opening`` before the first),
+    less 1: the day-0-baseline daily return. A day after a close that is not
+    positive has none."""
+
     previous = opening
-    returns: list[float] = []
-    for equity in equities:
+    returns: list[tuple[_Day, float]] = []
+    for day, equity in closes:
         if previous > 0:
-            returns.append(equity / previous - 1.0)
+            returns.append((day, equity / previous - 1.0))
         previous = equity
+    return returns
+
+
+def daily_returns_from_curve(
+    curve: Sequence[Mapping[str, object]],
+) -> list[tuple[str, float]]:
+    """An equity curve's daily returns by ``YYYYMMDD`` day, on the day-0
+    baseline of its initial equity; a row without a finite equity is skipped."""
+
+    rows = sorted(
+        (row for row in curve if row.get("trade_date") is not None),
+        key=lambda row: date_text(row["trade_date"]),
+    )
+    if not rows:
+        return []
+    try:
+        opening = float(rows[0].get("initial_equity") or 0.0)
+    except (TypeError, ValueError):
+        opening = 0.0
+    return _close_returns(opening, _finite_closes(rows))
+
+
+def _finite_closes(rows: Iterable[Mapping[str, object]]) -> Iterator[tuple[str, float]]:
+    for row in rows:
+        try:
+            equity = float(row.get("equity"))
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(equity):
+            yield date_text(row["trade_date"]), equity
+
+
+def _annualized_sharpe(opening: float, equities: Sequence[float]) -> float:
+    # Not ``plain_statistics``' information ratio: the same quantity, but summed
+    # and annualised in another order, so the two differ in the last bits and
+    # a persisted Sharpe would move.
+    returns = [value for _day, value in _close_returns(opening, enumerate(equities))]
     if len(returns) < 2:
         return 0.0
     mean = sum(returns) / len(returns)
@@ -744,6 +778,72 @@ def plain_statistics(returns: Iterable[float]) -> dict[str, float | int | None]:
         "tracking_error": tracking_error,
         "information_ratio": excess / tracking_error if tracking_error > 0 else None,
     }
+
+
+def series_pairs(value: object) -> list[tuple[str, float]]:
+    """``[[date, value], ...]`` from a stored analysis series, skipping junk."""
+
+    rows: list[tuple[str, float]] = []
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
+        return rows
+    for item in value:
+        if (
+            not isinstance(item, Sequence)
+            or isinstance(item, (str, bytes))
+            or len(item) != 2
+        ):
+            continue
+        try:
+            rows.append((date_text(item[0]), float(item[1])))
+        except (TypeError, ValueError):
+            continue
+    return rows
+
+
+def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
+    """The analysis with the strategy's series replaced by its ACTIVE series.
+
+    Active is the strategy's daily return minus the random-baseline composite
+    of the same day, so every reader of ``strategy_daily`` -- the sub-span
+    figure below, the verdict's statistics, bootstrap and drawdown -- measures
+    the active series through the code that measures the strategy's own. ``None``
+    when the sidecar carries no random baseline (a truncated smoke replay). A random baseline that misses one of the strategy's
+    days raises: a day graded against nothing would read as pure skill.
+    """
+
+    composite = dict(series_pairs(analysis.get("baseline_daily")))
+    if not composite:
+        return None
+    strategy = series_pairs(analysis.get("strategy_daily"))
+    missing = [date for date, _value in strategy if date not in composite]
+    if missing:
+        raise ValueError(f"random baseline has no return for {missing[0]}")
+    return {
+        **analysis,
+        "strategy_daily": [[date, value - composite[date]] for date, value in strategy],
+    }
+
+
+def window_plain_excess(
+    analysis: Mapping[str, object], *, start: str = "", end: str = ""
+) -> float | None:
+    """The annualised mean of one span of a stored analysis's ``strategy_daily``,
+    with no regression (:func:`plain_statistics`).
+
+    Of an active analysis (:func:`active_analysis`) it is the plain active
+    excess every gate grades: the one computation point for a span narrower
+    than the whole window -- the per-year figure ``attach_sub_window_benchmark``
+    writes into a result, and the verdict's research years and recency window.
+    ``None`` when the span holds fewer than two days. An empty
+    ``start``/``end`` takes the whole window.
+    """
+
+    value = plain_statistics(
+        value
+        for date, value in series_pairs(analysis.get("strategy_daily"))
+        if (not start or date >= start) and (not end or date <= end)
+    )["plain_excess"]
+    return None if value is None else float(value)
 
 
 def _round(value: float) -> float:

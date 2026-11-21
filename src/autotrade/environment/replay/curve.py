@@ -9,99 +9,46 @@ curve out.
 
 from __future__ import annotations
 
-import math
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from autotrade.common.records import read_json_object
+from autotrade.common.records import finite_number, read_json_object_or_empty
 
-from .stats import compounded_path
+from .market import date_text
+from .stats import (
+    compounded_path,
+    daily_returns_from_curve,
+    gross_exposure,
+    series_pairs,
+)
 from .style import STYLE_ARTIFACT_NAME
 
 STRATEGY_LABEL = "策略"
 BASELINE_LABEL = "随机对照组合"
 
 
-def _finite(value: object) -> float | None:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None
-    number = float(value)
-    return number if math.isfinite(number) else None
+def _exposures(curve: Sequence[Mapping[str, object]]) -> list[tuple[str, float]]:
+    """Daily position weight (``stats.gross_exposure``, to four places); the
+    long-only book carries no short leg."""
 
-
-def read_result(path: Path) -> dict[str, object]:
-    """One ``result.json``; an unreadable or non-object file reads as empty."""
-
-    try:
-        payload = read_json_object(Path(path))
-    except (OSError, ValueError):
-        return {}
-    return payload if isinstance(payload, dict) else {}
-
-
-def _curve_rows(payload: dict[str, object]) -> list[dict[str, object]]:
-    curve = payload.get("equity_curve")
-    rows = [
-        row
-        for row in (curve if isinstance(curve, list) else ())
-        if isinstance(row, dict) and row.get("trade_date") and _finite(row.get("equity"))
+    rows = sorted(
+        (row for row in curve if row.get("trade_date") and finite_number(row.get("equity")) is not None),
+        key=lambda row: date_text(row["trade_date"]),
+    )
+    return [
+        (date_text(row["trade_date"]), round(value, 4))
+        for row in rows
+        if (value := gross_exposure(row)) is not None
     ]
-    return sorted(rows, key=lambda row: str(row["trade_date"]))
 
 
-def result_returns(payload: dict[str, object]) -> list[tuple[str, float]]:
-    rows = _curve_rows(payload)
-    if not rows:
-        return []
-    initial = _finite(payload.get("initial_cash")) or _finite(rows[0].get("initial_equity"))
-    previous = initial if initial and initial > 0 else float(rows[0]["equity"])  # type: ignore[arg-type]
-    result: list[tuple[str, float]] = []
-    for row in rows:
-        equity = float(row["equity"])  # type: ignore[arg-type]
-        if previous > 0:
-            result.append((str(row["trade_date"]), equity / previous - 1.0))
-        previous = equity
-    return result
-
-
-def result_exposures(payload: dict[str, object]) -> list[tuple[str, float]]:
-    """Daily position weight (EOD gross market value / equity); the long-only
-    book carries no short leg."""
-    rows: list[tuple[str, float]] = []
-    for row in _curve_rows(payload):
-        equity = float(row["equity"])  # type: ignore[arg-type]
-        cash = _finite(row.get("cash"))
-        if cash is not None and equity > 0:
-            rows.append((str(row["trade_date"]), round((equity - cash) / equity, 4)))
-    return rows
-
-
-def _sidecar_returns(result_file: Path, key: str) -> list[tuple[str, float]]:
-    """One daily series of the result's own style sidecar, by date."""
-
-    sidecar = read_result(Path(result_file).parent / STYLE_ARTIFACT_NAME)
-    rows: dict[str, float] = {}
-    for item in sidecar.get(key) or ():
-        if isinstance(item, list) and len(item) == 2 and item[0]:
-            value = _finite(item[1])
-            if value is not None:
-                rows.setdefault(str(item[0]), value)
-    return sorted(rows.items())
-
-
-def benchmark_returns(result_file: Path) -> list[tuple[str, float]]:
-    """Benchmark daily returns from the result's own style sidecar."""
-
-    return _sidecar_returns(result_file, "benchmark_daily")
-
-
-def benchmark_label(result_file: Path) -> str:
+def _benchmark_label(sidecar: Mapping[str, object], path: Path) -> str:
     """Which benchmark this result was graded against: the label of the
     experiment's ``benchmark_index`` its own sidecar records. A sidecar
     without one is refused."""
 
-    path = Path(result_file).parent / STYLE_ARTIFACT_NAME
-    benchmark = read_result(path).get("benchmark")
-    label = benchmark.get("label") if isinstance(benchmark, dict) else None
+    benchmark = sidecar.get("benchmark")
+    label = benchmark.get("label") if isinstance(benchmark, Mapping) else None
     if not isinstance(label, str) or not label:
         raise ValueError(f"{path} names no benchmark label")
     return label
@@ -128,18 +75,18 @@ def result_curve(result_file: Path) -> dict[str, object]:
     result without one) on the strategy's own days so all start at zero
     together, and the daily position weight."""
 
-    payload = read_result(result_file)
-    returns = result_returns(payload)
+    curve = read_json_object_or_empty(result_file).get("equity_curve") or []
+    returns = daily_returns_from_curve(curve)
     days = {day for day, _value in returns}
-    benchmark = [(day, value) for day, value in benchmark_returns(result_file) if day in days]
-    baseline = [
-        (day, value) for day, value in _sidecar_returns(result_file, "baseline_daily") if day in days
-    ]
-    exposure = result_exposures(payload)
+    sidecar_path = Path(result_file).parent / STYLE_ARTIFACT_NAME
+    sidecar = read_json_object_or_empty(sidecar_path)
+    benchmark = [(day, value) for day, value in series_pairs(sidecar.get("benchmark_daily")) if day in days]
+    baseline = [(day, value) for day, value in series_pairs(sidecar.get("baseline_daily")) if day in days]
+    exposure = _exposures(curve)
     return {
         "series": [curve_entry("strategy", STRATEGY_LABEL, returns)] if returns else [],
         "benchmark": (
-            curve_entry("benchmark", benchmark_label(result_file), benchmark)
+            curve_entry("benchmark", _benchmark_label(sidecar, sidecar_path), benchmark)
             if benchmark
             else None
         ),
@@ -157,11 +104,6 @@ def result_curve(result_file: Path) -> dict[str, object]:
 
 __all__ = [
     "STRATEGY_LABEL",
-    "benchmark_label",
-    "benchmark_returns",
     "curve_entry",
-    "read_result",
     "result_curve",
-    "result_exposures",
-    "result_returns",
 ]

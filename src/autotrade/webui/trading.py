@@ -41,8 +41,12 @@ from autotrade.common.records import as_mapping, finite_number, read_json_object
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.contracts import benchmark_index_label
 from autotrade.environment.replay.curve import curve_entry
-from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
-from autotrade.environment.replay.style import daily_returns_from_curve, slot_benchmark
+from autotrade.environment.replay.stats import (
+    ReplayResult,
+    compute_return_stats,
+    daily_returns_from_curve,
+)
+from autotrade.environment.replay.style import slot_benchmark
 from autotrade.paper import fills
 from autotrade.paper.book import (
     BOOK_NAME,

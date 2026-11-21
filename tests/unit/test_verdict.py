@@ -11,8 +11,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autotrade.environment.replay.stats import TRADING_DAYS_PER_YEAR
-from autotrade.environment.replay.style import factor_ols, window_plain_excess
+from autotrade.environment.replay.stats import (
+    TRADING_DAYS_PER_YEAR,
+    window_plain_excess,
+)
+from autotrade.environment.replay.style import factor_ols
 from autotrade.pipelines import verdict
 from autotrade.pipelines.config import ACCEPTANCE_KEYS, AcceptanceRules
 from tests.unit.acceptance_fixture import REQUIRED_RULES

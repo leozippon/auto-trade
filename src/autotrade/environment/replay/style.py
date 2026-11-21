@@ -56,9 +56,12 @@ from .market import date_text
 from .stats import (
     TRADING_DAYS_PER_YEAR,
     ReplayResult,
+    active_analysis,
     compounded_drawdown,
     compounded_return,
+    daily_returns_from_curve,
     plain_statistics,
+    series_pairs,
     total_return_from_curve,
 )
 
@@ -246,33 +249,6 @@ def _industry_vintages(
             }
         vintages.append((date_text(day), industry))
     return sorted(vintages, key=lambda item: item[0])
-
-
-def daily_returns_from_curve(
-    curve: Sequence[Mapping[str, object]],
-) -> list[tuple[str, float]]:
-    rows = sorted(
-        (row for row in curve if row.get("trade_date") is not None),
-        key=lambda row: date_text(row["trade_date"]),
-    )
-    if not rows:
-        return []
-    try:
-        previous = float(rows[0].get("initial_equity") or 0.0)
-    except (TypeError, ValueError):
-        previous = 0.0
-    result: list[tuple[str, float]] = []
-    for row in rows:
-        try:
-            equity = float(row.get("equity"))
-        except (TypeError, ValueError):
-            continue
-        if not math.isfinite(equity):
-            continue
-        if previous > 0:
-            result.append((date_text(row["trade_date"]), equity / previous - 1.0))
-        previous = equity
-    return result
 
 
 def _symbol_column(frame: pd.DataFrame) -> str:
@@ -726,12 +702,7 @@ def replay_style_analysis(
     total_return = total_return_from_curve(replay.equity_curve)
     benchmark_return = round(compounded_return(covered), 6) if covered else None
     excess_return = (
-        round(float(total_return) - float(benchmark_return), 6)
-        if isinstance(total_return, (int, float))
-        and not isinstance(total_return, bool)
-        and isinstance(benchmark_return, (int, float))
-        and not isinstance(benchmark_return, bool)
-        else None
+        round(total_return - benchmark_return, 6) if benchmark_return is not None else None
     )
     tilts = style.get("tilts")
     return {
@@ -765,72 +736,6 @@ def replay_style_analysis(
         },
         "created_at": utc_now_iso(),
     }
-
-
-def series_pairs(value: object) -> list[tuple[str, float]]:
-    """``[[date, value], ...]`` from a stored analysis series, skipping junk."""
-
-    rows: list[tuple[str, float]] = []
-    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        return rows
-    for item in value:
-        if (
-            not isinstance(item, Sequence)
-            or isinstance(item, (str, bytes))
-            or len(item) != 2
-        ):
-            continue
-        try:
-            rows.append((date_text(item[0]), float(item[1])))
-        except (TypeError, ValueError):
-            continue
-    return rows
-
-
-def active_analysis(analysis: Mapping[str, object]) -> dict[str, object] | None:
-    """The analysis with the strategy's series replaced by its ACTIVE series.
-
-    Active is the strategy's daily return minus the random-baseline composite
-    of the same day, so every reader of ``strategy_daily`` -- the sub-span
-    figure below, the verdict's statistics, bootstrap and drawdown -- measures
-    the active series through the code that measures the strategy's own. ``None``
-    when the sidecar carries no random baseline (a truncated smoke replay). A random baseline that misses one of the strategy's
-    days raises: a day graded against nothing would read as pure skill.
-    """
-
-    composite = dict(series_pairs(analysis.get("baseline_daily")))
-    if not composite:
-        return None
-    strategy = series_pairs(analysis.get("strategy_daily"))
-    missing = [date for date, _value in strategy if date not in composite]
-    if missing:
-        raise ValueError(f"random baseline has no return for {missing[0]}")
-    return {
-        **analysis,
-        "strategy_daily": [[date, value - composite[date]] for date, value in strategy],
-    }
-
-
-def window_plain_excess(
-    analysis: Mapping[str, object], *, start: str = "", end: str = ""
-) -> float | None:
-    """The annualised mean of one span of a stored analysis's ``strategy_daily``,
-    with no regression (``stats.plain_statistics``).
-
-    Of an active analysis (:func:`active_analysis`) it is the plain active
-    excess every gate grades: the one computation point for a span narrower
-    than the whole window -- the per-year figure ``attach_sub_window_benchmark``
-    writes into a result, and the verdict's research years and recency window.
-    ``None`` when the span holds fewer than two days. An empty
-    ``start``/``end`` takes the whole window.
-    """
-
-    value = plain_statistics(
-        value
-        for date, value in series_pairs(analysis.get("strategy_daily"))
-        if (not start or date >= start) and (not end or date <= end)
-    )["plain_excess"]
-    return None if value is None else float(value)
 
 
 def benchmark_summary_block(analysis: Mapping[str, object]) -> dict[str, object] | None:
@@ -877,9 +782,7 @@ __all__ = [
     "STYLE_ARTIFACT_NAME",
     "STYLE_SCHEMA_VERSION",
     "VERSION_3_FACTOR_SERIES",
-    "active_analysis",
     "benchmark_summary_block",
-    "daily_returns_from_curve",
     "factor_ols",
     "regression_method",
     "replay_style_analysis",
@@ -887,6 +790,5 @@ __all__ = [
     "slot_membership",
     "stored_factor_series",
     "warmup_bars",
-    "window_plain_excess",
     "write_style_rollup",
 ]

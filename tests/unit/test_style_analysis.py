@@ -9,7 +9,7 @@ import pyarrow as pa
 import pytest
 
 from autotrade.environment.data.contracts import benchmark_index_label
-from autotrade.environment.replay.stats import ReplayResult
+from autotrade.environment.replay.stats import ReplayResult, daily_returns_from_curve
 from autotrade.environment.replay.style import (
     BENCHMARK_TS_CODE,
     FACTOR_SERIES,
@@ -20,7 +20,6 @@ from autotrade.environment.replay.style import (
     _turnover_factor,
     _value_factor,
     benchmark_summary_block,
-    daily_returns_from_curve,
     replay_style_analysis,
     slot_benchmark,
     warmup_bars,

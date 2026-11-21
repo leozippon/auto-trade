@@ -52,17 +52,17 @@ import pandas as pd
 from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
+    active_analysis,
     compounded_drawdown,
     compounded_path,
     compounded_return,
     plain_statistics,
+    series_pairs,
 )
 from autotrade.environment.replay.style import (
     FACTOR_SERIES,
     MIN_REGRESSION_DAYS,
-    active_analysis,
     factor_ols,
-    series_pairs,
     stored_factor_series,
 )
 
