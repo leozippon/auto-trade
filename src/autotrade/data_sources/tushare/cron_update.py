@@ -282,6 +282,40 @@ def build_context(args: argparse.Namespace) -> RunContext:
     return RunContext(config, repo_root, python, args.job, job, start_date, end_date, timezone_name)
 
 
+DOWNLOAD_SCRIPT = "scripts/data/tushare_download.py"
+AUDIT_SCRIPT = "scripts/data/tushare_audit.py"
+_WINDOW = (("--start-date", "start"), ("--end-date", "end"))
+# The one-command operations: operation -> (script, subcommand words, date
+# flags with the bound each takes, whether default_update_args follow
+# --raw-dir). Every command ends with the job's extra_args.
+_CHILD_OPERATIONS: dict[str, tuple[str, list[str], tuple[tuple[str, str], ...], bool]] = {
+    "update": (DOWNLOAD_SCRIPT, ["update"], _WINDOW, True),
+    "download_event_flow": (DOWNLOAD_SCRIPT, ["download", "--tier", "event_flow"], _WINDOW, True),
+    # The job's tier is appended to the words.
+    "download_tier": (DOWNLOAD_SCRIPT, ["download", "--tier"], _WINDOW, True),
+    # The share_float step of the evening ``update`` on its own, over the same
+    # window for both date paths.
+    "share_float_complete": (
+        DOWNLOAD_SCRIPT,
+        ["download-share-float-complete"],
+        (("--ann-start-date", "start"), ("--ann-end-date", "end"), ("--float-start-date", "start"), ("--float-end-date", "end")),
+        True,
+    ),
+    # The minute layer on its own: its vendor quota must not be able to fail
+    # the evening update that Paper's morning release depends on.
+    "intraday_by_date": (DOWNLOAD_SCRIPT, ["update-intraday-by-date"], _WINDOW, True),
+    # Local and payload-preserving restamps, but they rewrite partitions, so
+    # they take the updater lock and publish a generation like any mutating job.
+    "event_available_at_repair": (DOWNLOAD_SCRIPT, ["repair-event-available-at"], (), False),
+    "text_available_at_repair": (DOWNLOAD_SCRIPT, ["repair-text-available-at"], (), False),
+    "auction_capture": (DOWNLOAD_SCRIPT, ["capture-open-auction"], (("--trade-date", "end"),), True),
+    # Followed by --landing-job <job name>.
+    "auction_recheck": (DOWNLOAD_SCRIPT, ["recheck-stk-auction"], _WINDOW, True),
+    "audit_event_flow": (AUDIT_SCRIPT, ["event-flow"], _WINDOW, False),
+    "audit_text": (AUDIT_SCRIPT, ["text"], _WINDOW, False),
+}
+
+
 def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
     """The six trading-day-bound raw status files, then the Paper vintage report.
 
@@ -289,87 +323,24 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
     daily job, and this job's trading-day end date makes every weekend and
     holiday invocation skip as an unchanged range."""
     raw_dir = ctx.config.get("default_raw_dir", "data/raw")
-    event_flow_end_date = resolve_event_flow_audit_end_date(ctx)
+    audits = [
+        ("core-market", ctx.end_date, []),
+        ("fundamental-raw", ctx.end_date, ["--fundamental-start-date", ctx.start_date, "--fundamental-end-date", ctx.end_date]),
+        ("macro", ctx.end_date, []),
+        # "daily" is an INDEPENDENT universe for the newest-20-day deep check;
+        # "minute" read the audited file's own codes back, which can never
+        # report a dropped stock. Full-history scans still use "minute": the
+        # 2020-2023 vendor minute era genuinely lacks up to ~190 daily codes
+        # per day (accepted history, not a defect).
+        ("intraday-by-date", ctx.end_date, ["--expected-codes-source", "daily", "--min-rows-per-day", "1"]),
+        ("event-flow", resolve_event_flow_audit_end_date(ctx), []),
+        ("board-trading", ctx.end_date, []),
+    ]
     return [
-        [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "core-market",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ],
-        [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "fundamental-raw",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--fundamental-start-date",
-            ctx.start_date,
-            "--fundamental-end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ],
-        [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "macro",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ],
-        [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "intraday-by-date",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            # "daily" is an INDEPENDENT universe for the newest-20-day deep
-            # check; "minute" read the audited file's own codes back, which can
-            # never report a dropped stock. Full-history scans still use
-            # "minute": the 2020-2023 vendor minute era genuinely lacks up to
-            # ~190 daily codes per day (accepted history, not a defect).
-            "--expected-codes-source",
-            "daily",
-            "--min-rows-per-day",
-            "1",
-            "--raw-dir",
-            raw_dir,
-        ],
-        [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "event-flow",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            event_flow_end_date,
-            "--raw-dir",
-            raw_dir,
-        ],
-        [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "board-trading",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ],
+        *(
+            [ctx.python, AUDIT_SCRIPT, command, "--start-date", ctx.start_date, "--end-date", end_date, *extra, "--raw-dir", raw_dir]
+            for command, end_date, extra in audits
+        ),
         # Which datasets each live Paper account mounts changed vendor vintage
         # since the release it last pinned (paper/vintages.py).
         [ctx.python, "scripts/paper/run_paper.py", "vintages"],
@@ -379,179 +350,25 @@ def build_audit_full_commands(ctx: RunContext) -> list[list[str]]:
 def build_job_commands(ctx: RunContext) -> list[list[str]]:
     raw_dir = ctx.config.get("default_raw_dir", "data/raw")
     operation = ctx.job.get("operation", "update")
-    if operation == "update":
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "update",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.config.get("default_update_args", []))
+    if operation in _CHILD_OPERATIONS:
+        script, words, window, default_args = _CHILD_OPERATIONS[operation]
+        if operation == "download_tier":
+            tier = ctx.job.get("tier")
+            if not tier:
+                raise ValueError("download_tier job requires a tier")
+            words = [*words, tier]
+        dates = {"start": ctx.start_date, "end": ctx.end_date}
+        command = [ctx.python, script, *words]
+        for flag, bound in window:
+            command.extend([flag, dates[bound]])
+        command.extend(["--raw-dir", raw_dir])
+        if default_args:
+            command.extend(ctx.config.get("default_update_args", []))
         command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "download_event_flow":
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "download",
-            "--tier",
-            "event_flow",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.config.get("default_update_args", []))
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "download_tier":
-        tier = ctx.job.get("tier")
-        if not tier:
-            raise ValueError("download_tier job requires a tier")
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "download",
-            "--tier",
-            tier,
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.config.get("default_update_args", []))
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "share_float_complete":
-        # The share_float step of the evening ``update`` on its own, over the
-        # same window for both date paths.
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "download-share-float-complete",
-            "--ann-start-date",
-            ctx.start_date,
-            "--ann-end-date",
-            ctx.end_date,
-            "--float-start-date",
-            ctx.start_date,
-            "--float-end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.config.get("default_update_args", []))
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "intraday_by_date":
-        # The minute layer on its own: its vendor quota must not be able to
-        # fail the evening update that Paper's morning release depends on.
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "update-intraday-by-date",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.config.get("default_update_args", []))
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "event_available_at_repair":
-        # Local and payload-preserving, but it rewrites partitions, so it takes
-        # the updater lock and publishes a generation like any mutating job.
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "repair-event-available-at",
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "text_available_at_repair":
-        # The text counterpart: the same local, payload-preserving restamp,
-        # under the updater lock and with a published generation.
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "repair-text-available-at",
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "auction_capture":
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "capture-open-auction",
-            "--trade-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.config.get("default_update_args", []))
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "auction_recheck":
-        command = [
-            ctx.python,
-            "scripts/data/tushare_download.py",
-            "recheck-stk-auction",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.config.get("default_update_args", []))
-        command.extend(ctx.job.get("extra_args", []))
-        command.extend(["--landing-job", ctx.job_name])
-        return [command]
-    if operation == "audit_event_flow":
-        command = [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "event-flow",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.job.get("extra_args", []))
-        return [command]
-    if operation == "audit_text":
-        command = [
-            ctx.python,
-            "scripts/data/tushare_audit.py",
-            "text",
-            "--start-date",
-            ctx.start_date,
-            "--end-date",
-            ctx.end_date,
-            "--raw-dir",
-            raw_dir,
-        ]
-        command.extend(ctx.job.get("extra_args", []))
+        if operation == "auction_recheck":
+            command.extend(["--landing-job", ctx.job_name])
         return [command]
     if operation == "pit_event_pipeline":
-        raw_dir = ctx.config.get("default_raw_dir", "data/raw")
         pit_root = ctx.config.get("default_pit_root", "data/pit")
         fundamental_root = ctx.job.get("fundamental_events_root", f"{pit_root}/fundamental_events")
         # Build and audit the FULL retained window every night. The build reads
@@ -562,7 +379,7 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
         # Month-aligned like the builder's replace window, so a manual
         # mid-month --start-date cannot put built rows outside the audit window.
         event_start_date = f"{ctx.start_date[:6]}01"
-        commands = [
+        return [
             [
                 ctx.python,
                 "scripts/data/build_pit_events.py",
@@ -591,12 +408,11 @@ def build_job_commands(ctx: RunContext) -> list[list[str]]:
                 "--require-partitions",
             ],
         ]
-        return commands
     if operation == "revision_sentinel":
         revision_config = ctx.config.get("revision_monitor", {})
         command = [
             ctx.python,
-            "scripts/data/tushare_audit.py",
+            AUDIT_SCRIPT,
             "revision-sentinel",
             "--start-date",
             ctx.start_date,
@@ -665,6 +481,25 @@ def last_success(job_state: dict) -> dict:
     if job_state.get("status") == "ok":
         return {"last_ok_at": job_state.get("updated_at"), "last_ok_end_date": job_state.get("end_date")}
     return {key: job_state[key] for key in ("last_ok_at", "last_ok_end_date") if key in job_state}
+
+
+def job_state_record(ctx: RunContext, payload: dict, log_path: Path, status: str, returncode: int, *, previous: dict, **detail: object) -> dict:
+    """One outcome of ``ctx``'s job as its state file records it; a non-ok
+    outcome carries the previous record's last success forward."""
+    record = {
+        "status": status,
+        "returncode": returncode,
+        "start_date": ctx.start_date,
+        "end_date": ctx.end_date,
+        "commands": payload["commands"],
+        "config_identity": payload["config_identity"],
+        **detail,
+        "log_path": str(log_path),
+        "updated_at": utc_now(),
+    }
+    if status != "ok":
+        record.update(last_success(previous))
+    return record
 
 
 def job_config_identity(ctx: RunContext) -> dict:
@@ -1142,17 +977,9 @@ def _run(args: argparse.Namespace) -> int:
         ctx.config.get("default_raw_dir", "data/raw"),
         ctx.end_date,
     ):
-        record = record_job_state(ctx.job_name, {
-            "status": "ok",
-            "returncode": 0,
-            "start_date": ctx.start_date,
-            "end_date": ctx.end_date,
-            "commands": payload["commands"],
-            "config_identity": payload["config_identity"],
-            "skipped_non_trading_day": True,
-            "log_path": str(log_path),
-            "updated_at": utc_now(),
-        })
+        record = record_job_state(ctx.job_name, job_state_record(
+            ctx, payload, log_path, "ok", 0, previous=job_state, skipped_non_trading_day=True,
+        ))
         log_outcome(log_path, {**record, "job": ctx.job_name})
         return 0
     generation = read_raw_generation_file(raw_dir) if mutates_lake else {}
@@ -1170,18 +997,9 @@ def _run(args: argparse.Namespace) -> int:
             int(ctx.job.get("lock_wait_seconds", ctx.config.get("default_lock_wait_seconds", DEFAULT_LOCK_WAIT_SECONDS))),
         )
     except RuntimeError as exc:
-        record = record_job_state(ctx.job_name, {
-            "status": "error",
-            "returncode": 1,
-            "start_date": ctx.start_date,
-            "end_date": ctx.end_date,
-            "commands": payload["commands"],
-            "config_identity": payload["config_identity"],
-            "error": str(exc),
-            "log_path": str(log_path),
-            "updated_at": utc_now(),
-            **last_success(job_state),
-        })
+        record = record_job_state(ctx.job_name, job_state_record(
+            ctx, payload, log_path, "error", 1, previous=job_state, error=str(exc),
+        ))
         log_outcome(log_path, {**record, "job": ctx.job_name})
         return 1
 
@@ -1245,21 +1063,10 @@ def _run(args: argparse.Namespace) -> int:
         status = "ok" if returncode == 0 else (
             "not_ready" if no_mutation_retry or mutated_not_ready else "error"
         )
-        state: dict = {
-            "status": status,
-            "returncode": returncode,
-            "start_date": ctx.start_date,
-            "end_date": ctx.end_date,
-            "commands": payload["commands"],
-            "config_identity": payload["config_identity"],
-            "log_path": str(log_path),
-            "updated_at": utc_now(),
-        }
-        if status == "error":
-            state["error"] = summarize_failure_from_log(log_path, returncode)
-        if status != "ok":
-            state.update(last_success(job_state))
-        record = record_job_state(ctx.job_name, state)
+        detail = {"error": summarize_failure_from_log(log_path, returncode)} if status == "error" else {}
+        record = record_job_state(ctx.job_name, job_state_record(
+            ctx, payload, log_path, status, returncode, previous=job_state, **detail,
+        ))
         state_recorded = True
         log_outcome(log_path, {**record, "job": ctx.job_name})
         return returncode
@@ -1272,18 +1079,9 @@ def _run(args: argparse.Namespace) -> int:
         # the job state silently preserved a stale ``ok`` while the job failed
         # on every run. Record the failure and re-raise -- explicit failure
         # over false success.
-        record = record_job_state(ctx.job_name, {
-            "status": "error",
-            "returncode": 1,
-            "start_date": ctx.start_date,
-            "end_date": ctx.end_date,
-            "commands": payload["commands"],
-            "config_identity": payload["config_identity"],
-            "error": str(exc)[:1000],
-            "log_path": str(log_path),
-            "updated_at": utc_now(),
-            **last_success(job_state),
-        })
+        record = record_job_state(ctx.job_name, job_state_record(
+            ctx, payload, log_path, "error", 1, previous=job_state, error=str(exc)[:1000],
+        ))
         log_outcome(log_path, {**record, "job": ctx.job_name})
         raise
     finally:
