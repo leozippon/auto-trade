@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import threading
@@ -514,114 +515,87 @@ def _as_text(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, default=str, sort_keys=True)
 
 
-_STATS_CACHE: dict[str, dict[str, object]] = {}
+@dataclasses.dataclass
+class _TraceAggregate:
+    """A trace's running aggregate over its complete lines up to ``offset``,
+    extended in place by each scan."""
+
+    offset: int = 0
+    counts: dict[str, int] = dataclasses.field(default_factory=dict)
+    tool_counts: dict[str, int] = dataclasses.field(default_factory=dict)
+    llm_total_tokens: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    last_main_prompt_tokens: int = 0
+    subagent_task_ids: set[str] = dataclasses.field(default_factory=set)
+    subagent_ended_ids: set[str] = dataclasses.field(default_factory=set)
+    subagent_usage: dict[str, dict[str, int]] = dataclasses.field(default_factory=dict)
+    # The session's cumulative spend rides on every budgeted event; the last
+    # block seen is the experiment's usage so far, earlier attempts included.
+    budget_used: dict[str, object] | None = None
+    started_at: object = None
+    tests: list[dict[str, object]] = dataclasses.field(default_factory=list)
+
+
+_STATS_CACHE: dict[str, _TraceAggregate] = {}
 _STATS_LOCK = threading.Lock()
 # ``session_tools.TestTool``'s name: the call that records one step of the
 # validation record.
 TEST_TOOL = "test"
 
 
-def _scan(path: Path) -> dict[str, object]:
+def _scan(path: Path) -> _TraceAggregate:
     """The trace's running aggregate, extended over the complete lines appended
     since the last scan. Called with ``_STATS_LOCK`` held."""
 
     path = Path(path)
     size = path.stat().st_size
     key = str(path.resolve())
-    cached = _STATS_CACHE.get(key)
-    if cached is None or size < _as_int(cached.get("offset")):
-        cached = {
-            "offset": 0,
-            "counts": {},
-            "tool_counts": {},
-            "llm_total_tokens": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "last_main_prompt_tokens": 0,
-            "subagent_task_ids": set(),
-            "subagent_ended_ids": set(),
-            "subagent_usage": {},
-            "budget_used": None,
-            "started_at": None,
-            "tests": [],
-        }
-    offset = _as_int(cached.get("offset"))
+    aggregate = _STATS_CACHE.get(key)
+    if aggregate is None or size < aggregate.offset:
+        aggregate = _TraceAggregate()
     with path.open("rb") as handle:
-        handle.seek(offset)
-        blob = handle.read(size - offset)
+        handle.seek(aggregate.offset)
+        blob = handle.read(size - aggregate.offset)
     tail = blob.rfind(b"\n") + 1
-    counts = _as_mapping(cached.get("counts"))
-    tool_counts = _as_mapping(cached.get("tool_counts"))
-    total = _as_int(cached.get("llm_total_tokens"))
-    prompt = _as_int(cached.get("prompt_tokens"))
-    completion = _as_int(cached.get("completion_tokens"))
-    last_main_prompt = _as_int(cached.get("last_main_prompt_tokens"))
-    task_ids = set(_as_str_list(cached.get("subagent_task_ids")))
-    ended_ids = set(_as_str_list(cached.get("subagent_ended_ids")))
-    subagent_usage = {
-        task: _usage_row(_as_mapping(row))
-        for task, row in _as_mapping(cached.get("subagent_usage")).items()
-    }
-    # The session's cumulative spend rides on every budgeted event; the
-    # last block seen is the experiment's usage so far, earlier attempts included.
-    budget_used = cached.get("budget_used")
-    started_at = cached.get("started_at")
-    tests = list(cached.get("tests") or ())  # type: ignore[call-overload]
     for raw in blob[:tail].splitlines():
         event = _decode_event(raw)
         kind = str(event.get("event_type") or "event")
-        counts[kind] = _as_int(counts.get(kind)) + 1
-        if started_at is None:
-            started_at = event.get("ts")
+        aggregate.counts[kind] = aggregate.counts.get(kind, 0) + 1
+        if aggregate.started_at is None:
+            aggregate.started_at = event.get("ts")
         if isinstance(event.get("budget_used"), Mapping):
-            budget_used = _as_mapping(event["budget_used"])
+            aggregate.budget_used = _as_mapping(event["budget_used"])
         task_id = _subagent_event_task_id(event)
         if task_id is not None:
-            task_ids.add(task_id)
+            aggregate.subagent_task_ids.add(task_id)
             # A finished task reports authoritative totals; a live one is
             # summed from the per-turn records seen so far.
             if _subagent_phase(event) == "ended":
-                ended_ids.add(task_id)
+                aggregate.subagent_ended_ids.add(task_id)
                 totals = _as_mapping(event.get("usage_totals"))
                 if totals:
-                    subagent_usage[task_id] = _usage_row(totals)
-            elif kind == TraceEvent.SUBAGENT_LLM and task_id not in ended_ids:
-                _add_usage(
-                    subagent_usage.setdefault(task_id, _new_usage()),
-                    _as_mapping(event.get("usage")),
-                )
+                    aggregate.subagent_usage[task_id] = _usage_row(totals)
+            elif kind == TraceEvent.SUBAGENT_LLM and task_id not in aggregate.subagent_ended_ids:
+                _add_usage(aggregate.subagent_usage.setdefault(task_id, _new_usage()), _as_mapping(event.get("usage")))
         if kind == TraceEvent.TOOL_CALL:
             tool = str(event.get("tool") or "unknown")
-            tool_counts[tool] = _as_int(tool_counts.get(tool)) + 1
+            aggregate.tool_counts[tool] = aggregate.tool_counts.get(tool, 0) + 1
             if tool == TEST_TOOL and isinstance(event.get("budget_used"), Mapping):
-                tests.append({"ts": event.get("ts"), "budget_used": _as_mapping(event["budget_used"])})
+                aggregate.tests.append({"ts": event.get("ts"), "budget_used": _as_mapping(event["budget_used"])})
         elif kind == TraceEvent.LLM_CALL:
             usage = _as_mapping(event.get("usage"))
             if usage:
-                total += _as_int(usage.get("total_tokens"))
-                prompt += _as_int(usage.get("prompt_tokens"))
-                completion += _as_int(usage.get("completion_tokens"))
+                aggregate.llm_total_tokens += _as_int(usage.get("total_tokens"))
+                aggregate.prompt_tokens += _as_int(usage.get("prompt_tokens"))
+                aggregate.completion_tokens += _as_int(usage.get("completion_tokens"))
                 if _is_main_agent_llm_call(event):
-                    last_main_prompt = _as_int(usage.get("prompt_tokens"))
-    cached = {
-        "offset": offset + tail,
-        "counts": counts,
-        "tool_counts": tool_counts,
-        "llm_total_tokens": total,
-        "prompt_tokens": prompt,
-        "completion_tokens": completion,
-        "last_main_prompt_tokens": last_main_prompt,
-        "subagent_task_ids": task_ids,
-        "subagent_ended_ids": ended_ids,
-        "subagent_usage": subagent_usage,
-        "budget_used": budget_used,
-        "started_at": started_at,
-        "tests": tests,
-    }
+                    aggregate.last_main_prompt_tokens = _as_int(usage.get("prompt_tokens"))
+    aggregate.offset += tail
     if len(_STATS_CACHE) >= 32 and key not in _STATS_CACHE:
         _STATS_CACHE.pop(next(iter(_STATS_CACHE)))
-    _STATS_CACHE[key] = cached
-    return cached
+    _STATS_CACHE[key] = aggregate
+    return aggregate
 
 
 def trace_test_marks(path: Path) -> dict[str, object]:
@@ -632,44 +606,30 @@ def trace_test_marks(path: Path) -> dict[str, object]:
     reader matches calls to recorded steps by time."""
 
     with _STATS_LOCK:
-        cached = _scan(path)
-        return {
-            "started_at": cached["started_at"],
-            "tests": [dict(mark) for mark in cached["tests"]],  # type: ignore[union-attr]
-        }
+        aggregate = _scan(path)
+        return {"started_at": aggregate.started_at, "tests": [dict(mark) for mark in aggregate.tests]}
 
 
 def trace_stats(path: Path) -> dict[str, object]:
     """Incrementally aggregate event/tool/token counts and unique sub-agent tasks."""
 
     with _STATS_LOCK:
-        cached = _scan(path)
-        counts = _as_mapping(cached["counts"])
-        tool_counts = _as_mapping(cached["tool_counts"])
-        budget_used = cached["budget_used"]
-        total = _as_int(cached["llm_total_tokens"])
-        prompt = _as_int(cached["prompt_tokens"])
-        completion = _as_int(cached["completion_tokens"])
-        last_main_prompt = _as_int(cached["last_main_prompt_tokens"])
-        task_ids = set(_as_str_list(cached["subagent_task_ids"]))
-        ended_ids = set(_as_str_list(cached["subagent_ended_ids"]))
-        subagent_usage = _as_mapping(cached["subagent_usage"])
+        aggregate = _scan(path)
+        usage = aggregate.subagent_usage
         return {
-            "budget_used": dict(budget_used) if isinstance(budget_used, Mapping) else None,
-            "counts": counts,
-            "tool_counts": tool_counts,
-            "llm_total_tokens": total,
-            "llm_prompt_tokens": prompt,
-            "llm_completion_tokens": completion,
-            "last_llm_prompt_tokens": last_main_prompt,
-            "subagent_tasks": len(task_ids),
-            "subagent_running": len(task_ids - ended_ids),
-            "subagent_prompt_tokens": _usage_sum(subagent_usage, "prompt_tokens"),
-            "subagent_completion_tokens": _usage_sum(subagent_usage, "completion_tokens"),
-            "subagent_total_tokens": sum(
-                _usage_total(row) for row in subagent_usage.values()
-            ),
-            "compact_ops": _as_int(counts.get(TraceEvent.CONTEXT_COMPACTION)),
+            "budget_used": dict(aggregate.budget_used) if aggregate.budget_used is not None else None,
+            "counts": dict(aggregate.counts),
+            "tool_counts": dict(aggregate.tool_counts),
+            "llm_total_tokens": aggregate.llm_total_tokens,
+            "llm_prompt_tokens": aggregate.prompt_tokens,
+            "llm_completion_tokens": aggregate.completion_tokens,
+            "last_llm_prompt_tokens": aggregate.last_main_prompt_tokens,
+            "subagent_tasks": len(aggregate.subagent_task_ids),
+            "subagent_running": len(aggregate.subagent_task_ids - aggregate.subagent_ended_ids),
+            "subagent_prompt_tokens": _usage_sum(usage, "prompt_tokens"),
+            "subagent_completion_tokens": _usage_sum(usage, "completion_tokens"),
+            "subagent_total_tokens": sum(_usage_total(row) for row in usage.values()),
+            "compact_ops": aggregate.counts.get(TraceEvent.CONTEXT_COMPACTION, 0),
         }
 
 
@@ -805,14 +765,6 @@ def _usage_total(usage: Mapping[str, int]) -> int:
     return total or _as_int(usage.get("prompt_tokens")) + _as_int(
         usage.get("completion_tokens")
     )
-
-
-def _as_str_list(value: object) -> list[str]:
-    if isinstance(value, (str, bytes)) or not isinstance(
-        value, (list, tuple, set, frozenset)
-    ):
-        return []
-    return [item for item in value if isinstance(item, str)]
 
 
 class _Call:
