@@ -29,6 +29,7 @@ from autotrade.data_sources.tushare import (
     cron_update,
     download,
     generation,
+    intraday,
     share_float,
     specs,
     stamps,
@@ -515,9 +516,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
         output = self.raw_dir / specs.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
-        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyMinuteClient()):
+        with patch.object(intraday, "load_token", return_value="token"), patch.object(intraday, "TuShareClient", return_value=EmptyMinuteClient()):
             with self.assertRaisesRegex(RuntimeError, "refusing to write zero-row intraday"):
-                download.update_intraday_by_date(args)
+                intraday.update_intraday_by_date(args)
         self.assertFalse(output.exists())
 
     def _minute_update_args(self, start_date, end_date, max_retries=2):
@@ -573,8 +574,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                         items.append([code, bar, 1.0, 1.0, 1.0, 1.0, 100.0, 100.0])
                 return tushare_client.ApiResult(fields.split(","), items)
 
-        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=BatchMinuteClient()):
-            self.assertEqual(download.update_intraday_by_date(self._minute_update_args("20200102", "20200102")), 0)
+        with patch.object(intraday, "load_token", return_value="token"), patch.object(intraday, "TuShareClient", return_value=BatchMinuteClient()):
+            self.assertEqual(intraday.update_intraday_by_date(self._minute_update_args("20200102", "20200102")), 0)
 
         self.assertEqual([len(batch) for batch in requests], [specs.STK_MINS_BATCH_CODES, 5, 1])
         self.assertEqual(requests[-1], ["000030.SZ"])
@@ -600,8 +601,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 return tushare_client.ApiResult(fields.split(","), items)
 
         output = io.StringIO()
-        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=QuotaMinuteClient()), redirect_stdout(output):
-            code = download.update_intraday_by_date(self._minute_update_args("20200102", "20200103", max_retries=3))
+        with patch.object(intraday, "load_token", return_value="token"), patch.object(intraday, "TuShareClient", return_value=QuotaMinuteClient()), redirect_stdout(output):
+            code = intraday.update_intraday_by_date(self._minute_update_args("20200102", "20200103", max_retries=3))
 
         self.assertEqual(code, common.MUTATED_NOT_READY_RETRY_EXIT_CODE)
         self.assertEqual(calls, ["2020-01-02", "2020-01-03"])
@@ -649,7 +650,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             fields=list(minute_rows.columns),
         )
 
-        codes = common.intraday_expected_codes_for_day(
+        codes = intraday.intraday_expected_codes_for_day(
             self.raw_dir,
             argparse.Namespace(expected_codes_source="minute", output_dataset=specs.STK_MINS_BY_DATE_DATASET, codes=None, max_codes=None),
             "20200102",
@@ -6756,7 +6757,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
 def load_tushare_data_module():
     return types.SimpleNamespace(
-        compact_intraday_by_date=download.compact_intraday_by_date,
+        compact_intraday_by_date=intraday.compact_intraday_by_date,
         audit_intraday_by_date=audit.audit_intraday_by_date,
     )
 

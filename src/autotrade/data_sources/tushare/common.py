@@ -22,7 +22,7 @@ from autotrade.environment.data.contracts import DOMAIN_STATUS_FILES
 from autotrade.environment.data.pit import concat_rows
 
 from .client import TuShareClient, frame
-from .io import parquet_rows, read_many
+from .io import read_many
 from .specs import (
     BOARD_DC_HOT_MARKETS,
     BOARD_DC_HOT_TYPES,
@@ -42,13 +42,10 @@ from .specs import (
     FUNDAMENTAL_DATASETS,
     FUNDAMENTAL_SPECS,
     GLOBAL_CONTEXT_DEFAULT_DATASETS,
-    INTRADAY_DATASETS,
     MACRO_REGIME_DEFAULT_DATASETS,
     MACRO_SPECS,
     NEWS_SOURCES,
     STK_MINS_BY_DATE_DATASET,
-    STK_MINS_DATASET,
-    STK_MINS_REQUIRED_COLUMNS,
     TEXT_DATASETS,
     TEXT_SPECS,
     DatasetSpec,
@@ -538,223 +535,6 @@ def margin_family_missing_exchanges(api_name: str, trade_date: str, frame: pd.Da
         values = [MARGIN_EXCHANGE_BY_TS_CODE_SUFFIX.get(value.rsplit(".", 1)[-1], "") for value in values]
     return margin_missing_exchanges(trade_date, values)
 
-
-def selected_intraday_datasets(values: Iterable[str] | None) -> list[str]:
-    aliases = {"stk_mins": STK_MINS_DATASET}
-    normalized = [aliases.get(str(name), str(name)) for name in values or INTRADAY_DATASETS]
-    return select_datasets(normalized, default=INTRADAY_DATASETS, allowed=INTRADAY_DATASETS, label="intraday minute")
-
-def clean_yyyymmdd(value: Any) -> str:
-    text = str(value or "").strip()
-    return text if re.fullmatch(r"\d{8}", text) else ""
-
-def date_overlaps(start_a: str, end_a: str, start_b: str, end_b: str) -> bool:
-    return start_a <= end_b and start_b <= end_a
-
-
-def load_minute_universe(raw_dir: Path, args: argparse.Namespace) -> pd.DataFrame:
-    files = sorted((raw_dir / "stock_basic").glob("list_status=*.parquet"))
-    if not files:
-        raise RuntimeError("stock_basic partitions are missing; run download --tier reference first")
-    cols = ["ts_code", "name", "market", "exchange", "list_status", "list_date", "delist_date"]
-    df = read_many(files, columns=cols)
-    if df.empty:
-        raise RuntimeError("stock_basic is empty; cannot build full-A minute universe")
-    df = df.dropna(subset=["ts_code"]).copy()
-    df["ts_code"] = df["ts_code"].astype(str).str.strip()
-    df = df[df["ts_code"].ne("")].drop_duplicates("ts_code", keep="first")
-    if getattr(args, "codes", None):
-        wanted = {str(code).strip() for code in args.codes if str(code).strip()}
-        df = df[df["ts_code"].isin(wanted)]
-    df = df.sort_values("ts_code").reset_index(drop=True)
-    if getattr(args, "max_codes", None):
-        df = df.head(int(args.max_codes))
-    if df.empty:
-        raise RuntimeError("minute universe is empty after code/max-code filtering")
-    return df
-
-
-def active_year_windows(row: pd.Series, start_date: str, end_date: str) -> list[tuple[int, str, str]]:
-    list_date = clean_yyyymmdd(row.get("list_date")) or start_date
-    delist_date = clean_yyyymmdd(row.get("delist_date")) or end_date
-    active_start = max(start_date, list_date)
-    active_end = min(end_date, delist_date)
-    if active_start > active_end:
-        return []
-    windows: list[tuple[int, str, str]] = []
-    for year in range(int(active_start[:4]), int(active_end[:4]) + 1):
-        year_start = max(active_start, f"{year}0101")
-        year_end = min(active_end, f"{year}1231")
-        if date_overlaps(year_start, year_end, start_date, end_date):
-            windows.append((year, year_start, year_end))
-    return windows
-
-
-def minute_datetime(value: str, *, end: bool = False) -> str:
-    suffix = "15:00:00" if end else "09:00:00"
-    return f"{value[:4]}-{value[4:6]}-{value[6:8]} {suffix}"
-
-def augment_stk_mins_frame(df: pd.DataFrame) -> pd.DataFrame:
-    if df.empty:
-        return pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
-    out = df.copy()
-    out["trade_time"] = out["trade_time"].astype(str).str.strip()
-    parsed = pd.to_datetime(out["trade_time"], errors="coerce")
-    out["trade_date"] = parsed.dt.strftime("%Y%m%d").fillna("")
-    out["available_at"] = parsed.dt.strftime("%Y-%m-%d %H:%M:%S+08:00").fillna("")
-    out["available_at_rule"] = "source:trade_time_bar_close"
-    sort_cols = [col for col in ["ts_code", "trade_time"] if col in out.columns]
-    if sort_cols:
-        out = out.sort_values(sort_cols).reset_index(drop=True)
-    for col in STK_MINS_REQUIRED_COLUMNS:
-        if col not in out.columns:
-            out[col] = "" if col in {"ts_code", "trade_time", "trade_date", "available_at", "available_at_rule"} else pd.NA
-    return out[STK_MINS_REQUIRED_COLUMNS]
-
-def stk_mins_by_date_path(raw_dir: Path, dataset: str, trade_date: str) -> Path:
-    return raw_dir / dataset / f"trade_date={trade_date}.parquet"
-
-def normalize_stk_mins_by_date_frame(df: pd.DataFrame, trade_date: str) -> tuple[pd.DataFrame, dict[str, int]]:
-    if df.empty:
-        out = pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
-        return out, {"input_rows": 0, "filtered_rows": 0, "duplicate_rows_dropped": 0}
-    out = df.copy()
-    for col in STK_MINS_REQUIRED_COLUMNS:
-        if col not in out.columns:
-            out[col] = "" if col in {"ts_code", "trade_time", "trade_date", "available_at", "available_at_rule"} else pd.NA
-    out = out[STK_MINS_REQUIRED_COLUMNS]
-    out["ts_code"] = out["ts_code"].astype(str).str.strip()
-    out["trade_time"] = out["trade_time"].astype(str).str.strip()
-    if "trade_date" not in out or out["trade_date"].astype(str).str.strip().eq("").all():
-        parsed = pd.to_datetime(out["trade_time"], errors="coerce")
-        out["trade_date"] = parsed.dt.strftime("%Y%m%d").fillna("")
-    else:
-        out["trade_date"] = out["trade_date"].astype(str).str.strip()
-    before_filter = len(out)
-    out = out[out["trade_date"] == trade_date].copy()
-    if out["available_at"].astype(str).str.strip().eq("").any():
-        parsed = pd.to_datetime(out["trade_time"], errors="coerce")
-        mask = out["available_at"].astype(str).str.strip().eq("") & parsed.notna()
-        out.loc[mask, "available_at"] = parsed[mask].dt.strftime("%Y-%m-%d %H:%M:%S+08:00")
-    missing_rule = out["available_at_rule"].astype(str).str.strip().eq("")
-    out.loc[missing_rule, "available_at_rule"] = "source:trade_time_bar_close"
-    before_dedup = len(out)
-    out = out.drop_duplicates(["ts_code", "trade_time"], keep="last")
-    out = out.sort_values(["ts_code", "trade_time"]).reset_index(drop=True)
-    return out, {
-        "input_rows": int(before_filter),
-        "filtered_rows": int(before_filter - len(out)),
-        "duplicate_rows_dropped": int(before_dedup - len(out)),
-    }
-
-def intraday_day_time_details(df: pd.DataFrame) -> dict[str, Any]:
-    if df.empty or "trade_time" not in df.columns:
-        return {"unique_times": 0, "has_0930": False, "has_1500": False, "invalid_time_rows": len(df)}
-    time_hhmm = df["trade_time"].astype(str).str.extract(r"(\d{2}:\d{2})", expand=False)
-    valid = (
-        (time_hhmm == "09:30")
-        | ((time_hhmm >= "09:31") & (time_hhmm <= "11:30"))
-        | ((time_hhmm >= "13:00") & (time_hhmm <= "15:00"))
-    )
-    times = set(time_hhmm.dropna().tolist())
-    return {
-        "unique_times": int(time_hhmm.nunique(dropna=True)),
-        "has_0930": "09:30" in times,
-        "has_1500": "15:00" in times,
-        "invalid_time_rows": int((~valid.fillna(False)).sum()),
-    }
-
-def validate_stk_mins_by_date_frame(
-    df: pd.DataFrame,
-    trade_date: str,
-    *,
-    expected_codes: set[str] | None = None,
-    min_rows: int = 0,
-    allow_missing_codes: int = 0,
-) -> tuple[bool, dict[str, Any]]:
-    missing_columns = sorted(set(STK_MINS_REQUIRED_COLUMNS) - set(df.columns))
-    details: dict[str, Any] = {
-        "trade_date": trade_date,
-        "rows": len(df),
-        "unique_codes": int(df["ts_code"].nunique()) if "ts_code" in df.columns else 0,
-        "missing_columns": missing_columns,
-        "duplicate_key_rows": 0,
-        "wrong_trade_date_rows": 0,
-        "unparseable_trade_time_rows": 0,
-        "unparseable_available_at_rows": 0,
-        "min_rows": int(min_rows),
-        "expected_codes": len(expected_codes or set()),
-        "missing_expected_codes": 0,
-        "extra_codes": 0,
-        "missing_expected_sample": [],
-        "extra_code_sample": [],
-    }
-    if missing_columns:
-        return False, details
-    details["duplicate_key_rows"] = int(df.duplicated(["ts_code", "trade_time"]).sum())
-    details["wrong_trade_date_rows"] = int((df["trade_date"].astype(str) != trade_date).sum())
-    parsed_trade = pd.to_datetime(df["trade_time"].astype(str), errors="coerce")
-    details["unparseable_trade_time_rows"] = int(parsed_trade.isna().sum())
-    available = df["available_at"].astype(str).str.strip()
-    parsed_available = pd.to_datetime(available[available.ne("")], errors="coerce", utc=True)
-    details["unparseable_available_at_rows"] = int(parsed_available.isna().sum())
-    details.update(intraday_day_time_details(df))
-    if expected_codes is not None:
-        actual_codes = set(df["ts_code"].dropna().astype(str))
-        missing = sorted(expected_codes - actual_codes)
-        extra = sorted(actual_codes - expected_codes)
-        details["missing_expected_codes"] = len(missing)
-        details["extra_codes"] = len(extra)
-        details["missing_expected_sample"] = missing[:20]
-        details["extra_code_sample"] = extra[:20]
-    ok = not any([
-        missing_columns,
-        details["duplicate_key_rows"],
-        details["wrong_trade_date_rows"],
-        details["unparseable_trade_time_rows"],
-        details["unparseable_available_at_rows"],
-        not details["has_0930"] if len(df) else False,
-        not details["has_1500"] if len(df) else False,
-        len(df) < min_rows,
-        details["missing_expected_codes"] > allow_missing_codes,
-    ])
-    return bool(ok), details
-
-def intraday_expected_codes_for_day(raw_dir: Path, args: argparse.Namespace, trade_date: str) -> set[str] | None:
-    source = getattr(args, "expected_codes_source", "none")
-    if source == "none":
-        return None
-    if getattr(args, "codes", None):
-        codes = {str(code).strip() for code in args.codes if str(code).strip()}
-    elif source in {"daily", "minute"}:
-        if source == "minute":
-            dataset = getattr(args, "output_dataset", STK_MINS_BY_DATE_DATASET)
-            existing_path = stk_mins_by_date_path(raw_dir, dataset, trade_date)
-            if existing_path.exists() and parquet_rows(existing_path) > 0:
-                existing = pd.read_parquet(existing_path, columns=["ts_code"])
-                codes = set(existing["ts_code"].dropna().astype(str))
-                if getattr(args, "max_codes", None):
-                    codes = set(sorted(codes)[: int(args.max_codes)])
-                return codes
-        daily_path = raw_dir / "daily" / f"trade_date={trade_date}.parquet"
-        if not daily_path.exists():
-            return set()
-        if parquet_rows(daily_path) == 0:
-            return set()
-        daily = pd.read_parquet(daily_path, columns=["ts_code"])
-        codes = set(daily["ts_code"].dropna().astype(str))
-    else:
-        universe = load_minute_universe(raw_dir, argparse.Namespace(codes=None, max_codes=None))
-        active = []
-        for _, row in universe.iterrows():
-            list_date = clean_yyyymmdd(row.get("list_date")) or "00000000"
-            delist_date = clean_yyyymmdd(row.get("delist_date")) or "99999999"
-            if list_date <= trade_date <= delist_date:
-                active.append(str(row["ts_code"]))
-        codes = set(active)
-    if getattr(args, "max_codes", None):
-        codes = set(sorted(codes)[: int(args.max_codes)])
-    return codes
 
 def selected_text_datasets(
     values: Iterable[str] | None,

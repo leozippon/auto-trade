@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd
-import pyarrow.parquet as pq
 
 from autotrade.common.records import read_json_object
 from autotrade.common.time import CN_TZ, cn_today
@@ -26,7 +25,6 @@ from autotrade.environment.data.pit import (
     concat_rows,
     first_seen_at,
     key_strings,
-    partition_value,
 )
 
 from . import common as core
@@ -53,25 +51,19 @@ from .common import (
     NO_MUTATION_RETRY_EXIT_CODE,
     REVISION_EVENTS_PATH,
     WRITTEN_OUTCOMES,
-    active_year_windows,
     as_datetime_window,
-    augment_stk_mins_frame,
     date_range_days,
     download_trade_cal,
     ensure_trade_cal_coverage,
     format_yyyymmdd,
     history_floor,
-    intraday_expected_codes_for_day,
     latest_sse_calendar_date,
-    load_minute_universe,
     load_sse_open_dates,
     load_stock_codes,
     margin_exchange_column,
     margin_family_missing_exchanges,
-    minute_datetime,
     month_windows,
     normalize_date_key,
-    normalize_stk_mins_by_date_frame,
     parse_yyyymmdd,
     quarter_periods,
     resolve_revision_ledger,
@@ -80,21 +72,22 @@ from .common import (
     selected_board_trading_datasets,
     selected_daily_datasets,
     selected_fundamental_datasets,
-    selected_intraday_datasets,
     selected_macro_datasets,
     selected_text_datasets,
     spec_page_limit,
-    stk_mins_by_date_path,
-    validate_stk_mins_by_date_frame,
     write_frame,
     year_windows,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
 )
+from .intraday import (
+    compact_intraday_by_date,
+    download_intraday,
+    update_intraday_by_date,
+)
 from .io import (
     committed_partition_intact,
     parquet_rows,
-    write_parquet,
 )
 from .layout import (
     Partition,
@@ -126,15 +119,8 @@ from .specs import (
     REFERENCE_DATASETS,
     REFERENCE_PAGE_LIMIT,
     RESEARCH_HISTORY_FLOOR,
-    STK_MINS_API_NAME,
-    STK_MINS_BATCH_CODES,
     STK_MINS_BY_DATE_DATASET,
-    STK_MINS_DATASET,
-    STK_MINS_FIELDS,
-    STK_MINS_FREQ,
     STK_MINS_PAGE_LIMIT,
-    STK_MINS_QUOTA_MARKER,
-    STK_MINS_REQUIRED_COLUMNS,
     TEXT_DATASETS,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
@@ -1562,346 +1548,6 @@ def download_fundamental_ts_code_dataset(
         page_limit=page_limit, revision_ledger=revision_ledger, unit="codes", every=500,
     )
 
-def download_intraday(args: argparse.Namespace) -> int:
-    repo_root = Path.cwd().resolve()
-    raw_dir = repo_root / args.raw_dir
-    client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    selected_intraday_datasets(args.datasets)
-    universe = load_minute_universe(raw_dir, args)
-    tasks: list[tuple[str, int, str, str]] = []
-    for _, row in universe.iterrows():
-        ts_code = str(row["ts_code"])
-        for year, year_start, year_end in active_year_windows(row, args.start_date, args.end_date):
-            tasks.append((ts_code, year, year_start, year_end))
-    if not tasks:
-        raise RuntimeError(f"no active stock-year windows for {args.start_date}-{args.end_date}")
-    page_limit = min(args.page_limit or STK_MINS_PAGE_LIMIT, STK_MINS_PAGE_LIMIT)
-    dataset_dir = raw_dir / STK_MINS_DATASET
-    skipped = 0
-    written = 0
-    total_rows = 0
-    total_pages = 0
-    for index, (ts_code, year, year_start, year_end) in enumerate(tasks, start=1):
-        path = dataset_dir / f"ts_code={safe_partition_value(ts_code)}" / f"year={year}.parquet"
-        if path.exists() and not args.force:
-            skipped += 1
-            if index % 250 == 0:
-                print(f"{STK_MINS_DATASET} {index}/{len(tasks)} skipped={skipped} written={written} rows_written={total_rows}")
-            continue
-        params = {
-            "ts_code": ts_code,
-            "freq": STK_MINS_FREQ,
-            "start_date": minute_datetime(year_start),
-            "end_date": minute_datetime(year_end, end=True),
-        }
-        try:
-            result, pages = query_paged(client, STK_MINS_API_NAME, params, STK_MINS_FIELDS, page_limit)
-        except Exception as exc:
-            raise RuntimeError(f"{STK_MINS_API_NAME} ts_code={ts_code} year={year} failed: {exc}") from exc
-        df = augment_stk_mins_frame(frame(result))
-        if path.exists() and args.force:
-            # A partial-window --force must not replace the whole stock-year file:
-            # rows outside the requested window are kept, the window is replaced.
-            existing = pd.read_parquet(path)
-            if not existing.empty and "trade_date" in existing.columns:
-                dates = existing["trade_date"].astype(str)
-                outside = existing[(dates < str(year_start)) | (dates > str(year_end))]
-                if not outside.empty:
-                    df = concat_rows([outside, df])
-                    dedup_cols = [c for c in ("ts_code", "trade_time") if c in df.columns]
-                    if dedup_cols:
-                        df = df.drop_duplicates(dedup_cols, keep="last")
-                    sort_cols = [c for c in ("trade_date", "trade_time") if c in df.columns]
-                    if sort_cols:
-                        df = df.sort_values(sort_cols, kind="stable")
-                    df = df.reset_index(drop=True)
-        meta_params = dict(params)
-        meta_params.update({
-            "dataset": STK_MINS_DATASET,
-            "official_page_limit": STK_MINS_PAGE_LIMIT,
-            "pagination": {"page_limit": page_limit, "pages": pages},
-            "unit_rules": {"vol": "shares", "amount": "CNY", "trade_time": "Asia/Shanghai minute/bar timestamp; includes 09:30 and 15:00 auction bars"},
-        })
-        write_parquet(path, df, api_name=STK_MINS_API_NAME, params=meta_params, fields=list(df.columns))
-        written += 1
-        total_rows += len(df)
-        total_pages += pages
-        if index % 50 == 0:
-            print(f"{STK_MINS_DATASET} {index}/{len(tasks)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"{STK_MINS_DATASET} done tasks={len(tasks)} skipped={skipped} written={written} rows_written={total_rows} pages={total_pages}")
-    print(f"intraday minute download finished under {raw_dir}")
-    return 0
-
-def read_stk_mins_source_subset(path: Path, trade_dates: set[str]) -> pd.DataFrame:
-    if not trade_dates:
-        return pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
-    columns = [col for col in STK_MINS_REQUIRED_COLUMNS if col in pq.ParquetFile(path).schema_arrow.names]
-    try:
-        df = pd.read_parquet(path, columns=columns, filters=[("trade_date", "in", sorted(trade_dates))])
-    except Exception:  # noqa: BLE001 - filtered read failure retries unfiltered; a second failure propagates
-        df = pd.read_parquet(path, columns=columns)
-    if df.empty or "trade_date" not in df.columns:
-        return pd.DataFrame(columns=columns)
-    return df[df["trade_date"].astype(str).isin(trade_dates)].copy()
-
-def source_stk_mins_files(raw_dir: Path, args: argparse.Namespace, years: set[str]) -> list[Path]:
-    files = sorted((raw_dir / STK_MINS_DATASET).glob("ts_code=*/year=*.parquet"))
-    if years:
-        files = [path for path in files if partition_value(path) in years]
-    if args.codes:
-        wanted = {safe_partition_value(str(code).strip()) for code in args.codes if str(code).strip()}
-        files = [path for path in files if path.parent.name.split("=", 1)[-1] in wanted]
-    if args.max_codes:
-        selected_codes = sorted({path.parent.name for path in files})[: int(args.max_codes)]
-        files = [path for path in files if path.parent.name in set(selected_codes)]
-    return files
-
-def write_stk_mins_by_date(
-    path: Path,
-    df: pd.DataFrame,
-    *,
-    trade_date: str,
-    source: str,
-    params: dict[str, Any],
-    revision_ledger: Path | str | None = None,
-) -> None:
-    meta_params = dict(params)
-    meta_params.update({
-        "dataset": STK_MINS_BY_DATE_DATASET,
-        "trade_date": trade_date,
-        "source": source,
-        "unit_rules": {"vol": "shares", "amount": "CNY", "available_at": "source trade_time bar close"},
-    })
-    publish(
-        path,
-        df,
-        api_name=STK_MINS_API_NAME,
-        params=meta_params,
-        fields=list(df.columns),
-        key_columns=["trade_date", "ts_code", "trade_time"],
-        ledger=revision_ledger,
-    )
-
-def compact_intraday_by_date(args: argparse.Namespace) -> int:
-    repo_root = Path.cwd().resolve()
-    raw_dir = (repo_root / args.raw_dir).resolve()
-    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
-    output_dataset = args.output_dataset
-    trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
-    month_to_dates: dict[str, list[str]] = {}
-    for trade_date in trade_dates:
-        month_to_dates.setdefault(trade_date[:6], []).append(trade_date)
-    years = {trade_date[:4] for trade_date in trade_dates}
-    source_files = source_stk_mins_files(raw_dir, args, years)
-    if not source_files:
-        raise RuntimeError(f"no source {STK_MINS_DATASET} files found for years={sorted(years)}")
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for month, month_dates in sorted(month_to_dates.items()):
-        needed_dates = []
-        for trade_date in month_dates:
-            path = stk_mins_by_date_path(raw_dir, output_dataset, trade_date)
-            if path.exists() and not args.force:
-                skipped += 1
-            else:
-                needed_dates.append(trade_date)
-        if not needed_dates:
-            continue
-        date_set = set(needed_dates)
-        buffers: dict[str, list[pd.DataFrame]] = {trade_date: [] for trade_date in needed_dates}
-        scanned = 0
-        for source_path in source_files:
-            if partition_value(source_path) not in {date[:4] for date in date_set}:
-                continue
-            subset = read_stk_mins_source_subset(source_path, date_set)
-            scanned += 1
-            if subset.empty:
-                continue
-            for trade_date, group in subset.groupby("trade_date", sort=False):
-                key = str(trade_date)
-                if key in buffers:
-                    buffers[key].append(group)
-        for trade_date in needed_dates:
-            if not buffers[trade_date]:
-                if args.allow_empty:
-                    combined = pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
-                else:
-                    raise RuntimeError(f"no minute rows found while compacting trade_date={trade_date}")
-            else:
-                combined = concat_rows(buffers[trade_date])
-            normalized, normalize_details = normalize_stk_mins_by_date_frame(combined, trade_date)
-            expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date)
-            ok, details = validate_stk_mins_by_date_frame(
-                normalized,
-                trade_date,
-                expected_codes=expected_codes,
-                min_rows=args.min_rows_per_day,
-                allow_missing_codes=args.allow_missing_codes,
-            )
-            if not ok and not args.allow_validation_warnings:
-                raise RuntimeError(f"compacted intraday by-date validation failed for {trade_date}: {details}")
-            params = {
-                "source_dataset": STK_MINS_DATASET,
-                "source_layout": "ts_code/year",
-                "output_layout": "trade_date",
-                "month": month,
-                "source_files_scanned": scanned,
-                "normalize": normalize_details,
-                "validation": details,
-            }
-            write_stk_mins_by_date(
-                stk_mins_by_date_path(raw_dir, output_dataset, trade_date),
-                normalized,
-                trade_date=trade_date,
-                source="compact_from_stock_year",
-                params=params,
-                revision_ledger=revision_ledger,
-            )
-            written += 1
-            total_rows += len(normalized)
-        print(f"{output_dataset} month={month} written={written} skipped={skipped} rows_written={total_rows}")
-    print(f"{output_dataset} compact finished dates={len(trade_dates)} written={written} skipped={skipped} rows_written={total_rows}")
-    return 0
-
-def update_intraday_by_date(args: argparse.Namespace) -> int:
-    repo_root = Path.cwd().resolve()
-    raw_dir = (repo_root / args.raw_dir).resolve()
-    revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
-    client = TuShareClient(load_token(repo_root), args.min_interval_seconds, args.timeout_seconds)
-    ensure_trade_cal_coverage(client, raw_dir, args.start_date, args.end_date, ledger=revision_ledger)
-    trade_dates = load_sse_open_dates(raw_dir, args.start_date, args.end_date)
-    page_limit = min(args.page_limit or STK_MINS_PAGE_LIMIT, STK_MINS_PAGE_LIMIT)
-    written = 0
-    skipped = 0
-    total_rows = 0
-    force_from = str(args.force_from or "")
-    for trade_date in trade_dates:
-        day_force = args.force or (force_from != "" and trade_date >= force_from)
-        path = stk_mins_by_date_path(raw_dir, args.output_dataset, trade_date)
-        if path.exists() and not day_force:
-            existing = pd.read_parquet(path)
-            if args.expected_codes_source == "minute" and not existing.empty:
-                expected_codes = set(existing["ts_code"].dropna().astype(str))
-                if args.max_codes:
-                    expected_codes = set(sorted(expected_codes)[: int(args.max_codes)])
-            else:
-                expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date) or set()
-            existing_allow_missing = max(int(args.allow_missing_codes), int(args.existing_allow_missing_codes))
-            ok, _ = validate_stk_mins_by_date_frame(
-                existing,
-                trade_date,
-                expected_codes=expected_codes or None,
-                min_rows=args.min_rows_per_day,
-                allow_missing_codes=existing_allow_missing,
-            )
-            if ok:
-                skipped += 1
-                continue
-        else:
-            expected_codes = intraday_expected_codes_for_day(raw_dir, args, trade_date) or set()
-        if not expected_codes:
-            skipped += 1
-            print(f"{args.output_dataset} trade_date={trade_date} skipped_empty_expected_codes")
-            continue
-        collected: dict[str, pd.DataFrame] = {}
-        pending = sorted(expected_codes)
-        pages_total = 0
-        quota_error = ""
-        for attempt in range(1, args.max_retries + 1):
-            if not pending:
-                break
-            failed: list[str] = []
-            for offset in range(0, len(pending), STK_MINS_BATCH_CODES):
-                batch = pending[offset : offset + STK_MINS_BATCH_CODES]
-                params = {
-                    "ts_code": ",".join(batch),
-                    "freq": STK_MINS_FREQ,
-                    "start_date": minute_datetime(trade_date),
-                    "end_date": minute_datetime(trade_date, end=True),
-                }
-                try:
-                    result, pages = query_paged(client, STK_MINS_API_NAME, params, STK_MINS_FIELDS, page_limit)
-                except Exception as exc:  # noqa: BLE001 - non-quota failures mark the batch failed for the final report
-                    if STK_MINS_QUOTA_MARKER in str(exc):
-                        quota_error = str(exc)
-                        break
-                    failed.extend(batch)
-                    continue
-                pages_total += pages
-                df = augment_stk_mins_frame(frame(result))
-                df = df[df["trade_date"].astype(str) == trade_date]
-                # A code the batch answered nothing for is retried like a failed
-                # request; the batch's other codes are kept.
-                by_code = {str(code): rows for code, rows in df.groupby("ts_code", sort=False)}
-                for ts_code in batch:
-                    if ts_code in by_code:
-                        collected[ts_code] = by_code[ts_code].copy()
-                    else:
-                        failed.append(ts_code)
-                done = offset + len(batch)
-                if done // 500 > offset // 500:
-                    print(f"{trade_date} attempt={attempt}/{args.max_retries} codes={done}/{len(pending)} collected={len(collected)} failed_current={len(failed)}")
-            if quota_error:
-                break
-            pending = failed
-            if pending and attempt < args.max_retries:
-                time.sleep(args.retry_delay_seconds)
-        if quota_error:
-            # The quota holds until the vendor's next day, so the run stops
-            # here: every day already written stays committed (76 = mutated,
-            # not ready) and the next run resumes at this day.
-            print(json.dumps({
-                "status": "not_ready_after_mutation",
-                "note": "stk_mins_daily_quota_exhausted",
-                "trade_date": trade_date,
-                "days_written": written,
-                "error": quota_error[:300],
-            }, ensure_ascii=False, sort_keys=True))
-            return MUTATED_NOT_READY_RETRY_EXIT_CODE
-        if len(pending) > args.allow_missing_codes:
-            raise RuntimeError(f"{trade_date}: {len(pending)} minute codes still missing after retries; sample={pending[:20]}")
-        combined = concat_rows(list(collected.values())) if collected else pd.DataFrame(columns=STK_MINS_REQUIRED_COLUMNS)
-        normalized, normalize_details = normalize_stk_mins_by_date_frame(combined, trade_date)
-        if expected_codes and normalized.empty:
-            raise RuntimeError(
-                f"{trade_date}: refusing to write zero-row intraday by-date file "
-                f"for nonempty expected universe ({len(expected_codes)} codes)"
-            )
-        ok, details = validate_stk_mins_by_date_frame(
-            normalized,
-            trade_date,
-            expected_codes=expected_codes,
-            min_rows=args.min_rows_per_day,
-            allow_missing_codes=args.allow_missing_codes,
-        )
-        if not ok and not args.allow_validation_warnings:
-            raise RuntimeError(f"{trade_date}: intraday by-date update validation failed: {details}")
-        params = {
-            "output_layout": "trade_date",
-            "expected_codes_source": args.expected_codes_source,
-            "expected_codes": len(expected_codes),
-            "missing_codes_after_retry": len(pending),
-            "missing_code_sample": pending[:20],
-            "normalize": normalize_details,
-            "validation": details,
-            "pagination": {"page_limit": page_limit, "pages_total": pages_total, "batch_codes": STK_MINS_BATCH_CODES},
-            "max_retries": args.max_retries,
-        }
-        write_stk_mins_by_date(
-            path,
-            normalized,
-            trade_date=trade_date,
-            source="daily_incremental_update",
-            params=params,
-            revision_ledger=revision_ledger,
-        )
-        written += 1
-        total_rows += len(normalized)
-        print(f"{args.output_dataset} trade_date={trade_date} written rows={len(normalized)} missing_codes={len(pending)}")
-    print(f"{args.output_dataset} update finished dates={len(trade_dates)} written={written} skipped={skipped} rows_written={total_rows}")
-    report_complete(args.output_dataset)
-    return 0
 
 def official_text_client(datasets: list[str], repo_root: Path, args: argparse.Namespace) -> TuShareClient:
     """The official-service client for ``datasets``, proven before anything is written.
