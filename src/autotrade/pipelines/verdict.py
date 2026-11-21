@@ -49,6 +49,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 import numpy as np
 import pandas as pd
 
+from autotrade.common.records import finite_number
 from autotrade.environment.replay.null_control import BASELINE_DRAWS
 from autotrade.environment.replay.stats import (
     TRADING_DAYS_PER_YEAR,
@@ -472,7 +473,7 @@ def summary_excess_at_cost_stress(
     costs = summary.get("cost_sensitivity")
     slippage = costs.get("slippage_bps") if isinstance(costs, Mapping) else None
     turnover = summary.get("turnover")
-    if not (_finite(slippage) and _finite(turnover)):
+    if finite_number(slippage) is None or finite_number(turnover) is None:
         return None
     return excess_at_cost_stress(
         float(statistics["plain_excess"]),  # type: ignore[arg-type]
@@ -689,13 +690,6 @@ class Condition(NamedTuple):
     requires: str = ""
 
 
-def _finite(value: object) -> bool:
-    """Whether one replay metric is a finite number. ``bool`` is an ``int`` in
-    Python, so ``True`` would otherwise read as a total return of 1.0."""
-
-    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
-
-
 def _within_cap(measured: Mapping[str, Any], thresholds: Mapping[str, Any]) -> bool:
     value = measured["mandate"]["tracking_error"]
     return value is not None and value <= thresholds["tracking_error_cap"]
@@ -726,10 +720,10 @@ CONDITIONS: tuple[Condition, ...] = (
     # It is the only drawdown this table judges: the validation record's and
     # the forward slices' drawdowns are recorded, never judged.
     # ``sharpe`` is read only for finiteness.
-    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_TOTAL_RETURN, lambda m, t: _finite(m.get("total_return"))),
-    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_MAX_DRAWDOWN, lambda m, t: _finite(m.get("max_drawdown"))),
-    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_SHARPE, lambda m, t: m.get("sharpe") is None or _finite(m["sharpe"])),
-    Condition(ConditionStage.NOMINATION, ConditionReason.MAX_DRAWDOWN_ABOVE_LIMIT, lambda m, t: not (_finite(m.get("max_drawdown")) and abs(m["max_drawdown"]) > t["max_drawdown"])),
+    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_TOTAL_RETURN, lambda m, t: finite_number(m.get("total_return")) is not None),
+    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_MAX_DRAWDOWN, lambda m, t: finite_number(m.get("max_drawdown")) is not None),
+    Condition(ConditionStage.NOMINATION, ConditionReason.NON_FINITE_SHARPE, lambda m, t: m.get("sharpe") is None or finite_number(m["sharpe"]) is not None),
+    Condition(ConditionStage.NOMINATION, ConditionReason.MAX_DRAWDOWN_ABOVE_LIMIT, lambda m, t: not (finite_number(m.get("max_drawdown")) is not None and abs(m["max_drawdown"]) > t["max_drawdown"])),
     # How the nominee was registered (``experiment.check_registration``).
     Condition(ConditionStage.REGISTRATION, ConditionReason.REGISTRATION_NEEDS_FULL_SPAN_VALIDATION, lambda m, t: m.get("span") == FULL_SPAN),
     Condition(ConditionStage.REGISTRATION, ConditionReason.REGISTRATION_NOMINEE_IS_CONTROL, lambda m, t: m.get("control") is not True),

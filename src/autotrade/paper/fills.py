@@ -38,7 +38,6 @@ reason instead.
 from __future__ import annotations
 
 import copy
-import math
 import re
 import uuid
 from collections.abc import Iterable, Mapping, Sequence
@@ -46,6 +45,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, time
 from pathlib import Path
 
+from autotrade.common.records import finite_number
 from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import DailyBroker, Execution, Lot, Position
 from autotrade.environment.broker_core import validate_buy_lot
@@ -154,7 +154,7 @@ def normalize_record(raw: Mapping[str, object]) -> dict[str, object]:
         validate_buy_lot(quantity, symbol)  # the exchange accepts no other buy
     if not _positive(price):
         raise ValueError("a fill's price must be a positive number")
-    if commission is not None and not (_finite(commission) and float(commission) >= 0):
+    if commission is not None and (finite_number(commission) is None or float(commission) < 0):
         raise ValueError("commission must be a non-negative number")
     return {
         **record, "quantity": quantity, "price": float(price),
@@ -384,12 +384,9 @@ def unresolved(
 # --------------------------------------------------------------- settlement
 
 
-def _finite(value: object) -> bool:
-    return not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(float(value))
-
-
 def _positive(value: object) -> bool:
-    return _finite(value) and float(value) > 0
+    number = finite_number(value)
+    return number is not None and number > 0
 
 
 def record_fill(
