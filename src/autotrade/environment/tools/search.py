@@ -33,7 +33,7 @@ import uuid
 from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
-from autotrade.environment.executor import close_process_pipes
+from autotrade.environment.commands import close_process_pipes
 
 from .base import ToolError, ToolResult, ToolSpec
 from .workspace import WORKSPACE_MOUNT, SafeWorkspace, mount_relative

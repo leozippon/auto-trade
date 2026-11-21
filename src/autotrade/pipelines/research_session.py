@@ -34,12 +34,10 @@ from autotrade.environment.artifacts import (
     readonly_baseline,
     restore_working_artifacts_writable,
 )
+from autotrade.environment.commands import PersistentCommandRunner
 from autotrade.environment.contract_fingerprint import assert_image_contract_current
 from autotrade.environment.data.summary import write_agent_data_summary
-from autotrade.environment.executor import (
-    IMPORTED_RUNTIME_FINGERPRINT,
-    PersistentCommandRunner,
-)
+from autotrade.environment.executor import IMPORTED_RUNTIME_FINGERPRINT
 from autotrade.environment.gpu import GpuUnavailableError
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm.model_profiles import token_prices

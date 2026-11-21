@@ -30,17 +30,16 @@ from autotrade.environment.artifacts import (
     readonly_baseline,
     restore_working_artifacts_writable,
 )
+from autotrade.environment.commands import PersistentCommandRunner, run_limited_capture
 from autotrade.environment.container_stats import ContainerResourceMonitor
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     GpuMemoryContention,
-    PersistentCommandRunner,
     StrategyCall,
     StrategyExecutionError,
     StrategyMemoryExceeded,
     StrategyRaised,
     StrategyStateExceeded,
-    _run_limited_capture,
     attach_strategy_resources,
     discard_strategy_state,
     raised_by_strategy,
@@ -348,7 +347,7 @@ def test_bounded_capture_streams_output_without_a_communicate_buffer(tmp_path: P
     """The reader every sandbox command goes through (``exec_limited`` ->
     ``PersistentCommandRunner``) must cap each stream as it arrives."""
 
-    result = _run_limited_capture(
+    result = run_limited_capture(
         [sys.executable, "-c", "import sys; print('x' * 10000); print('y' * 10000, file=sys.stderr)"],
         cwd=tmp_path,
         timeout_seconds=30.0,
@@ -357,7 +356,7 @@ def test_bounded_capture_streams_output_without_a_communicate_buffer(tmp_path: P
     assert result.exit_code == 0 and not result.timed_out
     assert len(result.stdout) == 64 and result.stdout_truncated
     assert len(result.stderr) == 64 and result.stderr_truncated
-    slow = _run_limited_capture(
+    slow = run_limited_capture(
         [sys.executable, "-c", "import time; time.sleep(30)"],
         timeout_seconds=0.2,
         max_output_chars=64,
