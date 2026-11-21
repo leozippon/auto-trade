@@ -18,7 +18,6 @@ from autotrade.common.time import cn_today
 
 # Raw-lake research contract values are owned by the environment's PIT layer;
 # the ingest adapter imports them so producer and consumer cannot drift.
-from autotrade.environment.data.contracts import DOMAIN_STATUS_FILES
 from autotrade.environment.data.pit import concat_rows
 
 from .client import TuShareClient, frame
@@ -52,28 +51,12 @@ from .specs import (
 )
 from .versions import publish, record_defect
 
-# Status file names are owned by environment.data.contracts (one source for
-# audit producers, snapshot gates, and research-release pinning).
-CORE_MARKET_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["daily"]
-FUNDAMENTAL_RAW_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["fundamentals_raw"]
-
-TEXT_EVIDENCE_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["text"]
-
-INTRADAY_MINUTES_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["intraday_1min"]
-
-
 REVISION_EVENTS_PATH = "results/data_quality/revision_events.jsonl"
 
-REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
 
 # Partition outcomes (versions.publish) that changed the visible partition.
 WRITTEN_OUTCOMES = frozenset({"appended", "replaced", "restated"})
 
-MACRO_CONTEXT_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["macro"]
-
-EVENT_FLOW_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["events"]
-
-BOARD_TRADING_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["board_trading"]
 
 # Child-process contract: validation/polling ended before any raw write began.
 # The cron runner may restore the previous committed generation and retry later.
@@ -485,23 +468,6 @@ def margin_missing_exchanges(trade_date: str, present: Iterable[str]) -> list[st
         required.add("BSE")
     return sorted(required - {str(item) for item in present})
 
-
-# Full-market per-trade-date tables whose per-day stock universe must track
-# the daily table. Measured 2020-2026 per-day floors: cyq_perf 0.9109 (2020
-# risk-warning/select-layer gap), moneyflow 0.9401 (the vendor feed carries no
-# BSE codes at all), stk_auction 0.9486; every other day sits higher. 0.90
-# therefore trips only on a genuinely dropped batch of stocks, never on the
-# known structural residuals.
-FULL_MARKET_COVERAGE_MIN_RATIO = 0.90
-FULL_MARKET_COVERAGE_DATASETS = (
-    "bak_basic",
-    "bak_daily",
-    "cyq_perf",
-    "moneyflow",
-    "moneyflow_dc",
-    "moneyflow_ths",
-    "stk_auction",
-)
 
 # All margin tables publish per exchange and share the requirement above, but
 # they name the exchange differently: the summary and the eligibility list

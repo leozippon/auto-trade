@@ -19,6 +19,7 @@ from autotrade.common.time import CN_TZ, cn_today
 from autotrade.environment.data.auction import AuctionCorrectionConfig, market_bucket
 from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
+    DOMAIN_STATUS_FILES,
     SELECTABLE_DATASETS,
     default_tushare_contracts,
 )
@@ -45,13 +46,6 @@ from .client import (
     query_paged,
 )
 from .common import (
-    BOARD_TRADING_STATUS_PATH,
-    CORE_MARKET_STATUS_PATH,
-    EVENT_FLOW_STATUS_PATH,
-    FUNDAMENTAL_RAW_STATUS_PATH,
-    INTRADAY_MINUTES_STATUS_PATH,
-    MACRO_CONTEXT_STATUS_PATH,
-    TEXT_EVIDENCE_STATUS_PATH,
     cli_values,
     latest_sse_calendar_date,
     load_sse_open_dates,
@@ -130,6 +124,40 @@ from .stamps import (
     official_available_at,
 )
 from .versions import diff_frames, revision_event
+
+# Status file names are owned by environment.data.contracts (one source for
+# audit producers, snapshot gates, and research-release pinning).
+CORE_MARKET_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["daily"]
+FUNDAMENTAL_RAW_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["fundamentals_raw"]
+
+TEXT_EVIDENCE_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["text"]
+
+INTRADAY_MINUTES_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["intraday_1min"]
+
+REVISION_SUMMARY_PATH = "results/data_quality/revision_summary.json"
+
+MACRO_CONTEXT_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["macro"]
+
+EVENT_FLOW_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["events"]
+
+BOARD_TRADING_STATUS_PATH = "results/data_quality/" + DOMAIN_STATUS_FILES["board_trading"]
+
+# Full-market per-trade-date tables whose per-day stock universe must track
+# the daily table. Measured 2020-2026 per-day floors: cyq_perf 0.9109 (2020
+# risk-warning/select-layer gap), moneyflow 0.9401 (the vendor feed carries no
+# BSE codes at all), stk_auction 0.9486; every other day sits higher. 0.90
+# therefore trips only on a genuinely dropped batch of stocks, never on the
+# known structural residuals.
+FULL_MARKET_COVERAGE_MIN_RATIO = 0.90
+FULL_MARKET_COVERAGE_DATASETS = (
+    "bak_basic",
+    "bak_daily",
+    "cyq_perf",
+    "moneyflow",
+    "moneyflow_dc",
+    "moneyflow_ths",
+    "stk_auction",
+)
 
 # The one-line summary every audit prints last, and the pattern the cron runner
 # reads it back by (``cron_update.summarize_failure_from_log``, which imports
@@ -946,7 +974,7 @@ def audit_full_market_coverage(raw_dir: Path, api_names: list[str], add) -> None
     stocks: the partition stays plausible and paging never hits a cap. Compare
     each full-market dataset's per-day universe against the daily table and
     warn when a day falls under the measured floor."""
-    datasets = [api for api in api_names if api in core.FULL_MARKET_COVERAGE_DATASETS]
+    datasets = [api for api in api_names if api in FULL_MARKET_COVERAGE_DATASETS]
     days_by_dataset = {
         api: {partition_value(path): path for path in sorted((raw_dir / api).glob("trade_date=*.parquet"))}
         for api in datasets
@@ -974,7 +1002,7 @@ def audit_full_market_coverage(raw_dir: Path, api_names: list[str], add) -> None
             codes = set(pd.read_parquet(path, columns=["ts_code"])["ts_code"].astype(str))
             ratio = len(codes & base_codes) / len(base_codes)
             checked[api] += 1
-            if ratio < core.FULL_MARKET_COVERAGE_MIN_RATIO:
+            if ratio < FULL_MARKET_COVERAGE_MIN_RATIO:
                 low[api].append({
                     "trade_date": day,
                     "dataset_codes": len(codes),
@@ -986,7 +1014,7 @@ def audit_full_market_coverage(raw_dir: Path, api_names: list[str], add) -> None
         days = sorted(low[api], key=lambda item: item["coverage"])
         add("warning" if days else "info", f"{api}_daily_coverage", f"{api} per-day stock coverage against daily", {
             "days_checked": checked[api],
-            "min_coverage_ratio": core.FULL_MARKET_COVERAGE_MIN_RATIO,
+            "min_coverage_ratio": FULL_MARKET_COVERAGE_MIN_RATIO,
             "days_below_threshold": len(days),
             "low_coverage_sample": days[:20],
         })
@@ -2559,7 +2587,7 @@ def add_core_market_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--datasets", nargs="+", choices=DAILY_REQUIRED_DATASETS)
     parser.add_argument("--sample-limit", type=int, default=10)
     core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
-    parser.add_argument("--output", help=f"Defaults to {core.CORE_MARKET_STATUS_PATH}.")
+    parser.add_argument("--output", help=f"Defaults to {CORE_MARKET_STATUS_PATH}.")
 
 
 def add_fundamental_raw_parser(sub: argparse._SubParsersAction) -> None:
@@ -2572,7 +2600,7 @@ def add_fundamental_raw_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--fundamental-datasets", nargs="+", choices=FUNDAMENTAL_DATASETS, dest="fundamental_datasets")
     parser.add_argument("--sample-limit", type=int, default=10)
     core.add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
-    parser.add_argument("--output", help=f"Defaults to {core.FUNDAMENTAL_RAW_STATUS_PATH}.")
+    parser.add_argument("--output", help=f"Defaults to {FUNDAMENTAL_RAW_STATUS_PATH}.")
 
 def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("intraday", help="audit stock-year intraday minute raw data")
@@ -2583,13 +2611,13 @@ def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--intraday-codes", nargs="+")
     parser.add_argument("--intraday-max-codes", type=int)
     parser.add_argument("--sample-limit", type=int, default=10)
-    parser.add_argument("--output", help=f"Defaults to {core.INTRADAY_MINUTES_STATUS_PATH}.")
+    parser.add_argument("--output", help=f"Defaults to {INTRADAY_MINUTES_STATUS_PATH}.")
 
     by_date = sub.add_parser("intraday-by-date", help="audit final full-market daily minute files")
     core.add_intraday_by_date_common_args(by_date)
     by_date.add_argument("--full-scan", action="store_true")
     by_date.add_argument("--sample-limit", type=int, default=20)
-    by_date.add_argument("--output", help=f"Defaults to {core.INTRADAY_MINUTES_STATUS_PATH}.")
+    by_date.add_argument("--output", help=f"Defaults to {INTRADAY_MINUTES_STATUS_PATH}.")
 
     auction = sub.add_parser("auction-alignment", help="compare 09:30 minute auction bars with stk_auction and daily units")
     core.add_raw_arg(auction)
@@ -2607,7 +2635,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     event.add_argument("--end-date", default=cn_today())
     event.add_argument("--datasets", nargs="+", choices=EVENT_FLOW_DATASETS)
     event.add_argument("--as-of", help="Audit time for publication-time expectations (ISO; naive = Asia/Shanghai). Defaults to now.")
-    event.add_argument("--output", help=f"Defaults to {core.EVENT_FLOW_STATUS_PATH}.")
+    event.add_argument("--output", help=f"Defaults to {EVENT_FLOW_STATUS_PATH}.")
 
     macro = sub.add_parser("macro", help="audit macro, policy, and global-context raw data")
     core.add_raw_arg(macro)
@@ -2615,7 +2643,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     macro.add_argument("--end-date", default=cn_today())
     macro.add_argument("--datasets", nargs="+", choices=MACRO_DATASETS)
     core.add_macro_filter_args(macro)
-    macro.add_argument("--output", help=f"Defaults to {core.MACRO_CONTEXT_STATUS_PATH}.")
+    macro.add_argument("--output", help=f"Defaults to {MACRO_CONTEXT_STATUS_PATH}.")
 
     text = sub.add_parser("text", help="audit only text-evidence raw data")
     core.add_raw_arg(text)
@@ -2624,7 +2652,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     text.add_argument("--text-datasets", nargs="+", choices=TEXT_DATASETS, dest="text_datasets")
     text.add_argument("--news-src", action="append", default=[])
     text.add_argument("--major-news-src", action="append", default=[])
-    text.add_argument("--output", help=f"Defaults to {core.TEXT_EVIDENCE_STATUS_PATH}.")
+    text.add_argument("--output", help=f"Defaults to {TEXT_EVIDENCE_STATUS_PATH}.")
 
 def add_board_parser(sub: argparse._SubParsersAction) -> None:
     board = sub.add_parser("board-trading", help="audit 打板专题 raw data")
@@ -2633,7 +2661,7 @@ def add_board_parser(sub: argparse._SubParsersAction) -> None:
     board.add_argument("--end-date", default=cn_today())
     board.add_argument("--datasets", nargs="+", choices=BOARD_TRADING_DATASETS)
     core.add_board_filter_args(board)
-    board.add_argument("--output", help=f"Defaults to {core.BOARD_TRADING_STATUS_PATH}.")
+    board.add_argument("--output", help=f"Defaults to {BOARD_TRADING_STATUS_PATH}.")
 
 def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision = sub.add_parser("revision-sentinel", help="sample TuShare source partitions and compare them with local raw data without overwriting raw files")
@@ -2651,7 +2679,7 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision.add_argument("--seed", help="Deterministic sampling seed. Defaults to --end-date.")
     revision.add_argument("--page-limit", type=int, default=TRADE_DATE_PAGE_LIMIT)
     revision.add_argument("--revision-ledger", default=core.REVISION_EVENTS_PATH)
-    revision.add_argument("--output", default=core.REVISION_SUMMARY_PATH)
+    revision.add_argument("--output", default=REVISION_SUMMARY_PATH)
     revision.add_argument("--fail-on-revision", action="store_true", help="Return nonzero when source revisions are found.")
     core.add_runtime_args(revision, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
 
