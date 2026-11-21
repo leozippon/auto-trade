@@ -154,7 +154,7 @@ def generate_orders(context):
                 with self.assertRaisesRegex(ArtifactError, "symlinks"):
                     check_strategy_artifact(root)
 
-    def test_modification_delta_counts_files_and_code_lines_only(self):
+    def test_modification_delta_counts_changed_files_and_lines(self):
         with tempfile.TemporaryDirectory() as tmp:
             parent = write_artifact(Path(tmp) / "parent")
             work = Path(tmp) / "work"
@@ -165,7 +165,6 @@ def generate_orders(context):
             delta = modification_delta(parent, work)
             self.assertEqual(set(delta.changed_files), {"main.py", "notes.md"})
             self.assertGreaterEqual(delta.diff_lines, 2)
-            self.assertGreaterEqual(delta.code_diff_lines, 1)
             self.assertEqual(delta.total_files, 3)
 
     def test_a_modified_readonly_file_is_rejected(self):

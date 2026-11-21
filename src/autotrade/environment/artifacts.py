@@ -146,7 +146,7 @@ class RegisteredArtifact:
     source_run_id: str
     source_fold_id: str
     source_step_id: str
-    revision_id: str = ""
+    revision_id: str
 
 
 def new_revision_id(prefix: str = "artifact") -> str:
@@ -404,7 +404,7 @@ def reject_forbidden_code_references(paths: Iterable[Path]) -> None:
 
 def check_model_artifacts(root: str | Path) -> None:
     """Validate the optional ``models/`` artifact directory; raises ``ArtifactError``."""
-    _model_artifact_files(Path(root).resolve(), missing_ok=True)
+    _model_artifact_files(Path(root).resolve())
 
 
 def copy_artifact(source_root: str | Path, dest_root: str | Path) -> None:
@@ -451,7 +451,7 @@ def copy_model_artifacts(source_root: str | Path | None, dest_root: str | Path) 
         _replace_artifact_root(dest_root)
         return
     source_root = Path(source_root)
-    _copy_revision(source_root, dest_root, _model_artifact_files(source_root, missing_ok=True))
+    _copy_revision(source_root, dest_root, _model_artifact_files(source_root))
 
 
 def artifact_fingerprint(
@@ -475,7 +475,7 @@ def artifact_fingerprint(
     ]
     if models_root is not None:
         models = Path(models_root)
-        roots.append(("models", models, _model_artifact_files(models, missing_ok=True)))
+        roots.append(("models", models, _model_artifact_files(models)))
     digest = hashlib.sha256()
     for label, root, relpaths in roots:
         for relpath in sorted(relpaths):
@@ -654,23 +654,11 @@ def restore_readonly_baseline(
 class ModificationDelta:
     changed_files: tuple[str, ...]
     diff_lines: int
-    code_diff_lines: int
     total_files: int
     total_bytes: int
     # One entry per read-only file that no longer matches its baseline, each
     # naming the file and both digests so the mismatch can be diagnosed.
     readonly_violations: tuple[str, ...]
-
-    def to_record(self) -> dict[str, object]:
-        return {
-            "changed_files": list(self.changed_files),
-            "changed_file_count": len(self.changed_files),
-            "diff_lines": self.diff_lines,
-            "code_diff_lines": self.code_diff_lines,
-            "total_files": self.total_files,
-            "total_bytes": self.total_bytes,
-            "readonly_violations": list(self.readonly_violations),
-        }
 
 
 @dataclass(frozen=True)
@@ -678,14 +666,6 @@ class ModelArtifactDelta:
     changed_files: tuple[str, ...]
     total_files: int
     total_bytes: int
-
-    def to_record(self) -> dict[str, object]:
-        return {
-            "changed_files": list(self.changed_files),
-            "changed_file_count": len(self.changed_files),
-            "total_files": self.total_files,
-            "total_bytes": self.total_bytes,
-        }
 
 
 def modification_delta(
@@ -708,7 +688,6 @@ def modification_delta(
     work_files = _artifact_files(work_root)
     changed: list[str] = []
     diff_lines = 0
-    code_diff_lines = 0
     readonly_violations: list[str] = []
     for relpath in sorted(parent_files | work_files):
         if readonly_baseline is not None and relpath in READONLY_FILES:
@@ -727,10 +706,7 @@ def modification_delta(
                     _optional_digest(work_root / relpath),
                 )
             )
-        line_delta = _changed_line_count(parent_text or "", work_text or "")
-        diff_lines += line_delta
-        if relpath.endswith(".py"):
-            code_diff_lines += line_delta
+        diff_lines += _changed_line_count(parent_text or "", work_text or "")
     if readonly_baseline is not None:
         for relpath in sorted(READONLY_FILES):
             seeded = readonly_baseline.get(relpath)
@@ -742,7 +718,6 @@ def modification_delta(
     return ModificationDelta(
         changed_files=tuple(changed),
         diff_lines=diff_lines,
-        code_diff_lines=code_diff_lines,
         total_files=len(work_files),
         total_bytes=sum((work_root / relpath).stat().st_size for relpath in work_files),
         readonly_violations=tuple(readonly_violations),
@@ -753,8 +728,8 @@ def model_artifact_delta(parent_root: str | Path, work_root: str | Path) -> Mode
     """Deterministic changed-file counts for optional model parameter files."""
     parent_root = Path(parent_root)
     work_root = Path(work_root)
-    parent_files = _model_artifact_files(parent_root, missing_ok=True)
-    work_files = _model_artifact_files(work_root, missing_ok=True)
+    parent_files = _model_artifact_files(parent_root)
+    work_files = _model_artifact_files(work_root)
     changed: list[str] = []
     for relpath in sorted(parent_files | work_files):
         if relpath not in parent_files or relpath not in work_files or not _files_equal(parent_root / relpath, work_root / relpath):
@@ -840,23 +815,18 @@ def _artifact_files(root: Path, *, reject_runtime_cache: bool = True) -> set[str
     )
 
 
-def _model_artifact_files(
-    root: Path,
-    *,
-    reject_runtime_cache: bool = True,
-    missing_ok: bool = False,
-) -> set[str]:
+def _model_artifact_files(root: Path) -> set[str]:
+    """The optional ``models/`` tree's files; a missing tree has none."""
+
     if not root.exists():
-        if missing_ok:
-            return set()
-        raise ArtifactError(f"missing model artifact directory: {root}")
+        return set()
     if not root.is_dir():
         raise ArtifactError(f"models must be a directory: {root}")
     return _collect_artifact_files(
         root,
         allowed_suffixes=MODEL_ARTIFACT_ALLOWED_SUFFIXES,
         metadata_files=frozenset(),
-        reject_runtime_cache=reject_runtime_cache,
+        reject_runtime_cache=True,
         label="models",
     )
 
@@ -909,7 +879,7 @@ def _revision_relpaths(directory: Path) -> list[str]:
     if models.is_dir():
         relpaths.extend(
             f"models/{relpath}"
-            for relpath in sorted(_model_artifact_files(models, missing_ok=True))
+            for relpath in sorted(_model_artifact_files(models))
         )
     return relpaths
 
