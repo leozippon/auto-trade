@@ -288,16 +288,27 @@ class RefreshNodeDriftGuardTest(unittest.TestCase):
         self.assertLessEqual(paper[-1] + budget, due)
         self.assertEqual(paper[0] + timedelta(minutes=run_paper.GPU_WAIT_MINUTES), paper[-1])
 
-    def test_managed_jobs_log_through_the_runner_only(self) -> None:
-        # Every run writes its own log via the runner; cron lines carry no
-        # shell redirects and no legacy dispatch-log plumbing.
+    def test_managed_jobs_log_through_the_one_helper(self) -> None:
+        # Every run writes its own log via the runner, and every line of the
+        # block hands what its job prints to ops/cron/logged.sh, which keeps it
+        # in a dated file per job instead of cron's mail (its behaviour:
+        # test_cron_installer). The rule lives in that one helper: no line
+        # carries a redirect of its own -- a shared append-only log is what
+        # the runner's per-run logs replaced -- or the legacy dispatch-log
+        # plumbing, and a runner job's file is named after its job.
         job_lines = [
             line for line in CRONTAB.read_text(encoding="utf-8").splitlines()
-            if _CRON_LINE.match(line)
+            if line[:1].isdigit() or line[:1] == "*"
         ]
         self.assertTrue(job_lines)
-        self.assertTrue(all("--dispatch-log" not in line for line in job_lines))
-        self.assertTrue(all(">>" not in line and "2>&1" not in line for line in job_lines))
+        for line in job_lines:
+            command = line.split(None, 5)[5]
+            logged = re.fullmatch(r"cd \$REPO_ROOT && ops/cron/logged\.sh \$TUSHARE_LOGS/(\S+) (.+)", command)
+            self.assertIsNotNone(logged, line)
+            self.assertNotIn(">", logged.group(2))
+            self.assertNotIn("--dispatch-log", line)
+            if job := _CRON_LINE.match(line):
+                self.assertEqual(logged.group(1), job.group(3))
 
     def test_daily_download_tier_defaults_exclude_stk_auction(self) -> None:
         self.assertEqual(TIER_DATASETS["daily"], DAILY_DOWNLOAD_DATASETS)

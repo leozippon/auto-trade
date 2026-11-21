@@ -361,6 +361,70 @@ class CronInstallerTest(unittest.TestCase):
             self.assertEqual(run(), 0)
             self.assertEqual(sorted(path.name for path in logs.iterdir()), ["clash.jsonl.zst", "old.jsonl.zst", "old.txt", "young.jsonl"])
 
+    def test_the_tushare_jobs_log_to_dated_files_and_mail_only_failures(self) -> None:
+        """A TuShare job line run for real by bash in a stand-in repository with
+        a stand-in interpreter, through ops/cron/logged.sh: what the job prints,
+        stderr included, goes to its own file for the day under $TUSHARE_LOGS,
+        each run closed by one dated exit line, and nothing reaches cron while a
+        run succeeds or ends in one of the runner's planned retries (the block's
+        RETRY_EXIT_STATUSES, which must be the runner's not-ready exits). Any
+        other failure also writes that line with the file's path to stderr, the
+        one thing cron mails, and the exit status passes through. A run removes
+        the job's files untouched for 14 days, and no other job's."""
+        import subprocess
+        import time
+
+        from autotrade.data_sources.tushare import common
+
+        lines = TEMPLATE.read_text(encoding="utf-8").splitlines()
+        variables = dict(line.split("=", 1) for line in lines if re.fullmatch(r"[A-Z_]+=.*", line))
+        retry = variables["RETRY_EXIT_STATUSES"]
+        self.assertEqual(
+            sorted(retry.split()),
+            sorted(map(str, (common.NO_MUTATION_RETRY_EXIT_CODE, common.MUTATED_NOT_READY_RETRY_EXIT_CODE))),
+        )
+        job = "cn_preopen_margin_retry_0915"
+        (line,) = [line for line in job_lines("tushare") if line.endswith(f"--job {job}")]
+        command = line.split(None, 5)[5]
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            helper = root / "ops" / "cron" / "logged.sh"
+            helper.parent.mkdir(parents=True)
+            helper.write_text((installer.REPO_ROOT / "ops" / "cron" / "logged.sh").read_text(encoding="utf-8"), encoding="utf-8")
+            helper.chmod(0o755)
+            python = root / "python"
+            python.write_text('#!/bin/bash\necho "job: $*"\necho "warning: $*" >&2\nexit "$EXIT"\n', encoding="utf-8")
+            python.chmod(0o755)
+            logs = root / variables["TUSHARE_LOGS"]
+            logs.mkdir(parents=True)
+            kept = {f"{job}_20200102.log": 13, f"{job}_extra_20200101.log": 15}
+            for name, age_days in {**kept, f"{job}_20200101.log": 15}.items():
+                (logs / name).write_text("earlier\n", encoding="utf-8")
+                stamp = time.time() - age_days * 86400
+                os.utime(logs / name, (stamp, stamp))
+
+            def run(status: int) -> subprocess.CompletedProcess[str]:
+                env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "EXIT": str(status)}
+                env.update({name: variables[name] for name in ("TUSHARE_LOGS", "RETRY_EXIT_STATUSES")})
+                return subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
+
+            for status in (0, *map(int, retry.split())):
+                quiet = run(status)
+                self.assertEqual((quiet.returncode, quiet.stdout, quiet.stderr), (status, "", ""))
+            failed = run(3)
+            self.assertEqual((failed.returncode, failed.stdout), (3, ""))
+            (today,) = sorted({path.name for path in logs.iterdir()} - set(kept))
+            self.assertRegex(today, rf"^{job}_\d{{8}}\.log$")
+            self.assertRegex(failed.stderr, rf"\A{DATED} {job} exited 3; output in {re.escape(variables['TUSHARE_LOGS'])}/{today}\n\Z")
+            logged = (logs / today).read_text(encoding="utf-8").splitlines()
+            ran = f"scripts/data/tushare_cron_update.py --job {job}"
+            self.assertEqual(len(logged), 12)
+            for index, status in enumerate((0, *map(int, retry.split()), 3)):
+                self.assertEqual(logged[3 * index : 3 * index + 2], [f"job: {ran}", f"warning: {ran}"])
+                self.assertRegex(logged[3 * index + 2], rf"^{DATED} {job} exited {status}$")
+            for name in kept:
+                self.assertEqual((logs / name).read_text(encoding="utf-8"), "earlier\n")
+
     def test_removing_a_block_keeps_every_other_entry_and_is_idempotent(self) -> None:
         """Pausing one managed job -- the research fill, while a stop window
         rebuilds the sandbox image -- must not touch the Paper or TuShare

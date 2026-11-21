@@ -7,12 +7,21 @@
 # exported, writes every run outcome to its own 14-day log under
 # logs/tushare/cron/, persists per-job state under .runtime/tushare/jobs/, and
 # skips duplicate successful job/date runs.
+#
+# Every line runs its job through ops/cron/logged.sh, so what a job prints goes
+# to $TUSHARE_LOGS/<job>_<YYYYMMDD>.log (kept 14 days), not to cron's mail. A
+# failed run also leaves one line on stderr naming that file, the only thing
+# cron mails. The runner's not-ready exits stay quiet (RETRY_EXIT_STATUSES: 75,
+# nothing written yet; 76, what landed is committed and the rest is due): they
+# are planned retries, recorded as not_ready in the job state.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 CRON_TZ=Asia/Shanghai
 REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
+TUSHARE_LOGS=logs/tushare/cron_output
+RETRY_EXIT_STATUSES=75 76
 
 # Natural-day landing jobs: these tiers publish on weekends and A-share
 # holidays, so each has its own calendar-day job that runs every night ahead
@@ -28,9 +37,9 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 #       the two), so anns_d keeps the 23:15 visibility cutoff it always had.
 # 23:25 global tier (overseas indices, FX, US rates, economic calendar) --
 #       overseas sessions keep trading through A-share holidays.
-15 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_text_full
-15 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_anns_full
-25 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_global_full
+15 23 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_text_full $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_text_full
+15 23 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_anns_full $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_anns_full
+25 23 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_global_full $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_global_full
 
 # Trading-evening self-heals, one job per family with identical shape: the
 # margin pass re-attempts missing and exchange-incomplete partitions, the
@@ -38,8 +47,8 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # any missing day — both over 90-day windows with the same guards as their
 # pre-open jobs, so gaps land without a manual runbook run. The 02:30 full
 # audit then re-audits the affected domains.
-30 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_margin_backfill
-32 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_auction_backfill
+30 23 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_evening_margin_backfill $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_margin_backfill
+32 23 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_evening_auction_backfill $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_auction_backfill
 
 # After normal same-day releases should have landed. The job uses a rolling
 # recent window with open-window refreshes plus selected reference/daily
@@ -49,7 +58,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # landed here either: stk_mins carries a per-token daily request quota, so the
 # minutes land through their own job below, where a quota stop cannot fail the
 # update the morning Paper release depends on.
-35 23 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_full
+35 23 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_evening_full $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_evening_full
 
 # Land the 1-minute by-date layer through the last open day before today
 # (about 222 batched requests and 3 minutes a day; a quota stop exits 76 and
@@ -57,62 +66,62 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # derived build and the full audit, inside the evening node's window that the
 # replay gates minutes on, so the replay never sees minutes earlier than they
 # land.
-30 1 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_intraday_minutes
+30 1 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_intraday_minutes $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_intraday_minutes
 
 # Refresh the six data-quality status files over the full retained window
 # after the evening chain has normally finished — every calendar day: the
 # global tier and the disclosure tables land on weekends and holidays too,
 # and weekend-written rows must be audited before the next open. Trading-day
 # domains clamp their expectations internally, so weekend runs stay honest.
-30 2 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit
+30 2 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_full_audit $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_full_audit
 
 # Reduce whatever minute partitions have landed (cn_nightly_intraday_minutes) to
 # the derived stock-day tables (data/raw/intraday_flow, data/raw/intraday_stats).
 # Not a TuShare job: it fetches nothing and only reads the lake, so it is a
-# plain line rather than a runner job, logging to logs/data/minute_derived.log.
-# It is incremental (committed trade dates are skipped, a new one costs about
-# two seconds), so a night without new minutes is a no-op.
-45 2 * * * cd $REPO_ROOT && mkdir -p logs/data && $QUANT_PYTHON scripts/data/build_minute_derived.py >> logs/data/minute_derived.log 2>&1
+# plain line rather than a runner job. It is incremental (committed trade dates
+# are skipped, a new one costs about two seconds), so a night without new
+# minutes is a no-op.
+45 2 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/build_minute_derived $QUANT_PYTHON scripts/data/build_minute_derived.py
 
 # Rebuild and audit ALL PIT-ready financial event availability partitions
 # after raw status refresh. Snapshot construction uses this layer to enforce
 # financial statement visibility without precomputing alpha columns. Same
 # trading-calendar end date, so weekend invocations skip too.
-35 3 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build
+35 3 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_pit_event_build $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_pit_event_build
 
 # Sample historical daily partitions without overwriting raw data. Differences
 # are appended to the revision ledger for downstream stale-cache review.
-0 4 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_daily_revision_sentinel
+0 4 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_daily_revision_sentinel $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_daily_revision_sentinel
 
 # Refresh text_evidence_status.json over the natural day the text job landed
 # the evening before. It runs every calendar day in the free slot after the
 # nightly chain, so weekend text is audited before the next session opens.
-0 5 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_text_audit
+0 5 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_text_audit $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_text_audit
 
 # Pre-open refresh for sources whose official/current availability is better
 # in the next-morning window than in the prior evening run. There is no
 # pre-open text job (the 08:55 short-text backfill was retired on 2026-09-10),
 # so nothing lands between the evening text jobs and the open.
-50 8 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_board_backfill_0850
+50 8 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_preopen_board_backfill_0850 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_board_backfill_0850
 
 # Pre-open forced backfill for same-day margin eligibility and T+1 margin
 # sources. Distinct retry job names keep the second query active if the first
 # one returned before the source was fully ready.
-3 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_secs_backfill_0903
-5 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_backfill_0905
-13 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_secs_retry_0913
-15 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_retry_0915
+3 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_preopen_margin_secs_backfill_0903 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_secs_backfill_0903
+5 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_preopen_margin_backfill_0905 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_backfill_0905
+13 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_preopen_margin_secs_retry_0913 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_secs_retry_0913
+15 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_preopen_margin_retry_0915 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_margin_retry_0915
 
 # Refresh event/flow status after margin retry so 09:25 pre-open gates do not
 # see the stale 02:30 status for T+1 margin sources.
-20 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_event_flow_audit_0920
+20 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_preopen_event_flow_audit_0920 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_preopen_event_flow_audit_0920
 
 # Opening-auction results publish between 09:27 and 09:29. The first run polls
 # through that window; the same job retries at 09:31 only if the first did not
 # finish successfully (skip_if_already_ok prevents a second generation publish).
 # Late-day catch-up and source-correction rechecks happen in cn_evening_auction_backfill.
-27 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927
-31 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927
+27 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_open_auction_capture_0927 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927
+31 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_open_auction_capture_0927 $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_open_auction_capture_0927
 
 # Ann-date disclosure tables (holder counts/trades, top-10 holders,
 # repurchases), every calendar day at the end of the chain: after the morning's
@@ -121,12 +130,12 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # and queues the dataset's whole-history re-pull, which runs at the end of the
 # same run. Rows announced on day D land the next morning: the replay node
 # moves with this line, so they are visible from D+1 09:55.
-45 9 * * * cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_disclosure_full
+45 9 * * * cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_nightly_disclosure_full $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_nightly_disclosure_full
 
 # Weekly deep sweeps (Saturday, market closed; end date resolves to Friday):
 # the slow per-code namechange loop and the 90-day fundamental/dividend
 # correction window, moved off the nightly critical path.
-35 12 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_reference_deep
+35 12 * * 6 cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_weekly_reference_deep $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_reference_deep
 
 # The fundamental sweep mutates raw fundamentals AFTER Saturday's 02:30 audit
 # and 03:35 PIT rebuild, and Sunday/Monday nightly invocations skip (unchanged
@@ -143,4 +152,4 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # fails does not stop the next one, and the invocation exits non-zero either
 # way. Last, the weekly release retention removes the research releases no
 # consumer records any more (scripts/data/tushare_lake.py prune-releases).
-0 14 * * 6 cd $REPO_ROOT && $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep --then cn_weekly_deep_audit --then cn_nightly_full_audit --then cn_nightly_pit_event_build --then cn_weekly_release_prune
+0 14 * * 6 cd $REPO_ROOT && ops/cron/logged.sh $TUSHARE_LOGS/cn_weekly_fundamental_deep $QUANT_PYTHON scripts/data/tushare_cron_update.py --job cn_weekly_fundamental_deep --then cn_weekly_deep_audit --then cn_nightly_full_audit --then cn_nightly_pit_event_build --then cn_weekly_release_prune

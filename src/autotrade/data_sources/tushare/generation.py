@@ -104,8 +104,7 @@ def finish_raw_generation_update(
         payload["versioned_since"] = previous["versioned_since"]
     _write_raw_generation_file(raw_dir, payload)
     if commit:
-        # Single-line JSON: everything the runner prints may be teed into the
-        # dispatch log, which is a strict-JSONL contract.
+        # One JSON line, like the runner's outcome lines.
         print(json.dumps({
             "note": "raw_generation_published",
             "generation_id": payload["generation_id"],
