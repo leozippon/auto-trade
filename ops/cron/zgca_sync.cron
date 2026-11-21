@@ -12,9 +12,10 @@
 # was refused is only tagged again, every run, until the images agree; a failure
 # is one line and the next experiment still goes ahead; a stopped or
 # unreachable instance is one line and the next run tries again. Every run ends
-# with one timestamped summary line, or the line below for a run that found the
-# lock held, so `tail -1 logs/zgca/sync_cron.log` and its time show the state;
-# it exits non-zero when something needs the operator. It opens no Paper account.
+# with one timestamped summary line, or a line below for a run that found the
+# lock held or reached its time limit, so `tail -1 logs/zgca/sync_cron.log` and
+# its time show the state; it exits non-zero when something needs the operator.
+# It opens no Paper account.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -31,7 +32,10 @@ ROUNDS=scripts/experiments/create_round_20261119.py
 # the jump host; a run that falls meanwhile finds the lock held and writes one
 # line saying so (`flock -E 75` tells a held lock from a pass that failed): a
 # copy leaves one or two, more in a row mean the run holding the lock is stuck.
-# No time limit ends such a run: rsync copies an experiment's bulk (artifacts/)
-# before its hitl/, and every later pass refuses a copy cut short before
-# hitl/params.json arrived until its directory is removed by hand.
-*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && { flock -n -E 75 .runtime/zgca/sync_cron.lock $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS || { [ $? = 75 ] && echo "$(date -Iseconds) zgca sync skipped: the previous run still holds .runtime/zgca/sync_cron.lock"; }; } >> logs/zgca/sync_cron.log 2>&1
+# `timeout 4h` (three such copies and a margin) ends a stuck run with its
+# process group, so `dev`, ssh and rsync end with it and leave the lock free,
+# and one line says so; the next run continues a copy it cut short (zgca.py
+# makes a first copy outside experiments/ and moves it in once verified). A
+# run that finds the lock held exits 0, one the limit ended 124, a pass that
+# failed with its own status.
+*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && { flock -n -E 75 .runtime/zgca/sync_cron.lock timeout 4h $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS; s=$?; case $s in 75) s=0; echo "$(date -Iseconds) zgca sync skipped: the previous run still holds .runtime/zgca/sync_cron.lock";; 124) echo "$(date -Iseconds) zgca sync stopped: the run reached its time limit";; esac; exit $s; } >> logs/zgca/sync_cron.log 2>&1

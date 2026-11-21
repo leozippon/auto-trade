@@ -183,9 +183,12 @@ class CronInstallerTest(unittest.TestCase):
         on the instance), and the job line hands all of them to one sync-rounds pass.
         A run that finds the lock held writes one timestamped line saying so, and
         a pass that fails is never taken for one: on 2026-11-21 a hung pass held
-        the lock for 4 h 27 min while every later run was skipped without a word."""
+        the lock for 4 h 27 min while every later run was skipped without a word.
+        A run reaching its time limit is ended with every process it started, so
+        the lock is free again, and writes its own line and exit status."""
         import fcntl
         import subprocess
+        import time
 
         template, begin, end = installer.BLOCKS["zgca"]
         block = installer.build_managed_block(template, begin, end)
@@ -198,7 +201,7 @@ class CronInstallerTest(unittest.TestCase):
         jobs = [line for line in lines if line[:1] == "*" or line[:1].isdigit()]
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].split()[:5], ["*/30", "*", "*", "*", "*"])
-        self.assertIn("flock -n -E 75 .runtime/zgca/sync_cron.lock", jobs[0])
+        self.assertIn("flock -n -E 75 .runtime/zgca/sync_cron.lock timeout 4h $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS;", jobs[0])
         self.assertTrue(jobs[0].endswith(" >> logs/zgca/sync_cron.log 2>&1"), jobs[0])
         # cron reads a % in a job line as a newline.
         self.assertNotIn("%", jobs[0])
@@ -220,6 +223,7 @@ class CronInstallerTest(unittest.TestCase):
                     self.assertEqual((root / "logs/zgca/sync_cron.log").read_text(encoding="utf-8").splitlines()[-1], expected)
             log = root / "logs/zgca/sync_cron.log"
             self.assertNotIn("skipped", log.read_text(encoding="utf-8"))
+            self.assertNotIn("stopped", log.read_text(encoding="utf-8"))
             # The previous run still holds the lock: nothing runs, one line says so,
             # stamped as the pass stamps its summary line.
             with (root / ".runtime/zgca/sync_cron.lock").open("a") as lock:
@@ -233,6 +237,30 @@ class CronInstallerTest(unittest.TestCase):
                 r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d zgca sync skipped: "
                 r"the previous run still holds \.runtime/zgca/sync_cron\.lock$",
             )
+            # A pass that hangs in a copy (here a grandchild, as rsync is under dev): the limit,
+            # 2 s instead of 4 h, ends the whole process group and one line says so.
+            child = root / "child.pid"
+            python.write_text(f'#!/bin/bash\necho "pass: $*"\nbash -c \'sleep 300 & echo $! > "$0"; wait\' {child}\n', encoding="utf-8")
+            self.assertEqual(command.count("timeout 4h "), 1)
+            run = subprocess.run(["bash", "-c", command.replace("timeout 4h ", "timeout 2s ")], env=env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(run.returncode, 124)
+            logged = log.read_text(encoding="utf-8").splitlines()
+            self.assertEqual(logged[-2], "pass: ops/zgca/zgca.py sync-rounds first second")
+            self.assertRegex(logged[-1], r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d[+-]\d\d:\d\d zgca sync stopped: the run reached its time limit$")
+
+            def running(pid: int) -> bool:
+                try:
+                    return Path(f"/proc/{pid}/stat").read_text(encoding="utf-8").rsplit(")", 1)[1].split()[0] != "Z"
+                except FileNotFoundError:
+                    return False
+
+            pid, deadline = int(child.read_text(encoding="utf-8")), time.monotonic() + 10
+            while running(pid) and time.monotonic() < deadline:
+                time.sleep(0.1)
+            self.assertFalse(running(pid))
+            # The grandchild held the lock it inherited; ended with it, the lock is free.
+            with (root / ".runtime/zgca/sync_cron.lock").open("a") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 
     def test_the_housekeeping_job_compresses_only_old_conversation_logs(self) -> None:
         """The weekly job line itself, run by bash in a stand-in repository: a
