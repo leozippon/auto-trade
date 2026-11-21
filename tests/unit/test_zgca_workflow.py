@@ -1257,7 +1257,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
             return self.remote_step(root, "experiment-state", experiment)
 
         refused = step("experiment_live")
-        self.assertEqual(refused.returncode, 1)
+        self.assertEqual(refused.returncode, zgca.REMOTE_RUNNING)
         self.assertIn("experiment_live: state running_session", refused.stdout)
         self.assertIn("experiment_live is still running", refused.stderr)
         for experiment in ("experiment_gone", "experiment_done"):
@@ -1266,8 +1266,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual(shown.returncode, 0, shown.stderr)
                 self.assertIn(f"{experiment}: state {experiments[experiment]['state']}", shown.stdout)
         missing = step("experiment_absent")
-        self.assertEqual(missing.returncode, 1)
+        self.assertEqual(missing.returncode, zgca.REMOTE_ABSENT)
         self.assertIn("no experiment experiment_absent", missing.stderr)
+        # Any other failure is neither: a status the instance cannot read.
+        (root / "experiments" / "experiment_broken" / "hitl").mkdir(parents=True)
+        (root / "experiments" / "experiment_broken" / "hitl" / "status.json").write_text("{", encoding="utf-8")
+        self.assertEqual(step("experiment_broken").returncode, 1)
         # The first step of deploy and down refuses while one runs, naming it.
         # A stub tmux answers has-session for $SESSION alone, so no session of
         # this host's tmux server is asked.

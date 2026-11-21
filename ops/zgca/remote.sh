@@ -13,9 +13,11 @@
 set -euo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
-# A step whose subject is not on the instance exits ABSENT (zgca.py's
-# REMOTE_ABSENT), which the workflow tells from a step that failed.
+# A step whose subject is not on the instance exits ABSENT, one whose subject
+# is still running there RUNNING (zgca.py's REMOTE_ABSENT and REMOTE_RUNNING),
+# which the workflow tells from a step that failed.
 ABSENT=3
+RUNNING=4
 absent() { echo "ERROR: $*" >&2; exit "$ABSENT"; }
 
 [ $# -ge 7 ] || die "usage: remote.sh <root> <venv> <local dir> <storage> <quota bytes> <floor bytes> <step> [args...]"
@@ -470,8 +472,8 @@ deployed_commit() {
 experiment_state() {
     local experiment=$1 status="$ROOT/experiments/$1/hitl/status.json"
     require_venv
-    [ -f "$status" ] || die "no experiment $experiment on the instance ($status is missing)"
-    "$VENV/bin/python" - "$ROOT/experiments" "$experiment" <<'PY'
+    [ -f "$status" ] || absent "no experiment $experiment on the instance ($status is missing)"
+    "$VENV/bin/python" - "$ROOT/experiments" "$experiment" "$RUNNING" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -483,10 +485,12 @@ record = json.loads((root / experiment / "hitl" / "status.json").read_text(encod
 state, verdict = record.get("state"), record.get("verdict") or "-"
 print(f"{experiment}: state {state}, verdict {verdict}, sessions {record.get('completed_sessions')}/{record.get('total_sessions')}")
 if experiment in running_experiments(root):
-    sys.exit(
+    print(
         f"ERROR: {experiment} is still running (worker pid {record.get('pid')}): its status and log change "
-        "every few seconds, so a copy cannot be verified; sync it after it ends"
+        "every few seconds, so a copy cannot be verified; sync it after it ends",
+        file=sys.stderr,
     )
+    sys.exit(int(sys.argv[3]))
 PY
 }
 

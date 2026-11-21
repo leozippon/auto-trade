@@ -153,8 +153,10 @@ COMPLETED = "completed"
 NOT_RESUMED = ("completed", "stopped")
 # What a sync-rounds pass counts, in its summary line's order.
 SYNC_COUNTS = ("synced", "untagged", "running", "interrupted", "pending", "failed")
-# remote.sh's exit status (its ABSENT) for a step whose subject is not on the instance.
+# remote.sh's exit statuses (its ABSENT and RUNNING) for a step whose subject
+# is not on the instance, or is still running there.
 REMOTE_ABSENT = 3
+REMOTE_RUNNING = 4
 SAFE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 # Every transfer keeps contents, times and modes; the instance's root owns what lands there.
 PRESERVE = ("-a", "--no-owner", "--no-group")
@@ -755,12 +757,11 @@ class Workflow:
         if stage not in ("copied", "synced"):
             completed = self.remote_run("experiment-state", experiment_id, capture=True, quiet=True)
             line, state = shown_state(experiment_id, (completed.stdout or b"").decode("utf-8", errors="replace"))
-            said = (completed.stderr or b"").decode("utf-8", errors="replace")
+            if completed.returncode == REMOTE_ABSENT:
+                return "pending"
+            if completed.returncode == REMOTE_RUNNING:
+                return "running"
             if completed.returncode != 0:
-                if f"no experiment {experiment_id} on the instance" in said:
-                    return "pending"
-                if line and f"{experiment_id} is still running" in said:
-                    return "running"
                 raise WorkflowError(f"remote step experiment-state failed (exit {completed.returncode})" + _said(completed))
             if not state:
                 raise WorkflowError(f"remote step experiment-state showed no state for {experiment_id}")
