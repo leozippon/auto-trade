@@ -3385,18 +3385,14 @@ def set_download_defaults(args: argparse.Namespace) -> None:
     if args.timeout_seconds is None:
         args.timeout_seconds = 120 if args.tier == "intraday" else 90 if args.tier in {"fundamental", "event_flow", "board_trading", "text_evidence", "macro", "global"} else 60
     if args.page_limit is None:
-        if args.tier == "intraday":
-            args.page_limit = STK_MINS_PAGE_LIMIT
-        elif args.tier == "text_evidence":
-            args.page_limit = None
-        elif args.tier == "fundamental":
-            args.page_limit = 7000
-        elif args.tier == "daily":
-            args.page_limit = TRADE_DATE_PAGE_LIMIT
-        elif args.tier == "board_trading":
-            args.page_limit = None
-        else:
-            args.page_limit = 10000
+        # None leaves each text and board dataset its spec's own limit.
+        args.page_limit = {
+            "intraday": STK_MINS_PAGE_LIMIT,
+            "text_evidence": None,
+            "fundamental": 7000,
+            "daily": TRADE_DATE_PAGE_LIMIT,
+            "board_trading": None,
+        }.get(args.tier, 10000)
 
 def download_selected_tier(args: argparse.Namespace) -> int:
     """Run one tier; when it returns 0, each dataset it pulled is reported to
@@ -3495,135 +3491,55 @@ def update_share_float_complete_data(
             float_start_date=start_date,
             float_end_date=args.end_date,
             skip_ann_date=False,
-            rescue_ann_limit_hits=args.rescue_ann_limit_hits,
             rescue_ann_date=[],
             float_rescue_date=[],
-            rescue_universe=args.rescue_universe,
             rescue_code=[],
             rescue_codes_file=None,
             no_anns_candidates=False,
             no_cross_path_candidates=False,
-            max_rescue_calls=args.max_rescue_calls,
             skip_float_date_union=False,
             force=force,
             write_union=True,
-            union_output=args.union_output,
             output=args.share_float_process_output,
             revision_ledger=revision_ledger,
-            min_interval_seconds=args.min_interval_seconds,
-            timeout_seconds=args.timeout_seconds,
         ),
         summary,
     )
 
 def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]]) -> None:
+    """Run the update's steps in order. Each step gets the update's own
+    arguments with only its differences overridden."""
     repo_root = Path.cwd().resolve()
     raw_dir = repo_root / args.raw_dir
     revision_ledger = resolve_revision_ledger(raw_dir, args.revision_ledger, repo_root=repo_root)
     start_date = args.start_date
     if parse_yyyymmdd(start_date) > parse_yyyymmdd(args.end_date):
         raise RuntimeError(f"start_date {start_date} is after end_date {args.end_date}")
-    macro_floor = args.macro_start_date
-    macro_start_date = min(start_date, macro_floor, key=parse_yyyymmdd)
+    macro_start_date = min(start_date, args.macro_start_date, key=parse_yyyymmdd)
     refresh_open_window = args.refresh_open_window
     force_open_window = bool(args.force or refresh_open_window)
     trade_cal_end_date = format_yyyymmdd(
         parse_yyyymmdd(args.end_date) + timedelta(days=max(args.trade_cal_lookahead_days, 0))
     )
-    run_update_step(
-        "reference",
-        download_selected_tier,
-        ns_from(
-            args,
-            tier="reference",
-            start_date=start_date,
-            bak_start_date=args.bak_start_date or start_date,
-            end_date=args.end_date,
-            trade_cal_end_date=trade_cal_end_date,
-            datasets=None,
-            force=args.force,
-            page_limit=args.page_limit,
-            revision_ledger=revision_ledger,
-            min_interval_seconds=args.reference_min_interval_seconds or args.min_interval_seconds,
-            timeout_seconds=args.timeout_seconds,
-        ),
-        summary,
+
+    def tier(label: str, datasets: str | None, force: bool, **overrides: Any) -> None:
+        run_update_step(label, download_selected_tier, ns_from(
+            args, tier=label, datasets=getattr(args, datasets) if datasets else None, force=force,
+            revision_ledger=revision_ledger, **overrides,
+        ), summary)
+
+    tier(
+        "reference", None, args.force,
+        bak_start_date=args.bak_start_date or start_date,
+        trade_cal_end_date=trade_cal_end_date,
+        min_interval_seconds=args.reference_min_interval_seconds or args.min_interval_seconds,
     )
-    run_update_step(
-        "daily",
-        download_selected_tier,
-        ns_from(
-            args,
-            tier="daily",
-            start_date=start_date,
-            end_date=args.end_date,
-            datasets=args.daily_datasets,
-            revision_ledger=revision_ledger,
-            force=args.force,
-            page_limit=args.page_limit,
-            min_interval_seconds=args.min_interval_seconds,
-            timeout_seconds=args.timeout_seconds,
-        ),
-        summary,
-    )
-    run_update_step(
-        "macro",
-        download_selected_tier,
-        ns_from(
-            args,
-            tier="macro",
-            start_date=start_date,
-            macro_start_date=macro_start_date,
-            end_date=args.end_date,
-            datasets=args.macro_datasets,
-            force=force_open_window,
-            page_limit=args.page_limit,
-            revision_ledger=revision_ledger,
-            min_interval_seconds=args.min_interval_seconds,
-            timeout_seconds=args.timeout_seconds,
-        ),
-        summary,
-    )
+    tier("daily", "daily_datasets", args.force)
+    tier("macro", "macro_datasets", force_open_window, macro_start_date=macro_start_date)
     if args.include_global:
-        run_update_step(
-            "global",
-            download_selected_tier,
-            ns_from(
-                args,
-                tier="global",
-                start_date=start_date,
-                macro_start_date=macro_start_date,
-                end_date=args.end_date,
-                datasets=args.global_datasets,
-                force=force_open_window,
-                page_limit=args.page_limit,
-                revision_ledger=revision_ledger,
-                min_interval_seconds=args.min_interval_seconds,
-                timeout_seconds=args.timeout_seconds,
-            ),
-            summary,
-        )
-    run_update_step(
-        "event_flow",
-        download_selected_tier,
-        ns_from(
-            args,
-            tier="event_flow",
-            start_date=start_date,
-            end_date=args.end_date,
-            datasets=args.event_datasets,
-            zero_rows_not_ready=False,
-            force=force_open_window,
-            page_limit=args.page_limit,
-            revision_ledger=revision_ledger,
-            min_interval_seconds=args.min_interval_seconds,
-            timeout_seconds=args.timeout_seconds,
-        ),
-        summary,
-    )
+        tier("global", "global_datasets", force_open_window, macro_start_date=macro_start_date)
+    tier("event_flow", "event_datasets", force_open_window, zero_rows_not_ready=False)
     if args.include_intraday:
-        intraday_start_date = start_date
-        intraday_force = args.force
         intraday_force_from = None
         intraday_lookback = args.intraday_refresh_lookback_days
         if refresh_open_window and intraday_lookback > 0:
@@ -3638,87 +3554,19 @@ def update_all_dimensions(args: argparse.Namespace, summary: list[dict[str, Any]
         run_update_step(
             "intraday_by_date",
             update_intraday_by_date,
-            ns_from(
-                args,
-                start_date=intraday_start_date,
-                end_date=args.end_date,
-                output_dataset=args.output_dataset,
-                expected_codes_source=args.expected_codes_source,
-                codes=args.codes,
-                max_codes=args.max_codes,
-                min_rows_per_day=args.min_rows_per_day,
-                allow_missing_codes=args.allow_missing_codes,
-                allow_validation_warnings=args.allow_validation_warnings,
-                max_retries=args.max_retries,
-                retry_delay_seconds=args.retry_delay_seconds,
-                existing_allow_missing_codes=args.existing_allow_missing_codes,
-                page_limit=args.page_limit,
-                min_interval_seconds=args.min_interval_seconds,
-                timeout_seconds=args.timeout_seconds,
-                force=intraday_force,
-                force_from=intraday_force_from,
-                revision_ledger=revision_ledger,
-            ),
+            ns_from(args, force=args.force, force_from=intraday_force_from, revision_ledger=revision_ledger),
             summary,
         )
     if args.include_share_float_complete:
         update_share_float_complete_data(args, summary, start_date=start_date, force=force_open_window)
     if args.include_text:
-        run_update_step(
-            "text_evidence",
-            download_selected_tier,
-            ns_from(
-                args,
-                tier="text_evidence",
-                start_date=start_date,
-                end_date=args.end_date,
-                datasets=args.text_datasets,
-                force=force_open_window,
-                page_limit=args.page_limit,
-                revision_ledger=revision_ledger,
-                min_interval_seconds=args.min_interval_seconds,
-                timeout_seconds=args.timeout_seconds,
-            ),
-            summary,
-        )
-    run_update_step(
-        "fundamental",
-        download_selected_tier,
-        ns_from(
-            args,
-            tier="fundamental",
-            start_date=start_date,
-            end_date=args.end_date,
-            datasets=args.fundamental_datasets,
-            force=args.force,
-            page_limit=args.page_limit,
-            revision_ledger=revision_ledger,
-            min_interval_seconds=args.min_interval_seconds,
-            timeout_seconds=args.timeout_seconds,
-        ),
-        summary,
-    )
+        tier("text_evidence", "text_datasets", force_open_window)
+    tier("fundamental", "fundamental_datasets", args.force)
     # Board datasets run last: none of them feeds Paper, and a vendor change
     # to one of them (twice in 2026-11, to a table since retired) must not
     # stop the fundamental refresh that Paper's readiness check requires.
     if args.include_board_trading:
-        run_update_step(
-            "board_trading",
-            download_selected_tier,
-            ns_from(
-                args,
-                tier="board_trading",
-                start_date=start_date,
-                end_date=args.end_date,
-                datasets=args.board_datasets,
-                force=force_open_window,
-                page_limit=args.page_limit,
-                revision_ledger=revision_ledger,
-                min_interval_seconds=args.min_interval_seconds,
-                timeout_seconds=args.timeout_seconds,
-            ),
-            summary,
-        )
+        tier("board_trading", "board_datasets", force_open_window)
 
 def update_data(args: argparse.Namespace) -> int:
     if args.min_interval_seconds is None:
