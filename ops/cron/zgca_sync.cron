@@ -25,7 +25,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The ZGCA round files whose experiments may still have to come back,
 # separated by spaces; a closed round stays until all of them are synced, and
 # leaves before its file leaves the tree. Empty: each run only writes its line.
-ROUNDS=scripts/experiments/create_round_20261119.py
+ZGCA_ROUNDS=scripts/experiments/create_round_20261119.py
 
 # Every 30 minutes, all day: an experiment runs for hours and ends at no
 # particular hour. A copy of a 6-10 GB experiment takes about an hour through
@@ -34,4 +34,4 @@ ROUNDS=scripts/experiments/create_round_20261119.py
 # lock is stuck) and ends a run at 4 h (three such copies and a margin) with
 # everything it started, saying so in one line; the next run continues a copy
 # it cut short.
-*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && ops/cron/locked.sh .runtime/zgca/sync_cron.lock 4h "zgca sync" $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ROUNDS >> logs/zgca/sync_cron.log 2>&1
+*/30 * * * * cd $REPO_ROOT && mkdir -p logs/zgca .runtime/zgca && ops/cron/locked.sh .runtime/zgca/sync_cron.lock 4h "zgca sync" $QUANT_PYTHON ops/zgca/zgca.py sync-rounds $ZGCA_ROUNDS >> logs/zgca/sync_cron.log 2>&1

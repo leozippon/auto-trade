@@ -142,8 +142,8 @@ class CronInstallerTest(unittest.TestCase):
         # The queue it fills has to be open round files this repository holds
         # (none while nothing is queued): a mistyped or closed one would fail
         # every ten minutes instead of once.
-        rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
-        self.assertIn("$ROUNDS", jobs[0])
+        rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("RESEARCH_ROUNDS="))
+        self.assertIn("$RESEARCH_ROUNDS", jobs[0])
         for round_file in rounds.split():
             self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
             module = importlib.import_module("scripts.experiments." + Path(round_file).stem)
@@ -178,7 +178,7 @@ class CronInstallerTest(unittest.TestCase):
 
             def run(rounds: str) -> subprocess.CompletedProcess[str]:
                 calls.unlink(missing_ok=True)
-                env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ROUNDS": rounds}
+                env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "RESEARCH_ROUNDS": rounds}
                 return subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
 
             # An empty queue is the steady state between rounds: nothing runs.
@@ -216,7 +216,8 @@ class CronInstallerTest(unittest.TestCase):
         jobs = job_lines("zgca")
         self.assertEqual(len(jobs), 1)
         self.assertEqual(jobs[0].split()[:5], ["*/30", "*", "*", "*", "*"])
-        rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ROUNDS="))
+        rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("ZGCA_ROUNDS="))
+        self.assertIn("$ZGCA_ROUNDS", jobs[0])
         for round_file in rounds.split():
             self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
             self.assertTrue(importlib.import_module("scripts.experiments." + Path(round_file).stem).ROUND.experiments, round_file)
@@ -229,7 +230,7 @@ class CronInstallerTest(unittest.TestCase):
             python.chmod(0o755)
             for listed, expected in (("", "pass: ops/zgca/zgca.py sync-rounds"), ("first second", "pass: ops/zgca/zgca.py sync-rounds first second")):
                 with self.subTest(rounds=listed):
-                    env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ROUNDS": listed}
+                    env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ZGCA_ROUNDS": listed}
                     run = subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
                     self.assertEqual(run.returncode, 1)
                     self.assertEqual((root / "logs/zgca/sync_cron.log").read_text(encoding="utf-8").splitlines()[-1], expected)
@@ -270,7 +271,7 @@ class CronInstallerTest(unittest.TestCase):
             root = Path(tmp)
             stand_in_repository(root)
             python, pids = root / "python", root / "pids"
-            env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ROUNDS": "first"}
+            env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "RESEARCH_ROUNDS": "first", "ZGCA_ROUNDS": "first"}
 
             def run(line: str = command) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(["bash", "-c", line], env=env, capture_output=True, text=True, timeout=60)

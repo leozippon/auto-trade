@@ -16,9 +16,9 @@
 # pending or nothing free is the steady state and exits 0; a refused creation
 # in any file makes the run exit non-zero with its reason in the log, and the
 # files after it still fill. The operator tops the queue up by appending experiments
-# and their reference workspaces to a file, or a file to ROUNDS; a round whose experiments
+# and their reference workspaces to a file, or a file to RESEARCH_ROUNDS; a round whose experiments
 # have all been created, or whose remaining experiments are withdrawn, is marked closed
-# and leaves ROUNDS in the same change.
+# and leaves RESEARCH_ROUNDS in the same change.
 
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
@@ -27,7 +27,7 @@ REPO_ROOT=/Data2/lzp/auto-trade
 QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The queue's round files, filled in this order; separated by spaces. Empty
 # while nothing is queued: the job then exits 0 without creating anything.
-ROUNDS=
+RESEARCH_ROUNDS=
 
 # Every ten minutes, all day: a slot that frees up stays empty for at most that
 # long, and research experiments end at no particular hour. One run takes seconds per
@@ -37,4 +37,4 @@ ROUNDS=
 # everything it started, saying so in one line: a smoke has taken up to 5 h
 # (logs/research/smoke/, 2026-10-22), so a run that smokes two new starters
 # still ends on its own.
-*/10 * * * * cd $REPO_ROOT && mkdir -p logs/research .runtime/research && ops/cron/locked.sh .runtime/research/cron.lock 12h "research fill" bash -c 'status=0; for round in $ROUNDS; do $QUANT_PYTHON $round 38888 --fill || status=1; done; exit $status' >> logs/research/cron.log 2>&1
+*/10 * * * * cd $REPO_ROOT && mkdir -p logs/research .runtime/research && ops/cron/locked.sh .runtime/research/cron.lock 12h "research fill" bash -c 'status=0; for round in $RESEARCH_ROUNDS; do $QUANT_PYTHON $round 38888 --fill || status=1; done; exit $status' >> logs/research/cron.log 2>&1
