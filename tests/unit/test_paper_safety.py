@@ -19,7 +19,7 @@ from autotrade.paper.engine import (
 )
 from autotrade.paper.storage import read_jsonl
 from autotrade.webui import trading
-from tests.unit.paper_book_fixture import (
+from tests.unit.support.paper_book_fixture import (
     BOOK_SESSIONS,
     COUNTER_STRATEGY,
     PROFILE,
@@ -28,7 +28,7 @@ from tests.unit.paper_book_fixture import (
     _registered_book,
     _run_paper,
 )
-from tests.unit.paper_reconcile_fixture import _write_slot
+from tests.unit.support.paper_reconcile_fixture import _write_slot
 from tests.unit.test_paper_titles import _ok, _repo
 
 

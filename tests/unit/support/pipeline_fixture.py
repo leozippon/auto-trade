@@ -15,7 +15,7 @@ from autotrade.pipelines.config import (
     ExperimentConfig,
     SnapshotBundle,
 )
-from tests.unit.acceptance_fixture import RULES
+from tests.unit.support.acceptance_fixture import RULES
 
 GEOMETRY = ResearchGeometry(
     research_start="20220701",

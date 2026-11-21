@@ -55,16 +55,16 @@ from autotrade.paper.books import (
 from autotrade.paper.engine import PaperWriterBusy
 from autotrade.paper.storage import append_jsonl_once
 from autotrade.pipelines.worker import resolve_worker_options
-from tests.unit.paper_book_fixture import (
+from tests.unit.support.paper_book_fixture import (
     FAILING_STRATEGY,
     engine_book,
     paper_root,
     run_days,
     write_book_record,
 )
-from tests.unit.replay_fixture import MATCHED_AT, _bar, _board_draws, _order
-from tests.unit.snapshot_fixture import write_fundamental_status
-from tests.unit.webui_research_experiment import build_experiment
+from tests.unit.support.replay_fixture import MATCHED_AT, _bar, _board_draws, _order
+from tests.unit.support.snapshot_fixture import write_fundamental_status
+from tests.unit.support.webui_research_experiment import build_experiment
 
 
 def _decided(root: Path) -> list[str]:

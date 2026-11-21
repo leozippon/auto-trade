@@ -29,8 +29,8 @@ from autotrade.pipelines.ledger import LEDGER_RECORD_SCHEMA_VERSION
 from autotrade.webui import traces
 from autotrade.webui.registry import research_depth
 from autotrade.webui.server import create_app
-from tests.unit.webui_js import js_function
-from tests.unit.webui_research_experiment import PARAMS
+from tests.unit.support.webui_js import js_function
+from tests.unit.support.webui_research_experiment import PARAMS
 
 APP_JS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
 T0 = datetime(2025, 1, 1, 0, 0, 0, 123456, tzinfo=UTC)

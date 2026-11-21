@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.unit.webui_js import js_const, js_function
+from tests.unit.support.webui_js import js_const, js_function
 
 APP_JS = Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
 

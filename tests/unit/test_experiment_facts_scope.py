@@ -28,7 +28,7 @@ from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.sandbox import SandboxSpec
-from tests.unit.agent_fixture import run_facts
+from tests.unit.support.agent_fixture import run_facts
 
 
 def _data_summary(rows: dict[str, int]) -> dict[str, object]:

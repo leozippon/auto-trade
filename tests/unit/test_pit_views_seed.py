@@ -32,7 +32,7 @@ from autotrade.pipelines.pit_views_seed import (
     plan_seed,
     seed_pit_views,
 )
-from tests.unit.acceptance_fixture import TEST_GEOMETRY
+from tests.unit.support.acceptance_fixture import TEST_GEOMETRY
 
 
 def _record(raw_dir: Path, *, events: bool = True) -> dict[str, object]:

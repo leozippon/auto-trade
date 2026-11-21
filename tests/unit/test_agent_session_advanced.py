@@ -52,7 +52,7 @@ from autotrade.environment.tools import (
 )
 from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
-from tests.unit.agent_fixture import (
+from tests.unit.support.agent_fixture import (
     DeclaredReadOnlyShell,
     TerminalTool,
     make_engine,

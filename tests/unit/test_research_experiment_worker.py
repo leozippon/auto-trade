@@ -1,6 +1,6 @@
 """The research experiment end to end through the real worker and the real PIT replay.
 
-Only the snapshot provider is synthetic (``tests/unit/synthetic_experiment.py``): the
+Only the snapshot provider is synthetic (``tests/unit/support/synthetic_experiment.py``): the
 params loader, the interactive runner, the pipeline, the deterministic
 developer, the span replay, the Broker, the readout and the terminal status
 are the production code.
@@ -32,8 +32,8 @@ from autotrade.pipelines.ledger import (
     research_records,
 )
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
-from tests.unit.agent_fixture import prompt_facts
-from tests.unit.synthetic_experiment import (
+from tests.unit.support.agent_fixture import prompt_facts
+from tests.unit.support.synthetic_experiment import (
     GEOMETRY,
     RELEASE_END,
     TEST_WORKING_COPY,

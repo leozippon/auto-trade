@@ -47,10 +47,10 @@ from autotrade.pipelines.worker import (
     strategy_sandbox_from_spec,
 )
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED
-from tests.unit.gpu_probe import stubbed_gpu_probe
-from tests.unit.paper_book_fixture import paper_root
-from tests.unit.webui_research_experiment import build_experiment
+from tests.unit.support.acceptance_fixture import CREATE_RULES, NO_SEED
+from tests.unit.support.gpu_probe import stubbed_gpu_probe
+from tests.unit.support.paper_book_fixture import paper_root
+from tests.unit.support.webui_research_experiment import build_experiment
 
 OTHER_PIN = "0" * 64
 

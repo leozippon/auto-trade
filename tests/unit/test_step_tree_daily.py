@@ -7,7 +7,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ToolRegistry
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
-from tests.unit.agent_fixture import TerminalTool
+from tests.unit.support.agent_fixture import TerminalTool
 
 
 def test_step_revision_can_be_selected_and_restored(tmp_path: Path):

@@ -42,14 +42,14 @@ from autotrade.webui.registry import (
 )
 from autotrade.webui.server import create_app
 from autotrade.webui.steps import step_tree_view
-from tests.unit.acceptance_fixture import (
+from tests.unit.support.acceptance_fixture import (
     CREATE_RULES,
     NO_SEED,
     REQUIRED_RULES,
     TEST_GEOMETRY,
 )
-from tests.unit.webui_js import js_const, js_function
-from tests.unit.webui_research_experiment import (
+from tests.unit.support.webui_js import js_const, js_function
+from tests.unit.support.webui_research_experiment import (
     ENVIRONMENT_BLOCKED_REASON,
     REPLAY,
     _step,

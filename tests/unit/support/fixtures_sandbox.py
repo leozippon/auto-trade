@@ -27,7 +27,7 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.tools import ToolResult
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_DIR = REPO_ROOT / "configs" / "agent_output_template"
 TS_CODE = "000001.SZ"
 

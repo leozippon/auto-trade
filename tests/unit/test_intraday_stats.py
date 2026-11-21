@@ -28,7 +28,7 @@ from autotrade.environment.data.intraday_stats import (
 )
 from autotrade.environment.data.snapshot import DEFAULT_DATASETS, SELECTABLE_DATASETS
 from autotrade.environment.data.units import resolve_field
-from tests.unit.snapshot_fixture import MINUTE_GRID, MINUTE_TRADE_DATE
+from tests.unit.support.snapshot_fixture import MINUTE_GRID, MINUTE_TRADE_DATE
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LABELS = [f"{hour}:{minute:02d}" for hour, minute in MINUTE_GRID]

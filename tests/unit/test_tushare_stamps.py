@@ -10,7 +10,7 @@ import pandas as pd
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.data_sources.tushare import specs, stamps, versions
 
-from .tushare_fixture import LakeTestCase
+from .support.tushare_fixture import LakeTestCase
 
 
 class StampTest(LakeTestCase):

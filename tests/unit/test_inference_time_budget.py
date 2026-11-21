@@ -52,11 +52,16 @@ from autotrade.pipelines.research_session import (
     session_role_quotas,
 )
 from autotrade.pipelines.session_tools import SessionValidations, ValidateTool
-from tests.unit.acceptance_fixture import RULES
-from tests.unit.agent_fixture import FakeClock, TerminalTool, make_engine, make_runner
-from tests.unit.validate_session_fixture import _write_style_sidecar
+from tests.unit.support.acceptance_fixture import RULES
+from tests.unit.support.agent_fixture import (
+    FakeClock,
+    TerminalTool,
+    make_engine,
+    make_runner,
+)
+from tests.unit.support.validate_session_fixture import _write_style_sidecar
 
-from .fixtures_sandbox import PassingModificationCheck
+from .support.fixtures_sandbox import PassingModificationCheck
 
 
 class TimedLLM:

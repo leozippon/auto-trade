@@ -38,7 +38,7 @@ from autotrade.pipelines.validation_record import (
     candidate_changes,
     step_entry,
 )
-from tests.unit.validate_session_fixture import _Session, _strategy
+from tests.unit.support.validate_session_fixture import _Session, _strategy
 
 DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
 

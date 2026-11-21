@@ -20,9 +20,9 @@ from autotrade.environment.artifacts import (
     readonly_baseline,
     restore_registered_artifact_trees,
 )
-from tests.unit.fixtures_sandbox import VALID_MAIN, write_artifact
+from tests.unit.support.fixtures_sandbox import VALID_MAIN, write_artifact
 
-from .fixtures_sandbox import TEMPLATE_DIR
+from .support.fixtures_sandbox import TEMPLATE_DIR
 
 
 class ArtifactContractTest(unittest.TestCase):

@@ -49,7 +49,7 @@ from autotrade.environment.tools.skill_feedback import (
 )
 from autotrade.webui import feedback
 from autotrade.webui.server import create_app
-from tests.unit.skills_fixture import file_skill_feedback
+from tests.unit.support.skills_fixture import file_skill_feedback
 
 SESSION_KEY = "s1"
 

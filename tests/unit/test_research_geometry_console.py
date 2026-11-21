@@ -26,7 +26,7 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.webui.registry import experiment_listing, summarize_experiment
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
 
 
 def _experiment(root: Path, experiment_id: str, params: dict[str, object]) -> Path:

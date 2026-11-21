@@ -39,7 +39,7 @@ from autotrade.pipelines.experiment import (
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
 
-from .fixtures_sandbox import TEMPLATE_DIR, real_docker
+from .support.fixtures_sandbox import TEMPLATE_DIR, real_docker
 
 MAIN ='''import numpy as np
 

@@ -18,7 +18,7 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
 from scripts.experiments import _cli
 from scripts.experiments._cli import add_acceptance_arguments
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
 
 
 class _ProviderConstructed(RuntimeError):

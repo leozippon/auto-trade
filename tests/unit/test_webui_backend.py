@@ -2,7 +2,7 @@
 
 No worker subprocesses, Docker, or LLM calls: worker spawn is patched out and
 experiment state is synthesized on disk exactly as the orchestrator writes it
-(``tests/unit/webui_research_experiment.py``). The research-experiment projections, the
+(``tests/unit/support/webui_research_experiment.py``). The research-experiment projections, the
 forward seal and the best-experiment ranking are in
 ``test_webui_research_console.py``.
 """
@@ -55,9 +55,9 @@ from autotrade.webui.manager import (
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.registry import ORDER_TABLE_ROWS
 from autotrade.webui.server import create_app, is_loopback_host, run
-from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
-from tests.unit.gpu_probe import stubbed_gpu_probe
-from tests.unit.webui_research_experiment import build_experiment
+from tests.unit.support.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
+from tests.unit.support.gpu_probe import stubbed_gpu_probe
+from tests.unit.support.webui_research_experiment import build_experiment
 
 
 def test_local_webui_health_schema_and_brand(tmp_path: Path):
@@ -465,7 +465,7 @@ def test_the_session_gpu_panel_marks_the_cards_the_experiment_claimed(tmp_path: 
     is not shown."""
     from autotrade.pipelines.hitl_state import write_gpu_claim
     from autotrade.webui.registry import experiment_detail
-    from tests.unit.webui_research_experiment import build_experiment
+    from tests.unit.support.webui_research_experiment import build_experiment
 
     hitl = build_experiment(tmp_path, "experiment", "research", alive=True) / "hitl"
     assert experiment_detail(tmp_path, "experiment")["gpu_claim"] == []

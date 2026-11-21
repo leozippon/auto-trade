@@ -15,7 +15,7 @@ from autotrade.data_sources.tushare import audit, common, intraday, specs
 from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import io as tushare_io
 
-from .tushare_fixture import EmptyClient, LakeTestCase
+from .support.tushare_fixture import EmptyClient, LakeTestCase
 
 
 class MinuteUpdateTest(LakeTestCase):

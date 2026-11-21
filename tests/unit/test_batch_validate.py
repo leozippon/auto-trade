@@ -65,8 +65,8 @@ from autotrade.pipelines.verdict import (
     residual_reading,
     residual_statistics,
 )
-from tests.unit.acceptance_fixture import REQUIRED_RULES
-from tests.unit.validate_session_fixture import (
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.validate_session_fixture import (
     PARENT_SOURCE,
     TEMPLATE_README,
     _Session,

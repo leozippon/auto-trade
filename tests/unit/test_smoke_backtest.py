@@ -32,8 +32,8 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.local_backend import LocalDailyEvaluationBackend
 from autotrade.pipelines.session_tools import SMOKE_BACKTEST_MAX_DAYS, SmokeBacktestTool
-from tests.unit.acceptance_fixture import RULES
-from tests.unit.agent_fixture import FakeClock
+from tests.unit.support.acceptance_fixture import RULES
+from tests.unit.support.agent_fixture import FakeClock
 
 DAYS = [stamp.strftime("%Y%m%d") for stamp in pd.bdate_range("2025-10-01", periods=12)]
 

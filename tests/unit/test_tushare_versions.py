@@ -16,7 +16,7 @@ from autotrade.data_sources.tushare import audit, cron_update, download, specs, 
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.environment.data.snapshot import SELECTABLE_DATASETS
 
-from .tushare_fixture import LakeTestCase
+from .support.tushare_fixture import LakeTestCase
 
 
 class VersionedWriteTest(LakeTestCase):

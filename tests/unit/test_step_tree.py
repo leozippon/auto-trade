@@ -11,8 +11,8 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.runtime import RunManifest
 from autotrade.environment.step_tree import StepTree
 from autotrade.pipelines.research_session import acceptance_facts
-from tests.unit.acceptance_fixture import REQUIRED_RULES
-from tests.unit.fixtures_sandbox import write_artifact
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.fixtures_sandbox import write_artifact
 
 NODE = {"epoch_id": "epoch_001", "run_id": "run_x"}
 

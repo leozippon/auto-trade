@@ -35,7 +35,7 @@ from autotrade.environment.broker_core import (
 )
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
 from autotrade.environment.strategy import StrategyOrder
-from tests.unit.replay_fixture import MATCHED_AT, _bar, _order
+from tests.unit.support.replay_fixture import MATCHED_AT, _bar, _order
 
 
 def _broker(**profile_fields: object) -> DailyBroker:

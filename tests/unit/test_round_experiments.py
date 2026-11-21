@@ -61,8 +61,8 @@ from scripts.experiments._round import (
     Round,
     round_id,
 )
-from tests.unit.acceptance_fixture import CREATE_RULES, TEST_GEOMETRY
-from tests.unit.research_release_fixture import (
+from tests.unit.support.acceptance_fixture import CREATE_RULES, TEST_GEOMETRY
+from tests.unit.support.research_release_fixture import (
     BACKFILLED_HISTORY_START,
     HELDOUT_REACHING_DAYS,
     publish_release,

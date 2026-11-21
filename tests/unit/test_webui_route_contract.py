@@ -532,7 +532,7 @@ def test_the_research_experiment_fields_the_console_reads_are_served(tmp_path: P
     replicates so the fields only such an experiment has are served too."""
 
     from autotrade.webui.registry import experiment_detail, summarize_experiment
-    from tests.unit.webui_research_experiment import build_experiment
+    from tests.unit.support.webui_research_experiment import build_experiment
 
     build_experiment(tmp_path, "experiment", "registered_with_record", seeded=True)
     detail = experiment_detail(tmp_path, "experiment")

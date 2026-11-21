@@ -57,8 +57,8 @@ from autotrade.pipelines.ledger import (
     research_over,
 )
 from autotrade.pipelines.replay_backend import null_control_seed
-from tests.unit.acceptance_fixture import REQUIRED_RULES, RULES
-from tests.unit.pipeline_fixture import (
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES, RULES
+from tests.unit.support.pipeline_fixture import (
     CONFIG_PROFILE,
     CONFIG_SCHEDULE,
     DAYS,

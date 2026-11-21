@@ -19,7 +19,7 @@ from autotrade.paper import verdict as paper_verdict
 from autotrade.paper.book import VERDICT_LOG_NAME, Book
 from autotrade.paper.storage import append_jsonl_once, read_jsonl
 from autotrade.paper.verdict import evidence_reading, paper_reading
-from tests.unit.paper_book_fixture import (
+from tests.unit.support.paper_book_fixture import (
     BOOK_SESSIONS,
     SYMBOL,
     _bars,
@@ -28,8 +28,8 @@ from tests.unit.paper_book_fixture import (
     paper_root,
     run_days,
 )
-from tests.unit.paper_reconcile_fixture import PROFILE as RECONCILE_PROFILE
-from tests.unit.paper_reconcile_fixture import (
+from tests.unit.support.paper_reconcile_fixture import PROFILE as RECONCILE_PROFILE
+from tests.unit.support.paper_reconcile_fixture import (
     SESSIONS,
     A,
     B,
@@ -37,7 +37,7 @@ from tests.unit.paper_reconcile_fixture import (
     _session,
     _write_slot,
 )
-from tests.unit.paper_reconcile_fixture import _book as _reconcile_book
+from tests.unit.support.paper_reconcile_fixture import _book as _reconcile_book
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

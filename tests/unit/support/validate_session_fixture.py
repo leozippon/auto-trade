@@ -48,8 +48,8 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.session_tools import SessionValidations, ValidateTool
-from tests.unit.acceptance_fixture import REQUIRED_RULES
-from tests.unit.agent_fixture import TerminalTool
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.agent_fixture import TerminalTool
 
 PARENT_SOURCE = "def generate_orders(context):\n    return []\n"
 # A four-year research period, one slot per July-June year.

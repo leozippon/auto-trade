@@ -38,7 +38,7 @@ from autotrade.environment.replay.null_control import (
 )
 from autotrade.environment.replay.stats import ReplayResult
 from autotrade.environment.strategy import StrategySchedule
-from tests.unit.replay_fixture import (
+from tests.unit.support.replay_fixture import (
     _BOARD_SKELETON,
     DAYS,
     _at,

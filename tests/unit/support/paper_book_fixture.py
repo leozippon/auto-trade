@@ -21,9 +21,9 @@ from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.paper import DailyPaperEngine
 from autotrade.paper.book import Book, create_book
-from tests.unit.webui_research_experiment import build_experiment
+from tests.unit.support.webui_research_experiment import build_experiment
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 SESSIONS = ("20260105", "20260106", "20260107", "20260108", "20260109", "20260112")
 SYMBOL = "000001.SZ"
 PROFILE = BrokerProfile(

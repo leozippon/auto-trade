@@ -63,8 +63,8 @@ from autotrade.pipelines.config import (
 from autotrade.pipelines.experiment import seed_change
 from autotrade.pipelines.pit_backend import PITDailyEvaluationBackend
 from autotrade.pipelines.session_resume import REVISIONS_DIR
-from tests.unit.acceptance_fixture import REQUIRED_RULES
-from tests.unit.fixtures_sandbox import (
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.fixtures_sandbox import (
     _executor_for_process,
     _pit_slot_paths,
     _write_corporate_actions,

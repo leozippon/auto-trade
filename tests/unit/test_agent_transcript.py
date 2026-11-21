@@ -34,7 +34,11 @@ from autotrade.environment.trace import (
     render_transcript_block,
 )
 from autotrade.pipelines.session_resume import resume_state
-from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_runner, shell_turns
+from tests.unit.support.agent_fixture import (
+    DeclaredReadOnlyShell,
+    make_runner,
+    shell_turns,
+)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

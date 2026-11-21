@@ -49,10 +49,10 @@ from autotrade.environment.tools.workspace import (
     LOW_DISK_SPACE,
     WORKSPACE_MIN_FREE_BYTES,
 )
-from tests.unit.acceptance_fixture import RULES
-from tests.unit.agent_fixture import make_runner
+from tests.unit.support.acceptance_fixture import RULES
+from tests.unit.support.agent_fixture import make_runner
 
-from .fixtures_sandbox import PassingModificationCheck
+from .support.fixtures_sandbox import PassingModificationCheck
 
 RG_AVAILABLE = shutil.which("rg") is not None
 
@@ -1337,7 +1337,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
     def _finish_tool(self, root: Path):
         from autotrade.environment.artifacts import new_revision_id
         from autotrade.environment.step_tree import StepTree
-        from tests.unit.agent_fixture import TerminalTool
+        from tests.unit.support.agent_fixture import TerminalTool
 
         paths, roots, workspace = build_sandbox(root)
         (paths.agent / "output" / "main.py").write_text(
@@ -2094,7 +2094,7 @@ def _validate_tool(
     )
     from autotrade.pipelines.ledger import ExperimentLedger
     from autotrade.pipelines.session_tools import SessionValidations, ValidateTool
-    from tests.unit.validate_session_fixture import _write_style_sidecar
+    from tests.unit.support.validate_session_fixture import _write_style_sidecar
 
     paths, _, _ = build_sandbox(tmp)
     output = paths.agent / "output"

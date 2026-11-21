@@ -41,7 +41,7 @@ from autotrade.pipelines.skills import (
 )
 from autotrade.webui import memory
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import CREATE_RULES
+from tests.unit.support.acceptance_fixture import CREATE_RULES
 
 HOST_PATH = "/Data2/lzp/ADMCubeQuant/experiments/adopted/artifacts"
 SESSION_KEY = "research"

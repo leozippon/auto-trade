@@ -28,9 +28,9 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ModificationCheckTool, ToolRegistry
 from autotrade.pipelines.config import ExperimentConfig
 from autotrade.pipelines.ledger import ExperimentLedger
-from tests.unit.acceptance_fixture import RULES
+from tests.unit.support.acceptance_fixture import RULES
 
-from .fixtures_sandbox import PassingModificationCheck
+from .support.fixtures_sandbox import PassingModificationCheck
 
 VALID_MAIN = "def generate_orders(context):\n    return []\n"
 # A real host path: the redaction recognises the roots the host keeps its files

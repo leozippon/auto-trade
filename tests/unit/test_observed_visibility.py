@@ -34,7 +34,7 @@ from autotrade.environment.data.pit import (
 from autotrade.environment.data.snapshot import SnapshotBuilder, SnapshotConfig
 from autotrade.environment.replay.timeview import Timeview
 from autotrade.pipelines.pit_backend import _open_replay_rows
-from tests.unit.snapshot_fixture import (
+from tests.unit.support.snapshot_fixture import (
     build_raw,
     write,
     write_dividend_history,

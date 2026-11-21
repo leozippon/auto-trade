@@ -40,9 +40,9 @@ from autotrade.pipelines.ledger import ExperimentLedger
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from autotrade.pipelines.worker import load_worker_options
 from autotrade.webui.manager import ExperimentManager
-from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED
-from tests.unit.gpu_probe import stubbed_gpu_probe
-from tests.unit.synthetic_experiment import daily_experiment
+from tests.unit.support.acceptance_fixture import CREATE_RULES, NO_SEED
+from tests.unit.support.gpu_probe import stubbed_gpu_probe
+from tests.unit.support.synthetic_experiment import daily_experiment
 
 
 def test_a_params_file_that_leaves_a_parameter_out_runs_on_its_console_default(
@@ -281,7 +281,7 @@ def test_an_experiment_without_the_boundary_keys_keeps_todays_containers_and_one
         strategy_boundary,
         strategy_sandbox_from_spec,
     )
-    from tests.unit.agent_fixture import run_facts
+    from tests.unit.support.agent_fixture import run_facts
 
     monkeypatch.setenv("LIGHTING_API_KEY", "test-primary")
     repo, experiment = daily_experiment(tmp_path, developer_mode="llm")

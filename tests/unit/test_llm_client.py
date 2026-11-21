@@ -30,7 +30,7 @@ from autotrade.environment.llm import (
     model_profile,
 )
 from autotrade.environment.llm.openai_compatible import RETRY_BACKOFF_CAP_SECONDS
-from tests.unit.llm_fixture import FakeTransport
+from tests.unit.support.llm_fixture import FakeTransport
 
 
 def make_config(**kwargs) -> OpenAICompatibleConfig:

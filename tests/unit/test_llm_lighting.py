@@ -45,8 +45,8 @@ from autotrade.environment.llm.pricing import TokenPrices
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import validate_arguments
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
-from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_runner
-from tests.unit.llm_fixture import FakeTransport
+from tests.unit.support.agent_fixture import DeclaredReadOnlyShell, make_runner
+from tests.unit.support.llm_fixture import FakeTransport
 
 MODEL = "gpt-6-astra"
 GEMINI_MODEL = "gemini-4-argon"

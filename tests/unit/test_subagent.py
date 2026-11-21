@@ -78,8 +78,12 @@ from autotrade.pipelines.research_session import (
     SessionCallBudget,
     build_subagent_tools,
 )
-from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_engine, make_runner
-from tests.unit.llm_fixture import FakeTransport
+from tests.unit.support.agent_fixture import (
+    DeclaredReadOnlyShell,
+    make_engine,
+    make_runner,
+)
+from tests.unit.support.llm_fixture import FakeTransport
 
 _STRATEGY = "def generate_orders(context):\n    return []\n"
 

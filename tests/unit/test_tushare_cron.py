@@ -28,7 +28,7 @@ from autotrade.environment.data.fundamental_events import (
 )
 from autotrade.environment.data.snapshot import _require_event_months
 
-from .tushare_fixture import LakeTestCase, commit_generation
+from .support.tushare_fixture import LakeTestCase, commit_generation
 
 
 class _StubLock:

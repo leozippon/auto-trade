@@ -43,7 +43,7 @@ from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.environment.tools import CommandResult
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBundle
 from autotrade.pipelines.pit_backend import prebuild_asof_stash
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
 
 GENERATION = "synthetic_generation"
 # Random-baseline draws per null control in the end-to-end tests, which assert

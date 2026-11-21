@@ -14,7 +14,7 @@ from unittest.mock import patch
 from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import download, specs, versions
 
-from .tushare_fixture import LakeTestCase
+from .support.tushare_fixture import LakeTestCase
 
 
 class RepeatingPagedClient:

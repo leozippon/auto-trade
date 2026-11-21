@@ -19,8 +19,8 @@ import pytest
 from autotrade.common.time import utc_now
 from autotrade.webui.registry import ARCHIVED_NAME, experiment_listing
 from scripts.dev.check_verdicts import current_experiments
-from tests.unit.paper_book_fixture import paper_root, write_book_record
-from tests.unit.webui_research_experiment import build_experiment
+from tests.unit.support.paper_book_fixture import paper_root, write_book_record
+from tests.unit.support.webui_research_experiment import build_experiment
 
 # The archive CLI runs as a real process.
 pytestmark = pytest.mark.slow

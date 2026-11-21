@@ -36,7 +36,7 @@ from autotrade.environment.strategy import (
     StrategyContractError,
     StrategySchedule,
 )
-from tests.unit.fixtures_sandbox import _executor_for_process
+from tests.unit.support.fixtures_sandbox import _executor_for_process
 
 GOLDEN = Path(__file__).with_name("data") / "replay_market_golden.json"
 SYMBOLS = ("000001.SZ", "600000.SH", "688001.SH", "830000.BJ", "300001.SZ")

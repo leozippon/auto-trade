@@ -90,10 +90,10 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.pipelines.session_tools import resource_reading
 from autotrade.pipelines.worker import strategy_sandbox_from_spec
-from tests.unit.fixtures_sandbox import _executor_for_process
+from tests.unit.support.fixtures_sandbox import _executor_for_process
 
-from .fixtures_sandbox import real_docker
-from .gpu_probe import gpu_roster, stubbed_gpu_probe
+from .support.fixtures_sandbox import real_docker
+from .support.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 
 def _strategy(tmp_path: Path, source: str = "def generate_orders(context):\n    return []\n") -> Path:

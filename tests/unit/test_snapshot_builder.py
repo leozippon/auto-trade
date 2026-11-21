@@ -28,7 +28,7 @@ from autotrade.environment.data.snapshot import (
     load_snapshot_manifest,
 )
 from autotrade.environment.replay.timeview import ReplayRows, Timeview
-from tests.unit.snapshot_fixture import (
+from tests.unit.support.snapshot_fixture import (
     build_fundamental_events,
     build_raw,
     write,
@@ -40,7 +40,7 @@ from tests.unit.snapshot_fixture import (
     write_quality_status,
 )
 
-from .fixtures_sandbox import finalize_snapshot_dir
+from .support.fixtures_sandbox import finalize_snapshot_dir
 
 CN_TZ = ZoneInfo("Asia/Shanghai")
 DECISION = datetime(2021, 10, 8, 9, 25, tzinfo=CN_TZ)
@@ -2946,7 +2946,7 @@ def test_external_union_snapshot_fixture_finalizes_under_the_unit_contract(tmp_p
     manifest and unit-registry gate as a builder-produced snapshot: an external
     union directory declares its dataset ownership explicitly, and every column
     must classify."""
-    from .fixtures_sandbox import PRICE_ROWS, TS_CODE, FakeSnapshotProvider
+    from .support.fixtures_sandbox import PRICE_ROWS, TS_CODE, FakeSnapshotProvider
 
     provider = FakeSnapshotProvider()
     decision = provider.decision_snapshot(

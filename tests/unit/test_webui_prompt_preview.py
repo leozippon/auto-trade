@@ -37,8 +37,8 @@ from autotrade.pipelines.hitl_state import (
     write_control,
 )
 from autotrade.webui.prompt_preview import RUNTIME_PLACEHOLDER, build_prompt_preview
-from tests.unit.acceptance_fixture import NO_SEED, REQUIRED_RULES, TEST_GEOMETRY
-from tests.unit.agent_fixture import prompt_facts
+from tests.unit.support.acceptance_fixture import NO_SEED, REQUIRED_RULES, TEST_GEOMETRY
+from tests.unit.support.agent_fixture import prompt_facts
 
 SESSION_KEY = "research"
 

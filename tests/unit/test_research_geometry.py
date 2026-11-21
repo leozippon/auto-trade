@@ -20,7 +20,7 @@ import pytest
 from autotrade.common.time import CN_TZ
 from autotrade.pipelines import calendar
 from autotrade.pipelines.calendar import ResearchGeometry, load_sse_trading_days
-from tests.unit.acceptance_fixture import TEST_GEOMETRY
+from tests.unit.support.acceptance_fixture import TEST_GEOMETRY
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

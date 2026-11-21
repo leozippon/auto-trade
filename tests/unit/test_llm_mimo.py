@@ -19,7 +19,7 @@ from autotrade.environment.llm import (
     build_model_gateway,
     model_profile,
 )
-from tests.unit.llm_fixture import FakeTransport
+from tests.unit.support.llm_fixture import FakeTransport
 
 TOOLS = (
     {

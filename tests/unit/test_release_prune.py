@@ -27,7 +27,7 @@ from autotrade.pipelines.hitl_state import (
     HITL_STATE_SCHEMA_VERSION,
     proc_start_ticks,
 )
-from tests.unit.research_release_fixture import (
+from tests.unit.support.research_release_fixture import (
     FUNDAMENTAL_EVENTS_ROOT,
     FUNDAMENTAL_EVENTS_STATUS,
     RAW_DIR,

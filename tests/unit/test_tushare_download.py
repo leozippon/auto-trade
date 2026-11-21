@@ -29,7 +29,7 @@ from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import io as tushare_io
 from autotrade.data_sources.tushare import lock as tushare_lock
 
-from .tushare_fixture import (
+from .support.tushare_fixture import (
     DAILY_FIELDS,
     EmptyClient,
     FieldClient,

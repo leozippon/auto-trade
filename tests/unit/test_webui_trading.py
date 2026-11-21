@@ -42,13 +42,13 @@ from autotrade.pipelines.ledger import ExperimentLedger, forward_record
 from autotrade.webui import trading
 from autotrade.webui.equity import result_equity_payload
 from autotrade.webui.server import create_app
-from tests.unit.paper_book_fixture import (
+from tests.unit.support.paper_book_fixture import (
     _sheet_book,
     engine_book,
     paper_root,
     write_book_record,
 )
-from tests.unit.webui_research_experiment import REPLAY, build_experiment
+from tests.unit.support.webui_research_experiment import REPLAY, build_experiment
 
 BOOK = "exp"
 # The panels one book's page reads, each under /api/trading/<env>/books/<book>/.
@@ -773,7 +773,7 @@ def test_a_book_is_switched_to_real_fills_recorded_and_compared_through_the_cons
     session waiting, record it (a refused record writes nothing), and read
     the settled session back against its simulated fill, as two curves, in
     the history, and after a correction with the per-name P&L still whole."""
-    from tests.unit.paper_reconcile_fixture import PLAN_STRATEGY, _Book
+    from tests.unit.support.paper_reconcile_fixture import PLAN_STRATEGY, _Book
 
     root = paper_root(tmp_path) / BOOK
     write_book_record(root)

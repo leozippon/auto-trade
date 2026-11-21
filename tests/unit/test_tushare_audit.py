@@ -17,7 +17,12 @@ from autotrade.data_sources.tushare import audit, common, specs, stamps, version
 from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import io as tushare_io
 
-from .tushare_fixture import DAILY_FIELDS, EmptyClient, FieldClient, LakeTestCase
+from .support.tushare_fixture import (
+    DAILY_FIELDS,
+    EmptyClient,
+    FieldClient,
+    LakeTestCase,
+)
 
 
 class ErrorTradeDateClient:

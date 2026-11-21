@@ -34,7 +34,7 @@ from autotrade.pipelines.agent_inbox import (
     list_unconsumed_messages,
 )
 from autotrade.webui.traces import project_trace_blocks
-from tests.unit.agent_fixture import TerminalTool, make_engine, make_runner
+from tests.unit.support.agent_fixture import TerminalTool, make_engine, make_runner
 
 SESSION_A = "epoch_001/fold_2022Q2"
 SESSION_B = "epoch_001/fold_2022Q1"

@@ -54,14 +54,14 @@ from autotrade.pipelines.pit_backend import (
     _bind_asof_stash_contract,
     prebuild_asof_stash,
 )
-from tests.unit.fixtures_sandbox import (
+from tests.unit.support.fixtures_sandbox import (
     _pit_slot_paths,
     _write_corporate_actions,
     _write_domains,
     _write_provider_contract,
 )
 
-from .fixtures_sandbox import real_docker
+from .support.fixtures_sandbox import real_docker
 
 # The boards every profile below pins: the random baseline draws only on a
 # profile's own boards.

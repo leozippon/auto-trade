@@ -11,7 +11,7 @@ import pandas as pd
 
 from autotrade.data_sources.tushare import common, specs
 
-from .tushare_fixture import FieldClient, LakeTestCase, param
+from .support.tushare_fixture import FieldClient, LakeTestCase, param
 
 # One SSE calendar day: the end of the requested range, open.
 TRADE_CAL_FIELDS = {

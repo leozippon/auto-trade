@@ -52,8 +52,8 @@ from autotrade.pipelines.hitl_state import (
 from autotrade.webui import manager as manager_module
 from autotrade.webui.manager import ManagerError
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
-from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
+from tests.unit.support.acceptance_fixture import CREATE_RULES, NO_SEED, REQUIRED_RULES
+from tests.unit.support.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 # Every test drives real worker processes, some through a real SIGTERM grace.
 pytestmark = pytest.mark.slow

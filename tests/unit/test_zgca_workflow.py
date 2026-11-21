@@ -866,7 +866,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         experiment loses its PIT views, sandbox work root and archived session workspaces and keeps its
         directory with every record; a second release frees nothing. A failed experiment, an id that is
         none, an absent experiment and a tree reached through a link are refused, and nothing is deleted."""
-        from tests.unit.webui_research_experiment import build_experiment
+        from tests.unit.support.webui_research_experiment import build_experiment
 
         root = Path(self.temp.name) / "instance"
         (root / ".venv" / "bin").mkdir(parents=True)

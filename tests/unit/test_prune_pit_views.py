@@ -16,7 +16,7 @@ import pytest
 from autotrade.common.records import write_json_atomic
 from autotrade.pipelines.hitl_state import ARCHIVED_NAME
 from scripts.experiments import prune_pit_views as prune_tool
-from tests.unit.webui_research_experiment import build_experiment
+from tests.unit.support.webui_research_experiment import build_experiment
 
 PAYLOAD = b"x" * 65536
 

@@ -34,7 +34,7 @@ from autotrade.environment.tools.skill_feedback import (
 )
 from autotrade.pipelines.skills import MemorySource, mounted_skill_refs
 from autotrade.webui import feedback
-from tests.unit.skills_fixture import (
+from tests.unit.support.skills_fixture import (
     CURATED,
     EVIDENCE,
     SESSION_KEY,

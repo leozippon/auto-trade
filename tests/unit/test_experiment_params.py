@@ -23,7 +23,7 @@ from autotrade.pipelines.experiment_params import (
     session_models,
 )
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS, WEB_INTERNAL_PARAMS
-from tests.unit.acceptance_fixture import CREATE_RULES
+from tests.unit.support.acceptance_fixture import CREATE_RULES
 
 ROOTS = {"experiments_root": "experiments", "work_root": ".runtime/sandboxes"}
 

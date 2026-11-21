@@ -16,7 +16,7 @@ from autotrade.environment.data.intraday_flow import (
     aggregate_intraday_flow,
 )
 from autotrade.environment.data.pit import to_cn_timestamps
-from tests.unit.snapshot_fixture import MINUTE_GRID, MINUTE_TRADE_DATE
+from tests.unit.support.snapshot_fixture import MINUTE_GRID, MINUTE_TRADE_DATE
 
 
 def _session_frame(ts_code: str, closes, volumes) -> pd.DataFrame:

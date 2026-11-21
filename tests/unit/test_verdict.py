@@ -18,7 +18,7 @@ from autotrade.environment.replay.stats import (
 from autotrade.environment.replay.style import factor_ols
 from autotrade.pipelines import verdict
 from autotrade.pipelines.config import ACCEPTANCE_KEYS, AcceptanceRules
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
 
 SCALE = math.sqrt(TRADING_DAYS_PER_YEAR)
 FORWARD_START, FORWARD_END = "20250701", "20260630"

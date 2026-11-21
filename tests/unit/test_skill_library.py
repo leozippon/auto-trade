@@ -36,7 +36,7 @@ from autotrade.pipelines.skills import (
     validate_skills_tree,
 )
 from autotrade.pipelines.worker import load_worker_options
-from tests.unit.synthetic_experiment import daily_experiment
+from tests.unit.support.synthetic_experiment import daily_experiment
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 LIBRARY = REPO_ROOT / SKILL_LIBRARY_PATH

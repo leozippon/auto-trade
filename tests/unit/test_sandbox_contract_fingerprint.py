@@ -45,7 +45,7 @@ from autotrade.environment.executor import (
 )
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 
-from .fixtures_sandbox import real_docker
+from .support.fixtures_sandbox import real_docker
 
 REPO =Path(__file__).resolve().parents[2]
 DOCKERFILE = REPO / "ops/docker/sandbox.Dockerfile"

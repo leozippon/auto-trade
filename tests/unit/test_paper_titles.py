@@ -18,7 +18,7 @@ from autotrade.environment.strategy import CN_TZ
 from autotrade.paper.engine import PaperTitlesNotLanded
 from autotrade.paper.orders import render_failure
 from autotrade.paper.titles import require_landed_titles
-from tests.unit.paper_book_fixture import COUNTER_STRATEGY, _Book, _sheet_book
+from tests.unit.support.paper_book_fixture import COUNTER_STRATEGY, _Book, _sheet_book
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 JOB = "cn_nightly_anns_full"

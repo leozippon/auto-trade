@@ -25,7 +25,7 @@ from scripts.dev.check_verdicts import (
     current_experiments,
     main,
 )
-from tests.unit.synthetic_experiment import (
+from tests.unit.support.synthetic_experiment import (
     SyntheticPITProvider,
     few_baseline_draws,
     make_experiment,

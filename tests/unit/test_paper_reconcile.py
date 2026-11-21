@@ -18,7 +18,14 @@ from autotrade.environment.strategy import CN_TZ
 from autotrade.paper import engine as engine_module
 from autotrade.paper.engine import PaperAwaitingFills, PaperEngineError
 from autotrade.paper.orders import order_sheet, render_failure
-from tests.unit.paper_reconcile_fixture import SESSIONS, A, B, _book, _fill, _session
+from tests.unit.support.paper_reconcile_fixture import (
+    SESSIONS,
+    A,
+    B,
+    _book,
+    _fill,
+    _session,
+)
 
 # Stateless: one seat in B, bought at the close whenever the account it is
 # shown does not hold B.

@@ -35,13 +35,13 @@ from autotrade.pipelines.config import (
 )
 from autotrade.pipelines.experiment_params import PARAMETERS
 from autotrade.pipelines.hitl_state import WEB_CREATE_DEFAULTS
-from tests.unit.acceptance_fixture import (
+from tests.unit.support.acceptance_fixture import (
     CREATE_RULES,
     NO_SEED,
     REQUIRED_RULES,
     TEST_GEOMETRY,
 )
-from tests.unit.gpu_probe import gpu_roster, stubbed_gpu_probe
+from tests.unit.support.gpu_probe import gpu_roster, stubbed_gpu_probe
 
 #: The console create form is seeded from the pinned explore profile so a
 #: new experiment hardlinks the prebuilt view cache. Period, screen, compact, and
@@ -990,7 +990,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
         from autotrade.pipelines.pit_backend import required_release_raw_datasets
         from autotrade.pipelines.pit_views_seed import pit_cache_provider_record
         from autotrade.pipelines.worker import _snapshot_config
-        from tests.unit.research_release_fixture import publish_release
+        from tests.unit.support.research_release_fixture import publish_release
 
         config = _snapshot_config({**PIT_SEED_BASE_PARAMS, **params})
         built_from = publish_release(
@@ -1174,7 +1174,7 @@ class PitViewsSeedParameterTest(unittest.TestCase):
             required_release_raw_datasets,
         )
         from autotrade.pipelines.worker import _snapshot_config
-        from tests.unit.research_release_fixture import publish_release
+        from tests.unit.support.research_release_fixture import publish_release
 
         selection = {"macro_datasets": ["cn_gdp", "fut_daily"]}
         with tempfile.TemporaryDirectory() as tmp:

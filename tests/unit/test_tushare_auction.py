@@ -12,7 +12,7 @@ from autotrade.data_sources.tushare import auction, common, specs
 from autotrade.data_sources.tushare import client as tushare_client
 from autotrade.data_sources.tushare import io as tushare_io
 
-from .tushare_fixture import LakeTestCase
+from .support.tushare_fixture import LakeTestCase
 
 
 class AuctionTest(LakeTestCase):

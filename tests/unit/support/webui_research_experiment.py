@@ -47,7 +47,7 @@ from autotrade.pipelines.verdict import (
     heldout_slice,
     residual_reading,
 )
-from tests.unit.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES, TEST_GEOMETRY
 
 STAGES = (
     "created",

@@ -39,7 +39,7 @@ from autotrade.pipelines.hitl_state import (
 )
 from autotrade.webui.public_identity import PublicIdentity
 from autotrade.webui.server import create_app
-from tests.unit.acceptance_fixture import REQUIRED_RULES
+from tests.unit.support.acceptance_fixture import REQUIRED_RULES
 
 SESSION_A = "s2"
 SESSION_B = "s1"
