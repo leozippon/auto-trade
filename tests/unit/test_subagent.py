@@ -79,6 +79,7 @@ from autotrade.pipelines.research_session import (
     build_subagent_tools,
 )
 from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_engine, make_runner
+from tests.unit.llm_fixture import FakeTransport
 
 _STRATEGY = "def generate_orders(context):\n    return []\n"
 
@@ -3423,20 +3424,9 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
 _MIMO_REFUSAL = "The request was rejected because it was considered high risk"
 
 
-class _ReplayTransport:
-    def __init__(self, *payloads: bytes) -> None:
-        self.payloads = list(payloads)
-        self.posts = 0
-
-    def post(self, url, headers, body, timeout):
-        del url, headers, body, timeout
-        self.posts += 1
-        return self.payloads.pop(0)
-
-
 def _mimo_child_gateway(
     content: str, finish_reason: str
-) -> tuple[OpenAICompatibleProxy, _ReplayTransport]:
+) -> tuple[OpenAICompatibleProxy, FakeTransport]:
     """A MiMo gateway replaying the stream shape of the two refused child
     turns of open_research_100k_8y_mimo_r3_20261004 (2026-10-02): reasoning
     deltas, then one last chunk carrying the whole content, the
@@ -3472,7 +3462,7 @@ def _mimo_child_gateway(
             "data: [DONE]",
         )
     )
-    transport = _ReplayTransport(stream.encode())
+    transport = FakeTransport([stream.encode()])
     gateway = OpenAICompatibleProxy(
         OpenAICompatibleConfig(
             api_key="mimo-test-key",
@@ -3519,7 +3509,7 @@ def test_provider_refusal_ends_the_child_refused_and_the_parent_is_told() -> Non
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     runner.run("go")
-    assert transport.posts == 1
+    assert len(transport.requests) == 1
     completed = next(
         json.loads(str(message.content))
         for message in parent.calls[-1]["messages"]

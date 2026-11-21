@@ -34,8 +34,7 @@ from autotrade.environment.trace import (
     render_transcript_block,
 )
 from autotrade.pipelines.session_resume import resume_state
-from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_runner
-from tests.unit.test_agent_session_advanced import _shell_turns
+from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_runner, shell_turns
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -219,7 +218,7 @@ def test_a_session_whose_trace_reaches_the_cap_stops_there(tmp_path: Path):
     one marker."""
 
     writer = _writer(tmp_path, max_bytes=8_000, max_event_bytes=4_000)
-    llm = ScriptedLLM(_shell_turns(40))
+    llm = ScriptedLLM(shell_turns(40))
     runner = make_runner(
         llm=llm,
         tools=[DeclaredReadOnlyShell()],

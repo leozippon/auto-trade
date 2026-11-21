@@ -30,6 +30,7 @@ from autotrade.environment.llm import (
     model_profile,
 )
 from autotrade.environment.llm.openai_compatible import RETRY_BACKOFF_CAP_SECONDS
+from tests.unit.llm_fixture import FakeTransport
 
 
 def make_config(**kwargs) -> OpenAICompatibleConfig:
@@ -43,19 +44,6 @@ def make_config(**kwargs) -> OpenAICompatibleConfig:
     }
     values.update(kwargs)
     return OpenAICompatibleConfig(**values)
-
-
-class FakeTransport:
-    def __init__(self, outcomes):
-        self.outcomes = list(outcomes)
-        self.requests = []
-
-    def post(self, url, headers, body, timeout):
-        self.requests.append((url, dict(headers), json.loads(body), timeout))
-        outcome = self.outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome if isinstance(outcome, bytes) else json.dumps(outcome).encode()
 
 
 class _QuietHTTPServer(ThreadingHTTPServer):
@@ -283,7 +271,6 @@ INVALID_COMPLETE_TOOL_CALLS = (
         "function": {"name": "read_file", "arguments": '["main.py"]'},
     },
 )
-
 
 
 def test_config_repr_redacts_api_key():

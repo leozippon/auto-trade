@@ -46,6 +46,7 @@ from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools.base import validate_arguments
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_runner
+from tests.unit.llm_fixture import FakeTransport
 
 MODEL = "gpt-6-astra"
 GEMINI_MODEL = "gemini-4-argon"
@@ -75,24 +76,6 @@ FLAT_TOOL = {
         "required": ["symbol"],
     },
 }
-
-
-class FakeTransport:
-    def __init__(self, outcomes):
-        self.outcomes = list(outcomes)
-        self.urls: list[str] = []
-        self.headers: list[dict[str, str]] = []
-        self.bodies: list[dict[str, object]] = []
-
-    def post(self, url, headers, body, timeout):
-        del timeout
-        self.urls.append(url)
-        self.headers.append(dict(headers))
-        self.bodies.append(json.loads(body))
-        outcome = self.outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
 
 
 def _env(tmp_path: Path, text: str | None = None) -> Path:

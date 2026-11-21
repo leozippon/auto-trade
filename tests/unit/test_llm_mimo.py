@@ -19,6 +19,7 @@ from autotrade.environment.llm import (
     build_model_gateway,
     model_profile,
 )
+from tests.unit.llm_fixture import FakeTransport
 
 TOOLS = (
     {
@@ -116,22 +117,6 @@ def _no_process_credentials(monkeypatch):
     # the shell would otherwise win and could surface in an assertion diff.
     monkeypatch.delenv("MIMO_API_KEY", raising=False)
     monkeypatch.delenv("MIMO_BASE_URL", raising=False)
-
-
-class FakeTransport:
-    def __init__(self, outcomes):
-        self.outcomes = list(outcomes)
-        self.bodies: list[dict[str, object]] = []
-        self.headers: list[dict[str, str]] = []
-
-    def post(self, url, headers, body, timeout):
-        del url, timeout
-        self.headers.append(dict(headers))
-        self.bodies.append(json.loads(body))
-        outcome = self.outcomes.pop(0)
-        if isinstance(outcome, Exception):
-            raise outcome
-        return outcome
 
 
 def _env(tmp_path: Path, text: str = "MIMO_API_KEY=mimo-test-key\n") -> Path:

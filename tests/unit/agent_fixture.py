@@ -14,7 +14,7 @@ from collections.abc import Iterable, Mapping
 
 from autotrade.agent.runner import AgentSessionRunner
 from autotrade.agent.subagent import SubAgentEngine
-from autotrade.environment.llm import LLMProxy, ProviderResponse, ScriptedLLM
+from autotrade.environment.llm import LLMProxy, ProviderResponse, ScriptedLLM, ToolCall
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ToolRegistry
 from autotrade.environment.tools.base import ToolResult, ToolSpec
@@ -111,4 +111,8 @@ def make_engine(
     )
 
 
-__all__ = ["DeclaredReadOnlyShell", "TerminalTool", "make_engine", "make_runner"]
+def shell_turns(count: int, *, prefix: str = "s") -> list[ProviderResponse]:
+    return [
+        ProviderResponse(tool_calls=(ToolCall(f"{prefix}{index}", "shell", {"argv": ["rg", str(index)]}),))
+        for index in range(count)
+    ]

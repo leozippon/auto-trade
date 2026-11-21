@@ -17,9 +17,7 @@ from autotrade.agent.compact import (
     summarize_tool_result_for_context,
 )
 from autotrade.agent.experiment_facts import build_experiment_facts
-from autotrade.agent.prompts import (
-    build_system_prompt,
-)
+from autotrade.agent.prompts import build_system_prompt
 from autotrade.agent.runner import COMPACT_ADVISORY_FRACTION
 from autotrade.agent.turns import PROVIDER_TRANSIENT_FAILURE_HINT
 from autotrade.environment.artifacts import new_revision_id
@@ -59,6 +57,7 @@ from tests.unit.agent_fixture import (
     TerminalTool,
     make_engine,
     make_runner,
+    shell_turns,
 )
 
 
@@ -196,13 +195,6 @@ def _spill_roots(tmp_path: Path) -> SearchRoots:
     return SearchRoots(SafeWorkspace(workspace))
 
 
-def _shell_turns(count: int, *, prefix: str = "s") -> list[ProviderResponse]:
-    return [
-        ProviderResponse(tool_calls=(ToolCall(f"{prefix}{index}", "shell", {"argv": ["rg", str(index)]}),))
-        for index in range(count)
-    ]
-
-
 SUMMARY = (
     "## 策略现状\noutput/ 是动量腿 v2（20 日收益排序、每周复核、15 只等权），候选 candidates/v3 加了 60 日"
     "波动过滤，待冒烟。\n## 决定\n- 否定 60 日反转：Y2 中性化超额 -1.2%，空对照分位 0.48，"
@@ -236,7 +228,7 @@ def test_the_agent_compacts_its_own_context_and_is_pointed_at_the_trace(tmp_path
     tail with its protocol pairs; the event locates the replaced calls."""
 
     finish, node_id = finish_session_tool(tmp_path)
-    llm = ScriptedLLM([*_shell_turns(3), _compact_call(), *_shell_turns(1, prefix="t"), _finish_call(node_id)])
+    llm = ScriptedLLM([*shell_turns(3), _compact_call(), *shell_turns(1, prefix="t"), _finish_call(node_id)])
     events: list[tuple[str, dict[str, object]]] = []
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
     shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
@@ -296,7 +288,7 @@ def test_a_summary_over_its_writers_limit_ends_on_a_whole_line_and_says_it_was_c
     item = "- 否定 60 日反转：Y2 中性化超额 -1.2%，节点 valid_002。\n"
     written = item * (COMPACT_SUMMARY_MAX_CHARS // len(item) + 3)
     finish, node_id = finish_session_tool(tmp_path)
-    llm = ScriptedLLM([*_shell_turns(2), _compact_call(written), _finish_call(node_id)])
+    llm = ScriptedLLM([*shell_turns(2), _compact_call(written), _finish_call(node_id)])
     runner = make_runner(
         llm=llm,
         tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
@@ -367,7 +359,7 @@ def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_pat
 
 def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
     finish, node_id = finish_session_tool(tmp_path)
-    llm = ScriptedLLM([*_shell_turns(2), _compact_call("too short"), _finish_call(node_id)])
+    llm = ScriptedLLM([*shell_turns(2), _compact_call("too short"), _finish_call(node_id)])
     events: list[tuple[str, dict[str, object]]] = []
     runner = make_runner(
         llm=llm,
@@ -389,7 +381,7 @@ def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_
 ):
     finish, node_id = finish_session_tool(tmp_path)
     llm = ScriptedLLM(
-        [*_shell_turns(3), _compact_call(), *_shell_turns(3, prefix="t"), _finish_call(node_id)]
+        [*shell_turns(3), _compact_call(), *shell_turns(3, prefix="t"), _finish_call(node_id)]
     )
     events: list[tuple[str, dict[str, object]]] = []
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
@@ -438,7 +430,7 @@ def test_a_runtime_compaction_updates_the_agents_own_summary(tmp_path: Path):
 
     finish, node_id = finish_session_tool(tmp_path)
     compact_llm = ScriptedLLM([ProviderResponse(content="## 目标\nupdated\n\n## 下一步\n- finish")])
-    llm = ScriptedLLM([*_shell_turns(2), _compact_call(), *_shell_turns(3, prefix="t"), _finish_call(node_id)])
+    llm = ScriptedLLM([*shell_turns(2), _compact_call(), *shell_turns(3, prefix="t"), _finish_call(node_id)])
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
     shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
     events: list[tuple[str, dict[str, object]]] = []
