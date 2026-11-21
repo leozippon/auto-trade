@@ -82,7 +82,6 @@ from autotrade.environment.tools.node_reference import (
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.environment.trace import TraceEvent
 
-from .agent_views import NULL_CONTROL_KEYS, allowed_keys
 from .calendar import FULL_SPAN, REVEALED_SPAN, yyyymmdd
 from .config import (
     BATCH_VALIDATE_MAX_CANDIDATES,
@@ -2735,6 +2734,26 @@ SIGNIFICANCE_KEYS = (
     "days",
     "years",
 )
+# The null-control fields a ``run_null_control`` result carries.
+# ``rejects_mean`` rides along because a null whose orders are mostly rejected
+# is a weaker comparison, ``status``/``reason`` because a failed or unavailable
+# null (a result with no filled trade) must not read as a missing one, and the
+# null's own centre and spread over its draws (their number is in the tool's
+# description) because a percentile alone does not say how far the observed
+# excess sits from them. Informational: the pipeline gates on the active series
+# against the random baseline each validation draws, never on this percentile.
+NULL_CONTROL_KEYS = (
+    "status",
+    "reason",
+    "observed_excess",
+    "excess_percentile",
+    "null_excess_mean",
+    "null_excess_p05",
+    "null_excess_p95",
+    "rejects_mean",
+    "dropped_trips_mean",
+    "step",
+)
 
 
 def step_readings(
@@ -2912,7 +2931,7 @@ class NullControlTool(SessionTimeBudgetAware):
     ) -> dict[str, object]:
         return {
             "handle": self.backtest.named([node_id])[0],
-            "null_control": allowed_keys(block, NULL_CONTROL_KEYS),
+            "null_control": {key: block[key] for key in NULL_CONTROL_KEYS if key in block},
             "cached": cached,
             "null_controls_used": self.used,
             "null_controls_remaining": self.max_calls - self.used,
