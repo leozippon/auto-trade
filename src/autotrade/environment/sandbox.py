@@ -48,6 +48,7 @@ from .runtime import (
     chmod_tree,
     link_or_copy,
     new_id,
+    rmtree_keeping_file_modes,
     utc_now_iso,
 )
 
@@ -82,21 +83,6 @@ def attached_stdin(data: bytes = b"") -> Iterator[int]:
         os.close(write_fd)
 
 
-def _unlock_owned_directories(path: Path) -> None:
-    """Make host-owned directories removable without changing file modes.
-
-    Snapshot directories are mode 0555. Unlinking their entries needs a
-    writable parent. File modes stay untouched: a payload may be a hard link
-    into a shared pit view, and chmod would change that shared inode.
-    """
-
-    for directory, _dirnames, _filenames in os.walk(path, topdown=False):
-        try:
-            os.chmod(directory, 0o700)
-        except OSError:
-            continue
-
-
 # Wall clock for the container that deletes what the host cannot; one that
 # outlives it is removed by name.
 _PURGE_TIMEOUT_SECONDS = 300.0
@@ -114,14 +100,9 @@ def remove_sandbox_tree(path: Path, spec: SandboxSpec | None = None) -> bool:
     """
 
     target = Path(path)
-
-    def drop() -> None:
-        if not target.exists():
-            return
-        _unlock_owned_directories(target)
-        shutil.rmtree(target, ignore_errors=True)
-
-    drop()
+    # Snapshot directories are 0555 and a payload may be a hard link into a
+    # shared PIT view, so only the directories are unlocked.
+    rmtree_keeping_file_modes(target, ignore_errors=True)
     if not target.exists():
         return True
     docker = spec.docker_executable if spec is not None else "docker"
@@ -164,7 +145,7 @@ def remove_sandbox_tree(path: Path, spec: SandboxSpec | None = None) -> bool:
             pass
     except (OSError, subprocess.SubprocessError):
         pass
-    drop()
+    rmtree_keeping_file_modes(target, ignore_errors=True)
     return not target.exists()
 
 

@@ -2099,9 +2099,7 @@ def test_a_state_tree_the_host_cannot_empty_is_purged_from_the_replays_own_image
     )
     docker.chmod(0o755)
     spec = SandboxSpec(image="autotrade-sandbox:exp-pinned", docker_executable=str(docker), gpu=None)
-    monkeypatch.setattr(
-        "autotrade.environment.sandbox._unlock_owned_directories", lambda _path: None
-    )
+    monkeypatch.setattr("autotrade.environment.runtime._tree_directories", lambda _root: ())
 
     def written_state(name: str) -> Path:
         state = tmp_path / name

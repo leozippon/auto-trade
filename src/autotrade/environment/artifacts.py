@@ -357,10 +357,11 @@ class FilesystemArtifactStore:
     def _discard_directory(path: Path) -> None:
         if path.is_symlink() or not path.is_dir():
             raise ArtifactError(f"artifact store contains an invalid entry: {path}")
-        # Only the directories are unlocked. Unlinking a file needs write access
-        # to its directory, not to the file, and a revision file is a hard link
-        # into the shared object store: chmod'ing it writable would unlock the
-        # same bytes inside every other revision that shares them.
+        # Only the directories are unlocked; every file is set read-only. A
+        # revision file is a hard link into the shared object store, so it is
+        # never made writable, and the objects a revision that failed while
+        # being created interned are frozen only here
+        # (``runtime.rmtree_keeping_file_modes`` would leave them writable).
         chmod_tree(path, file_mode=0o444, dir_mode=0o700)
         shutil.rmtree(path)
 

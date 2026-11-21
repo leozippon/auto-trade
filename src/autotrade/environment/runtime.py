@@ -272,7 +272,7 @@ def chmod_tree(root: Path, *, file_mode: int, dir_mode: int) -> None:
         pass
 
 
-def rmtree_keeping_file_modes(root: Path) -> None:
+def rmtree_keeping_file_modes(root: Path, *, ignore_errors: bool = False) -> None:
     """Remove a tree whose files may be hardlinks this caller does not own.
 
     Only the directories are made writable. Unlinking a child needs write
@@ -281,9 +281,11 @@ def rmtree_keeping_file_modes(root: Path) -> None:
     way out would also unfreeze every other link to it. PIT staging trees are
     hardlink copies of published views, so one such chmod turns every
     experiment's decision snapshot writable at once. Single source for the
-    PIT cache's staging and slot removals; :func:`chmod_tree`'s tolerant
-    per-path policy applies to the directories for the same reason it does
-    there."""
+    PIT cache's staging and slot removals and for the host's part of
+    ``sandbox.remove_sandbox_tree``, which removes what it can
+    (``ignore_errors``) and leaves the rest to a container;
+    :func:`chmod_tree`'s tolerant per-path policy applies to the directories
+    for the same reason it does there."""
 
     root = Path(root)
     if not root.exists():
@@ -293,7 +295,7 @@ def rmtree_keeping_file_modes(root: Path) -> None:
             directory.chmod(0o755)
         except OSError:
             pass
-    shutil.rmtree(root)
+    shutil.rmtree(root, ignore_errors=ignore_errors)
 
 
 def link_or_copy(source: str | Path, dest: str | Path) -> None:
