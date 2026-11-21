@@ -353,6 +353,8 @@ class SnapshotConfig:
     # the open and the close and any other execute_at is rejected as
     # ``missing_execution_price``.
     include_intraday: bool = False
+    # No experiment sets these two or the news knobs above (only tests do); they
+    # stay because to_record() keys the PIT view cache on them.
     include_industry: bool = True
     text_body_chars: int = 4000
     replay_include_events: bool = True
