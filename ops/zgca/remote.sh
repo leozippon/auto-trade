@@ -3,8 +3,11 @@
 # workflow as `bash -lc "$(cat remote.sh)" remote.sh <root> <venv> <local dir>
 # <storage> <quota bytes> <floor bytes> <step> [args]` so the platform's login
 # environment (DOCKER_HOST) is present, the script is always the local
-# checkout's, never a stale copy on the instance, and the instance's layout and
-# storage quota are stated in zgca.py alone. Runs as the instance's root;
+# checkout's, never a stale copy on the instance, and the instance's paths and
+# storage quota are stated in zgca.py alone. The names of the four files the
+# deploy ships into .runtime/zgca/ are written here too: the tests run the
+# steps that read two of them against zgca.py's names and compare the other
+# two, the release files only the image build reads. Runs as the instance's root;
 # everything persistent lives on the quota-bound storage except the pretrained
 # store, which is too large for that quota and lives in <local dir>/pretrained
 # on the instance's own disk, linked from the root's data/pretrained. The
