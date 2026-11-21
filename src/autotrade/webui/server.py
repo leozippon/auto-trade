@@ -15,6 +15,7 @@ import logging
 import tempfile
 import zipfile
 from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -117,6 +118,7 @@ def _raw_generation_status(repo_root: Path) -> dict[str, object]:
 _HEALTHY_RAW_STATES = frozenset({"committed", "absent", "updating"})
 
 _UNREADABLE_HITL_HEALTH_ERROR = "HITL control plane is unreadable"
+_UNREADABLE_IDENTITY = "experiment identity state is unreadable"
 
 
 def _health_unreadable_experiments(
@@ -190,6 +192,28 @@ class FillsRequest(_Body):
     fills: list[dict[str, object]] = []
 
 
+_Kinds = type[Exception] | tuple[type[Exception], ...]
+
+
+@contextmanager
+def _http_errors(*rules: tuple[_Kinds, int] | tuple[_Kinds, int, str]) -> Iterator[None]:
+    """Answer an exception raised inside with the status of the first rule
+    ``(exception types, status[, detail])`` it matches: the rule's fixed
+    detail, or else the exception's own message without host paths (a
+    KeyError's message is its argument; ``str(KeyError)`` is its repr).
+    An exception no rule names propagates."""
+
+    try:
+        yield
+    except Exception as exc:
+        for kinds, status, *fixed in rules:
+            if isinstance(exc, kinds):
+                message = str(exc.args[0]) if isinstance(exc, KeyError) and exc.args else str(exc)
+                detail = fixed[0] if fixed else omit_private_paths(message)
+                raise HTTPException(status_code=status, detail=detail) from exc
+        raise
+
+
 def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI:
     root = Path(repo_root).resolve()
     experiment_root = Path(experiments_root or root / "experiments").resolve()
@@ -244,22 +268,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return JSONResponse(status_code=422, content={"detail": "; ".join(problems)})
 
     def _experiment_dir(experiment_id: str) -> Path:
-        try:
+        with _http_errors((KeyError, 404), (ValueError, 400)):
             return registry.resolve_experiment_dir(experiment_root, experiment_id)
-        except KeyError as exc:
-            # str(KeyError) is the repr of its argument; the message is args[0].
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def _public_identity(experiment_id: str) -> tuple[Path, PublicIdentity]:
         directory = _experiment_dir(experiment_id)
-        try:
+        with _http_errors(((OSError, ValueError), 409, _UNREADABLE_IDENTITY)):
             return directory, PublicIdentity(directory)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(
-                status_code=409, detail="experiment identity state is unreadable"
-            ) from exc
 
     def _trace_target(
         experiment_id: str, public_ref: str | None
@@ -271,10 +286,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             if not raw_run_id:
                 raise HTTPException(status_code=404, detail="no trace available for this run")
         else:
-            try:
+            with _http_errors(((KeyError, ValueError), 404, "unknown run or trace reference")):
                 raw_run_id = identity.raw_run_id(public_ref)
-            except (KeyError, ValueError) as exc:
-                raise HTTPException(status_code=404, detail="unknown run or trace reference") from exc
         path = traces.resolve_trace_path(directory, raw_run_id)
         if path is None:
             raise HTTPException(status_code=404, detail="no trace available for this run")
@@ -377,20 +390,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.post("/api/experiments")
     def post_experiment(params: dict = Body(..., embed=True)) -> dict[str, object]:
-        try:
+        with _http_errors(((ManagerError, ValueError), 400)):
             return manager.create_experiment(dict(params))
-        except (ManagerError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     @app.get("/api/experiments/{experiment_id}")
     def get_experiment(experiment_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        try:
+        with _http_errors(((OSError, ValueError, KeyError), 409, _UNREADABLE_IDENTITY)):
             return registry.experiment_detail(experiment_root, experiment_id)
-        except (OSError, ValueError, KeyError) as exc:
-            raise HTTPException(
-                status_code=409, detail="experiment identity state is unreadable"
-            ) from exc
 
     @app.get("/api/experiments/{experiment_id}/status")
     def get_status(experiment_id: str) -> dict[str, object]:
@@ -412,12 +419,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}/research-depth")
     def get_research_depth(experiment_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        try:
+        with _http_errors(((OSError, ValueError), 409, "experiment research records are unreadable")):
             return registry.research_depth(experiment_root, experiment_id)
-        except (OSError, ValueError) as exc:
-            raise HTTPException(
-                status_code=409, detail="experiment research records are unreadable"
-            ) from exc
 
     @app.get("/api/experiments/{experiment_id}/trace/stats")
     def get_trace_stats(
@@ -479,10 +482,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         """The system prompt and opening message a session actually started with."""
 
         path, _raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
-        try:
+        with _http_errors((KeyError, 404)):
             prompt = traces.read_initial_prompt(path)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
         public = identity.public_record(prompt)
         public.pop("run_ref", None)
         public.pop("trace_ref", None)
@@ -511,10 +512,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         run_id: str | None = Query(None),
     ) -> FileResponse:
         path, _raw_run_id, trace_ref, identity = _trace_target(experiment_id, run_id)
-        try:
+        with _http_errors(((OSError, UnicodeError, ValueError), 409, "trace is unreadable")):
             public_path = _public_trace_download(path, identity)
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise HTTPException(status_code=409, detail="trace is unreadable") from exc
         return FileResponse(
             public_path,
             media_type="application/x-ndjson",
@@ -530,6 +529,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         try:
             return manager.delete_experiment(experiment_id)
         except ManagerDeleteError as exc:
+            # As written: it names what is left on disk for the operator to remove.
             raise HTTPException(status_code=500, detail=str(exc)) from exc
         except ManagerError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -537,10 +537,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.post("/api/experiments/{experiment_id}/control")
     def post_control(experiment_id: str, body: ControlRequest) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        try:
+        with _http_errors((ManagerError, 400)):
             return manager.control(experiment_id, **body.model_dump())
-        except ManagerError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def _zip_response(members: Iterable[tuple[Path, Path]], filename: str) -> FileResponse:
         with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as handle:
@@ -577,31 +575,22 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}/registered/strategy.zip")
     def get_registered_strategy(experiment_id: str) -> FileResponse:
         _experiment_dir(experiment_id)
-        try:
+        with _http_errors((FileNotFoundError, 404), ((KeyError, ValueError), 404, "the experiment has no registered artifact")):
             strategy_dir = registry.registered_strategy_dir(experiment_root, experiment_id)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail="the experiment has no registered artifact") from exc
         return _strategy_zip_response(strategy_dir, f"{experiment_id}__registered.zip")
 
     # ---- step tree ---------------------------------------------------------------
     @app.get("/api/experiments/{experiment_id}/steps")
     def get_step_tree(experiment_id: str) -> dict[str, object]:
-        try:
-            return steps.step_tree_view(_experiment_dir(experiment_id))
-        except (OSError, ValueError) as exc:
-            raise HTTPException(
-                status_code=409, detail="experiment identity state is unreadable"
-            ) from exc
+        directory = _experiment_dir(experiment_id)
+        with _http_errors(((OSError, ValueError), 409, _UNREADABLE_IDENTITY)):
+            return steps.step_tree_view(directory)
 
     @app.get("/api/experiments/{experiment_id}/steps/{node_id}/source.zip")
     def get_step_node_zip(experiment_id: str, node_id: str) -> FileResponse:
         directory, _identity = _public_identity(experiment_id)
-        try:
+        with _http_errors((ValueError, 404)):
             node_dir = steps.node_export_dir(directory, node_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
         return _zip_response(
             (
                 (file_path.relative_to(node_dir), file_path)
@@ -617,12 +606,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     # named result whose file is not in the experiment directory says so.
     def _ledger_result(read, experiment_id: str, name: str):
         _experiment_dir(experiment_id)
-        try:
+        with _http_errors((FileNotFoundError, 404), ((KeyError, ValueError), 404, f"unknown result: {name}")):
             return read()
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
-        except (KeyError, ValueError) as exc:
-            raise HTTPException(status_code=404, detail=f"unknown result: {name}") from exc
 
     @app.get("/api/experiments/{experiment_id}/results/{name}/equity")
     def get_result_equity(
@@ -674,27 +659,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     # for the proxied surface, the edge's login gate — so these routes carry no
     # gate of their own beyond the validation each write performs.
     def _memory_write(action) -> dict[str, object]:
-        """One HTTP mapping for every memory write; messages carry no host path."""
+        """One HTTP mapping for every memory write."""
 
-        try:
+        with _http_errors(
+            (FileExistsError, 409), (KeyError, 404), (ValueError, 400),
+            (OSError, 409, "curated memory library is not writable"),
+        ):
             return action()
-        except FileExistsError as exc:
-            raise HTTPException(
-                status_code=409, detail=omit_private_paths(str(exc))
-            ) from exc
-        except KeyError as exc:
-            detail = str(exc.args[0]) if exc.args else "unknown curated memory entry"
-            raise HTTPException(
-                status_code=404, detail=omit_private_paths(detail)
-            ) from exc
-        except ValueError as exc:
-            raise HTTPException(
-                status_code=400, detail=omit_private_paths(str(exc))
-            ) from exc
-        except OSError as exc:
-            raise HTTPException(
-                status_code=409, detail="curated memory library is not writable"
-            ) from exc
 
     @app.get("/api/memory")
     def get_memory() -> dict[str, object]:
@@ -702,14 +673,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
     @app.get("/api/memory/curated/{name}")
     def get_curated_memory(name: str) -> dict[str, object]:
-        try:
+        with _http_errors(
+            (ValueError, 400, "invalid memory entry name"), ((KeyError, OSError), 404, "unknown curated memory entry")
+        ):
             return memory.curated_entry(root, name)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
-        except (KeyError, OSError) as exc:
-            raise HTTPException(
-                status_code=404, detail="unknown curated memory entry"
-            ) from exc
 
     @app.post("/api/memory/curated")
     def post_curated_memory(body: CuratedMemoryCreate) -> dict[str, object]:
@@ -726,12 +693,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.get("/api/experiments/{experiment_id}/memory")
     def get_experiment_memory(experiment_id: str) -> dict[str, object]:
         _experiment_dir(experiment_id)
-        try:
+        with _http_errors(((OSError, TypeError, ValueError, KeyError), 409, _UNREADABLE_IDENTITY)):
             return memory.experiment_memory(experiment_root, experiment_id)
-        except (OSError, TypeError, ValueError, KeyError) as exc:
-            raise HTTPException(
-                status_code=409, detail="experiment identity state is unreadable"
-            ) from exc
 
     @app.get("/api/experiments/{experiment_id}/memory/{source}/{name}")
     def get_experiment_memory_entry(
@@ -740,16 +703,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         """One entry as this experiment holds it, not as the library reads now."""
 
         _experiment_dir(experiment_id)
-        try:
-            return memory.experiment_memory_entry(
-                experiment_root, experiment_id, source, name
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail="invalid memory entry name") from exc
-        except (KeyError, OSError) as exc:
-            raise HTTPException(
-                status_code=404, detail="unknown mounted memory entry"
-            ) from exc
+        with _http_errors(
+            (ValueError, 400, "invalid memory entry name"), ((KeyError, OSError), 404, "unknown mounted memory entry")
+        ):
+            return memory.experiment_memory_entry(experiment_root, experiment_id, source, name)
 
     # ---- Agent feedback channels --------------------------------------------------
     @app.get("/api/issue-reports")
@@ -804,17 +761,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
     def post_prompt_preview(experiment_id: str, body: PromptPreviewRequest) -> dict[str, object]:
         directory, identity = _public_identity(experiment_id)
-        try:
+        with _http_errors((KeyError, 404), (ValueError, 400)):
             raw_session_key = identity.raw_session_key(body.session_key)
             preview = build_prompt_preview(directory, raw_session_key, body.directive, repo_root=root)
-            return {
-                **preview,
-                "prompt": identity.public_text(str(preview.get("prompt") or "")),
-            }
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0] if exc.args else exc)) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            return {**preview, "prompt": identity.public_text(str(preview.get("prompt") or ""))}
 
     def _trading_env(env: str) -> str:
         if env not in trading.TRADING_ENVS:
@@ -822,10 +772,8 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return env
 
     def _trading_book(env: str, book: str, panel):
-        try:
+        with _http_errors((KeyError, 404)):
             return panel(root, book, _trading_env(env))
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
     @app.get("/api/trading/{env}/books")
     def trading_books(env: str):
@@ -835,29 +783,18 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def trading_open_book(env: str, body: OpenBookRequest) -> dict[str, object]:
         _trading_env(env)
         directory = _experiment_dir(body.experiment_id)
-        try:
+        with _http_errors((FileNotFoundError, 404), ((ValueError, OSError, RuntimeError), 400)):
             book_id = open_registered_book(root, directory)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=404, detail=omit_private_paths(str(exc))) from exc
-        except (ValueError, OSError, RuntimeError) as exc:
-            raise HTTPException(status_code=400, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "book_id": book_id}
 
     @app.delete("/api/trading/{env}/books/{book}")
     def trading_delete_book(env: str, book: str) -> dict[str, object]:
         state_root = trading.env_dir(root, _trading_env(env))
-        try:
+        with _http_errors(
+            (KeyError, 404), (ValueError, 400),
+            (PaperWriterBusy, 409, f"Paper account {book} is running; delete it after the run"), (OSError, 500),
+        ):
             delete_book(state_root, book)
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except PaperWriterBusy as exc:
-            raise HTTPException(
-                status_code=409, detail=f"Paper account {book} is running; delete it after the run"
-            ) from exc
-        except OSError as exc:
-            raise HTTPException(status_code=500, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "deleted": book}
 
     @app.get("/api/trading/{env}/books/{book}/status")
@@ -897,15 +834,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     # (the loopback bind and the edge's login). The run reads the file; the
     # console never writes the book's state.
     def _book_root(env: str, book: str) -> Path:
-        try:
+        with _http_errors((KeyError, 404)):
             return trading.book_dir(root, book, _trading_env(env))
-        except KeyError as exc:
-            raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
     @app.post("/api/trading/{env}/books/{book}/fills")
     def trading_record_fills(env: str, book: str, body: FillsRequest) -> dict[str, object]:
         directory = _book_root(env, book)
-        try:
+        with _http_errors(((TypeError, ValueError), 400)):
             lines = fills.record(
                 directory,
                 read_json_object(directory / PAPER_STATE_NAME, missing_ok=True),
@@ -914,17 +849,13 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
                 fills=body.fills,
                 today=datetime.now(CN_TZ).strftime("%Y%m%d"),
             )
-        except (TypeError, ValueError) as exc:
-            raise HTTPException(status_code=400, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "book_id": book, "recorded": len(lines)}
 
     @app.post("/api/trading/{env}/books/{book}/fills/enable")
     def trading_enable_fills(env: str, book: str) -> dict[str, object]:
         directory = _book_root(env, book)
-        try:
+        with _http_errors((ValueError, 400)):
             fills.enable(directory)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=omit_private_paths(str(exc))) from exc
         return {"env": env, "book_id": book, "real_fills": True}
 
     if STATIC_DIR.is_dir():
