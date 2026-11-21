@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import math
+import shutil
 import threading
 import unittest
 from collections.abc import Mapping
@@ -749,6 +750,37 @@ class RegistrationTest(unittest.TestCase):
             full = _node_id(session.validate_one("full", _strategy("22")))
             registration = session.backtest.registration(full)
             self.assertEqual((registration["passed"], registration["reasons"]), (True, []))
+
+    def test_another_sessions_node_is_refused_as_candidate_and_as_seed_replicate(self) -> None:
+        """``test`` resolves any node id of the tree, another session's
+        included, so the refusal of a node this session did not validate rests
+        on the registration guard alone: it names that reason for a node that
+        registers in its own session, named as candidate or as seed replicate."""
+        from autotrade.pipelines.session_tools import TestTool
+
+        with TemporaryDirectory() as tmp:
+            other = _Session(Path(tmp) / "other")
+            foreign = _node_id(other.validate_one("full", _strategy("22")))
+            self.assertTrue(other.backtest.registration(foreign)["passed"])
+            # One tree, two sessions: the node keeps the other session's ref.
+            shutil.copytree(other.root / "steps", Path(tmp) / "session" / "steps")
+            session = _Session(Path(tmp) / "session")
+            self.assertNotIn(foreign, session.tree.session_node_ids(session.backtest.session_ref))
+            own = _node_id(session.validate_one("full", _strategy("22")))
+            self.assertTrue(session.backtest.registration(own)["passed"])
+            test = TestTool(session.backtest)
+            for arguments in (
+                {"candidate": foreign},
+                {"candidate": own, "seed_replicates": [foreign]},
+            ):
+                with self.assertRaises(ToolError) as refused:
+                    test.invoke(arguments)
+                self.assertEqual(refused.exception.error_type, "test_registration_refused")
+                self.assertEqual(
+                    refused.exception.details["registration"]["reasons"],
+                    ["registration_needs_a_step_of_this_session"],
+                )
+            self.assertEqual(session.backtest.tests, [])
 
     def test_a_full_span_winner_among_two_is_tested_without_restoring_the_working_copy(
         self,
