@@ -126,7 +126,6 @@ from .common import (
 )
 from .io import (
     committed_partition_intact,
-    manual_production_write,
     parquet_rows,
     write_parquet,
 )
@@ -137,6 +136,7 @@ from .layout import (
     range_partition,
     refuse_moved_range_start,
 )
+from .lock import manual_production_write
 from .versions import (
     DefectiveAnswer,
     answer_defects,

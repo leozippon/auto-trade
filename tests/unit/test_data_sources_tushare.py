@@ -31,6 +31,7 @@ from autotrade.data_sources.tushare import (
     versions,
 )
 from autotrade.data_sources.tushare import io as tushare_io
+from autotrade.data_sources.tushare import lock as tushare_lock
 from autotrade.environment.data.fundamental_events import (
     FundamentalEventsBuilder,
     month_aligned_replace_window,
@@ -7370,14 +7371,14 @@ class ManualProductionWriteRefusalTest(unittest.TestCase):
             (self.root / "elsewhere", False),
             (None, False),
         ):
-            self.assertEqual(tushare_io.manual_production_write(self.root, protected, target), refused, target)
+            self.assertEqual(tushare_lock.manual_production_write(self.root, protected, target), refused, target)
 
     def test_genuine_cron_child_with_inherited_lock_fd_passes(self) -> None:
         # Only an INHERITED, exclusively-held lock fd proves a runner child:
         # env flag + "somebody holds the lock" was forgeable by any manual run.
         import fcntl
 
-        from autotrade.data_sources.tushare.io import UPDATER_LOCK_FD_ENV
+        from autotrade.data_sources.tushare.lock import UPDATER_LOCK_FD_ENV
 
         lock_path = self.root / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
         lock_path.parent.mkdir(parents=True)
@@ -7393,7 +7394,7 @@ class ManualProductionWriteRefusalTest(unittest.TestCase):
     def test_forged_marker_without_an_inherited_lock_fd_is_refused(self) -> None:
         import fcntl
 
-        from autotrade.data_sources.tushare.io import UPDATER_LOCK_FD_ENV
+        from autotrade.data_sources.tushare.lock import UPDATER_LOCK_FD_ENV
 
         lock_path = self.root / ".runtime" / "tushare" / "locks" / "tushare_update.lock"
         lock_path.parent.mkdir(parents=True)

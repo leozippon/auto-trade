@@ -34,7 +34,7 @@ def _refuse_manual_production_write(args: argparse.Namespace) -> None:
     with its runner equivalent (``manual_production_write``); non-production
     roots (tests, local lakes) and the read-only audit subcommand, which has
     no --output-root, pass."""
-    from autotrade.data_sources.tushare.io import manual_production_write
+    from autotrade.data_sources.tushare.lock import manual_production_write
 
     repo_root = Path(__file__).resolve().parents[2]
     production_events = repo_root / "data" / "pit" / "fundamental_events"

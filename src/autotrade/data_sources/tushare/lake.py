@@ -64,7 +64,6 @@ from .cron_update import (
     DEFAULT_LOCK_WAIT_SECONDS,
     RUN_LOG_ROOT,
     RunContext,
-    acquire_lock,
     history_repull_policy,
     load_config,
     run_history_repull,
@@ -76,7 +75,7 @@ from .generation import (
     read_raw_generation_file,
     record_vintages,
 )
-from .io import inherited_updater_lock_fd
+from .lock import acquire_lock, inherited_updater_lock_fd
 from .versions import (
     STAGED,
     SUPERSEDED,

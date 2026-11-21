@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autotrade.data_sources.tushare import cron_update, lake
-from autotrade.data_sources.tushare.io import UPDATER_LOCK_FD_ENV
+from autotrade.data_sources.tushare.lock import UPDATER_LOCK_FD_ENV
 from autotrade.environment.data.research_release import pin_research_release
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,

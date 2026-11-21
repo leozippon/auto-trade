@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
 import os
 import re
@@ -21,7 +20,6 @@ from autotrade.common.records import read_json_object, write_json_atomic
 from autotrade.common.time import utc_now
 from autotrade.environment.data.contracts import (
     GENERATION_COMMITTED,
-    updater_lock_path,
 )
 from autotrade.environment.data.pit import complete_interrupted_commits
 
@@ -44,7 +42,7 @@ from .generation import (
     read_raw_generation_file,
     record_vintages,
 )
-from .io import UPDATER_LOCK_FD_ENV
+from .lock import UPDATER_LOCK_FD_ENV, acquire_lock
 from .versions import RUN_REPORT_ENV
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")
@@ -520,47 +518,6 @@ def job_config_identity(ctx: RunContext) -> dict:
         "shared": {key: ctx.config.get(key) for key in sorted(shared_keys)},
         "job": ctx.job,
     }
-
-
-@dataclass
-class FileLock:
-    """A held kernel flock; the file itself is never deleted (unlinking a
-    flock-backed lock file races a concurrent opener onto a dead inode)."""
-
-    path: Path
-    fd: int
-
-    def release(self) -> None:
-        try:
-            fcntl.flock(self.fd, fcntl.LOCK_UN)
-        finally:
-            os.close(self.fd)
-
-
-def acquire_lock(repo_root: Path, wait_seconds: int) -> FileLock:
-    """Exclusive kernel flock on the updater lock of ``repo_root``: released
-    automatically when the holder exits, so a crashed/killed run can never
-    leave a permanently stale lock (the old PID-file scheme broke on PID
-    reuse). pid/started_at are diagnostics only."""
-    lock = updater_lock_path(repo_root)
-    lock.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(lock, os.O_CREAT | os.O_RDWR)
-    deadline = time.monotonic() + max(0, wait_seconds)
-    while True:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            break
-        except BlockingIOError:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                os.close(fd)
-                raise RuntimeError(
-                    f"lock is held after waiting {wait_seconds}s, another run may be active: {lock}"
-                ) from None
-            time.sleep(min(15.0, remaining))
-    os.ftruncate(fd, 0)
-    os.write(fd, f"pid={os.getpid()}\nstarted_at={utc_now()}\n".encode())
-    return FileLock(lock, fd)
 
 
 def new_run_report() -> Path:
