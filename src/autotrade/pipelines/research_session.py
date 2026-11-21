@@ -1250,7 +1250,6 @@ class LLMResearchDeveloper:
         target = local.paths.current_snapshot
         end = yyyymmdd(request.decision_time)
         start = months_before(end, request.window_months)
-        rmtree_keeping_file_modes(target)
         if source.is_dir():
             local.bind_snapshot_view(source)
         elif source.is_file():
@@ -1262,7 +1261,8 @@ class LLMResearchDeveloper:
             visible = frame_between(start, end)
             if not isinstance(visible, pd.DataFrame) or visible.empty:
                 raise ValueError(f"Agent daily view is empty for {start}..{end}")
-            target.mkdir(parents=True, exist_ok=True)
+            rmtree_keeping_file_modes(target)
+            target.mkdir(parents=True)
             visible.to_parquet(target / "daily.parquet", index=False)
             write_json_atomic(
                 target / "manifest.json",

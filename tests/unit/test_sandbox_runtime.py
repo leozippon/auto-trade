@@ -48,6 +48,7 @@ from autotrade.environment.executor import (
 from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB, GpuUnavailableError
 from autotrade.environment.replay import DailyMarketData
 from autotrade.environment.replay.stats import compute_return_stats
+from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.sandbox import (
     ARCHIVE_MAX_FILE_BYTES,
     EXPERIMENT_LABEL,
@@ -799,6 +800,38 @@ def test_relinking_a_tree_leaves_the_modes_of_files_it_replaces_alone(tmp_path: 
     assert stat.S_IMODE(frozen.stat().st_mode) == 0o444
     assert sorted(path.name for path in dest.iterdir()) == ["tree.json"]
     assert (dest / "tree.json").stat().st_ino == (source / "tree.json").stat().st_ino
+
+
+def test_a_second_snapshot_view_replaces_the_first_without_touching_the_shared_views(
+    tmp_path: Path,
+):
+    # A mounted snapshot is a read-only hard-linked copy of a shared PIT view;
+    # a resumed attempt mounts its view over the one already there.
+    views = {
+        "first": {"manifest.json": b"first\n", "only_first.parquet": b"old", "daily/a.parquet": b"a1"},
+        "second": {"manifest.json": b"second\n", "daily/a.parquet": b"a2"},
+    }
+    for name, files in views.items():
+        for relative, payload in files.items():
+            path = tmp_path / "views" / name / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        chmod_tree(tmp_path / "views" / name, file_mode=0o444, dir_mode=0o555)
+    local = LocalSandbox(tmp_path / "session")
+    current = local.prepare_layout().current_snapshot
+
+    local.bind_snapshot_view(tmp_path / "views" / "first")
+    local.bind_snapshot_view(tmp_path / "views" / "second")
+
+    assert sorted(
+        path.relative_to(current).as_posix() for path in current.rglob("*") if path.is_file()
+    ) == sorted(views["second"])
+    assert (current / "manifest.json").read_bytes() == b"second\n"
+    for name, files in views.items():
+        for relative, payload in files.items():
+            shared = tmp_path / "views" / name / relative
+            assert shared.read_bytes() == payload
+            assert stat.S_IMODE(shared.stat().st_mode) == 0o444
 
 
 def test_working_artifact_permission_restore_fails_closed(tmp_path: Path):

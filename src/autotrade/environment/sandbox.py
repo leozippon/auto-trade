@@ -548,7 +548,14 @@ class LocalSandbox:
         return self.paths.runtime_env
 
     def bind_snapshot_view(self, view_dir: Path) -> None:
-        _replace_dir_contents(Path(view_dir), self.paths.current_snapshot)
+        """Replace the mounted snapshot with a read-only hard-linked copy of
+        ``view_dir``; the old view's links go without a chmod."""
+
+        chmod_tree(
+            link_copytree(view_dir, self.paths.current_snapshot),
+            file_mode=0o444,
+            dir_mode=0o555,
+        )
 
     def collect_artifacts(self, dest_dir: Path) -> Path:
         """Collect runtime outputs into the host experiment run directory.
@@ -767,7 +774,8 @@ class DockerSandbox:
 def link_copytree(source: str | Path, dest: str | Path) -> Path:
     """Replace ``dest`` with a hard-linked copy of ``source``. The old files
     may be links to frozen files elsewhere (a published step tree links the
-    session's node snapshots), so they go without a chmod."""
+    session's node snapshots, a mounted snapshot the shared PIT view), so they
+    go without a chmod."""
 
     source, dest = Path(source), Path(dest)
     rmtree_keeping_file_modes(dest)
@@ -886,18 +894,6 @@ def _record_collect_skip(dest_dir: Path, name: str, exc: Exception) -> None:
         )
     except OSError:
         pass
-
-
-def _replace_dir_contents(source: Path, dest: Path) -> None:
-    if not source.is_dir():
-        raise FileNotFoundError(source)
-    dest.mkdir(parents=True, exist_ok=True)
-    for child in list(dest.iterdir()):
-        shutil.rmtree(child) if child.is_dir() and not child.is_symlink() else child.unlink()
-    for child in source.iterdir():
-        target = dest / child.name
-        shutil.copytree(child, target, copy_function=link_or_copy) if child.is_dir() else link_or_copy(child, target)
-    chmod_tree(dest, file_mode=0o444, dir_mode=0o555)
 
 
 def _validate_explicit_image_tag(image: str) -> None:
