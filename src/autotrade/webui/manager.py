@@ -275,6 +275,21 @@ def _signal_worker_group(pid: int, sig: signal.Signals) -> None:
         os.kill(pid, sig)
 
 
+def _stop_worker(status_path: Path, pid: int, grace: float) -> bool:
+    """SIGTERM the worker's process group, and SIGKILL it once it outlives
+    ``grace``; whether it had to be killed. A worker already gone at the
+    SIGTERM raises ``ProcessLookupError``."""
+
+    _signal_worker_group(pid, signal.SIGTERM)
+    if _await_worker_exit(status_path, grace):
+        return False
+    try:
+        _signal_worker_group(pid, signal.SIGKILL)
+    except ProcessLookupError:  # exited just after the last poll
+        pass
+    return True
+
+
 def uses_local_model(params: Mapping[str, object]) -> bool:
     """Whether an experiment counts against MAX_RUNNING_LOCAL_EXPERIMENTS: its main
     session or its sub-agents run on the local model, as the worker resolves
@@ -867,15 +882,9 @@ class ExperimentManager:
             raise ManagerError("no live worker to terminate")
         pid = int(status["pid"])
         try:
-            _signal_worker_group(pid, signal.SIGTERM)
+            escalated = _stop_worker(status_path, pid, _TERMINATE_GRACE_SECONDS)
         except ProcessLookupError as exc:  # exited between check and signal
             raise ManagerError("worker 已退出") from exc
-        escalated = not _await_worker_exit(status_path, _TERMINATE_GRACE_SECONDS)
-        if escalated:
-            try:
-                _signal_worker_group(pid, signal.SIGKILL)
-            except ProcessLookupError:  # exited just after the last poll
-                pass
         result: dict[str, object] = {
             "terminated_pid": pid,
             "escalated": escalated,
@@ -943,17 +952,9 @@ class ExperimentManager:
         with self._slots:
             if status_pid_alive(status):
                 pid = int(status["pid"])
-                _signal_worker_group(pid, signal.SIGTERM)
-                escalated = not _await_worker_exit(status_path, _RESTART_GRACE_SECONDS)
-                if escalated:
-                    try:
-                        _signal_worker_group(pid, signal.SIGKILL)
-                    except ProcessLookupError:  # exited just after the last poll
-                        pass
-                    if not _await_worker_exit(status_path, _SIGKILL_EXIT_SECONDS):
-                        raise ManagerError(
-                            f"worker pid {pid} 未响应 SIGKILL；请先排查该进程再重启"
-                        )
+                escalated = _stop_worker(status_path, pid, _RESTART_GRACE_SECONDS)
+                if escalated and not _await_worker_exit(status_path, _SIGKILL_EXIT_SECONDS):
+                    raise ManagerError(f"worker pid {pid} 未响应 SIGKILL；请先排查该进程再重启")
             _reclaim_sandbox_containers(experiment_id)
             return {
                 "restarted": True,
