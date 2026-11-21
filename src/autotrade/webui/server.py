@@ -19,13 +19,16 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import Body, FastAPI, HTTPException, Query, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
+    JSONResponse,
     PlainTextResponse,
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, ConfigDict
 from starlette.background import BackgroundTask
 from starlette.middleware.gzip import GZipMiddleware
 
@@ -143,6 +146,50 @@ def _health_unreadable_experiments(
     return public
 
 
+class _Body(BaseModel):
+    """A request body read as written: a field of another JSON type, or one
+    the route does not take, is refused with 422 naming it, never coerced."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+
+class ControlRequest(_Body):
+    """``ExperimentManager.control``'s arguments, which it checks further."""
+
+    action: str
+    session_key: str | None = None
+    directive: str | None = None
+    text: str | None = None
+    interrupt: bool | None = False
+    at: str | None = None
+
+
+class CuratedMemoryCreate(_Body):
+    name: str
+    content: str
+
+
+class CuratedMemoryUpdate(_Body):
+    content: str
+
+
+class PromptPreviewRequest(_Body):
+    session_key: str
+    directive: str = ""
+
+
+class OpenBookRequest(_Body):
+    experiment_id: str
+
+
+class FillsRequest(_Body):
+    """``paper.fills.record``'s arguments; it checks each fill's fields."""
+
+    trade_date: str
+    outcome: str | None = None
+    fills: list[dict[str, object]] = []
+
+
 def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI:
     root = Path(repo_root).resolve()
     experiment_root = Path(experiments_root or root / "experiments").resolve()
@@ -187,6 +234,14 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     # more time on the event loop. The live trace stream (text/event-stream)
     # is never compressed.
     app.add_middleware(GZipMiddleware, compresslevel=6)
+
+    @app.exception_handler(RequestValidationError)
+    async def refuse_malformed_request(_request: Request, exc: RequestValidationError) -> JSONResponse:
+        """A malformed request answers 422 with one line naming each bad field
+        (``body.at: Input should be a valid string``): ``detail`` is text in
+        every refusal, which the page shows as written."""
+        problems = [f"{'.'.join(str(part) for part in error['loc'])}: {error['msg']}" for error in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": "; ".join(problems)})
 
     def _experiment_dir(experiment_id: str) -> Path:
         try:
@@ -480,18 +535,10 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
     @app.post("/api/experiments/{experiment_id}/control")
-    def post_control(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:
+    def post_control(experiment_id: str, body: ControlRequest) -> dict[str, object]:
         _experiment_dir(experiment_id)
         try:
-            return manager.control(
-                experiment_id,
-                str(payload.get("action") or ""),
-                session_key=payload.get("session_key"),
-                directive=payload.get("directive"),
-                text=payload.get("text"),
-                interrupt=payload.get("interrupt", False),
-                at=payload.get("at"),
-            )
+            return manager.control(experiment_id, **body.model_dump())
         except ManagerError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -665,22 +712,12 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             ) from exc
 
     @app.post("/api/memory/curated")
-    def post_curated_memory(payload: dict = Body(...)) -> dict[str, object]:
-        return _memory_write(
-            lambda: memory.create_curated_entry(
-                root,
-                str(payload.get("name") or ""),
-                str(payload.get("content") or ""),
-            )
-        )
+    def post_curated_memory(body: CuratedMemoryCreate) -> dict[str, object]:
+        return _memory_write(lambda: memory.create_curated_entry(root, body.name, body.content))
 
     @app.put("/api/memory/curated/{name}")
-    def put_curated_memory(name: str, payload: dict = Body(...)) -> dict[str, object]:
-        return _memory_write(
-            lambda: memory.update_curated_entry(
-                root, name, str(payload.get("content") or "")
-            )
-        )
+    def put_curated_memory(name: str, body: CuratedMemoryUpdate) -> dict[str, object]:
+        return _memory_write(lambda: memory.update_curated_entry(root, name, body.content))
 
     @app.delete("/api/memory/curated/{name}")
     def delete_curated_memory(name: str) -> dict[str, object]:
@@ -765,18 +802,11 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         )
 
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
-    def post_prompt_preview(experiment_id: str, payload: dict = Body(...)) -> dict[str, object]:
+    def post_prompt_preview(experiment_id: str, body: PromptPreviewRequest) -> dict[str, object]:
         directory, identity = _public_identity(experiment_id)
         try:
-            raw_session_key = identity.raw_session_key(
-                str(payload.get("session_key") or "")
-            )
-            preview = build_prompt_preview(
-                directory,
-                raw_session_key,
-                str(payload.get("directive") or ""),
-                repo_root=root,
-            )
+            raw_session_key = identity.raw_session_key(body.session_key)
+            preview = build_prompt_preview(directory, raw_session_key, body.directive, repo_root=root)
             return {
                 **preview,
                 "prompt": identity.public_text(str(preview.get("prompt") or "")),
@@ -802,9 +832,9 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         return trading.books_payload(root, _trading_env(env))
 
     @app.post("/api/trading/{env}/books")
-    def trading_open_book(env: str, payload: dict = Body(...)) -> dict[str, object]:
+    def trading_open_book(env: str, body: OpenBookRequest) -> dict[str, object]:
         _trading_env(env)
-        directory = _experiment_dir(str(payload.get("experiment_id") or ""))
+        directory = _experiment_dir(body.experiment_id)
         try:
             book_id = open_registered_book(root, directory)
         except FileNotFoundError as exc:
@@ -873,18 +903,15 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
             raise HTTPException(status_code=404, detail=str(exc.args[0])) from exc
 
     @app.post("/api/trading/{env}/books/{book}/fills")
-    def trading_record_fills(env: str, book: str, payload: dict = Body(...)) -> dict[str, object]:
+    def trading_record_fills(env: str, book: str, body: FillsRequest) -> dict[str, object]:
         directory = _book_root(env, book)
-        entries = payload.get("fills") or []
-        if not isinstance(entries, list) or not all(isinstance(item, dict) for item in entries):
-            raise HTTPException(status_code=400, detail="fills must be a list of objects")
         try:
             lines = fills.record(
                 directory,
                 read_json_object(directory / PAPER_STATE_NAME, missing_ok=True),
-                str(payload.get("trade_date") or ""),
-                outcome=payload.get("outcome"),
-                fills=entries,
+                body.trade_date,
+                outcome=body.outcome,
+                fills=body.fills,
                 today=datetime.now(CN_TZ).strftime("%Y%m%d"),
             )
         except (TypeError, ValueError) as exc:

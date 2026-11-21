@@ -1878,6 +1878,34 @@ class HitlControlActionTest(unittest.TestCase):
         self.assertEqual(refused.status_code, 400)
         self.assertIn("unknown control action", refused.json()["detail"])
 
+    def test_a_malformed_request_field_is_refused_by_name_and_persists_nothing(self) -> None:
+        """Every write route reads its body by type: a list or a number where
+        text belongs, or a field the route does not take, is a 422 whose
+        one-line detail names the field, never a 500 or a coerced string."""
+        control = self.directory / "hitl/control.json"
+        before = control.read_bytes()
+        for method, url, payload, field in (
+            ("post", "/api/experiments/exp_ctl/control", {"action": "restart", "at": ["x"]}, "body.at"),
+            ("post", "/api/experiments/exp_ctl/control", {"action": "restart", "at": {"x": 1}}, "body.at"),
+            ("post", "/api/experiments/exp_ctl/control",
+             {"action": "set_directive", "session_key": "research", "directive": 5}, "body.directive"),
+            ("post", "/api/experiments/exp_ctl/control",
+             {"action": "inject_message", "session_key": "research", "text": "hi", "interrupt": "yes"}, "body.interrupt"),
+            ("post", "/api/experiments/exp_ctl/control", {"action": "pause", "when": "now"}, "body.when"),
+            ("post", "/api/memory/curated", {"name": "cash-rule", "content": 5}, "body.content"),
+            ("put", "/api/memory/curated/cash-rule", {"content": ["x"]}, "body.content"),
+            ("post", "/api/experiments/exp_ctl/prompt-preview", {"session_key": ["research"]}, "body.session_key"),
+            ("post", "/api/trading/paper/books", {"experiment_id": 1}, "body.experiment_id"),
+            ("post", "/api/trading/paper/books/exp_ctl/fills", {"trade_date": 20260105}, "body.trade_date"),
+        ):
+            refused = getattr(self.client, method)(url, json=payload)
+            self.assertEqual(refused.status_code, 422, (url, payload, refused.text))
+            detail = refused.json()["detail"]
+            self.assertIsInstance(detail, str)
+            self.assertIn(field, detail)
+        self.assertEqual(control.read_bytes(), before)
+        self.assertFalse((self.repo_root / "configs/skill_library").exists())
+
     def test_lifecycle_actions_work_on_a_finished_experiment(self) -> None:
         build_experiment(self.experiments_root, "exp_done", "registered_with_record")
         done = self.experiments_root / "exp_done"
