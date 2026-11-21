@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent import AgentSessionConfig, AgentSessionRunner
+from autotrade.agent import AgentSessionConfig
 from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.environment import trace
 from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
@@ -34,7 +34,8 @@ from autotrade.environment.trace import (
     render_transcript_block,
 )
 from autotrade.pipelines.session_resume import resume_state
-from tests.unit.test_agent_session_advanced import DeclaredReadOnlyShell, _shell_turns
+from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_runner
+from tests.unit.test_agent_session_advanced import _shell_turns
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -219,9 +220,9 @@ def test_a_session_whose_trace_reaches_the_cap_stops_there(tmp_path: Path):
 
     writer = _writer(tmp_path, max_bytes=8_000, max_event_bytes=4_000)
     llm = ScriptedLLM(_shell_turns(40))
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        tools=[DeclaredReadOnlyShell()],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=40),
         event_sink=writer.emit,
@@ -261,9 +262,9 @@ def test_a_replys_reasoning_is_recorded_in_the_host_trace_and_nowhere_else(tmp_p
             turn(3, long_reasoning),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        tools=[DeclaredReadOnlyShell()],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=4),
         event_sink=writer.emit,

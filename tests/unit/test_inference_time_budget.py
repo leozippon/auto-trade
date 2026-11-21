@@ -14,9 +14,7 @@ from autotrade.agent.runner import (
     API_SPEND_EXHAUSTED,
     AgentSessionBudgetExhausted,
     AgentSessionConfig,
-    AgentSessionRunner,
 )
-from autotrade.agent.subagent import SubAgentEngine
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
@@ -37,7 +35,6 @@ from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.environment.tools import (
     SafeWorkspace,
     StepRollbackTool,
-    ToolRegistry,
     ToolResult,
     ToolSpec,
 )
@@ -59,7 +56,7 @@ from autotrade.pipelines.session_tools import (
     ValidateTool,
 )
 from tests.unit.acceptance_fixture import RULES
-from tests.unit.terminal_tool import TerminalTool
+from tests.unit.agent_fixture import TerminalTool, make_engine, make_runner
 
 from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
@@ -249,14 +246,12 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
     call_budget = SessionCallBudget(max_calls=3, time_budget=time_budget)
     llm = SessionBudgetLLM(TimedLLM(scripted, clock, 0.5), budget=call_budget)
     trace_path = tmp_path / "agent-trace.jsonl"
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry(
-            [
-                batch,
-                TerminalTool(tree, session_ref=fold_ref, registration=_passing_gate),
-            ]
-        ),
+        tools=[
+            batch,
+            TerminalTool(tree, session_ref=fold_ref, registration=_passing_gate),
+        ],
         system_prompt="repair a failed validation and finish",
         config=AgentSessionConfig(
             max_llm_calls=3,
@@ -372,14 +367,12 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
         context_window_tokens=128_000,
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=scripted,
-        tools=ToolRegistry(
-            [
-                SlowValidation(),
-                TerminalTool(tree, session_ref="fold_grace", registration=_passing_gate),
-            ]
-        ),
+        tools=[
+            SlowValidation(),
+            TerminalTool(tree, session_ref="fold_grace", registration=_passing_gate),
+        ],
         system_prompt="fold system prompt",
         config=AgentSessionConfig(
             max_llm_calls=4,
@@ -447,10 +440,9 @@ def test_api_spend_notices_then_one_wrap_up_before_the_cap_ends_the_session() ->
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(gateway, budget=shared, role="main"),
-        tools=ToolRegistry([RecordingShell()]),
-        system_prompt="research",
+        tools=[RecordingShell()],
         config=AgentSessionConfig(max_llm_calls=40, deadline_seconds=100_000.0),
         time_budget=time_budget,
         session_budget=shared,
@@ -505,10 +497,9 @@ def test_model_call_notices_then_the_wrap_up_leave_the_last_call_for_test() -> N
     )
     finish = TerminalTool()
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(scripted, budget=shared, role="main"),
-        tools=ToolRegistry([RecordingShell(), finish]),
-        system_prompt="research",
+        tools=[RecordingShell(), finish],
         config=AgentSessionConfig(max_llm_calls=10, deadline_seconds=100_000.0),
         time_budget=time_budget,
         session_budget=shared,
@@ -557,9 +548,9 @@ def test_reserve_without_complete_node_keeps_research_and_compaction_available()
             min_remaining_seconds=0.0,
         ),
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=main,
-        tools=ToolRegistry([shell]),
+        tools=[shell],
         system_prompt="research until a validation exists",
         config=AgentSessionConfig(
             max_llm_calls=2,
@@ -616,10 +607,8 @@ def test_non_exempt_llm_and_concurrent_read_tools_consume_effective_time() -> No
             clock.advance(1.0)
             return ToolResult(True, value={"read": True})
 
-    registry = ToolRegistry([TimedReadTool("glob"), TimedReadTool("grep")])
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=registry,
+    runner = make_runner(
+        tools=[TimedReadTool("glob"), TimedReadTool("grep")],
         system_prompt="read",
         time_budget=budget,
     )
@@ -649,9 +638,8 @@ def test_all_session_components_hold_one_budget_and_expire_at_boundaries() -> No
     assert main.budget is subagent.budget is compact.budget is calls
     assert calls.time_budget is time_budget
     with pytest.raises(ValueError, match="share one inference time budget"):
-        AgentSessionRunner(
+        make_runner(
             llm=main,
-            tools=ToolRegistry(),
             system_prompt="mismatched budget",
             time_budget=InferenceTimeBudget(duration_seconds=1.0, clock=clock),
         )
@@ -673,16 +661,11 @@ def test_runner_rejects_mismatched_subagent_budget() -> None:
         ScriptedLLM([]),
         budget=SessionCallBudget(max_calls=2, time_budget=subagent_budget),
     )
-    subagent = SubAgentEngine(
-        llm=subagent_llm,
-        tools=ToolRegistry(),
-        time_budget=subagent_budget,
-    )
+    subagent = make_engine(llm=subagent_llm, tools=[], time_budget=subagent_budget)
 
     with pytest.raises(ValueError, match="subagent is bound to another budget"):
-        AgentSessionRunner(
+        make_runner(
             llm=main,
-            tools=ToolRegistry(),
             system_prompt="mismatch",
             subagent=subagent,
             time_budget=main_budget,
@@ -703,9 +686,8 @@ def test_runner_rejects_mismatched_compactor_budget() -> None:
     )
 
     with pytest.raises(ValueError, match="compactor is bound to another budget"):
-        AgentSessionRunner(
+        make_runner(
             llm=main,
-            tools=ToolRegistry(),
             system_prompt="mismatch",
             compactor=ContextCompactor(compact_llm),
             time_budget=main_budget,
@@ -758,9 +740,9 @@ def test_runner_rejects_mismatched_backtest_budget(tmp_path: Path) -> None:
     with pytest.raises(
         ValueError, match="tool:validate is bound to another budget"
     ):
-        AgentSessionRunner(
+        make_runner(
             llm=main,
-            tools=ToolRegistry([batch]),
+            tools=[batch],
             system_prompt="mismatch",
             time_budget=main_budget,
         )
@@ -891,14 +873,12 @@ def test_a_child_is_bounded_by_the_parents_finalization_tail(tmp_path: Path) -> 
     clock = FakeClock()
     time_budget = InferenceTimeBudget(duration_seconds=1000.0, clock=clock)
     child_llm = CountingChildLLM()
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=child_llm,
-        tools=ToolRegistry([RecordingShell()]),
+        tools=[RecordingShell()],
         time_budget=time_budget,
     )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
+    runner = make_runner(
         system_prompt="fold",
         config=_reserved_fold_config(),
         subagent=engine,
@@ -928,14 +908,12 @@ def test_a_short_session_keeps_no_tail_it_cannot_afford() -> None:
     time at all."""
 
     time_budget = InferenceTimeBudget(duration_seconds=100.0, clock=FakeClock())
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=CountingChildLLM(),
-        tools=ToolRegistry([RecordingShell()]),
+        tools=[RecordingShell()],
         time_budget=time_budget,
     )
-    AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
+    make_runner(
         system_prompt="fold",
         config=_reserved_fold_config(),
         subagent=engine,
@@ -1025,26 +1003,24 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
     main = SessionBudgetLLM(
         ScheduledTimedLLM(scripted, clock, [10.0, 690.0, 250.0, 1.0]), budget=shared
     )
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=BlockingChildLLM(),
-        tools=ToolRegistry([RecordingShell()]),
+        tools=[RecordingShell()],
         time_budget=time_budget,
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=main,
-        tools=ToolRegistry(
-            [
-                ExistingValidation(),
-                StepRollbackTool(
-                    tree,
-                    output,
-                    models,
-                    session_ref="session_ref_current",
-                ),
-                TerminalTool(tree, session_ref="session_ref_current", registration=_passing_gate),
-            ]
-        ),
+        tools=[
+            ExistingValidation(),
+            StepRollbackTool(
+                tree,
+                output,
+                models,
+                session_ref="session_ref_current",
+            ),
+            TerminalTool(tree, session_ref="session_ref_current", registration=_passing_gate),
+        ],
         system_prompt="fold",
         config=_reserved_fold_config(),
         subagent=engine,

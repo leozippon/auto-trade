@@ -11,7 +11,6 @@ from autotrade.agent import (
     AgentSessionRunner,
     ContextCompactionConfig,
     ContextCompactor,
-    SubAgentEngine,
 )
 from autotrade.agent.compact import (
     fit_tool_results_to_context,
@@ -50,14 +49,18 @@ from autotrade.environment.tools import (
     SafeWorkspace,
     SandboxShellTool,
     SearchRoots,
-    ToolRegistry,
     ToolResult,
     ToolSpec,
     WriteFileTool,
 )
 from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
-from tests.unit.terminal_tool import TerminalTool
+from tests.unit.agent_fixture import (
+    DeclaredReadOnlyShell,
+    TerminalTool,
+    make_engine,
+    make_runner,
+)
 
 
 def _passing_gate(
@@ -91,26 +94,6 @@ def finish_session_tool(root: Path) -> tuple[TerminalTool, str]:
         metrics={"total_return": 0.01},
     )
     return TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
-
-
-class DeclaredReadOnlyShell:
-    spec = ToolSpec(
-        "shell",
-        "Test-only shell declared non-mutating.",
-        {
-            "type": "object",
-            "properties": {"argv": {"type": "array", "items": {"type": "string"}}},
-            "required": ["argv"],
-            "additionalProperties": False,
-        },
-    )
-
-    def __init__(self):
-        self.calls = []
-
-    def invoke(self, arguments):
-        self.calls.append(arguments)
-        return ToolResult(True, value={"stdout": "ran"})
 
 
 class LongResultShell(DeclaredReadOnlyShell):
@@ -267,9 +250,9 @@ def test_the_agent_compacts_its_own_context_and_is_pointed_at_the_trace(tmp_path
     events: list[tuple[str, dict[str, object]]] = []
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
     shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(llm, budget=shared, role="main"),
-        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=8),
         compactor=ContextCompactor(
@@ -324,9 +307,9 @@ def test_a_summary_over_its_writers_limit_ends_on_a_whole_line_and_says_it_was_c
     written = item * (COMPACT_SUMMARY_MAX_CHARS // len(item) + 3)
     finish, node_id = finish_session_tool(tmp_path)
     llm = ScriptedLLM([*_shell_turns(2), _compact_call(written), _finish_call(node_id)])
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=8),
     )
@@ -370,9 +353,9 @@ def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_pat
     finish, node_id = finish_session_tool(tmp_path)
     llm = ScriptedLLM([_finish_call(node_id)])
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=4),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -396,9 +379,9 @@ def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):
     finish, node_id = finish_session_tool(tmp_path)
     llm = ScriptedLLM([*_shell_turns(2), _compact_call("too short"), _finish_call(node_id)])
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=8),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -423,9 +406,9 @@ def test_the_context_notice_arrives_at_the_advisory_fraction_and_rearms_after_a_
     shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
     # A threshold the runtime compactor never reaches (its message floor is
     # high) while three shell turns cross the advisory fraction of it.
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(llm, budget=shared, role="main"),
-        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=12),
         compactor=ContextCompactor(
@@ -469,9 +452,9 @@ def test_a_runtime_compaction_updates_the_agents_own_summary(tmp_path: Path):
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
     shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(llm, budget=shared, role="main"),
-        tools=ToolRegistry([DeclaredReadOnlyShell(), CompactTool(), finish]),
+        tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=12),
         compactor=ContextCompactor(
@@ -523,9 +506,9 @@ def test_a_read_of_the_trace_root_is_traced_as_a_stub(tmp_path: Path):
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([ReadFileTool(roots), finish]),
+        tools=[ReadFileTool(roots), finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=4),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -621,9 +604,9 @@ def test_session_tracks_calls_and_finish_value(tmp_path: Path):
             )
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=2),
     )
@@ -658,9 +641,9 @@ def test_session_end_counts_the_parents_failed_tool_calls(tmp_path: Path):
             ),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=3),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -685,45 +668,37 @@ def test_session_end_tool_failures_include_the_childrens(tmp_path: Path):
     (workspace / "output" / "README.md").write_text("contract\n", encoding="utf-8")
     finish, node_id = finish_session_tool(tmp_path)
     events: list[tuple[str, dict]] = []
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "w",
-                            "write_file",
-                            {"path": "output/README.md", "content": "tamper"},
-                        ),
-                    )
+    subagent = make_engine(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    "w",
+                    "write_file",
+                    {"path": "output/README.md", "content": "tamper"},
                 ),
-                ProviderResponse(content="写入被拒绝，README 是只读合同。"),
-            ]
+            )
         ),
-        tools=ToolRegistry([WriteFileTool(SafeWorkspace(workspace))]),
+        ProviderResponse(content="写入被拒绝，README 是只读合同。"),
+        tools=[WriteFileTool(SafeWorkspace(workspace))],
     )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "e1",
-                            "agent",
-                            {"agent": "general-purpose", "task": "rewrite the contract"},
-                        ),
-                    )
+    runner = make_runner(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    "e1",
+                    "agent",
+                    {"agent": "general-purpose", "task": "rewrite the contract"},
                 ),
-                ProviderResponse(content="等子代理返回。"),
-                ProviderResponse(
-                    tool_calls=(ToolCall("bad", "test", {"node_id": "missing"}),)
-                ),
-                ProviderResponse(
-                    tool_calls=(ToolCall("f", "test", {"node_id": node_id}),)
-                ),
-            ]
+            )
         ),
-        tools=ToolRegistry([finish]),
+        ProviderResponse(content="等子代理返回。"),
+        ProviderResponse(
+            tool_calls=(ToolCall("bad", "test", {"node_id": "missing"}),)
+        ),
+        ProviderResponse(
+            tool_calls=(ToolCall("f", "test", {"node_id": node_id}),)
+        ),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=5),
         subagent=subagent,
@@ -752,9 +727,9 @@ def test_fold_session_nudges_text_only_turn_then_requires_finish(tmp_path: Path)
             ),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=2),
     )
@@ -778,9 +753,9 @@ def test_fold_session_replays_reasoning_with_tool_call_on_next_round(tmp_path: P
             ),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([shell, finish]),
+        tools=[shell, finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=2),
     )
@@ -811,9 +786,9 @@ def test_fold_session_edits_huge_recent_tool_result_below_min_message_count(
         context_window_tokens=3_000,
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([shell, finish]),
+        tools=[shell, finish],
         system_prompt="inspect and finish",
         config=AgentSessionConfig(max_llm_calls=3, max_response_tokens=500),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -881,9 +856,9 @@ def test_fold_session_recovers_one_provider_context_overflow_without_blind_repea
             )
 
     llm = AlwaysOverflowAfterTool()
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([shell, finish]),
+        tools=[shell, finish],
         system_prompt="inspect and finish",
         config=AgentSessionConfig(max_llm_calls=6, max_response_tokens=500),
     )
@@ -941,9 +916,9 @@ def test_a_provider_outage_is_noted_as_such_and_the_abort_names_its_last_error(
             raise outage
 
     llm = RequestErrorThenOutage()
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=6),
     )
@@ -998,9 +973,9 @@ def test_fold_session_reissues_one_malformed_tool_call_without_repeating_the_ana
 
     llm = MalformedThenFinish()
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=6),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -1055,9 +1030,9 @@ def test_fold_session_keeps_long_history_without_proactive_clear_or_trim(
     )
     llm = ScriptedLLM(responses)
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([MarkedResultShell(), finish]),
+        tools=[MarkedResultShell(), finish],
         system_prompt="inspect many times",
         config=AgentSessionConfig(max_llm_calls=rounds + 2),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -1115,9 +1090,9 @@ def test_fold_session_triggers_semantic_compact_on_threshold(tmp_path: Path):
     events: list[tuple[str, dict[str, object]]] = []
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
     shared = SessionCallBudget(max_calls=20, time_budget=time_budget)
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(llm, budget=shared, role="main"),
-        tools=ToolRegistry([DeclaredReadOnlyShell(), finish]),
+        tools=[DeclaredReadOnlyShell(), finish],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=6),
         compactor=ContextCompactor(
@@ -1187,9 +1162,9 @@ def test_compaction_keeps_the_session_system_prompt_byte_identical(tmp_path: Pat
     events: list[tuple[str, dict[str, object]]] = []
     time_budget = InferenceTimeBudget(duration_seconds=120.0)
     shared = SessionCallBudget(max_calls=20, time_budget=time_budget)
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(llm, budget=shared, role="main"),
-        tools=ToolRegistry([DeclaredReadOnlyShell(), finish]),
+        tools=[DeclaredReadOnlyShell(), finish],
         system_prompt=system_prompt,
         config=AgentSessionConfig(max_llm_calls=6),
         compactor=ContextCompactor(
@@ -1235,9 +1210,9 @@ def test_disabled_compact_fails_closed_without_dropping_history(tmp_path: Path):
     finish, _node_id = finish_session_tool(tmp_path)
     events: list[tuple[str, dict[str, object]]] = []
     llm = ScriptedLLM([], context_window_tokens=200)
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="s",
         config=AgentSessionConfig(max_llm_calls=2, max_response_tokens=50),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -1273,9 +1248,9 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
             )
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish, WriteFileTool(workspace)]),
+        tools=[finish, WriteFileTool(workspace)],
         system_prompt="daily JSON only",
     )
     runner.run("finish")
@@ -1286,10 +1261,7 @@ def test_terminal_tool_cancels_later_mutation_in_same_turn(tmp_path: Path):
 
 
 def test_subagent_accepts_write_file_tool(tmp_path: Path):
-    engine = SubAgentEngine(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry([WriteFileTool(SafeWorkspace(tmp_path))]),
-    )
+    engine = make_engine(tools=[WriteFileTool(SafeWorkspace(tmp_path))])
     assert {spec.name for spec in engine.tools.specs()} == {"write_file"}
 
 
@@ -1307,9 +1279,9 @@ def test_subagent_dispatches_full_shell_commands():
             ProviderResponse(content="ran full shell"),
         ]
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([shell]),
+        tools=[shell],
     ).run_with_transcript("inspect", role="general-purpose")[0]
     assert result["summary"] == "ran full shell"
     assert shell.calls == [
@@ -1421,20 +1393,10 @@ def test_sessions_reject_tools_outside_their_positive_contracts():
 
     for name in ("external_lookup", "finish_meta"):
         with pytest.raises(ValueError, match="unsupported tools"):
-            AgentSessionRunner(
-                llm=ScriptedLLM([]),
-                tools=ToolRegistry([StubTool(name)]),
-                system_prompt="session",
-                config=AgentSessionConfig(),
-            )
+            make_runner(tools=[StubTool(name)], system_prompt="session")
 
     with pytest.raises(ValueError, match="a session with validate requires test"):
-        AgentSessionRunner(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry([StubTool("validate")]),
-            system_prompt="session",
-            config=AgentSessionConfig(),
-        )
+        make_runner(tools=[StubTool("validate")], system_prompt="session")
 
 
 def test_prompt_and_facts_encode_daily_json_and_hidden_stage_boundaries(
@@ -1634,9 +1596,8 @@ def test_the_prompt_tool_check_fails_on_a_tool_the_session_cannot_register():
 
 
 def _context_runner(llm: ScriptedLLM, **config) -> AgentSessionRunner:
-    return AgentSessionRunner(
+    return make_runner(
         llm=llm,
-        tools=ToolRegistry([]),
         system_prompt="test",
         config=AgentSessionConfig(**config),
     )
@@ -1676,9 +1637,8 @@ def test_context_fit_sends_with_the_gateway_clamp_when_only_the_output_budget_ov
     window = 10_000
     events: list[tuple[str, dict[str, object]]] = []
     llm = ScriptedLLM([], context_window_tokens=window)
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([]),
         system_prompt="test",
         config=AgentSessionConfig(max_response_tokens=5_000),
         event_sink=lambda event, payload: events.append((event, payload)),

@@ -79,12 +79,9 @@ from autotrade.pipelines.research_session import (
     SessionCallBudget,
     build_subagent_tools,
 )
+from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_engine, make_runner
 
 _STRATEGY = "def generate_orders(context):\n    return []\n"
-
-
-def _session_config(**kwargs: object) -> AgentSessionConfig:
-    return AgentSessionConfig(**kwargs)  # type: ignore[arg-type]
 
 
 def _function_name(record: object) -> str:
@@ -103,26 +100,6 @@ def _function_payload(record: object) -> dict[str, object]:
     if not isinstance(function, dict):
         raise TypeError("provider tool function must be an object")
     return function
-
-
-class DeclaredReadOnlyShell:
-    spec = ToolSpec(
-        "shell",
-        "Test-only shell declared non-mutating.",
-        {
-            "type": "object",
-            "properties": {"argv": {"type": "array", "items": {"type": "string"}}},
-            "required": ["argv"],
-            "additionalProperties": False,
-        },
-    )
-
-    def __init__(self) -> None:
-        self.calls: list[Mapping[str, object]] = []
-
-    def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
-        self.calls.append(arguments)
-        return ToolResult(True, value={"stdout": "ok"})
 
 
 class WritingRunner:
@@ -173,9 +150,9 @@ def test_subagent_events_land_on_the_parent_session_trace() -> None:
             ProviderResponse(content="结论：可见。"),
         ]
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([shell]),
+        tools=[shell],
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript(
         "inspect snapshot schema",
@@ -222,10 +199,7 @@ def test_subagent_rejects_nested_agent_and_session_control_specs() -> None:
         "unknown_tool",
     ):
         with pytest.raises(ValueError, match="not allowed"):
-            SubAgentEngine(
-                llm=ScriptedLLM([]),
-                tools=ToolRegistry([NamedReadOnly(name)]),
-            )
+            make_engine(tools=[NamedReadOnly(name)])
 
 
 def test_subagent_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
@@ -265,16 +239,14 @@ def test_subagent_write_edit_shell_and_checks_persist(tmp_path: Path) -> None:
             ProviderResponse(content="结论：已写入并可验证。"),
         ]
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry(
-            [
-                WriteFileTool(safe),
-                EditFileTool(safe),
-                SandboxShellTool(safe, runner),
-                ModificationCheckTool(workspace / "output"),
-            ]
-        ),
+        tools=[
+            WriteFileTool(safe),
+            EditFileTool(safe),
+            SandboxShellTool(safe, runner),
+            ModificationCheckTool(workspace / "output"),
+        ],
     ).run_with_transcript("write and check the strategy", role="general-purpose")[0]
     assert result["status"] == "completed"
     written = (workspace / "output" / "main.py").read_text(encoding="utf-8")
@@ -449,32 +421,22 @@ def test_later_subagent_write_to_one_path_wins_and_leaves_the_rest(
 
 def test_subagent_write_failure_does_not_finish_parent(tmp_path: Path) -> None:
     events: list[str] = []
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "w",
-                            "write_file",
-                            {"path": "output/main.py", "content": "x"},
-                        ),
-                    )
+    subagent = make_engine(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    "w",
+                    "write_file",
+                    {"path": "output/main.py", "content": "x"},
                 ),
-                ProviderResponse(content="must not run"),
-            ]
+            )
         ),
-        tools=ToolRegistry([BoomWrite()]),
+        ProviderResponse(content="must not run"),
+        tools=[BoomWrite()],
         event_sink=lambda event, _payload: events.append(event),
     )
     # ScriptedLLM records every request, so the child's view is inspectable.
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=subagent,
-    )
+    runner = make_runner(subagent=subagent)
     dispatched = runner.tools.invoke(
         "agent", {"agent": "general-purpose", "task": "write then fail"}
     )
@@ -519,9 +481,9 @@ def test_subagent_readonly_write_failure_stays_an_observation(tmp_path: Path) ->
             ProviderResponse(content="写入被拒绝。"),
         ]
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([WriteFileTool(SafeWorkspace(workspace))]),
+        tools=[WriteFileTool(SafeWorkspace(workspace))],
     ).run_with_transcript("overwrite readme", role="general-purpose")[0]
     assert result["status"] == "completed"
     assert (workspace / "output" / "README.md").read_text(encoding="utf-8") == "keep\n"
@@ -537,9 +499,8 @@ def test_subagent_and_main_share_one_session_call_budget() -> None:
     budgeted = SessionBudgetLLM(
         scripted, budget=SessionCallBudget(max_calls=1, time_budget=InferenceTimeBudget(duration_seconds=10))
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=budgeted,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
     ).run_with_transcript("count rows", role="Explore")[0]
     assert result["status"] == "completed"
     with pytest.raises(RuntimeError, match="budget exhausted"):
@@ -549,15 +510,8 @@ def test_subagent_and_main_share_one_session_call_budget() -> None:
 
 def test_runner_attaches_subagent_events_to_its_sink() -> None:
     events: list[str] = []
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="summary")]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
+    subagent = make_engine(ProviderResponse(content="summary"))
+    runner = make_runner(
         subagent=subagent,
         event_sink=lambda event, _payload: events.append(event),
     )
@@ -579,9 +533,9 @@ def test_explore_child_cannot_invoke_the_registered_shell() -> None:
             ProviderResponse(content="shell blocked"),
         ]
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([shell]),
+        tools=[shell],
     ).run_with_transcript("inspect without shell", role="Explore")[0]
     assert result["status"] == "completed"
     assert result["summary"] == "shell blocked"
@@ -599,9 +553,9 @@ def test_subagent_unknown_tool_call_is_rejected_without_invoke() -> None:
             ProviderResponse(content="unknown tool blocked"),
         ]
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([shell]),
+        tools=[shell],
     ).run_with_transcript("do not backtest", role="Explore")[0]
     assert result["status"] == "completed"
     assert result["summary"] == "unknown tool blocked"
@@ -618,7 +572,7 @@ def test_subagent_agent_call_is_rejected_by_name() -> None:
             ProviderResponse(content="did it myself"),
         ]
     )
-    SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()])).run_with_transcript(
+    make_engine(llm=llm).run_with_transcript(
         "inspect", role="Explore"
     )[0]
     second = llm.calls[1]
@@ -695,17 +649,10 @@ class _FinishStub:
 def test_finish_session_allows_zero_subagent_and_emits_empty_trace_stats() -> None:
     finish = _FinishStub("test")
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),))]
-        ),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
+    runner = make_runner(
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[finish],
+        subagent=make_engine(),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
 
@@ -721,40 +668,30 @@ def test_finish_session_allows_zero_subagent_and_emits_empty_trace_stats() -> No
 
 def test_failed_subagent_attempt_counts_for_its_role() -> None:
     finish = _FinishStub("test")
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "w",
-                            "write_file",
-                            {"path": "output/main.py", "content": "x"},
-                        ),
-                    )
-                )
-            ]
-        ),
-        tools=ToolRegistry([BoomWrite()]),
-    )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "e1",
-                            "agent",
-                            {"agent": "general-purpose", "task": "write then fail"},
-                        ),
-                    )
+    subagent = make_engine(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    "w",
+                    "write_file",
+                    {"path": "output/main.py", "content": "x"},
                 ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
-            ]
+            )
         ),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
+        tools=[BoomWrite()],
+    )
+    runner = make_runner(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    "e1",
+                    "agent",
+                    {"agent": "general-purpose", "task": "write then fail"},
+                ),
+            )
+        ),
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[finish],
         subagent=subagent,
     )
     runner.run("failed subagent is still traced")
@@ -765,17 +702,11 @@ def test_failed_subagent_attempt_counts_for_its_role() -> None:
 
 def test_subagent_attempt_counter_resets_on_new_run() -> None:
     finish = _FinishStub("test")
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="unused")]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),))]
-        ),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(max_llm_calls=2),
+    subagent = make_engine(ProviderResponse(content="unused"))
+    runner = make_runner(
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[finish],
+        config=AgentSessionConfig(max_llm_calls=2),
         subagent=subagent,
     )
     runner._subagent_attempts = 4
@@ -788,12 +719,9 @@ def test_subagent_attempt_counter_resets_on_new_run() -> None:
 
 def test_sessions_without_subagent_still_finish() -> None:
     finish = _FinishStub("test")
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),))]
-        ),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
+    runner = make_runner(
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[finish],
     )
     runner.run("no subagent configured")
     assert finish.invoked == 1
@@ -819,17 +747,8 @@ def test_session_and_subagent_prompts_keep_roles() -> None:
 
 
 def test_subagent_schema_uses_session_role_enum() -> None:
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=subagent,
-    )
+    subagent = make_engine()
+    runner = make_runner(subagent=subagent)
     schema = next(
         _function_payload(tool)
         for tool in runner.tools.provider_tools()
@@ -873,7 +792,7 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
         ModificationCheckTool(workspace / "output"),
         _NamedTool("smoke_backtest"),
     )
-    engine = SubAgentEngine(llm=ScriptedLLM([]), tools=ToolRegistry(tools))
+    engine = make_engine(tools=tools)
     impl = {
         _function_name(record)
         for record in engine._provider_tools(allowed_subagent_tools("general-purpose"))
@@ -933,46 +852,35 @@ def test_role_tool_visibility_hides_writes_from_audits(tmp_path: Path) -> None:
 
 def test_subagent_calls_still_track_attempts_and_roles() -> None:
     finish = _FinishStub("test")
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(content="general summary"),
-                ProviderResponse(content="data summary"),
-                ProviderResponse(content="strategy summary"),
-            ]
-        ),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    subagent = make_engine(
+        ProviderResponse(content="general summary"),
+        ProviderResponse(content="data summary"),
+        ProviderResponse(content="strategy summary"),
         config=SubAgentConfig(max_concurrent=3),
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "g1",
-                            "agent",
-                            {"agent": "general-purpose", "task": "cross-cut"},
-                        ),
-                        ToolCall(
-                            "e1",
-                            "agent",
-                            {"agent": "Explore", "task": "check data"},
-                        ),
-                        ToolCall(
-                            "e2",
-                            "agent",
-                            {"agent": "general-purpose", "task": "check strategy"},
-                        ),
-                    )
+    runner = make_runner(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    "g1",
+                    "agent",
+                    {"agent": "general-purpose", "task": "cross-cut"},
                 ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
-            ]
+                ToolCall(
+                    "e1",
+                    "agent",
+                    {"agent": "Explore", "task": "check data"},
+                ),
+                ToolCall(
+                    "e2",
+                    "agent",
+                    {"agent": "general-purpose", "task": "check strategy"},
+                ),
+            )
         ),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[finish],
         subagent=subagent,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -1000,28 +908,19 @@ def test_subagent_calls_still_track_attempts_and_roles() -> None:
 
 def test_single_subagent_role_can_finish() -> None:
     finish = _FinishStub("test")
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="summary")]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall(
-                            "e1",
-                            "agent",
-                            {"agent": "Explore", "task": "check data"},
-                        ),
-                    )
+    subagent = make_engine(ProviderResponse(content="summary"))
+    runner = make_runner(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall(
+                    "e1",
+                    "agent",
+                    {"agent": "Explore", "task": "check data"},
                 ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
-            ]
+            )
         ),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[finish],
         subagent=subagent,
     )
     runner.run("one delegated review is enough")
@@ -1139,14 +1038,12 @@ def test_subagent_defaults_are_xhigh_thinking_and_six_concurrent() -> None:
 
     assert DEFAULT_SUBAGENT_MAX_CONCURRENT == 6
     assert SubAgentConfig().max_concurrent == 6
-    result = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="ok")]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    result = make_engine(
+        ProviderResponse(content="ok"),
     ).run_with_transcript("summarize", role="Explore")[0]
     assert result["thinking"] == "xhigh"
-    lowered = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="ok")]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    lowered = make_engine(
+        ProviderResponse(content="ok"),
     ).run_with_transcript("quote the config lines", role="general-purpose", thinking="medium")[0]
     assert lowered["thinking"] == "medium"
     assert (
@@ -1172,7 +1069,7 @@ def test_subagent_inherit_context_prepends_parent_digest() -> None:
             ProviderResponse(content="fresh"),
         ]
     )
-    engine = SubAgentEngine(llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]))
+    engine = make_engine(llm=llm)
     launch = ToolCall("p1", "agent", {"agent": "Explore", "task": "earlier"})
     result = engine.run_with_transcript(
         "summarize",
@@ -1214,17 +1111,8 @@ def test_subagent_inherit_context_prepends_parent_digest() -> None:
 
 
 def test_subagent_arguments_are_validated_by_the_registry() -> None:
-    subagent = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="ok")]),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    )
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=subagent,
-    )
+    subagent = make_engine(ProviderResponse(content="ok"))
+    runner = make_runner(subagent=subagent)
     # The runner registered subagent like any other tool.
     assert runner.tools.spec("agent") is not None
     assert "agent" in {
@@ -1272,16 +1160,10 @@ def test_legacy_thinking_values_launch_at_xhigh_through_the_registry() -> None:
     The advertised enum is the four canonical levels, so the alias mapping has
     to run before validation; an unknown level still fails with the enum."""
 
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM(
-                [ProviderResponse(content="ok"), ProviderResponse(content="ok")]
-            ),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
+    runner = make_runner(
+        subagent=make_engine(
+            ProviderResponse(content="ok"),
+            ProviderResponse(content="ok"),
         ),
     )
     for legacy in ("high", "max"):
@@ -1307,15 +1189,7 @@ def test_agent_action_resume_is_told_the_resume_parameter() -> None:
     """``action="resume"`` is a recurring parent mistake; the bare enum list
     does not say where resuming actually lives, so the rejection does."""
 
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
-    )
+    runner = make_runner(subagent=make_engine())
     rejected = runner.tools.invoke(
         "agent",
         {"action": "resume", "agent": "Explore", "task": "x", "task_id": "agent_1"},
@@ -1338,10 +1212,7 @@ def test_subagent_thinking_only_reply_does_not_finish_the_child() -> None:
             ProviderResponse(content="done after thinking"),
         ]
     )
-    result = SubAgentEngine(
-        llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
-    ).run_with_transcript("summarize", role="Explore")[0]
+    result = make_engine(llm=llm).run_with_transcript("summarize", role="Explore")[0]
     assert result["status"] == "completed"
     assert result["summary"] == "done after thinking"
     assert result["llm_calls"] == 2
@@ -1419,15 +1290,10 @@ def test_parent_session_continues_before_subagent_finishes() -> None:
                 release.set()
             return inner.complete(messages, **kwargs)
 
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=_ParentLLM(),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_GateLLM(started, release),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
+        tools=[finish],
+        subagent=make_engine(llm=_GateLLM(started, release)),
     )
     runner.run("go")
     assert finish.invoked == 1
@@ -1486,15 +1352,10 @@ def test_parent_text_only_waits_for_pending_subagent_then_resumes() -> None:
                 if n == 2:
                     call2_returned.set()
 
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=_ParentLLM(),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_GateLLM(started, release),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
+        tools=[finish],
+        subagent=make_engine(llm=_GateLLM(started, release)),
     )
     runner.run("go")
     assert finish.invoked == 1
@@ -1510,15 +1371,10 @@ def test_parent_text_only_without_pending_subagent_still_nudges() -> None:
             ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([ProviderResponse(content="unused")]),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
+        tools=[finish],
+        subagent=make_engine(ProviderResponse(content="unused")),
     )
     result = runner.run("go")
     assert result.llm_calls == 2
@@ -1590,19 +1446,16 @@ def test_parent_text_only_wakes_on_first_completed_subagent() -> None:
                 if n == 2:
                     call2_returned.set()
 
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=_ParentLLM(),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
+        tools=[finish],
+        subagent=make_engine(
             llm=_TaskGatedLLM(
                 {
                     "fast-task": (fast_started, fast_release, "fast summary"),
                     "slow-task": (slow_started, slow_release, "slow summary"),
                 }
             ),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
             config=SubAgentConfig(max_concurrent=2),
         ),
     )
@@ -1650,18 +1503,14 @@ def test_parent_text_only_pending_subagent_deadline_does_not_deadlock(
     t0 = time.monotonic()
     try:
         with pytest.raises(AgentSessionBudgetExhausted):
-            AgentSessionRunner(
+            make_runner(
                 llm=_ParentLLM(),
-                tools=ToolRegistry([finish]),
-                system_prompt="research",
-                config=_session_config(
+                tools=[finish],
+                config=AgentSessionConfig(
                     deadline_seconds=0.4,
                     deadline_grace_seconds=0.0,
                 ),
-                subagent=SubAgentEngine(
-                    llm=_GateLLM(started, release),
-                    tools=ToolRegistry([DeclaredReadOnlyShell()]),
-                ),
+                subagent=make_engine(llm=_GateLLM(started, release)),
             ).run("go")
         elapsed = time.monotonic() - t0
         assert parent_calls["n"] == 2
@@ -1674,16 +1523,7 @@ def test_parent_text_only_pending_subagent_deadline_does_not_deadlock(
 def test_wait_first_pending_subagent_returns_on_cancel() -> None:
     started = threading.Event()
     release = threading.Event()
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_GateLLM(started, release),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
-    )
+    runner = make_runner(subagent=make_engine(llm=_GateLLM(started, release)))
     dispatched = runner.tools.invoke(
         "agent", {"agent": "Explore", "task": "hang"}
     )
@@ -1713,9 +1553,8 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
             raise CallBudgetExhausted("Agent session LLM call budget exhausted")
 
     exhausted = Exhausted()
-    result = SubAgentEngine(
+    result = make_engine(
         llm=exhausted,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=5),
     ).run_with_transcript("look", role="Explore")[0]
     assert result["status"] == "error"
@@ -1736,9 +1575,8 @@ def test_subagent_stops_retry_on_call_budget_and_interrupt() -> None:
             raise SessionInterrupt("researcher stop")
 
     interrupted = Interrupted()
-    result = SubAgentEngine(
+    result = make_engine(
         llm=interrupted,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=5),
     ).run_with_transcript("look", role="Explore")[0]
     assert result["status"] == "error"
@@ -1765,10 +1603,7 @@ def test_subagent_skips_tools_when_cancelled_after_llm() -> None:
                 )
             )
 
-    engine = SubAgentEngine(
-        llm=LateTools(),
-        tools=ToolRegistry([shell]),
-    )
+    engine = make_engine(llm=LateTools(), tools=[shell])
     outcome: dict[str, object] = {}
 
     def run() -> None:
@@ -1839,18 +1674,14 @@ def test_runner_close_cancels_subagent_without_infinite_wait(
             return inner.complete(messages, **kwargs)
 
     t0 = time.monotonic()
-    AgentSessionRunner(
+    make_runner(
         llm=Parent(),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
+        tools=[finish],
         # The whole budget is wrap-up grace, so the session is past its main
         # deadline from the first turn: finishing is the only move left and the
         # in-flight-child refusal is exempt there.
-        config=_session_config(deadline_seconds=600.0, deadline_grace_seconds=600.0),
-        subagent=SubAgentEngine(
-            llm=BlockingChild(),
-            tools=ToolRegistry([shell]),
-        ),
+        config=AgentSessionConfig(deadline_seconds=600.0, deadline_grace_seconds=600.0),
+        subagent=make_engine(llm=BlockingChild(), tools=[shell]),
         time_budget=InferenceTimeBudget(duration_seconds=600.0),
     ).run("go")
     elapsed = time.monotonic() - t0
@@ -1939,15 +1770,10 @@ def _session_interrupted_in_tool_dispatch(
                 assert started.wait(3)
             return inner.complete(messages, **kwargs)
 
-    return AgentSessionRunner(
+    return make_runner(
         llm=Parent(),
-        tools=ToolRegistry([_InterruptingTool()]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=BlockingChild(),
-            tools=ToolRegistry([shell]),
-        ),
+        tools=[_InterruptingTool()],
+        subagent=make_engine(llm=BlockingChild(), tools=[shell]),
         event_sink=event_sink,
         time_budget=InferenceTimeBudget(duration_seconds=600.0),
     )
@@ -2042,15 +1868,10 @@ def test_terminal_tool_stops_refusing_once_the_deadline_is_at_hand() -> None:
             return ProviderResponse(content="late")
 
     def session_runner(duration: float) -> AgentSessionRunner:
-        return AgentSessionRunner(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry([_FinishStub("test")]),
+        return make_runner(
+            tools=[_FinishStub("test")],
             system_prompt="session",
-            config=_session_config(),
-            subagent=SubAgentEngine(
-                llm=BlockingChild(),
-                tools=ToolRegistry([_NamedTool("read_file")]),
-            ),
+            subagent=make_engine(llm=BlockingChild(), tools=[_NamedTool("read_file")]),
             time_budget=InferenceTimeBudget(duration_seconds=duration),
         )
 
@@ -2107,15 +1928,9 @@ def test_terminal_tool_is_refused_while_a_launched_child_still_runs(
             release.wait(5)
             return ProviderResponse(content="late")
 
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=BlockingChild(),
-            tools=ToolRegistry([shell]),
-        ),
+    runner = make_runner(
+        tools=[finish],
+        subagent=make_engine(llm=BlockingChild(), tools=[shell]),
     )
     try:
         results, _ = runner._dispatch_tool_calls(
@@ -2218,12 +2033,7 @@ def test_parallel_safe_batch_runs_concurrently_and_mutating_batch_in_order() -> 
             probe.new_turn()
             return llm.complete(messages, **kwargs)
 
-    runner = AgentSessionRunner(
-        llm=_TurnLLM(),
-        tools=ToolRegistry([read, grep, write, finish]),
-        system_prompt="research",
-        config=_session_config(),
-    )
+    runner = make_runner(llm=_TurnLLM(), tools=[read, grep, write, finish])
     runner.run("go")
     # Turn 1: three parallel-safe calls overlapped.
     assert probe.max_active_by_turn[0] >= 2
@@ -2283,14 +2093,11 @@ def test_subagent_launches_beyond_the_cap_queue_instead_of_failing() -> None:
                 assert blob.count('"observation": "subagent_completed"') >= 1
             return inner.complete(messages, **kwargs)
 
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=_ParentLLM(),
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
+        tools=[finish],
+        subagent=make_engine(
             llm=_TaskGatedLLM(gates),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
             config=SubAgentConfig(max_concurrent=1),
         ),
     )
@@ -2307,12 +2114,7 @@ def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
     calls of the same turn must then be refused, which needs an ordered batch."""
     backtest = _NamedTool("validate")
     read = _NamedTool("read_file")
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry([backtest, read, _FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(),
-    )
+    runner = make_runner(tools=[backtest, read, _FinishStub("test")])
     assert backtest.spec.mutating is False
     assert runner._is_parallel_batch(
         (ToolCall("b", "validate", {}), ToolCall("r", "read_file", {}))
@@ -2325,11 +2127,10 @@ def test_backtest_gate_keeps_its_batch_in_order_regardless_of_spec() -> None:
 def test_unfinished_session_end_still_reports_token_usage() -> None:
     # vLLM's usage: prompt tokens but no cache count.
     vllm = {"prompt_tokens": 1_000, "completion_tokens": 10}
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([ProviderResponse(content="thinking aloud", usage=vllm)]),
-        tools=ToolRegistry([_FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(max_llm_calls=1),
+    runner = make_runner(
+        ProviderResponse(content="thinking aloud", usage=vllm),
+        tools=[_FinishStub("test")],
+        config=AgentSessionConfig(max_llm_calls=1),
     )
     events: list[tuple[str, dict[str, object]]] = []
     runner.event_sink = lambda event, payload: events.append((event, payload))
@@ -2363,16 +2164,15 @@ def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() ->
         "completion_tokens": 300,
     }
     vllm = {"prompt_tokens": 1_000, "completion_tokens": 100, "prompt_tokens_details": None}
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=ScriptedLLM(
             [
                 ProviderResponse(content="thinking aloud", usage=usage)
                 for usage in (chat, responses, vllm)
             ]
         ),
-        tools=ToolRegistry([_FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(max_llm_calls=3),
+        tools=[_FinishStub("test")],
+        config=AgentSessionConfig(max_llm_calls=3),
     )
     events: list[tuple[str, dict[str, object]]] = []
     runner.event_sink = lambda event, payload: events.append((event, payload))
@@ -2432,29 +2232,22 @@ def test_session_token_usage_totals_cache_reads_misses_writes_and_reasoning() ->
 def test_session_token_usage_reports_the_subagent_cache_hit_ratio(
     child_usages: tuple[dict[str, object], ...], hits: int, ratio: float | None
 ) -> None:
-    subagent = SubAgentEngine(
+    subagent = make_engine(
         llm=ScriptedLLM(
             [ProviderResponse(content="summary", usage=usage) for usage in child_usages]
         ),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_concurrent=2),
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(
-                        ToolCall("e1", "agent", {"agent": "Explore", "task": "a"}),
-                        ToolCall("e2", "agent", {"agent": "Explore", "task": "b"}),
-                    )
-                ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
-            ]
+    runner = make_runner(
+        ProviderResponse(
+            tool_calls=(
+                ToolCall("e1", "agent", {"agent": "Explore", "task": "a"}),
+                ToolCall("e2", "agent", {"agent": "Explore", "task": "b"}),
+            )
         ),
-        tools=ToolRegistry([_FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(),
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[_FinishStub("test")],
         subagent=subagent,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -2501,19 +2294,13 @@ def test_child_token_totals_keep_reasoning_and_cache_counts() -> None:
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM(
-            [
-                ProviderResponse(
-                    tool_calls=(ToolCall("g1", "agent", {"agent": "general-purpose", "task": "t"}),)
-                ),
-                ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
-            ]
+    runner = make_runner(
+        ProviderResponse(
+            tool_calls=(ToolCall("g1", "agent", {"agent": "general-purpose", "task": "t"}),)
         ),
-        tools=ToolRegistry([_FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
+        ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
+        tools=[_FinishStub("test")],
+        subagent=make_engine(llm=child),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     runner.run("delegate")
@@ -2538,15 +2325,7 @@ def test_child_token_totals_keep_reasoning_and_cache_counts() -> None:
 
 def test_inherit_context_fork_drops_the_unanswered_tool_calls() -> None:
     child = ScriptedLLM([ProviderResponse(content="forked")])
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
-    )
+    runner = make_runner(subagent=make_engine(llm=child))
     # The realistic snapshot: the batch holding this subagent call is running,
     # so the last assistant turn has no tool results yet.
     runner._live_messages = [
@@ -2599,12 +2378,7 @@ def test_tool_exception_in_a_parallel_batch_keeps_sibling_results() -> None:
             ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
         ]
     )
-    runner = AgentSessionRunner(
-        llm=llm,
-        tools=ToolRegistry([_BoomTool(), _NamedTool("read_file"), finish]),
-        system_prompt="research",
-        config=_session_config(),
-    )
+    runner = make_runner(llm=llm, tools=[_BoomTool(), _NamedTool("read_file"), finish])
     runner.run("go")
     second = llm.calls[1]["messages"]
     results = {m.tool_call_id: json.loads(m.content) for m in second if m.role == "tool"}
@@ -2649,14 +2423,10 @@ def test_batch_validate_waits_for_running_subagent() -> None:
             ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([_Backtest(), finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_SlowChild(), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
+        tools=[_Backtest(), finish],
+        subagent=make_engine(llm=_SlowChild()),
     )
     runner.run("go")
     assert seen["children_done"] is True
@@ -2704,12 +2474,10 @@ def test_a_backtest_does_not_wait_for_a_read_only_child(role: str) -> None:
             ProviderResponse(tool_calls=(ToolCall("f", "test", {}),)),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([_Backtest(), _FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(llm=_Child(), tools=ToolRegistry()),
+        tools=[_Backtest(), _FinishStub("test")],
+        subagent=make_engine(llm=_Child(), tools=[]),
     )
     try:
         runner.run("go")
@@ -2730,9 +2498,7 @@ def test_a_backtest_refuses_a_writer_that_outlives_the_barrier(monkeypatch, role
     from autotrade.agent import runner as runner_module
 
     monkeypatch.setattr(runner_module, "SUBAGENT_TEARDOWN_WAIT_SECONDS", 0)
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]), tools=ToolRegistry(), system_prompt="research", config=_session_config()
-    )
+    runner = make_runner()
     writer = runner_module._SubAgentJob("pending", "call", role, 1, Future())
     runner._subagent_jobs.append(writer)
     try:
@@ -2746,15 +2512,7 @@ def test_a_backtest_refuses_a_writer_that_outlives_the_barrier(monkeypatch, role
 
 
 def test_agent_tool_schema_through_the_registry() -> None:
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
-    )
+    runner = make_runner(subagent=make_engine())
     spec = runner.tools.spec("agent")
     assert spec is not None and spec.name == "agent"
     schema = spec.input_schema
@@ -2789,12 +2547,8 @@ def test_resume_continues_a_finished_child_transcript() -> None:
         [ProviderResponse(content="first summary"), ProviderResponse(content="second summary")]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
+    runner = make_runner(
+        subagent=make_engine(llm=child),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     first = runner.tools.invoke("agent", {"agent": "Explore", "task": "look at daily"})
@@ -2824,15 +2578,7 @@ def test_resume_continues_a_finished_child_transcript() -> None:
 def test_resume_refuses_unknown_running_or_mismatched_children() -> None:
     started = threading.Event()
     release = threading.Event()
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
-    )
+    runner = make_runner(subagent=make_engine(llm=_GateLLM(started, release)))
     unknown = runner.tools.invoke(
         "agent", {"agent": "Explore", "task": "x", "resume": "agent_nope"}
     )
@@ -2869,15 +2615,7 @@ def test_a_strict_call_with_null_optionals_launches_and_messages() -> None:
 
     started = threading.Event()
     release = threading.Event()
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
-    )
+    runner = make_runner(subagent=make_engine(llm=_GateLLM(started, release)))
     unused = dict.fromkeys(AGENT_TOOL_SPEC.input_schema["properties"])
     launch = {
         **unused,
@@ -2925,14 +2663,10 @@ def test_a_parent_working_alone_is_never_nudged_to_delegate() -> None:
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([read, finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=ScriptedLLM([]), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
+        tools=[read, finish],
+        subagent=make_engine(),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     runner.run("go")
@@ -3005,14 +2739,9 @@ def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> 
         needle: (threading.Event(), threading.Event(), f"done-{needle}")
         for needle in ("scope-alpha", "scope-beta")
     }
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
+    runner = make_runner(
+        subagent=make_engine(
             llm=_TaskGatedLLM(gates),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
             config=SubAgentConfig(max_concurrent=1),
         ),
     )
@@ -3068,16 +2797,7 @@ def test_a_full_round_of_writable_children_runs_concurrently() -> None:
     gates = {
         scope: (threading.Event(), threading.Event(), f"done-{scope}") for scope in scopes
     }
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_TaskGatedLLM(gates),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-        ),
-    )
+    runner = make_runner(subagent=make_engine(llm=_TaskGatedLLM(gates)))
     try:
         results = [
             runner.tools.invoke(
@@ -3121,9 +2841,7 @@ def test_a_child_asks_for_the_reply_limit_it_was_given() -> None:
     # The cap a child sends, with room to spare in a 128k window.
     for config, cap in ((None, fallback), (SubAgentConfig(max_tokens=500), 500)):
         llm = ScriptedLLM([ProviderResponse(content="done")], context_window_tokens=128_000)
-        SubAgentEngine(
-            llm=llm, tools=ToolRegistry([DeclaredReadOnlyShell()]), config=config
-        ).run_with_transcript("look", role="Explore")
+        make_engine(llm=llm, config=config).run_with_transcript("look", role="Explore")
         assert llm.calls[0]["max_tokens"] == cap
 
 
@@ -3139,9 +2857,8 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         ],
         context_window_tokens=128_000,
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=cut,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
     ).run_with_transcript("audit", role="Explore")[0]
     assert result["status"] == "completed" and result["truncated"] is True
@@ -3166,9 +2883,8 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         context_window_tokens=128_000,
     )
     events: list[tuple[str, dict[str, object]]] = []
-    result = SubAgentEngine(
+    result = make_engine(
         llm=empty,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("audit", role="general-purpose")[0]
@@ -3190,9 +2906,8 @@ def test_child_output_truncation_is_marked_and_never_silent() -> None:
         + [ProviderResponse(content="must not be requested")],
         context_window_tokens=128_000,
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=exhausted,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=500),
     ).run_with_transcript("audit", role="Explore")[0]
     assert result["status"] == "error" and result["summary"] == ""
@@ -3252,9 +2967,9 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,  # type: ignore[arg-type]
-        tools=ToolRegistry([_LongResultTool()]),
+        tools=[_LongResultTool()],
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("dig", role="Explore")[0]
     assert result["status"] == "completed" and result["summary"] == "recovered report"
@@ -3279,9 +2994,9 @@ def test_child_gets_the_parents_single_post_provider_overflow_recovery() -> None
             ProviderResponse(content="must not be requested"),
         ]
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=twice,  # type: ignore[arg-type]
-        tools=ToolRegistry([_LongResultTool()]),
+        tools=[_LongResultTool()],
     ).run_with_transcript("dig", role="Explore")[0]
     assert result["status"] == "error" and result["summary"] == ""
     assert result["llm_errors"] == 2 and len(twice.items) == 1
@@ -3317,9 +3032,8 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
         context_window_tokens=128_000,
     )
     events: list[tuple[str, dict[str, object]]] = []
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=busy,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=4),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -3357,8 +3071,8 @@ def test_child_turns_default_to_48_with_grace_wrap_up() -> None:
         ],
         context_window_tokens=128_000,
     )
-    result = SubAgentEngine(
-        llm=short, tools=ToolRegistry([DeclaredReadOnlyShell()])
+    result = make_engine(
+        llm=short,
     ).run_with_transcript("dig", role="Explore", max_turns=2)[0]
     assert result["turns"] == 2 and result["summary"] == "done"
     assert not any("还剩" in str(m.content) for call in short.calls for m in call["messages"])
@@ -3399,15 +3113,13 @@ def test_child_compacts_at_the_shared_threshold_with_fresh_counters_per_launch()
     )
     events: list[tuple[str, dict[str, object]]] = []
     with pytest.raises(ValueError, match="subagent_compactor is unbound"):
-        SubAgentEngine(
+        make_engine(
             llm=child_llm,
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
             compactor=ContextCompactor(compact_llm),
             time_budget=shared.time_budget,
         )
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=SessionBudgetLLM(child_llm, budget=shared, role="subagent"),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         compactor=parent_compactor,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -3447,7 +3159,7 @@ def test_runner_hands_its_compactor_to_children_and_honours_max_turns() -> None:
         SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="compact"),
         ContextCompactionConfig(),
     )
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=SessionBudgetLLM(
             ScriptedLLM(
                 [_tool_round(0), _tool_round(1), ProviderResponse(content="done")],
@@ -3456,14 +3168,10 @@ def test_runner_hands_its_compactor_to_children_and_honours_max_turns() -> None:
             budget=shared,
             role="subagent",
         ),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="main"),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
         compactor=parent_compactor,
         subagent=engine,
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -3497,9 +3205,8 @@ def test_child_ends_on_context_overflow_instead_of_retrying() -> None:
             )
 
     llm = Overflowing()
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=5),
     ).run_with_transcript("look", role="Explore")[0]
     assert result["status"] == "error" and llm.calls == 1
@@ -3517,9 +3224,8 @@ def test_child_never_sends_a_request_that_cannot_be_made_to_fit() -> None:
         [ProviderResponse(content="must not be requested")], context_window_tokens=2_000
     )
     events: list[tuple[str, dict[str, object]]] = []
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("x" * 20_000, role="Explore")[0]
     assert llm.calls == []
@@ -3543,9 +3249,9 @@ def test_child_trims_tool_results_before_lowering_its_output_cap() -> None:
         context_window_tokens=12_000,
     )
     events: list[tuple[str, dict[str, object]]] = []
-    result = SubAgentEngine(
+    result = make_engine(
         llm=llm,
-        tools=ToolRegistry([_LongResultTool()]),
+        tools=[_LongResultTool()],
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("dig", role="Explore")[0]
     assert result["status"] == "completed" and result["summary"] == "done"
@@ -3573,11 +3279,10 @@ def test_parent_thinking_only_truncated_turn_gets_a_forced_continuation() -> Non
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(max_response_tokens=500),
+        tools=[finish],
+        config=AgentSessionConfig(max_response_tokens=500),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     runner.run("go")
@@ -3608,16 +3313,14 @@ def test_a_turn_that_spends_its_models_own_maximum_is_continued_with_that_figure
         return ScriptedLLM([cut, *then], context_window_tokens=profile.context_window_tokens)
 
     parent = scripted(ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)))
-    AgentSessionRunner(
+    make_runner(
         llm=parent,
-        tools=ToolRegistry([_FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(max_response_tokens=limit),
+        tools=[_FinishStub("test")],
+        config=AgentSessionConfig(max_response_tokens=limit),
     ).run("go")
     child = scripted(ProviderResponse(content="简洁结论"))
-    result = SubAgentEngine(
+    result = make_engine(
         llm=child,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_tokens=limit),
     ).run_with_transcript("audit", role="Explore")[0]
     assert result["status"] == "completed" and result["truncated_turns"] == 1
@@ -3663,11 +3366,10 @@ def test_parent_truncation_is_measured_against_the_cap_the_window_left() -> None
 
     llm = ClampingGateway()
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([_FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(max_response_tokens=50_000),
+        tools=[_FinishStub("test")],
+        config=AgentSessionConfig(max_response_tokens=50_000),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     runner.run("go")
@@ -3702,16 +3404,10 @@ def test_subagent_completed_surfaces_truncation_and_rounds() -> None:
             ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=child,
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-            config=SubAgentConfig(max_tokens=500),
-        ),
+        tools=[finish],
+        subagent=make_engine(llm=child, config=SubAgentConfig(max_tokens=500)),
     )
     runner.run("go")
     completed = next(
@@ -3755,9 +3451,8 @@ def test_child_malformed_tool_call_keeps_its_analysis_and_re_issues_once() -> No
 
     child = Malformed()
     events: list[tuple[str, dict[str, object]]] = []
-    result = SubAgentEngine(
+    result = make_engine(
         llm=child,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("look", role="Explore")[0]
 
@@ -3798,9 +3493,8 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
             return ProviderResponse(content="recovered report")
 
     events: list[tuple[str, dict[str, object]]] = []
-    result = SubAgentEngine(
+    result = make_engine(
         llm=Flaky(),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("look", role="Explore", parent_call_id="call_p")[0]
     assert result["status"] == "completed" and result["summary"] == "recovered report"
@@ -3819,13 +3513,7 @@ def test_child_llm_error_is_traced_and_a_recovered_child_is_not_an_error() -> No
             ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
         ]
     )
-    runner = AgentSessionRunner(
-        llm=llm,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(llm=Flaky(), tools=ToolRegistry([DeclaredReadOnlyShell()])),
-    )
+    runner = make_runner(llm=llm, tools=[finish], subagent=make_engine(llm=Flaky()))
     runner.run("go")
     completed = next(
         json.loads(str(message.content))
@@ -3928,14 +3616,10 @@ def test_provider_refusal_ends_the_child_refused_and_the_parent_is_told() -> Non
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=parent,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=gateway, tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
+        tools=[finish],
+        subagent=make_engine(llm=gateway),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     runner.run("go")
@@ -3961,8 +3645,8 @@ def test_a_report_quoting_the_refusal_sentence_is_still_a_report() -> None:
     an ordinary ``stop`` is the child's own report."""
 
     gateway, _transport = _mimo_child_gateway(_MIMO_REFUSAL, "stop")
-    result = SubAgentEngine(
-        llm=gateway, tools=ToolRegistry([DeclaredReadOnlyShell()])
+    result = make_engine(
+        llm=gateway,
     ).run_with_transcript("screen limit events", role="general-purpose")[0]
     assert result["status"] == "completed" and result["summary"] == _MIMO_REFUSAL
     assert "error" not in result and "llm_errors" not in result
@@ -4005,9 +3689,9 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
         ],
         context_window_tokens=128_000,
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=child,
-        tools=ToolRegistry([_NamedTool("grep"), _NamedTool("read_file")]),
+        tools=[_NamedTool("grep"), _NamedTool("read_file")],
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("look", role="Explore")[0]
 
@@ -4030,12 +3714,10 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
         ]
     )
     attempts: list[dict[str, object]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
+        tools=[finish],
+        subagent=make_engine(
             llm=ScriptedLLM(
                 [
                     ProviderResponse(
@@ -4047,7 +3729,7 @@ def test_child_cut_short_by_worker_shutdown_is_cancelled_not_failed(monkeypatch)
                 ],
                 context_window_tokens=128_000,
             ),
-            tools=ToolRegistry([_NamedTool("grep"), _NamedTool("read_file")]),
+            tools=[_NamedTool("grep"), _NamedTool("read_file")],
         ),
         event_sink=lambda event, payload: attempts.append(payload)
         if event == "subagent_attempt"
@@ -4077,9 +3759,8 @@ def test_child_without_a_report_is_not_completed() -> None:
         ],
         context_window_tokens=128_000,
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=silent,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=1),
     ).run_with_transcript("dig", role="general-purpose")[0]
     assert result["status"] == "error" and result["summary"] == ""
@@ -4107,9 +3788,8 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         ],
         context_window_tokens=128_000,
     )
-    result = SubAgentEngine(
+    result = make_engine(
         llm=reasoning_only,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=1),
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("dig", role="general-purpose")[0]
@@ -4145,9 +3825,8 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         ],
         context_window_tokens=128_000,
     )
-    fallback = SubAgentEngine(
+    fallback = make_engine(
         llm=quiet,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         config=SubAgentConfig(max_turns=1),
     ).run_with_transcript("dig", role="general-purpose")[0]
     assert fallback["status"] == "exhausted"
@@ -4170,12 +3849,10 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
         ]
     )
     attempts: list[dict[str, object]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
+        tools=[finish],
+        subagent=make_engine(
             llm=ScriptedLLM(
                 [
                     ProviderResponse(
@@ -4189,7 +3866,6 @@ def test_exhausted_child_reports_what_the_empty_finalize_left_behind() -> None:
                 ],
                 context_window_tokens=128_000,
             ),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
             config=SubAgentConfig(max_turns=1),
         ),
         event_sink=lambda event, payload: attempts.append(payload)
@@ -4255,9 +3931,8 @@ def test_child_thinking_level_reaches_the_budget_wrapped_gateway() -> None:
         role="subagent",
     )
     events: list[tuple[str, dict[str, object]]] = []
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=budgeted,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     for level, expected in (
@@ -4313,11 +3988,9 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         [55_000.0, 80_000.0, 95_000.0],
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([_NamedTool("read_file"), _NamedTool("smoke_backtest"), _FinishStub("test")]),
-        system_prompt="research",
-        config=_session_config(),
+        tools=[_NamedTool("read_file"), _NamedTool("smoke_backtest"), _FinishStub("test")],
         time_budget=budget,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -4359,11 +4032,10 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
         [80_000.0],
     )
     events = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([_NamedTool("read_file"), _FinishStub("test")]),
+        tools=[_NamedTool("read_file"), _FinishStub("test")],
         system_prompt="session",
-        config=_session_config(),
         time_budget=budget,
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -4441,12 +4113,8 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
     def _run(arguments: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
         child = ScriptedLLM([ProviderResponse(content="report")], context_window_tokens=128_000)
         events: list[tuple[str, dict[str, object]]] = []
-        runner = AgentSessionRunner(
-            llm=ScriptedLLM([]),
-            tools=ToolRegistry(),
-            system_prompt="research",
-            config=_session_config(),
-            subagent=SubAgentEngine(llm=child, tools=ToolRegistry([DeclaredReadOnlyShell()])),
+        runner = make_runner(
+            subagent=make_engine(llm=child),
             event_sink=lambda event, payload: events.append((event, payload)),
         )
         assert runner.tools.invoke("agent", {"agent": "Explore", "task": "dig", **arguments}).ok
@@ -4490,14 +4158,11 @@ def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path:
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([ReadFileTool(roots), finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
+        tools=[ReadFileTool(roots), finish],
+        subagent=make_engine(
             llm=ScriptedLLM([ProviderResponse(content=report)], context_window_tokens=128_000),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
         ),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
@@ -4572,14 +4237,11 @@ def test_short_child_report_is_delivered_whole_and_no_store_is_explicit() -> Non
             ProviderResponse(tool_calls=(ToolCall("f1", "test", {}),)),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
+        tools=[finish],
+        subagent=make_engine(
             llm=ScriptedLLM([ProviderResponse(content=long)], context_window_tokens=128_000),
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
         ),
     )
     runner.run("go")
@@ -4637,9 +4299,9 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    result, transcript = SubAgentEngine(
+    result, transcript = make_engine(
         llm=llm,
-        tools=ToolRegistry([_SteeringShell()]),
+        tools=[_SteeringShell()],
         event_sink=lambda event, payload: events.append((event, payload)),
     ).run_with_transcript("look", role="general-purpose", parent_call_id="call_p", steer_queue=steer)
     assert result["status"] == "completed" and result["steers"] == 1 and not steer
@@ -4662,14 +4324,14 @@ def test_steer_is_delivered_before_the_childs_next_round() -> None:
     assert any(STEER_MESSAGE_LABEL in str(message.content) for message in transcript)
     # A queued child (instruction sent before its first turn) reads it right after the task.
     early = _RecordingLLM([ProviderResponse(content="ok")])
-    result = SubAgentEngine(llm=early, tools=ToolRegistry([DeclaredReadOnlyShell()])).run_with_transcript(
+    result = make_engine(llm=early).run_with_transcript(
         "queued task", role="Explore", steer_queue=deque(["先看 README"])
     )[0]
     assert result["steers"] == 1
     assert early.seen[0][-2:] == [("user", "queued task"), ("user", f"{STEER_MESSAGE_LABEL} 先看 README")]
     # No instruction: no message, no counter.
-    plain = SubAgentEngine(
-        llm=ScriptedLLM([ProviderResponse(content="ok")]), tools=ToolRegistry([DeclaredReadOnlyShell()])
+    plain = make_engine(
+        ProviderResponse(content="ok"),
     ).run_with_transcript("plain", role="Explore")[0]
     assert "steers" not in plain
 
@@ -4705,16 +4367,8 @@ def test_agent_message_action_steers_running_and_queued_children() -> None:
     release = threading.Event()
     child = _SteerProbeLLM(started, release)
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=child,
-            tools=ToolRegistry([DeclaredReadOnlyShell()]),
-            config=SubAgentConfig(max_concurrent=1),
-        ),
+    runner = make_runner(
+        subagent=make_engine(llm=child, config=SubAgentConfig(max_concurrent=1)),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     slow = runner.tools.invoke("agent", {"agent": "general-purpose", "task": "slow task"})
@@ -4773,15 +4427,7 @@ def test_agent_message_action_steers_running_and_queued_children() -> None:
 def test_steer_the_child_never_read_is_reported_undelivered() -> None:
     started = threading.Event()
     release = threading.Event()
-    runner = AgentSessionRunner(
-        llm=ScriptedLLM([]),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
-        subagent=SubAgentEngine(
-            llm=_GateLLM(started, release), tools=ToolRegistry([DeclaredReadOnlyShell()])
-        ),
-    )
+    runner = make_runner(subagent=make_engine(llm=_GateLLM(started, release)))
     launched = runner.tools.invoke("agent", {"agent": "Explore", "task": "one turn"})
     assert launched.ok and started.wait(3)
     # The child is inside its only model call; it reports without another turn.
@@ -4818,9 +4464,8 @@ def test_children_run_on_their_own_gateway_inside_the_shared_session_quota() -> 
     )
     child_llm.provider, child_llm.model = "vllm", "qwen-3.8-27b-fp8"
     events: list[tuple[str, dict[str, object]]] = []
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=SessionBudgetLLM(child_llm, budget=shared, role="subagent"),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         event_sink=lambda event, payload: events.append((event, payload)),
     )
     # The engine's context arithmetic follows the child's own window.
@@ -4873,7 +4518,7 @@ def test_children_compact_at_their_own_models_threshold_not_the_parents() -> Non
         ContextCompactionConfig(token_threshold=1, min_messages=4, keep_recent_messages=2),
     )
     events: list[tuple[str, dict[str, object]]] = []
-    engine = SubAgentEngine(
+    engine = make_engine(
         llm=SessionBudgetLLM(
             ScriptedLLM(
                 [*(_tool_round(index) for index in range(3)), ProviderResponse(content="done")],
@@ -4882,14 +4527,10 @@ def test_children_compact_at_their_own_models_threshold_not_the_parents() -> Non
             budget=shared,
             role="subagent",
         ),
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
         compactor=child_compactor,
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=SessionBudgetLLM(ScriptedLLM([]), budget=shared, role="main"),
-        tools=ToolRegistry(),
-        system_prompt="research",
-        config=_session_config(),
         compactor=parent_compactor,
         subagent=engine,
         event_sink=lambda event, payload: events.append((event, payload)),

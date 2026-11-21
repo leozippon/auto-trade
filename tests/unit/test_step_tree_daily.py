@@ -7,7 +7,7 @@ from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import ToolRegistry
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
-from tests.unit.terminal_tool import TerminalTool
+from tests.unit.agent_fixture import TerminalTool
 
 
 def _passing_gate(

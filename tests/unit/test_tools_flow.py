@@ -50,6 +50,7 @@ from autotrade.environment.tools.workspace import (
     WORKSPACE_MIN_FREE_BYTES,
 )
 from tests.unit.acceptance_fixture import RULES
+from tests.unit.agent_fixture import make_runner
 
 from .fixtures_sandbox import PassingModificationCheck
 
@@ -1344,7 +1345,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
     def _finish_tool(self, root: Path):
         from autotrade.environment.artifacts import new_revision_id
         from autotrade.environment.step_tree import StepTree
-        from tests.unit.terminal_tool import TerminalTool
+        from tests.unit.agent_fixture import TerminalTool
 
         paths, roots, workspace = build_sandbox(root)
         (paths.agent / "output" / "main.py").write_text(
@@ -1364,7 +1365,6 @@ class TerminalToolWriteLockTest(unittest.TestCase):
         return workspace, roots, finish, node_id
 
     def test_calls_after_the_terminal_tool_are_refused_and_the_session_returns(self) -> None:
-        from autotrade.agent import AgentSessionConfig, AgentSessionRunner
         from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
 
         with tempfile.TemporaryDirectory() as tmp:
@@ -1382,13 +1382,9 @@ class TerminalToolWriteLockTest(unittest.TestCase):
                 ]
             )
             events: list[tuple[str, dict[str, object]]] = []
-            AgentSessionRunner(
+            make_runner(
                 llm=llm,
-                tools=ToolRegistry(
-                    [WriteFileTool(workspace), SandboxShellTool(workspace, shell_runner), ReadFileTool(roots), finish]
-                ),
-                system_prompt="research",
-                config=AgentSessionConfig(),
+                tools=[WriteFileTool(workspace), SandboxShellTool(workspace, shell_runner), ReadFileTool(roots), finish],
                 event_sink=lambda event, payload: events.append((event, payload)),
             ).run("finish")
             self.assertEqual(len(llm.calls), 1)

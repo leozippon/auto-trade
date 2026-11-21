@@ -14,9 +14,7 @@ from autotrade.agent.runner import (
     INBOX_SAFE_BEFORE_LLM,
     INBOX_SAFE_BETWEEN_SERIAL_TOOLS,
     AgentSessionConfig,
-    AgentSessionRunner,
 )
-from autotrade.agent.subagent import SubAgentEngine
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.llm import (
     ChatMessage,
@@ -26,7 +24,6 @@ from autotrade.environment.llm import (
 )
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools import (
-    ToolRegistry,
     ToolResult,
     ToolSpec,
 )
@@ -37,7 +34,7 @@ from autotrade.pipelines.agent_inbox import (
     list_unconsumed_messages,
 )
 from autotrade.webui.traces import project_trace_blocks
-from tests.unit.terminal_tool import TerminalTool
+from tests.unit.agent_fixture import TerminalTool, make_engine, make_runner
 
 SESSION_A = "epoch_001/fold_2022Q2"
 SESSION_B = "epoch_001/fold_2022Q1"
@@ -131,9 +128,9 @@ def test_before_llm_applies_guidance_without_system_or_manifest(tmp_path: Path) 
             )
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=2),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -178,9 +175,9 @@ def test_interrupt_after_llm_skips_unstarted_tools_with_pairing(tmp_path: Path) 
             ),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([write, finish]),
+        tools=[write, finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=3),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -241,9 +238,9 @@ def test_started_mutating_tool_is_not_killed(tmp_path: Path) -> None:
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([write, later, finish]),
+        tools=[write, later, finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=3),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -285,9 +282,9 @@ def test_non_interrupt_after_llm_waits_for_tool_pairing(tmp_path: Path) -> None:
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([grep, finish]),
+        tools=[grep, finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=3),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -323,9 +320,9 @@ def test_after_parallel_readonly_applies_before_next_llm(tmp_path: Path) -> None
         ]
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([glob, grep, finish]),
+        tools=[glob, grep, finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=3),
         event_sink=lambda event, payload: events.append((event, payload)),
@@ -366,12 +363,12 @@ def test_subagent_does_not_consume_inbox_until_parent_returns(tmp_path: Path) ->
             ),
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=parent_llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=3),
-        subagent=SubAgentEngine(llm=subagent_llm, tools=ToolRegistry([shell])),
+        subagent=make_engine(llm=subagent_llm, tools=[shell]),
         inbox=inbox,
     )
     runner.run("delegate then finish")
@@ -402,9 +399,9 @@ def test_session_inbox_hook_isolates_sessions_and_run_ids(tmp_path: Path) -> Non
             )
         ]
     )
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=llm,
-        tools=ToolRegistry([finish]),
+        tools=[finish],
         system_prompt="daily JSON only",
         config=AgentSessionConfig(max_llm_calls=2),
         inbox=hook_a,

@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent import AgentSessionConfig, AgentSessionRunner
+from autotrade.agent import AgentSessionConfig
 from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.agent.subagent import AGENT_TOOL_SPEC
 from autotrade.common.env import env_value
@@ -43,10 +43,9 @@ from autotrade.environment.llm.lighting import (
 )
 from autotrade.environment.llm.pricing import TokenPrices
 from autotrade.environment.time_budget import InferenceTimeBudget
-from autotrade.environment.tools import ToolRegistry
 from autotrade.environment.tools.base import validate_arguments
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
-from tests.unit.test_agent_session_advanced import DeclaredReadOnlyShell
+from tests.unit.agent_fixture import DeclaredReadOnlyShell, make_runner
 
 MODEL = "gpt-6-astra"
 GEMINI_MODEL = "gemini-4-argon"
@@ -571,9 +570,9 @@ def test_a_reasoning_summary_is_traced_and_never_sent_back(tmp_path: Path):
         reasoning_effort="xhigh",
     )
     events: list[tuple[str, dict[str, object]]] = []
-    runner = AgentSessionRunner(
+    runner = make_runner(
         llm=proxy,
-        tools=ToolRegistry([DeclaredReadOnlyShell()]),
+        tools=[DeclaredReadOnlyShell()],
         system_prompt="inspect",
         config=AgentSessionConfig(max_llm_calls=2),
         event_sink=lambda event, payload: events.append((event, payload)),
