@@ -17,16 +17,27 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.runtime import utc_now_iso
-from autotrade.pipelines import worker
+from autotrade.pipelines import pit_backend, worker
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
     check_experiment,
     current_experiments,
     main,
 )
-from tests.unit.synthetic_experiment import SyntheticPITProvider, make_experiment
+from tests.unit.synthetic_experiment import (
+    SyntheticPITProvider,
+    few_baseline_draws,
+    make_experiment,
+)
 
 LEDGER = Path("ledgers") / "experiment_ledger.jsonl"
+
+
+@pytest.fixture(scope="module", autouse=True)
+def few_draws():
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pit_backend, "run_null_control", few_baseline_draws)
+        yield
 
 
 @pytest.fixture(scope="module")

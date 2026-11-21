@@ -21,7 +21,7 @@ from autotrade.environment.artifacts import (
 )
 from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.pipelines import experiment as experiment_module
-from autotrade.pipelines import worker
+from autotrade.pipelines import pit_backend, worker
 from autotrade.pipelines.hitl_state import read_status
 from autotrade.pipelines.ledger import (
     ExperimentLedger,
@@ -37,6 +37,7 @@ from tests.unit.synthetic_experiment import (
     RELEASE_END,
     SyntheticPITProvider,
     decision_anchor,
+    few_baseline_draws,
     make_experiment,
 )
 
@@ -48,6 +49,7 @@ DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
 def synthetic_provider(monkeypatch: pytest.MonkeyPatch):
     SyntheticPITProvider.requests = []
     monkeypatch.setattr(worker, "ResearchPITSnapshotProvider", SyntheticPITProvider)
+    monkeypatch.setattr(pit_backend, "run_null_control", few_baseline_draws)
     yield SyntheticPITProvider
 
 

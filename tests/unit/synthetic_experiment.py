@@ -25,6 +25,7 @@ import numpy as np
 import pandas as pd
 
 from autotrade.environment.llm import LOCAL_QWEN_MODEL
+from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBundle
@@ -32,6 +33,18 @@ from autotrade.pipelines.pit_backend import prebuild_asof_stash
 from tests.unit.acceptance_fixture import REQUIRED_RULES
 
 GENERATION = "synthetic_generation"
+# Random-baseline draws per null control in the end-to-end tests, which assert
+# nothing about the count; test_null_control pins the production default.
+E2E_BASELINE_DRAWS = 8
+
+
+def few_baseline_draws(*args, **kwargs):
+    """``run_null_control`` at ``E2E_BASELINE_DRAWS`` draws whatever count the
+    caller names: patched over ``pit_backend.run_null_control``."""
+
+    return run_null_control(*args, **{**kwargs, "k": E2E_BASELINE_DRAWS})
+
+
 # Two research years: the session researches on Y1 and Y2 is the validation year.
 GEOMETRY = {
     "research_start": "20220701",
