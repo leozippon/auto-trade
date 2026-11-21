@@ -1283,7 +1283,7 @@ def download_macro_trade_date(
     for index, (loop_value, trade_date) in enumerate(tasks, start=1):
         directory = dataset_dir / f"{spec.loop_param}={safe_partition_value(loop_value)}" if loop_value else dataset_dir
         path = directory / f"trade_date={trade_date}.parquet"
-        if path.exists() and not force and parquet_rows(path) > 0:
+        if should_skip_existing_partition(path, force=force) and parquet_rows(path) > 0:
             skipped += 1
             continue
         params = {"trade_date": trade_date}
@@ -3451,7 +3451,7 @@ def download_text_day(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, d
     total_rows = 0
     for index, day in enumerate(days, start=1):
         path = raw_dir / spec.api_name / f"date={day}.parquet"
-        if path.exists() and not force:
+        if should_skip_existing_partition(path, force=force):
             skipped += 1
             continue
         params = {spec.date_column or "date": day}

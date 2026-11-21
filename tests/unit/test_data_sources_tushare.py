@@ -5724,6 +5724,40 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             download.download_board_trade_date_dataset(client, self.raw_dir, spec, ["20200102"], False, 5000, None)
         self.assertEqual(client.calls, [])
 
+    def test_text_day_and_macro_trade_date_skips_reattempt_partitions_without_intact_sidecar(self):
+        # Same rule as every other versioned family (DATA_DOCUMENTATION §2.3):
+        # a parquet without its commit identity is re-pulled and committed.
+        self._write_trade_cal()
+        cases = [
+            (common.TEXT_SPECS["cctv_news"], "date=20200102", ["20200102", "t", "c"],
+             lambda client: download.download_text_day(client, self.raw_dir, common.TEXT_SPECS["cctv_news"], ["20200102"], False)),
+            (common.MACRO_SPECS["sw_daily"], "trade_date=20200102", None,
+             lambda client: download.download_macro_trade_date(
+                 client, self.raw_dir, common.MACRO_SPECS["sw_daily"], "20200102", "20200102", False, 5000)),
+        ]
+        for spec, partition, row, run in cases:
+            columns = spec.fields.split(",")
+            row = row or ["801010.SI" if col == "ts_code" else "20200102" if col == "trade_date" else "1" for col in columns]
+            path = self.raw_dir / spec.api_name / f"{partition}.parquet"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            pd.DataFrame([row], columns=columns).to_parquet(path, index=False)  # NO sidecar
+            self.assertFalse(tushare_io.committed_partition_intact(path))
+
+            class RowClient(EmptyTradeDateClient):
+                def query(self, api_name, params=None, fields="", retries=5, answer=row, names=columns):
+                    self.calls.append((api_name, dict(params or {})))
+                    return common.ApiResult(names, [answer])
+
+            client = RowClient()
+            with redirect_stdout(io.StringIO()):
+                run(client)
+            self.assertEqual([api for api, _ in client.calls], [spec.api_name])
+            self.assertTrue(tushare_io.committed_partition_intact(path))
+            client.calls.clear()
+            with redirect_stdout(io.StringIO()):
+                run(client)
+            self.assertEqual(client.calls, [], spec.api_name)
+
     def test_board_progress_counts_only_partitions_publish_wrote(self):
         spec = common.BOARD_TRADING_SPECS["limit_list_d"]
 
