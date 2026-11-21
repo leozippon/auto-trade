@@ -446,14 +446,12 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
         run_id: str | None = Query(None),
         offset: int = Query(0, ge=0),
         max_bytes: int | None = Query(None, ge=1, le=traces.MAX_BLOCK_READ_BYTES),
-        tail_events: int | None = Query(None, ge=1, le=500),
     ) -> dict[str, object]:
         path, raw_run_id, _trace_ref, identity = _trace_target(experiment_id, run_id)
         blocks = traces.read_trace_blocks(
             path,
             offset=offset,
             max_bytes=max_bytes,
-            tail_events=tail_events,
             writer_alive=traces.trace_writer_alive(identity.experiment_dir, raw_run_id),
         )
         return _public_trace_blocks(blocks, identity)

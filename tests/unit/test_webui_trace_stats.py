@@ -885,13 +885,13 @@ def test_a_torn_tail_ends_pagination_once_its_writer_is_gone(tmp_path: Path) -> 
 
     live = traces.read_trace_page(trace, offset=complete, writer_alive=True)
     assert live == {"events": [], "next_offset": complete, "eof": False}
-    live_tail = traces.read_trace_tail(trace, max_events=10, writer_alive=True)
+    live_tail = traces.read_trace_tail(trace, max_bytes=size, writer_alive=True)
     assert live_tail["next_offset"] == complete and live_tail["eof"] is False
     assert [event.get("content") for event in live_tail["events"]] == ["one"]
 
     dead = traces.read_trace_page(trace, offset=complete, writer_alive=False)
     assert dead == {"events": [{"raw": marker}], "next_offset": size, "eof": True}
-    dead_tail = traces.read_trace_tail(trace, max_events=10, writer_alive=False)
+    dead_tail = traces.read_trace_tail(trace, max_bytes=size, writer_alive=False)
     assert dead_tail["next_offset"] == size and dead_tail["eof"] is True
     assert [event.get("content") for event in dead_tail["events"]] == ["one", None]
     assert dead_tail["events"][-1] == {"raw": marker}
@@ -1000,9 +1000,9 @@ def test_a_dead_runs_open_tool_calls_read_as_interrupted(tmp_path: Path) -> None
     partial = traces.read_trace_blocks(trace, offset=0, max_bytes=short, writer_alive=False)
     assert partial["eof"] is False and group(partial)["running"] == 1
 
-    # The route reads liveness from hitl/status.json, for a tail as for a page.
+    # The route reads liveness from hitl/status.json.
     client = TestClient(create_app(tmp_path))
-    params = {"run_id": identity.trace_ref("run_001"), "tail_events": 20}
+    params = {"run_id": identity.trace_ref("run_001")}
     _claim_writer(root, alive=True, run_id="run_001")
     running = client.get("/api/experiments/demo/trace/blocks", params=params).json()
     assert group(running)["running"] == 1

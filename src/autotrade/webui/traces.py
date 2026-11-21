@@ -18,7 +18,6 @@ from autotrade.pipelines.hitl_state import (
 )
 
 DEFAULT_PAGE_BYTES = 512 * 1024
-MAX_TAIL_BYTES = 4 * 1024 * 1024
 MAX_BLOCK_READ_BYTES = 32 * 1024 * 1024
 STREAM_POLL_SECONDS = 1.0
 STREAM_IDLE_HEARTBEAT_EVERY = 15
@@ -40,15 +39,11 @@ _TERMINAL_SUBAGENT = frozenset(
 )
 
 
-def resolve_trace_path(experiment_dir: Path, run_id: str | None) -> Path | None:
+def resolve_trace_path(experiment_dir: Path, run_id: str) -> Path | None:
     """Resolve one canonical trace without accepting paths from client/status data."""
 
     directory = Path(experiment_dir).resolve()
-    if run_id is None:
-        status = read_status(directory / HITL_DIR_NAME / STATUS_NAME)
-        value = status.get("run_id")
-        run_id = str(value) if isinstance(value, str) and value else None
-    if run_id is None or not TRACE_ID.fullmatch(run_id):
+    if not TRACE_ID.fullmatch(run_id):
         return None
     path = (directory / "artifacts/traces" / f"{run_id}.jsonl").resolve()
     trace_root = (directory / "artifacts/traces").resolve()
@@ -141,16 +136,10 @@ def read_trace_page(
     return {"events": events, "next_offset": next_offset, "eof": next_offset >= size}
 
 
-def read_trace_tail(
-    path: Path,
-    *,
-    max_events: int | None,
-    max_bytes: int = MAX_TAIL_BYTES,
-    writer_alive: bool = True,
-) -> dict[str, object]:
-    """Return a bounded tail plus the byte offset where live tailing can resume.
+def read_trace_tail(path: Path, *, max_bytes: int, writer_alive: bool = True) -> dict[str, object]:
+    """Every complete event of the last ``max_bytes``, plus the byte offset
+    where live tailing can resume.
 
-    ``max_events`` None keeps every complete event of the last ``max_bytes``.
     ``writer_alive`` carries the same meaning as in :func:`read_trace_page`: a
     dead writer's unterminated trailing bytes end the read as a marked
     truncation instead of holding the resume offset short of EOF forever.
@@ -173,8 +162,7 @@ def read_trace_tail(
         blob = blob[newline + 1 :]
     complete_bytes = blob.rfind(b"\n") + 1
     lines = blob[:complete_bytes].splitlines(keepends=True)
-    selected = lines if max_events is None else lines[-max(1, int(max_events)) :]
-    events = [_decode_event(line) for line in selected if line.strip()]
+    events = [_decode_event(line) for line in lines if line.strip()]
     next_offset = start + complete_bytes
     torn = len(blob) - complete_bytes
     if torn and not writer_alive:
@@ -184,7 +172,7 @@ def read_trace_tail(
         "events": events,
         "next_offset": next_offset,
         "eof": next_offset >= size,
-        "history_truncated": len(selected) < len(lines) or start > 0,
+        "history_truncated": start > 0,
     }
 
 
@@ -193,7 +181,6 @@ def read_trace_blocks(
     *,
     offset: int = 0,
     max_bytes: int | None = None,
-    tail_events: int | None = None,
     writer_alive: bool = True,
 ) -> dict[str, object]:
     """Project a page or tail of raw events into display blocks. JSONL is unchanged.
@@ -208,22 +195,15 @@ def read_trace_blocks(
 
     size = Path(path).stat().st_size
     remaining = max(size - max(0, int(offset)), 0)
-    if tail_events is not None:
-        page = read_trace_tail(path, max_events=tail_events, writer_alive=writer_alive)
-    elif max_bytes is None and not offset and remaining > MAX_BLOCK_READ_BYTES:
-        page = read_trace_tail(
-            path, max_events=None, max_bytes=MAX_BLOCK_READ_BYTES, writer_alive=writer_alive
-        )
+    if max_bytes is None and not offset and remaining > MAX_BLOCK_READ_BYTES:
+        page = read_trace_tail(path, max_bytes=MAX_BLOCK_READ_BYTES, writer_alive=writer_alive)
     else:
         window = (remaining or 1) if max_bytes is None else max(1, int(max_bytes))
         window = min(window, MAX_BLOCK_READ_BYTES)
         page = read_trace_page(
             path, offset=offset, max_bytes=window, writer_alive=writer_alive
         )
-    events = page.get("events")
-    if not isinstance(events, list):
-        events = []
-    blocks = project_trace_blocks(events)
+    blocks = project_trace_blocks(page["events"])
     if not writer_alive and page.get("eof"):
         _interrupt_open_calls(blocks)
     projected = {

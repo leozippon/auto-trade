@@ -1664,17 +1664,6 @@ class WebuiBackendTest(unittest.TestCase):
             404,
         )
 
-    def test_trace_tail_returns_recent_events_and_stream_offset(self) -> None:
-        tail = self.client.get(
-            "/api/experiments/exp_hitl/trace/blocks",
-            params={"run_id": self._run_ref("run_s1"), "tail_events": 2},
-        ).json()
-        self.assertEqual(
-            [block["kind"] for block in tail["blocks"]],
-            ["agent_output", "tool_group"],
-        )
-        self.assertTrue(tail["next_offset"] > 0)
-
     def test_trace_stats_counts_tokens_and_tool_calls(self) -> None:
         stats = self.client.get(
             "/api/experiments/exp_hitl/trace/stats",
