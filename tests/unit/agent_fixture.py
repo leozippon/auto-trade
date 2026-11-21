@@ -28,10 +28,8 @@ class TerminalTool:
         mutating=True,
     )
 
-    def __init__(self, tree: StepTree | None = None, *, session_ref: str = "", registration=None) -> None:
+    def __init__(self, tree: StepTree | None = None) -> None:
         self.tree = tree
-        self.session_ref = session_ref
-        self.registration = registration
         self.calls: list[Mapping[str, object]] = []
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:

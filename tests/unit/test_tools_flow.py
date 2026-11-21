@@ -56,14 +56,6 @@ from .fixtures_sandbox import PassingModificationCheck
 
 RG_AVAILABLE = shutil.which("rg") is not None
 
-def _passing_gate(
-    node_id: str,
-    seed_replicates: tuple[str, ...] = (),
-) -> dict[str, object]:
-    """A registration every node passes: these tests are about the Runner."""
-    return {"passed": True, "reasons": []}
-
-
 
 def build_sandbox(root: Path) -> tuple[SandboxPaths, SearchRoots, SafeWorkspace]:
     """A synthetic sandbox layout with every read root the Agent may reach."""
@@ -1361,7 +1353,7 @@ class TerminalToolWriteLockTest(unittest.TestCase):
             revision_id=new_revision_id("revision"),
             metrics={},
         )
-        finish = TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate)
+        finish = TerminalTool(tree)
         return workspace, roots, finish, node_id
 
     def test_calls_after_the_terminal_tool_are_refused_and_the_session_returns(self) -> None:

@@ -63,15 +63,6 @@ from tests.unit.agent_fixture import (
 )
 
 
-def _passing_gate(
-    node_id: str,
-    seed_replicates: tuple[str, ...] = (),
-) -> dict[str, object]:
-    """A registration every node passes: these tests are about the Runner."""
-    return {"passed": True, "reasons": []}
-
-
-
 def finish_session_tool(root: Path) -> tuple[TerminalTool, str]:
     """A terminal tool over a real step tree carrying one validated node.
 
@@ -93,7 +84,7 @@ def finish_session_tool(root: Path) -> tuple[TerminalTool, str]:
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
+    return TerminalTool(tree), node_id
 
 
 class LongResultShell(DeclaredReadOnlyShell):

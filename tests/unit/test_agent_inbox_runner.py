@@ -63,14 +63,6 @@ class FakeInbox:
     def push(self, notice: FakeNotice) -> None:
         self.items.append(notice)
 
-def _passing_gate(
-    node_id: str,
-    seed_replicates: tuple[str, ...] = (),
-) -> dict[str, object]:
-    """A registration every node passes: these tests are about the Runner."""
-    return {"passed": True, "reasons": []}
-
-
 
 class RecordingTool:
     def __init__(self, name: str, *, mutating: bool = False, on_invoke=None):
@@ -106,7 +98,7 @@ def _finish_tool(root: Path) -> tuple[TerminalTool, str]:
         revision_id=new_revision_id("revision"),
         metrics={"total_return": 0.01},
     )
-    return TerminalTool(tree, session_ref="session_ref_ab", registration=_passing_gate), node_id
+    return TerminalTool(tree), node_id
 
 
 def _user_texts(messages: list[ChatMessage]) -> list[str]:

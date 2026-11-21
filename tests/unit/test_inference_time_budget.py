@@ -62,15 +62,6 @@ from .fixtures_sandbox import PassingModificationCheck
 from .test_batch_validate import _write_style_sidecar
 
 
-def _passing_gate(
-    node_id: str,
-    seed_replicates: tuple[str, ...] = (),
-) -> dict[str, object]:
-    """A registration every node passes: these tests are about the Runner."""
-    return {"passed": True, "reasons": []}
-
-
-
 class FakeClock:
     def __init__(self, value: float = 100.0) -> None:
         self.value = value
@@ -250,7 +241,7 @@ def test_backtest_failure_past_wall_deadline_keeps_llm_repair_budget(
         llm=llm,
         tools=[
             batch,
-            TerminalTool(tree, session_ref=fold_ref, registration=_passing_gate),
+            TerminalTool(tree),
         ],
         system_prompt="repair a failed validation and finish",
         config=AgentSessionConfig(
@@ -371,7 +362,7 @@ def test_a_validation_completing_inside_the_grace_keeps_the_conversation(
         llm=scripted,
         tools=[
             SlowValidation(),
-            TerminalTool(tree, session_ref="fold_grace", registration=_passing_gate),
+            TerminalTool(tree),
         ],
         system_prompt="fold system prompt",
         config=AgentSessionConfig(
@@ -1019,7 +1010,7 @@ def test_the_parent_stops_waiting_for_a_child_at_the_finalization_boundary(
                 models,
                 session_ref="session_ref_current",
             ),
-            TerminalTool(tree, session_ref="session_ref_current", registration=_passing_gate),
+            TerminalTool(tree),
         ],
         system_prompt="fold",
         config=_reserved_fold_config(),

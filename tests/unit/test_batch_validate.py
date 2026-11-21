@@ -479,11 +479,7 @@ class _Session:
             self.models,
             session_ref=self.backtest.ref_store.get_or_create("session", "research"),
         )
-        self.finish = TerminalTool(
-            self.tree,
-            session_ref=self.backtest.ref_store.get_or_create("session", "research"),
-            registration=self.backtest.registration,
-        )
+        self.finish = TerminalTool(self.tree)
 
     def _check(self, directory: Path) -> ModificationCheckTool:
         return ModificationCheckTool(

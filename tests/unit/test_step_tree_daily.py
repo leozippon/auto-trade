@@ -10,14 +10,6 @@ from autotrade.environment.tools.step_rollback import StepRollbackTool
 from tests.unit.agent_fixture import TerminalTool
 
 
-def _passing_gate(
-    node_id: str,
-    seed_replicates: tuple[str, ...] = (),
-) -> dict[str, object]:
-    """A registration every node passes."""
-    return {"passed": True, "reasons": []}
-
-
 def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     revision = tmp_path / "revision"
     revision_models = tmp_path / "revision-models"
@@ -53,7 +45,7 @@ def test_step_revision_can_be_selected_and_restored(tmp_path: Path):
     assert stat.S_IMODE((work_models / "weights.bin").stat().st_mode) == 0o666
     assert stat.S_IMODE(tree.node_models_dir(node).stat().st_mode) == 0o555
     assert stat.S_IMODE((tree.node_models_dir(node) / "weights.bin").stat().st_mode) == 0o444
-    finished = TerminalTool(tree, session_ref="fold_2026Q1").invoke({"candidate": node})
+    finished = TerminalTool(tree).invoke({"candidate": node})
     assert finished.finish and finished.value["candidate"]["node_id"] == node
 
 
