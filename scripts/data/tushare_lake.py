@@ -15,6 +15,7 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.data_sources.tushare.lake import main
+from autotrade.paper.release_census import release_consumers
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(release_consumers=release_consumers))

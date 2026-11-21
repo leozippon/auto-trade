@@ -9,6 +9,8 @@ import io
 import json
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -19,6 +21,7 @@ from unittest.mock import patch
 from autotrade.data_sources.tushare import cron_update, lake
 from autotrade.data_sources.tushare.lock import UPDATER_LOCK_FD_ENV
 from autotrade.environment.data.research_release import pin_research_release
+from autotrade.paper.release_census import release_consumers
 from autotrade.pipelines.hitl_state import (
     ARCHIVED_NAME,
     HITL_STATE_SCHEMA_VERSION,
@@ -92,13 +95,13 @@ class ReleasePruneTest(unittest.TestCase):
             (book / "verdict.jsonl").write_text(json.dumps({"status": "killed"}) + "\n", encoding="utf-8")
         self._pin(book / "pit" / generation, generation)
 
-    def prune(self, *, apply: bool) -> tuple[dict, list[dict]]:
+    def prune(self, *, apply: bool, consumers=release_consumers) -> tuple[dict, list[dict]]:
         out = io.StringIO()
         with (
             chdir(self.root),
             redirect_stdout(out),
         ):
-            result = lake.prune_releases(str(self.config), apply=apply)
+            result = lake.prune_releases(str(self.config), apply=apply, consumers=consumers)
         return result, [json.loads(line) for line in out.getvalue().splitlines()]
 
     def kept(self) -> dict[str, list[str]]:
@@ -189,7 +192,6 @@ class ReleasePruneTest(unittest.TestCase):
 
     def test_apply_reads_the_consumers_under_both_locks_and_refuses_a_held_updater_lock(self) -> None:
         held = []
-        consumers = lake.release_consumers
 
         def probing(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
             for path in (self.lock, self.releases / ".registry.lock"):
@@ -198,17 +200,29 @@ class ReleasePruneTest(unittest.TestCase):
                         fcntl.flock(handle, fcntl.LOCK_SH | fcntl.LOCK_NB)
                     except BlockingIOError:
                         held.append(path.name)
-            return consumers(repo_root, raw_dir)
+            return release_consumers(repo_root, raw_dir)
 
         with self.lock.open("rb") as other:
             fcntl.flock(other, fcntl.LOCK_EX)
             with self.assertRaisesRegex(RuntimeError, "lock is held"):
                 self.prune(apply=True)
         self.assertEqual(self.published(), set(GENERATIONS))
-        with patch.object(lake, "release_consumers", probing):
-            self.prune(apply=True)
+        self.prune(apply=True, consumers=probing)
         self.assertEqual(held, ["tushare_update.lock", ".registry.lock"])
         self.assertEqual(self.published(), KEPT)
+
+    def test_the_operator_command_prunes_by_the_census_it_is_given(self) -> None:
+        # The command line the weekly job runs takes the census from paper;
+        # the lake's own entry point refuses to prune without one.
+        completed = subprocess.run(
+            [sys.executable, str(REPO_ROOT / "scripts/data/tushare_lake.py"), "--config", str(self.config), "prune-releases"],
+            capture_output=True, text=True, check=True,
+        )
+        lines = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith('{"generation_id"')]
+        self.assertEqual({line["generation_id"] for line in lines if line["action"] == "keep"}, KEPT)
+        self.assertEqual(self.published(), set(GENERATIONS))
+        with self.assertRaisesRegex(ValueError, "needs the release census"):
+            lake.main(["--config", str(self.config), "prune-releases"])
 
     def test_the_weekly_job_prunes_under_the_lock_its_runner_holds(self) -> None:
         job = json.loads((REPO_ROOT / "configs/tushare_update_schedule.json").read_text(encoding="utf-8"))["jobs"][

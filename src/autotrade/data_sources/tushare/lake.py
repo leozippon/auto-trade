@@ -13,11 +13,10 @@ scheduled job, so releases and Paper pins never see a half-applied command.
 * ``rebuild-observations DATASET PARTITION`` rebuilds a partition's
   observation table from its version history.
 * ``prune-releases [--dry-run | --apply]`` removes the research releases no
-  consumer reads any more, oldest first. A release stays while the raw
-  generation record names it, a seed (or a seed build's workspace pin) one or
-  two levels under ``data/`` was built from it, an experiment under
-  ``experiments/`` that has not ended pinned it or names a seed built from it,
-  or a Paper account that is not killed has it pinned. The consumers are read
+  consumer reads any more, oldest first. Who reads one is a census of the
+  seeds, experiments and Paper accounts (``paper.release_census``) that the
+  script passes in (``main``'s ``release_consumers``), so this package
+  imports neither the experiments' state nor Paper's. The consumers are read
   under the release registry lock and the updater lock, so a release a
   consumer records is never removed (``research_release``); a removal prints
   the bytes it freed, those of the files whose last link it removed. Nothing
@@ -31,31 +30,17 @@ import argparse
 import json
 import os
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, nullcontext
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from autotrade.common.records import read_json_object
 from autotrade.common.time import utc_now
 from autotrade.environment.data.pit import complete_interrupted_commits
 from autotrade.environment.data.research_release import (
-    pinned_generation,
     remove_release_tree,
     retire_research_releases,
-)
-from autotrade.paper.book import book_status
-from autotrade.paper.books import PAPER_STATE_DIR, list_books
-from autotrade.paper.pit import PIT_CACHE_NAME
-from autotrade.pipelines.hitl_state import (
-    HITL_DIR_NAME,
-    PARAMS_NAME,
-    STATUS_NAME,
-    ExperimentState,
-    experiment_is_archived,
-    read_status,
-    status_pid_alive,
 )
 
 from .common import REVISION_EVENTS_PATH, resolve_revision_ledger
@@ -72,7 +57,6 @@ from .generation import (
     begin_raw_generation_update,
     finish_raw_generation_update,
     issue_key,
-    read_raw_generation_file,
     record_vintages,
 )
 from .lock import acquire_lock, inherited_updater_lock_fd
@@ -179,64 +163,6 @@ def rebuild_partition_observations(config_path: str, dataset: str, partition: st
     return {"status": "ok", "dataset": dataset, "partition": partition, **stats}
 
 
-def release_consumers(repo_root: Path, raw_dir: Path) -> dict[str, list[str]]:
-    """Why each generation is still read: the keep rules of ``prune-releases``."""
-
-    kept: dict[str, list[str]] = {}
-
-    def keep(generation: str, reason: str) -> None:
-        if generation:
-            kept.setdefault(generation, []).append(reason)
-
-    keep(str(read_raw_generation_file(raw_dir).get("generation_id") or ""), "raw generation record")
-    data = repo_root / "data"
-    for directory in sorted(path for pattern in ("*", "*/*") for path in data.glob(pattern) if path.is_dir()):
-        name = directory.relative_to(repo_root)
-        if (directory / "provider.json").is_file():
-            keep(_seed_generation(directory), f"seed {name}")
-        keep(pinned_generation(directory), f"pin {name}")
-    experiments = repo_root / "experiments"
-    for directory in sorted(experiments.iterdir()) if experiments.is_dir() else ():
-        hitl = directory / HITL_DIR_NAME
-        if directory.name.startswith(".") or not hitl.is_dir():
-            continue
-        try:
-            status = read_status(hitl / STATUS_NAME)
-            state = str(status.get("state") or ExperimentState.CREATED)
-        except (OSError, TypeError, ValueError):
-            status, state = {}, ExperimentState.UNREADABLE
-        # An experiment has ended once completed (the console neither runs nor
-        # resumes it) or archived while no worker still runs it; any other
-        # experiment, one whose state is unknown or unreadable included, keeps its
-        # release.
-        if state == ExperimentState.COMPLETED or (experiment_is_archived(directory) and not status_pid_alive(status)):
-            continue
-        reason = f"experiment {directory.name} ({state})"
-        keep(pinned_generation(directory), reason)
-        seed = read_json_object(hitl / PARAMS_NAME, missing_ok=True).get("pit_views_seed")
-        if isinstance(seed, str) and seed.strip() and (repo_root / seed.strip() / "provider.json").is_file():
-            keep(_seed_generation(repo_root / seed.strip()), reason)
-    paper = repo_root / PAPER_STATE_DIR
-    for book_id in list_books(paper):
-        try:
-            killed = book_status(paper / book_id) == "killed"
-        except (OSError, ValueError):
-            killed = False
-        if not killed:
-            for cache in sorted((paper / book_id / PIT_CACHE_NAME).glob("*")):
-                keep(pinned_generation(cache), f"Paper account {book_id}")
-    return kept
-
-
-def _seed_generation(seed: Path) -> str:
-    """The generation a seed's views were built from, as its ``provider.json`` records it."""
-    path = seed / "provider.json"
-    try:
-        return str(read_json_object(path).get("generation_id") or "")
-    except (OSError, ValueError, AttributeError) as exc:
-        raise RuntimeError(f"cannot read the release seed record {path} names: {exc}") from exc
-
-
 @contextmanager
 def _updater_lock(config: dict, repo_root: Path) -> Iterator[None]:
     """The updater lock for a command that changes no partition: the weekly
@@ -252,7 +178,12 @@ def _updater_lock(config: dict, repo_root: Path) -> Iterator[None]:
         lock.release()
 
 
-def prune_releases(config_path: str, *, apply: bool) -> dict:
+# ``(repo_root, raw_dir) -> {generation: [why it stays, ...]}``: the census
+# ``prune-releases`` keeps releases by (``paper.release_census.release_consumers``).
+ReleaseConsumers = Callable[[Path, Path], Mapping[str, list[str]]]
+
+
+def prune_releases(config_path: str, *, apply: bool, consumers: ReleaseConsumers) -> dict:
     """Remove the research releases no consumer reads any more (see the module docstring)."""
     config, raw_dir, _ledger = _lake(config_path)
     repo_root = Path.cwd()  # _lake works from the repository root
@@ -268,7 +199,7 @@ def prune_releases(config_path: str, *, apply: bool) -> dict:
 
     with _updater_lock(config, repo_root) if apply else nullcontext():
         releases, leftovers = retire_research_releases(
-            raw_dir.parent / "research_releases", lambda: release_consumers(repo_root, raw_dir), apply=apply
+            raw_dir.parent / "research_releases", lambda: consumers(repo_root, raw_dir), apply=apply
         )
         for path in leftovers:
             print(json.dumps({"leftover": path.name, **removal(path)}, ensure_ascii=False), flush=True)
@@ -313,12 +244,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, release_consumers: ReleaseConsumers | None = None) -> int:
+    """The operator CLI; ``prune-releases`` needs ``release_consumers``, which
+    ``scripts/data/tushare_lake.py`` passes."""
     args = parse_args(argv)
     if args.command == "repull":
         return repull_dataset(args.config, args.dataset, start_date=args.start_date, end_date=args.end_date)
     if args.command == "prune-releases":
-        result = prune_releases(args.config, apply=args.apply)
+        if release_consumers is None:
+            raise ValueError("prune-releases needs the release census (scripts/data/tushare_lake.py passes it)")
+        result = prune_releases(args.config, apply=args.apply, consumers=release_consumers)
     elif args.command in {"revert", "promote"}:
         kind = SUPERSEDED if args.command == "revert" else STAGED
         result = restore_partition(args.config, args.dataset, args.partition, args.version, kind=kind)
