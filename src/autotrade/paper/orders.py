@@ -243,6 +243,12 @@ def order_sheet(
         "target_value": target_value,
         "cash_after": cash_after,
         "cash_weight": cash_after / total if total > 0 else None,
+        # How to fill in a call auction's limit price, for a sheet with an
+        # order in either auction; the Markdown sheet and the console both
+        # print it from here.
+        "limit_guidance": LIMIT_GUIDANCE
+        if any(row["window"] in (OPEN_AUCTION, CLOSE_AUCTION) for row in orders)
+        else None,
     }
 
 
@@ -294,8 +300,8 @@ def render_orders(book: Book, trade_date: str) -> str:
                     f"| {_price(row['reference_price'])} | {_money(row['notional'])} | {row['window_label']} |"
                 )
             lines += ["", _flows_line(group["flows"]), ""]
-        if any(row["window"] in (OPEN_AUCTION, CLOSE_AUCTION) for row in rows):
-            lines += [LIMIT_GUIDANCE, ""]
+        if sheet["limit_guidance"]:
+            lines += [sheet["limit_guidance"], ""]
         if sheet["skipped_lines"]:
             lines += [f"订单日志有 {sheet['skipped_lines']} 行无法解析，已跳过；请检查 orders_{trade_date}.jsonl。", ""]
     else:

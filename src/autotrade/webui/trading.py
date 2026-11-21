@@ -65,8 +65,6 @@ from autotrade.paper.engine import (
     SNAPSHOT_NAME,
 )
 from autotrade.paper.orders import (
-    CONTINUOUS,
-    LIMIT_GUIDANCE,
     exit_holdings,
     order_sheet,
     order_window,
@@ -275,7 +273,7 @@ def _sheet(root: Path, state: dict[str, object], trade_date: str) -> dict[str, o
             }
             for group in sheet["groups"]
         ],
-        "limit_guidance": LIMIT_GUIDANCE if any(row["window"] != CONTINUOUS for row in sheet["orders"]) else None,
+        "limit_guidance": sheet["limit_guidance"],
         "target": [
             {
                 "symbol": _text(row["symbol"]),

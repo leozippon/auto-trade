@@ -17,6 +17,7 @@ import shutil
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -34,7 +35,7 @@ from autotrade.paper.book import (
     copy_source_history,
 )
 from autotrade.paper.engine import PaperAwaitingFills
-from autotrade.paper.orders import order_sheet
+from autotrade.paper.orders import order_sheet, render_orders
 from autotrade.paper.pit import newest_replay_slot
 from autotrade.paper.storage import read_jsonl
 from autotrade.pipelines.ledger import ExperimentLedger, forward_record
@@ -42,6 +43,7 @@ from autotrade.webui import trading
 from autotrade.webui.equity import result_equity_payload
 from autotrade.webui.server import create_app
 from tests.unit.paper_book_fixture import engine_book, paper_root, write_book_record
+from tests.unit.test_paper_trading import _sheet_book
 from tests.unit.webui_research_experiment import REPLAY, build_experiment
 
 BOOK = "exp"
@@ -205,6 +207,23 @@ def test_the_signal_is_the_latest_order_sheet_and_history_keeps_every_earlier_da
         (row["symbol"], row["quantity"], row["value"]) for row in sheet["target"]
     ]
     assert (days[1]["cash_after"], days[1]["cash_weight"]) == (sheet["cash_after"], sheet["cash_weight"])
+
+
+INTRADAY_STRATEGY = """def generate_orders(context):
+    day = context.inference_at.strftime("%Y-%m-%d")
+    return [{"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T09:30:00+08:00",
+             "session": "intraday"}]
+"""
+
+
+def test_the_console_and_the_order_sheet_agree_on_the_limit_price_guidance(tmp_path: Path):
+    """The guidance is about the call auctions: a sheet whose only order is
+    worked through the day prints none, and the console serves none."""
+    root = engine_book(tmp_path, "20260105", strategy=INTRADAY_STRATEGY)
+    signal = trading.signal_payload(tmp_path, BOOK)["signal"]
+    assert [row["window"] for row in signal["orders"]] == ["intraday"]
+    text = render_orders(_sheet_book(SimpleNamespace(root=root)), "20260105")
+    assert "限价怎么填" not in text and signal["limit_guidance"] is None
 
 
 def test_a_settlement_only_day_says_it_has_no_order_sheet(tmp_path: Path):
