@@ -48,7 +48,7 @@ from autotrade.pipelines.hitl_state import (
     read_status,
 )
 
-from . import equity, issues, memory, registry, skill_feedback, steps, traces, trading
+from . import equity, feedback, memory, registry, steps, traces, trading
 from .manager import (
     ExperimentManager,
     ManagerDeleteError,
@@ -713,9 +713,6 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
     def get_issue_reports(
         experiment_id: str | None = Query(None),
         include_resolved: bool = Query(False),
-        limit: int = Query(
-            issues.MAX_ISSUE_REPORTS_PAGE, ge=1, le=issues.MAX_ISSUE_REPORTS_PAGE
-        ),
     ) -> dict[str, object]:
         """Agent-filed issue reports across experiments, newest first, resolved
         ones only when asked for. Read-only: a report and its resolution are
@@ -725,22 +722,12 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
         if experiment_id is not None:
             _experiment_dir(experiment_id)
-        return issues.issue_reports(
-            experiment_root,
-            experiment_id=experiment_id,
-            include_resolved=include_resolved,
-            limit=limit,
-        )
+        return feedback.issue_reports(experiment_root, experiment_id=experiment_id, include_resolved=include_resolved)
 
     @app.get("/api/skill-feedback")
     def get_skill_feedback(
         experiment_id: str | None = Query(None),
         include_resolved: bool = Query(False),
-        limit: int = Query(
-            skill_feedback.MAX_SKILL_FEEDBACK_PAGE,
-            ge=1,
-            le=skill_feedback.MAX_SKILL_FEEDBACK_PAGE,
-        ),
     ) -> dict[str, object]:
         """Agent-filed skill feedback across experiments, newest first, resolved
         ones only when asked for. Read-only on the same terms as the issue
@@ -751,12 +738,7 @@ def create_app(repo_root: Path, experiments_root: Path | None = None) -> FastAPI
 
         if experiment_id is not None:
             _experiment_dir(experiment_id)
-        return skill_feedback.skill_feedback(
-            experiment_root,
-            experiment_id=experiment_id,
-            include_resolved=include_resolved,
-            limit=limit,
-        )
+        return feedback.skill_feedback(experiment_root, experiment_id=experiment_id, include_resolved=include_resolved)
 
     @app.post("/api/experiments/{experiment_id}/prompt-preview")
     def post_prompt_preview(experiment_id: str, body: PromptPreviewRequest) -> dict[str, object]:

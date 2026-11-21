@@ -900,6 +900,18 @@ def best_experiment(rows: Sequence[Mapping[str, object]]) -> dict[str, object] |
     return {"experiment_id": row["experiment_id"]}
 
 
+def experiment_directories(experiments_root: Path) -> list[Path]:
+    """Every experiment directory under the root, in name order."""
+
+    root = Path(experiments_root)
+    if not root.is_dir():
+        return []
+    return sorted(
+        (directory for directory in root.iterdir() if directory.is_dir() and not directory.name.startswith(".")),
+        key=lambda path: path.name,
+    )
+
+
 def resolve_experiment_dir(root: Path, experiment_id: str) -> Path:
     if not is_experiment_id(experiment_id):
         raise ValueError(f"invalid experiment id: {experiment_id!r}")

@@ -47,8 +47,7 @@ from autotrade.environment.tools.skill_feedback import (
     read_skill_feedback,
     skill_feedback_path,
 )
-from autotrade.webui import issues
-from autotrade.webui import skill_feedback as skill_projection
+from autotrade.webui import feedback
 from autotrade.webui.server import create_app
 
 from .test_skill_feedback import _filed
@@ -270,13 +269,13 @@ def _file_report(directory: Path, **overrides: str) -> dict[str, object]:
     return append_issue_report(issue_reports_path(directory), record)
 
 
-def test_the_listing_projects_labels_and_scrubs_host_paths(tmp_path: Path) -> None:
+def test_the_listing_projects_labels_and_scrubs_host_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     experiments = tmp_path / "experiments"
     first = _console_experiment(experiments, "expA")
     second = _console_experiment(experiments, "expB")
     _file_report(first, summary="读 /Data2/lzp/ADMCubeQuant/experiments/expA/artifacts 出错。")
     _file_report(second, category="docs", session_key="s9")
-    payload = issues.issue_reports(experiments)
+    payload = feedback.issue_reports(experiments)
     assert payload["total"] == 2
     assert payload["unreadable"] == []
     reports = payload["reports"]
@@ -292,12 +291,11 @@ def test_the_listing_projects_labels_and_scrubs_host_paths(tmp_path: Path) -> No
     assert by_experiment["expB"]["session_label"] == ""
     assert by_experiment["expB"]["category"] == "docs"
     # The experiment filter and the page cap.
-    only = issues.issue_reports(experiments, experiment_id="expA")
+    only = feedback.issue_reports(experiments, experiment_id="expA")
     assert [item["experiment_id"] for item in only["reports"]] == ["expA"]
-    capped = issues.issue_reports(experiments, limit=1)
-    assert len(capped["reports"]) == 1 and capped["total"] == 2
-    with pytest.raises(ValueError):
-        issues.issue_reports(experiments, limit=0)
+    monkeypatch.setattr(feedback, "FEEDBACK_PAGE", 1)
+    capped = feedback.issue_reports(experiments)
+    assert len(capped["reports"]) == 1 and (capped["total"], capped["limit"]) == (2, 1)
 
 
 # ---- answering a report ----------------------------------------------------
@@ -397,7 +395,7 @@ def test_the_reader_fails_fast_on_a_resolution_naming_no_report(
 # ---- both channels: the console page and the resolver ----------------------
 #
 # ``report_issue`` and ``skill_feedback`` share the log, the page and the
-# resolver (``feedback_log``, ``feedback_page``, ``resolve_feedback.py``); each
+# resolver (``feedback_log``, ``webui.feedback``, ``resolve_feedback.py``); each
 # test below runs once per channel.
 
 RESOLVE_SCRIPT = Path(__file__).resolve().parents[2] / "scripts/experiments/resolve_feedback.py"
@@ -420,7 +418,7 @@ CHANNELS = [
     pytest.param(
         _Channel(
             "issue", _file_report, issue_reports_path, read_issue_reports,
-            append_issue_resolution, issues.issue_reports, "/api/issue-reports",
+            append_issue_resolution, feedback.issue_reports, "/api/issue-reports",
             "fixed", "issue report",
         ),
         id="issue",
@@ -428,7 +426,7 @@ CHANNELS = [
     pytest.param(
         _Channel(
             "skill", _filed, skill_feedback_path, read_skill_feedback,
-            append_skill_feedback_resolution, skill_projection.skill_feedback,
+            append_skill_feedback_resolution, feedback.skill_feedback,
             "/api/skill-feedback", "skill_updated", "skill feedback",
         ),
         id="skill",
@@ -503,7 +501,6 @@ def test_the_endpoint_serves_the_page_read_only(tmp_path: Path, channel: _Channe
     assert done["resolution"].startswith("合同如此") and done["resolved_at"]
     assert client.get(channel.endpoint, params={"experiment_id": "expA"}).json()["total"] == 1
     assert client.get(channel.endpoint, params={"experiment_id": "missing"}).status_code == 404
-    assert client.get(channel.endpoint, params={"limit": 0}).status_code == 422
     # The console reads; only the shell writes.
     assert client.post(channel.endpoint, json={}).status_code in (404, 405)
 

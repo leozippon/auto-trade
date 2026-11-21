@@ -33,7 +33,7 @@ from autotrade.environment.tools.skill_feedback import (
     skill_feedback_path,
 )
 from autotrade.pipelines.skills import MemorySource, mounted_skill_refs
-from autotrade.webui import skill_feedback as projection
+from autotrade.webui import feedback
 
 SESSION_KEY = "research"
 CURATED = "curated/offline-readings"
@@ -264,7 +264,7 @@ def _filed(directory: Path, **overrides: object) -> dict[str, object]:
 
 
 def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     experiments = tmp_path / "experiments"
     first = _console_experiment(experiments, "expA")
@@ -280,7 +280,7 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
         claim="wrong",
         session_key="s9",
     )
-    payload = projection.skill_feedback(experiments)
+    payload = feedback.skill_feedback(experiments)
     assert payload["total"] == 2 and payload["unreadable"] == []
     stamps = [str(item["recorded_at"]) for item in payload["reports"]]
     assert stamps == sorted(stamps, reverse=True)
@@ -299,16 +299,11 @@ def test_the_listing_splits_the_reference_labels_the_session_and_scrubs_paths(
     assert rows["expB"]["name"] == "validation-readings"
     # A session key the plan no longer names still lists, just unlabelled.
     assert rows["expB"]["session_label"] == ""
-    only = projection.skill_feedback(experiments, experiment_id="expA")
+    only = feedback.skill_feedback(experiments, experiment_id="expA")
     assert [item["experiment_id"] for item in only["reports"]] == ["expA"]
-    capped = projection.skill_feedback(experiments, limit=1)
-    assert len(capped["reports"]) == 1 and capped["total"] == 2
-    with pytest.raises(ValueError):
-        projection.skill_feedback(experiments, limit=0)
-    with pytest.raises(ValueError):
-        projection.skill_feedback(
-            experiments, limit=projection.MAX_SKILL_FEEDBACK_PAGE + 1
-        )
+    monkeypatch.setattr(feedback, "FEEDBACK_PAGE", 1)
+    capped = feedback.skill_feedback(experiments)
+    assert len(capped["reports"]) == 1 and (capped["total"], capped["limit"]) == (2, 1)
 
 
 def test_a_claim_or_entry_no_code_can_label_is_named_unreadable(tmp_path: Path) -> None:
@@ -324,6 +319,6 @@ def test_a_claim_or_entry_no_code_can_label_is_named_unreadable(tmp_path: Path) 
         _console_experiment(experiments, "expC"),
         skill="momentum_20260101/same-window-parent-control",
     )
-    payload = projection.skill_feedback(experiments)
+    payload = feedback.skill_feedback(experiments)
     assert payload["reports"] == []
     assert [item["experiment_id"] for item in payload["unreadable"]] == ["expA", "expB", "expC"]
