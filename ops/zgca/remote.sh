@@ -292,9 +292,10 @@ prepare() {
         "$BOX_PYTHON" -m venv "$VENV"
     fi
     # On every deploy, so a changed pin reaches the venv; when every pin is
-    # already satisfied nothing but the editable install itself changes.
+    # already satisfied nothing but the editable install itself changes. The
+    # test tools are the dev extra's pinned versions, as on the local host.
     echo "installing the project into $VENV"
-    "$VENV/bin/pip" install -q -e '.[webui]' pytest httpx
+    "$VENV/bin/pip" install -q -e '.[webui,dev]'
     "$VENV/bin/python" -c "import autotrade, sys; sys.exit(0 if autotrade.__file__.startswith('$ROOT/') else 1)" \
         || die "$VENV imports autotrade from outside $ROOT; remove the venv and deploy again"
     docker info >/dev/null 2>&1 || die "Docker is not reachable (DOCKER_HOST=${DOCKER_HOST:-unset})"
