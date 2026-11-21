@@ -1677,19 +1677,16 @@ class DomainAuditProfile:
 
     The four domain auditors (text/macro/event/board) were hand-written copies
     of the same shape and had drifted (uneven pagination-probe exclusion,
-    text-only empty early-return, event-only zero_rows_ok). The profile encodes
-    exactly what genuinely differs; the emitted check names and details keys
-    stay the per-domain status-JSON contract the nightly consumers read.
+    text-only empty early-return, event-only zero_rows_ok). The profile keeps
+    the differences that decide a finding's severity -- the drifted ones
+    included, since the domain status files the snapshot gates read carry
+    those severities -- and the check names stay the per-domain contract.
     """
 
     domain: str                    # check-name suffix: <api>_<domain>_partitions/_keys
     exact_limit_rows: frozenset    # row counts that look like a page-limit truncation
-    exact_limit_key: str           # details key name for that count
     apply_pagination_probe: bool   # exclude partitions with a recorded pagination probe
     empty_error_mode: str          # "with_expected" | "always" | "early_return"
-    include_strategy: bool
-    key_columns: tuple
-    key_extra_columns: tuple       # extra columns joined into the keys read
     blank_mode: str                # "per_key_field" | "available_at_total" | "available_at_rows"
     partitions_message: str
     keys_message: str
@@ -1765,9 +1762,7 @@ def audit_domain_dataset(raw_dir: Path, spec, expected_paths: set[Path], add, pr
     if profile.zero_rows_ok is not None:
         has_warning = has_warning or bool(zero_files and not profile.zero_rows_ok) or bool(ignored_parquet or ignored_meta)
         has_warning = has_warning or stale_feed
-    details: dict[str, Any] = {}
-    if profile.include_strategy:
-        details["strategy"] = spec.strategy
+    details: dict[str, Any] = {"strategy": spec.strategy}
     if profile.partition_prefix is not None:
         details["partition_prefix"] = profile.partition_prefix
     details.update({
@@ -1791,7 +1786,7 @@ def audit_domain_dataset(raw_dir: Path, spec, expected_paths: set[Path], add, pr
     details.update({
         "missing_meta": len(missing_meta),
         "orphan_meta": len(orphan_meta),
-        profile.exact_limit_key: len(exact_limit_files),
+        "exact_common_limit_row_count_partitions": len(exact_limit_files),
         "missing_sample": missing_expected[:10],
         "extra_sample": extra_files[:10],
     })
@@ -1808,7 +1803,7 @@ def audit_domain_dataset(raw_dir: Path, spec, expected_paths: set[Path], add, pr
         f"{spec.api_name} {profile.partitions_message}",
         details,
     )
-    key_details = audit_domain_keys(files, profile, row_counts)
+    key_details = audit_domain_keys(files, tuple(spec.key_columns), profile.blank_mode, row_counts)
     if profile.blank_mode == "per_key_field":
         has_blank = any(int(value) for value in key_details["blank_key_fields"].values())
     elif profile.blank_mode == "available_at_total":
@@ -1828,11 +1823,11 @@ def audit_domain_dataset(raw_dir: Path, spec, expected_paths: set[Path], add, pr
     )
     audit_business_payload(
         files, spec.api_name, f"{spec.api_name}_{profile.domain}_payload", add,
-        key_columns=profile.key_columns, expected_fields=profile.expected_fields,
+        key_columns=tuple(spec.key_columns), expected_fields=profile.expected_fields,
     )
 
 
-def audit_domain_keys(files: list[Path], profile: DomainAuditProfile, row_counts: dict[str, int]) -> dict[str, Any]:
+def audit_domain_keys(files: list[Path], key_columns: tuple[str, ...], blank_mode: str, row_counts: dict[str, int]) -> dict[str, Any]:
     duplicate_key_rows = 0
     blank_key_fields: dict[str, int] = {}
     blank_available_at = 0
@@ -1843,26 +1838,25 @@ def audit_domain_keys(files: list[Path], profile: DomainAuditProfile, row_counts
         if row_counts[str(path)] == 0:
             continue
         schema = pq.ParquetFile(path).schema_arrow.names
-        missing = [col for col in profile.key_columns if col not in schema]
+        missing = [col for col in key_columns if col not in schema]
         if missing:
             missing_key_column_files.append(str(path))
             continue
-        keys = list(profile.key_columns)
-        columns = list(dict.fromkeys(keys + list(profile.key_extra_columns)))
-        df = pd.read_parquet(path, columns=[col for col in columns if col and col in schema])
+        keys = list(key_columns)
+        df = pd.read_parquet(path, columns=[col for col in dict.fromkeys([*keys, "available_at"]) if col in schema])
         if keys:
             duplicate_key_rows += int(df.duplicated(keys).sum())
-            if profile.blank_mode == "per_key_field":
+            if blank_mode == "per_key_field":
                 for col in keys:
                     blank_key_fields[col] = blank_key_fields.get(col, 0) + blank_count(df[col])
         if "available_at" not in df.columns:
             missing_available_at_files.append(str(path))
             continue
         available = df["available_at"].astype(str).str.strip()
-        if profile.blank_mode == "available_at_total":
+        if blank_mode == "available_at_total":
             blank_available_at += blank_count(df["available_at"])
         blank = available.eq("") | available.eq("nan") | available.eq("None")
-        if profile.blank_mode == "available_at_rows":
+        if blank_mode == "available_at_rows":
             blank_available_at += int(blank.sum())
         nonblank = available[~blank]
         if not nonblank.empty:
@@ -1870,12 +1864,12 @@ def audit_domain_keys(files: list[Path], profile: DomainAuditProfile, row_counts
             unparseable_available_at_rows += int(parsed.isna().sum())
     details: dict[str, Any] = {
         "files_checked": len(files),
-        "key_columns": list(profile.key_columns),
+        "key_columns": list(key_columns),
         "duplicate_key_rows": duplicate_key_rows,
     }
-    if profile.blank_mode == "per_key_field":
+    if blank_mode == "per_key_field":
         details["blank_key_fields"] = blank_key_fields
-    elif profile.blank_mode == "available_at_total":
+    elif blank_mode == "available_at_total":
         details["blank_time_fields"] = blank_available_at
     else:
         details["blank_available_at_rows"] = blank_available_at
@@ -1896,12 +1890,8 @@ def audit_text_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pat
         # (2000/400/500/1000/3000/1500), so the truncation signature could not
         # fire for a single text dataset; include the spec's own limit.
         exact_limit_rows=frozenset({spec.page_limit, 5000, 6000, 7000, 8000, 10000}),
-        exact_limit_key="exact_common_limit_row_count_partitions",
         apply_pagination_probe=False,
         empty_error_mode="early_return",
-        include_strategy=False,
-        key_columns=tuple(spec.key_columns),
-        key_extra_columns=("available_at", spec.time_column, spec.date_column),
         blank_mode="available_at_total",
         partitions_message="text partition inventory",
         keys_message="text key and PIT checks",
@@ -1999,12 +1989,8 @@ def audit_macro_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
         # The spec's own limit joins the set so small-cap feeds (eco_cal 100)
         # are covered too.
         exact_limit_rows=frozenset({spec.page_limit, 1000, 2000, 3000, 4000, 5000, 8000, 10000}),
-        exact_limit_key="exact_common_limit_row_count_partitions",
         apply_pagination_probe=False,
         empty_error_mode="with_expected",
-        include_strategy=True,
-        key_columns=tuple(spec.key_columns),
-        key_extra_columns=("available_at", "available_at_rule"),
         blank_mode="per_key_field",
         partitions_message="macro/global partition inventory",
         keys_message="key, PIT, and duplicate checks",
@@ -2192,12 +2178,8 @@ def audit_event_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
         domain="event",
         exact_limit_rows=frozenset({spec.page_limit, 5000, 6000, 10000}),
-        exact_limit_key="exact_common_limit_row_count_partitions",
         apply_pagination_probe=True,
         empty_error_mode="always",
-        include_strategy=True,
-        key_columns=tuple(spec.key_columns),
-        key_extra_columns=("available_at", "available_at_rule"),
         blank_mode="per_key_field",
         partitions_message="event/flow partition inventory",
         keys_message="key, duplicate, and PIT checks",
@@ -2447,12 +2429,8 @@ def audit_board_dataset(raw_dir: Path, spec: DatasetSpec, expected_paths: set[Pa
     audit_domain_dataset(raw_dir, spec, expected_paths, add, DomainAuditProfile(
         domain="board",
         exact_limit_rows=frozenset({spec.page_limit}),
-        exact_limit_key="exact_page_limit_row_count_partitions",
         apply_pagination_probe=True,
         empty_error_mode="always",
-        include_strategy=True,
-        key_columns=tuple(spec.key_columns),
-        key_extra_columns=("available_at", "available_at_rule", spec.date_column, spec.time_column),
         blank_mode="available_at_rows",
         partitions_message="board-trading partition inventory",
         keys_message="board-trading key and PIT checks",
