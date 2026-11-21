@@ -342,23 +342,26 @@ class WorkerLifecycleTest(unittest.TestCase):
         self.assertEqual(refused.json()["detail"], "no live worker to terminate")
 
     def test_terminate_escalates_to_sigkill_and_stamps_a_terminal_state(self) -> None:
-        """A worker that ignores SIGTERM is killed after the 10 s grace.
+        """A worker that ignores SIGTERM is killed once the grace (10 s) is out.
 
         Real wall time on purpose: the grace is the guarantee a researcher
         relies on when a fold is wedged in a blocking call, and a mocked clock
-        would not prove the process ever dies.
+        would not prove the process ever dies. The wait is patched down to 1 s,
+        which proves the same escalation; the 10 s itself is pinned here.
         """
+        self.assertEqual(manager_module._TERMINATE_GRACE_SECONDS, 10.0)
         process = self._spawn(_STUBBORN)
         self._publish(process, session_key="research")
         started = time.monotonic()
-        body = self._post(action="terminate").json()
+        with patch.object(manager_module, "_TERMINATE_GRACE_SECONDS", 1.0):
+            body = self._post(action="terminate").json()
         elapsed = time.monotonic() - started
         self.assertIs(body["escalated"], True)
         self.assertEqual(body["terminated_pid"], process.pid)
         process.wait(timeout=10)
         self.assertEqual(process.returncode, -signal.SIGKILL)
-        self.assertGreaterEqual(elapsed, 10.0, "the grace was cut short")
-        self.assertLess(elapsed, 20.0)
+        self.assertGreaterEqual(elapsed, 1.0, "the grace was cut short")
+        self.assertLess(elapsed, 10.0)
         # SIGKILL leaves nobody to write a terminal state, so the console does.
         status = json.loads(self.status_path.read_text(encoding="utf-8"))
         self.assertEqual(status["state"], "terminated")
@@ -960,7 +963,7 @@ class RestartSlotRaceTest(unittest.TestCase):
             # Holding the slot across the restart, the create cannot get past
             # its slot check at all and this wait expires; without it, the
             # create finishes here and the respawn below finds no free slot.
-            created.wait(5.0)
+            created.wait(2.0)
             return real_reclaim(experiment_id)
 
         caller = threading.Thread(target=create_the_other)
