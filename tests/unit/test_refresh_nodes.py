@@ -8,7 +8,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 from autotrade.data_sources.tushare import cron_update
-from autotrade.data_sources.tushare.common import (
+from autotrade.data_sources.tushare.specs import (
     BOARD_TRADING_DEFAULT_DATASETS,
     DAILY_DOWNLOAD_DATASETS,
     DAILY_REQUIRED_DATASETS,

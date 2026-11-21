@@ -25,11 +25,9 @@ from autotrade.environment.data.pit import complete_interrupted_commits
 
 from .audit import AUDIT_SUMMARY_RE
 from .common import (
-    EVENT_FLOW_SPECS,
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
-    FetchStrategy,
     format_yyyymmdd,
     parse_yyyymmdd,
     sse_calendar,
@@ -43,6 +41,10 @@ from .generation import (
     record_vintages,
 )
 from .lock import UPDATER_LOCK_FD_ENV, acquire_lock
+from .specs import (
+    EVENT_FLOW_SPECS,
+    FetchStrategy,
+)
 from .versions import RUN_REPORT_ENV
 
 DEFAULT_CONFIG = Path("configs/tushare_update_schedule.json")

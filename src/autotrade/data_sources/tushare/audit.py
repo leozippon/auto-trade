@@ -39,36 +39,14 @@ from autotrade.environment.data.units import (
 
 from . import common as core
 from .common import (
-    BAK_BASIC_SPEC,
-    BOARD_TRADING_SPECS,
     BOARD_TRADING_STATUS_PATH,
     CORE_MARKET_STATUS_PATH,
-    DAILY_REQUIRED_DATASETS,
-    DAILY_SPECS,
-    DEFAULT_CN_INDEX_CODES,
-    EVENT_FLOW_SPECS,
     EVENT_FLOW_STATUS_PATH,
-    FUNDAMENTAL_DATASETS,
     FUNDAMENTAL_RAW_STATUS_PATH,
-    FUNDAMENTAL_SPECS,
-    INTEGRATED_DOC_REFS,
     INTRADAY_MINUTES_STATUS_PATH,
     MACRO_CONTEXT_STATUS_PATH,
-    MACRO_DATASETS,
-    MACRO_SPECS,
-    REFERENCE_DATASETS,
-    RESEARCH_HISTORY_FLOOR,
-    SEMANTIC_DOC_REFS,
     SHARE_FLOAT_ROW_LIMIT,
-    STK_MINS_API_NAME,
-    STK_MINS_DATASET,
-    STK_MINS_PAGE_LIMIT,
-    STK_MINS_REQUIRED_COLUMNS,
     TEXT_EVIDENCE_STATUS_PATH,
-    TEXT_SPECS,
-    TRADE_DATE_PAGE_LIMIT,
-    DatasetSpec,
-    FetchStrategy,
     TuShareClient,
     active_year_windows,
     augment_board_frame,
@@ -109,6 +87,36 @@ from .io import (
     read_many,
 )
 from .layout import partitions, range_partition, time_units
+from .specs import (
+    BAK_BASIC_SPEC,
+    BOARD_TRADING_SPECS,
+    DAILY_REQUIRED_DATASETS,
+    DAILY_SPECS,
+    DEFAULT_CN_INDEX_CODES,
+    EVENT_FLOW_DATASETS,
+    EVENT_FLOW_SPECS,
+    FUNDAMENTAL_DATASETS,
+    FUNDAMENTAL_SPECS,
+    INDEX_WEIGHT_FIELDS,
+    INTEGRATED_DOC_REFS,
+    INTRADAY_DATASETS,
+    MACRO_DATASETS,
+    MACRO_SPECS,
+    REFERENCE_DATASETS,
+    RESEARCH_HISTORY_FLOOR,
+    SEMANTIC_DOC_REFS,
+    STK_MINS_API_NAME,
+    STK_MINS_BY_DATE_DATASET,
+    STK_MINS_DATASET,
+    STK_MINS_PAGE_LIMIT,
+    STK_MINS_REQUIRED_COLUMNS,
+    TEXT_DATASETS,
+    TEXT_SPECS,
+    TRADE_DATE_PAGE_LIMIT,
+    AvailabilityRule,
+    DatasetSpec,
+    FetchStrategy,
+)
 from .versions import diff_frames, revision_event
 
 # The one-line summary every audit prints last, and the pattern the cron runner
@@ -1243,7 +1251,7 @@ def audit_index_weight(raw_dir: Path, end_date: str, add) -> None:
     audit_business_payload(
         sorted(dataset_dir.rglob("year=*.parquet")), "index_weight", "index_weight_payload", add,
         key_columns=("index_code", "con_code", "trade_date"),
-        expected_fields=tuple(field for field in core.INDEX_WEIGHT_FIELDS.split(",") if field),
+        expected_fields=tuple(field for field in INDEX_WEIGHT_FIELDS.split(",") if field),
     )
 
 def json_count_dict(series: pd.Series) -> dict[str, int]:
@@ -2107,7 +2115,7 @@ def audit_as_of(value: str | None) -> datetime:
     parsed = datetime.fromisoformat(value)
     return parsed if parsed.tzinfo else parsed.replace(tzinfo=CN_TZ)
 
-def latest_published_trade_date(open_dates: list[str], through: str, rule: core.AvailabilityRule, as_of: datetime) -> str | None:
+def latest_published_trade_date(open_dates: list[str], through: str, rule: AvailabilityRule, as_of: datetime) -> str | None:
     """Newest open day <= ``through`` whose official publication has passed at ``as_of``.
 
     Exchanges publish on open days only, so the publication falls on the first
@@ -2667,7 +2675,7 @@ def add_core_market_parser(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(parser)
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--end-date")
-    parser.add_argument("--datasets", nargs="+", choices=core.DAILY_REQUIRED_DATASETS)
+    parser.add_argument("--datasets", nargs="+", choices=DAILY_REQUIRED_DATASETS)
     parser.add_argument("--sample-limit", type=int, default=10)
     core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {core.CORE_MARKET_STATUS_PATH}.")
@@ -2680,7 +2688,7 @@ def add_fundamental_raw_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--end-date")
     parser.add_argument("--fundamental-start-date", default="20100101")
     parser.add_argument("--fundamental-end-date")
-    parser.add_argument("--fundamental-datasets", nargs="+", choices=core.FUNDAMENTAL_DATASETS, dest="fundamental_datasets")
+    parser.add_argument("--fundamental-datasets", nargs="+", choices=FUNDAMENTAL_DATASETS, dest="fundamental_datasets")
     parser.add_argument("--sample-limit", type=int, default=10)
     core.add_runtime_args(parser, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=60)
     parser.add_argument("--output", help=f"Defaults to {core.FUNDAMENTAL_RAW_STATUS_PATH}.")
@@ -2690,7 +2698,7 @@ def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(parser)
     parser.add_argument("--intraday-start-date", default="20200101")
     parser.add_argument("--intraday-end-date")
-    parser.add_argument("--intraday-datasets", nargs="+", choices=core.INTRADAY_DATASETS + ["stk_mins"])
+    parser.add_argument("--intraday-datasets", nargs="+", choices=INTRADAY_DATASETS + ["stk_mins"])
     parser.add_argument("--intraday-codes", nargs="+")
     parser.add_argument("--intraday-max-codes", type=int)
     parser.add_argument("--sample-limit", type=int, default=10)
@@ -2706,7 +2714,7 @@ def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(auction)
     auction.add_argument("--start-date", required=True)
     auction.add_argument("--end-date", required=True)
-    auction.add_argument("--output-dataset", default=core.STK_MINS_BY_DATE_DATASET)
+    auction.add_argument("--output-dataset", default=STK_MINS_BY_DATE_DATASET)
     auction.add_argument("--max-trade-dates", type=int, default=8, help="Use the latest N open dates in the requested window; <=0 means all.")
     auction.add_argument("--output", help="Defaults to results/data_quality/process/auction_alignment_status.json.")
     core.add_runtime_args(auction, min_interval=core.MIN_REQUEST_INTERVAL_SECONDS, timeout=120)
@@ -2716,7 +2724,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(event)
     event.add_argument("--start-date", default="20200101")
     event.add_argument("--end-date", default=cn_today())
-    event.add_argument("--datasets", nargs="+", choices=core.EVENT_FLOW_DATASETS)
+    event.add_argument("--datasets", nargs="+", choices=EVENT_FLOW_DATASETS)
     event.add_argument("--as-of", help="Audit time for publication-time expectations (ISO; naive = Asia/Shanghai). Defaults to now.")
     event.add_argument("--output", help=f"Defaults to {core.EVENT_FLOW_STATUS_PATH}.")
 
@@ -2724,7 +2732,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(macro)
     macro.add_argument("--start-date", default="20100101")
     macro.add_argument("--end-date", default=cn_today())
-    macro.add_argument("--datasets", nargs="+", choices=core.MACRO_DATASETS)
+    macro.add_argument("--datasets", nargs="+", choices=MACRO_DATASETS)
     core.add_macro_filter_args(macro)
     macro.add_argument("--output", help=f"Defaults to {core.MACRO_CONTEXT_STATUS_PATH}.")
 
@@ -2732,7 +2740,7 @@ def add_event_macro_parsers(sub: argparse._SubParsersAction) -> None:
     core.add_raw_arg(text)
     text.add_argument("--start-date", dest="text_start_date", default="20100101")
     text.add_argument("--end-date", dest="text_end_date", default=cn_today())
-    text.add_argument("--text-datasets", nargs="+", choices=core.TEXT_DATASETS, dest="text_datasets")
+    text.add_argument("--text-datasets", nargs="+", choices=TEXT_DATASETS, dest="text_datasets")
     text.add_argument("--news-src", action="append", default=[])
     text.add_argument("--major-news-src", action="append", default=[])
     text.add_argument("--output", help=f"Defaults to {core.TEXT_EVIDENCE_STATUS_PATH}.")
@@ -2754,13 +2762,13 @@ def add_revision_parser(sub: argparse._SubParsersAction) -> None:
     revision.add_argument(
         "--datasets",
         nargs="+",
-        choices=core.DAILY_REQUIRED_DATASETS
-        + sorted(name for name, spec in core.BOARD_TRADING_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE)
-        + sorted(name for name, spec in core.EVENT_FLOW_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE),
+        choices=DAILY_REQUIRED_DATASETS
+        + sorted(name for name, spec in BOARD_TRADING_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE)
+        + sorted(name for name, spec in EVENT_FLOW_SPECS.items() if spec.strategy == FetchStrategy.TRADE_DATE),
     )
     revision.add_argument("--sample-size", type=int, default=12, help="Deterministic sample size per dataset; <=0 checks all dates.")
     revision.add_argument("--seed", help="Deterministic sampling seed. Defaults to --end-date.")
-    revision.add_argument("--page-limit", type=int, default=core.TRADE_DATE_PAGE_LIMIT)
+    revision.add_argument("--page-limit", type=int, default=TRADE_DATE_PAGE_LIMIT)
     revision.add_argument("--revision-ledger", default=core.REVISION_EVENTS_PATH)
     revision.add_argument("--output", default=core.REVISION_SUMMARY_PATH)
     revision.add_argument("--fail-on-revision", action="store_true", help="Return nonzero when source revisions are found.")

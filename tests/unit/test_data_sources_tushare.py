@@ -28,6 +28,7 @@ from autotrade.data_sources.tushare import (
     cron_update,
     download,
     generation,
+    specs,
     versions,
 )
 from autotrade.data_sources.tushare import io as tushare_io
@@ -333,16 +334,16 @@ class EndlessPagedClient:
 
 class FetchStrategyTest(unittest.TestCase):
     def test_a_spec_holds_its_strategy_as_the_member_its_family_dispatches_on(self):
-        spec = common.DatasetSpec("income_vip", strategy="period")
+        spec = specs.DatasetSpec("income_vip", strategy="period")
 
-        self.assertIs(spec.strategy, common.FetchStrategy.PERIOD)
+        self.assertIs(spec.strategy, specs.FetchStrategy.PERIOD)
         # Recorded by value: the audit report and every message keep the string.
         self.assertEqual(json.dumps({"strategy": spec.strategy}), '{"strategy": "period"}')
-        self.assertIs(common.DatasetSpec("daily").strategy, common.FetchStrategy.DAILY_FAMILY)
+        self.assertIs(specs.DatasetSpec("daily").strategy, specs.FetchStrategy.DAILY_FAMILY)
 
     def test_a_spec_naming_no_strategy_is_refused_when_built(self):
         with self.assertRaisesRegex(ValueError, "is not a valid FetchStrategy"):
-            common.DatasetSpec("income_vip", strategy="perod")
+            specs.DatasetSpec("income_vip", strategy="perod")
 
 
 class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
@@ -492,7 +493,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir),
             start_date="20200102",
             end_date="20200102",
-            output_dataset=common.STK_MINS_BY_DATE_DATASET,
+            output_dataset=specs.STK_MINS_BY_DATE_DATASET,
             expected_codes_source="daily",
             codes=None,
             max_codes=None,
@@ -509,7 +510,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             revision_ledger=common.REVISION_EVENTS_PATH,
         )
 
-        output = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
+        output = self.raw_dir / specs.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=EmptyMinuteClient()):
             with self.assertRaisesRegex(RuntimeError, "refusing to write zero-row intraday"):
                 download.update_intraday_by_date(args)
@@ -520,7 +521,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir),
             start_date=start_date,
             end_date=end_date,
-            output_dataset=common.STK_MINS_BY_DATE_DATASET,
+            output_dataset=specs.STK_MINS_BY_DATE_DATASET,
             expected_codes_source="daily",
             codes=None,
             max_codes=None,
@@ -571,9 +572,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=BatchMinuteClient()):
             self.assertEqual(download.update_intraday_by_date(self._minute_update_args("20200102", "20200102")), 0)
 
-        self.assertEqual([len(batch) for batch in requests], [common.STK_MINS_BATCH_CODES, 5, 1])
+        self.assertEqual([len(batch) for batch in requests], [specs.STK_MINS_BATCH_CODES, 5, 1])
         self.assertEqual(requests[-1], ["000030.SZ"])
-        written = pd.read_parquet(self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet")
+        written = pd.read_parquet(self.raw_dir / specs.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet")
         self.assertEqual(sorted(written["ts_code"].unique()), codes)
         self.assertEqual(len(written), 60)
 
@@ -600,14 +601,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(code, common.MUTATED_NOT_READY_RETRY_EXIT_CODE)
         self.assertEqual(calls, ["2020-01-02", "2020-01-03"])
-        minute_dir = self.raw_dir / common.STK_MINS_BY_DATE_DATASET
+        minute_dir = self.raw_dir / specs.STK_MINS_BY_DATE_DATASET
         self.assertTrue((minute_dir / "trade_date=20200102.parquet").exists())
         self.assertFalse((minute_dir / "trade_date=20200103.parquet").exists())
         self.assertIn("stk_mins_daily_quota_exhausted", output.getvalue())
 
     def test_minute_expected_universe_uses_existing_minute_store_when_present(self):
         self._write_daily_universe()
-        minute_path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
+        minute_path = self.raw_dir / specs.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
         minute_rows = pd.DataFrame([
             {
                 "ts_code": "000001.SZ",
@@ -639,14 +640,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         tushare_io.write_parquet(
             minute_path,
             minute_rows,
-            api_name=common.STK_MINS_API_NAME,
+            api_name=specs.STK_MINS_API_NAME,
             params={},
             fields=list(minute_rows.columns),
         )
 
         codes = common.intraday_expected_codes_for_day(
             self.raw_dir,
-            argparse.Namespace(expected_codes_source="minute", output_dataset=common.STK_MINS_BY_DATE_DATASET, codes=None, max_codes=None),
+            argparse.Namespace(expected_codes_source="minute", output_dataset=specs.STK_MINS_BY_DATE_DATASET, codes=None, max_codes=None),
             "20200102",
         )
 
@@ -1105,7 +1106,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_share_float_empty_refresh_keeps_existing_cap_risk_signal(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
-        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        fields = specs.SHARE_FLOAT_FIELDS.split(",")
         existing = pd.DataFrame([
             {
                 field: (
@@ -1138,18 +1139,18 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_share_float_extreme_shrink_is_staged_and_reported(self):
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
-        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        fields = specs.SHARE_FLOAT_FIELDS.split(",")
         existing = pd.DataFrame([
             [f"{index:06d}.SZ", "20200101", "20200102", f"h{index}", "type", 1.0, 0.1]
             for index in range(100)
         ], columns=fields)
-        existing = common.augment_event_frame(existing, common.EVENT_FLOW_SPECS["share_float"])
+        existing = common.augment_event_frame(existing, specs.EVENT_FLOW_SPECS["share_float"])
         tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
 
         class ShrunkClient:
             def query(self, api_name, params=None, fields="", retries=5):
                 return common.ApiResult(
-                    common.SHARE_FLOAT_FIELDS.split(","),
+                    specs.SHARE_FLOAT_FIELDS.split(","),
                     [["000000.SZ", "20200101", "20200102", "h0", "type", 1.0, 0.1]])
 
         # An answer removing most keys is staged and REPORTED, not raised:
@@ -1170,9 +1171,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         caller reads staged on every day, so omitting it there turned the
         resume path into a KeyError."""
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
-        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        fields = specs.SHARE_FLOAT_FIELDS.split(",")
         frame = pd.DataFrame([["000001.SZ", "20200101", "20200102", "h", "type", 1.0, 0.1]], columns=fields)
-        frame = common.augment_event_frame(frame, common.EVENT_FLOW_SPECS["share_float"])
+        frame = common.augment_event_frame(frame, specs.EVENT_FLOW_SPECS["share_float"])
         tushare_io.write_parquet(path, frame, api_name="share_float", params={},
                              fields=list(frame.columns))
 
@@ -1195,11 +1196,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         version, and every code a kept answer for the day carried -- the new
         answer, the replaced partition, an earlier rescue -- is a candidate."""
         day = "20200101"
-        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        fields = specs.SHARE_FLOAT_FIELDS.split(",")
         path = self.raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
         old_codes = [f"{index:06d}.SZ" for index in range(100)]
         existing = pd.DataFrame([[code, day, "20200102", 1.0, 0.1, "h", "type"] for code in old_codes], columns=fields)
-        existing = common.augment_event_frame(existing, common.EVENT_FLOW_SPECS["share_float"])
+        existing = common.augment_event_frame(existing, specs.EVENT_FLOW_SPECS["share_float"])
         tushare_io.write_parquet(path, existing, api_name="share_float", params={}, fields=list(existing.columns))
         rescued = self.raw_dir / "share_float_ann_date_ts_code" / f"ann_date={day}" / "ts_code=300227.SZ.parquet"
         tushare_io.write_parquet(rescued, existing.head(1), api_name="share_float", params={}, fields=list(existing.columns))
@@ -1207,7 +1208,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         class CappedNewIpoClient:
             def query(self, api_name, params=None, fields="", retries=5):
                 return common.ApiResult(
-                    common.SHARE_FLOAT_FIELDS.split(","),
+                    specs.SHARE_FLOAT_FIELDS.split(","),
                     [["301716.SZ", day, "20200103", 1.0, 0.1, f"n{index}", "type"]
                      for index in range(common.SHARE_FLOAT_ROW_LIMIT)])
 
@@ -1237,7 +1238,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         source genuinely retracted the keys, which no rescue can undo -- the
         staged version waits for an operator, and the run carries on.
         """
-        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        fields = specs.SHARE_FLOAT_FIELDS.split(",")
 
         def seed(day, rows):
             path = self.raw_dir / "share_float_ann_date" / f"ann_date={day}.parquet"
@@ -1245,7 +1246,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 [f"{index:06d}.SZ", day, "20200102", f"h{index}", "type", 1.0, 0.1]
                 for index in range(rows)
             ], columns=fields)
-            frame = common.augment_event_frame(frame, common.EVENT_FLOW_SPECS["share_float"])
+            frame = common.augment_event_frame(frame, specs.EVENT_FLOW_SPECS["share_float"])
             tushare_io.write_parquet(path, frame, api_name="share_float", params={},
                                  fields=list(frame.columns))
 
@@ -1291,7 +1292,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 code = f"3000{params['ann_date'][-2:]}.SZ"
                 rows = 1 if "ts_code" in params else common.SHARE_FLOAT_ROW_LIMIT
                 return common.ApiResult(
-                    common.SHARE_FLOAT_FIELDS.split(","),
+                    specs.SHARE_FLOAT_FIELDS.split(","),
                     [[code, params["ann_date"], "20200301", 1.0, 0.1, f"h{index}", "type"] for index in range(rows)])
 
         def run(max_calls):
@@ -1407,7 +1408,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # existence would freeze such a partition permanently. The partitions
         # hold what the vendor answers again, so the content is unchanged and
         # only the sidecar records the coverage.
-        spec = common.MACRO_SPECS["cn_schedule"]
+        spec = specs.MACRO_SPECS["cn_schedule"]
         for month in ("202604", "202605"):
             path = self.raw_dir / "cn_schedule" / f"month={month}.parquet"
             frame = common.augment_macro_frame(
@@ -1425,7 +1426,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         download.download_macro_month_loop(
             client,
             self.raw_dir,
-            common.MACRO_SPECS["cn_schedule"],
+            specs.MACRO_SPECS["cn_schedule"],
             "20260401",
             "20260529",
             False,
@@ -1440,7 +1441,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # Second run: recorded coverage now satisfies both windows.
         client.calls.clear()
         download.download_macro_month_loop(
-            client, self.raw_dir, common.MACRO_SPECS["cn_schedule"], "20260401", "20260529", False,
+            client, self.raw_dir, specs.MACRO_SPECS["cn_schedule"], "20260401", "20260529", False,
         )
         self.assertEqual(client.calls, [])
 
@@ -1451,7 +1452,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # arrives, the partition must hold the declared contract: otherwise
         # `month` is absent, every row keeps the empty "missing_source_date"
         # stamp, and the whole table drops out of PIT replay.
-        spec = common.MACRO_SPECS["cn_pmi"]
+        spec = specs.MACRO_SPECS["cn_pmi"]
         declared = spec.fields.split(",")
         series = declared[1:]
 
@@ -1487,7 +1488,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         with redirect_stdout(io.StringIO()), self.assertRaisesRegex(RuntimeError, "returned no 'month' column"):
             download.download_macro_month_once(
-                NoMonthClient(), self.raw_dir, common.MACRO_SPECS["cn_pmi"],
+                NoMonthClient(), self.raw_dir, specs.MACRO_SPECS["cn_pmi"],
                 "20260701", "20260731", False,
             )
         self.assertFalse((self.raw_dir / "cn_pmi").exists())
@@ -1557,10 +1558,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # not know, where the downloader refuses one.
         args = argparse.Namespace(index_code=None, cn_index_code=None, fx_code=["USDCNH.FXCM"])
         self.assertEqual(
-            audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["fx_daily"], "20260101", "20260131", args),
+            audit.expected_macro_paths(self.raw_dir, specs.MACRO_SPECS["fx_daily"], "20260101", "20260131", args),
             {self.raw_dir / "fx_daily" / "ts_code=USDCNH.FXCM" / "year=2026.parquet"},
         )
-        unknown = common.DatasetSpec(api_name="new_by_code", strategy=common.FetchStrategy.DATE_YEAR_BY_TS_CODE)
+        unknown = specs.DatasetSpec(api_name="new_by_code", strategy=specs.FetchStrategy.DATE_YEAR_BY_TS_CODE)
         with self.assertRaisesRegex(RuntimeError, "no ts_code universe defined for by-ts_code macro dataset 'new_by_code'"):
             audit.expected_macro_paths(self.raw_dir, unknown, "20260101", "20260131", args)
 
@@ -1605,7 +1606,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(remaining, ["range=201407_latest.parquet"])
         # The audit expects the file the downloader keeps, not the floor's.
         expected = audit.expected_macro_paths(
-            self.raw_dir, common.MACRO_SPECS["cn_cpi"], "20200101", "20260603", args
+            self.raw_dir, specs.MACRO_SPECS["cn_cpi"], "20200101", "20260603", args
         )
         self.assertEqual(expected, {backfilled})
 
@@ -1798,7 +1799,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "ts_code": [f"{index:06d}.SZ" for index in range(5000)],
         }).to_parquet(path, index=False)
         findings = []
-        audit.audit_trade_date_dataset(self.raw_dir, common.DAILY_SPECS["daily"], {"20200102"}, lambda *item: findings.append(item))
+        audit.audit_trade_date_dataset(self.raw_dir, specs.DAILY_SPECS["daily"], {"20200102"}, lambda *item: findings.append(item))
         self.assertEqual(findings[0][0], "warning")
         self.assertEqual(findings[0][3]["exact_common_limit_row_count_dates"], ["20200102"])
 
@@ -1806,7 +1807,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # zero_rows_ok suppresses per-partition zero warnings, so a feed that
         # stops publishing (slb_len_mm: one year of empty partitions) never
         # surfaced. A long trailing run of zero-row partitions must warn.
-        spec = common.EVENT_FLOW_SPECS["block_trade"]
+        spec = specs.EVENT_FLOW_SPECS["block_trade"]
         columns = spec.fields.split(",") + ["available_at", "available_at_rule"]
         dates = ["20260701", "20260702", "20260703", "20260706", "20260707"]
         for index, trade_date in enumerate(dates):
@@ -1843,7 +1844,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_trailing_zero_run_warns_on_the_generic_board_path(self):
         # limit_list_d moved to the board tier; the stale-feed detector must
         # survive the move (the dedicated board audit used to enable it).
-        spec = common.BOARD_TRADING_SPECS["limit_list_d"]
+        spec = specs.BOARD_TRADING_SPECS["limit_list_d"]
         columns = spec.fields.split(",") + ["available_at", "available_at_rule"]
         dates = ["20260701", "20260702", "20260703", "20260706", "20260707"]
         for index, trade_date in enumerate(dates):
@@ -1877,7 +1878,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # could only ever see the last-sorted source. A dead feed that sorts
         # earlier (src=deadfeed < src=livefeed) must still be detected, and the
         # live sibling must not be flagged.
-        spec = common.TEXT_SPECS["news"]
+        spec = specs.TEXT_SPECS["news"]
         columns = spec.fields.split(",") + ["available_at", "available_at_rule"]
         days = ["20260701", "20260702", "20260703", "20260704"]
         files = set()
@@ -1915,14 +1916,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # month boundary instead of using the source date's own EOD.
         surv = common.augment_event_frame(
             pd.DataFrame([{"ts_code": "000001.SZ", "surv_date": "20260828"}]),
-            common.EVENT_FLOW_SPECS["stk_surv"],
+            specs.EVENT_FLOW_SPECS["stk_surv"],
         )
         self.assertEqual(surv.loc[0, "available_at"], "2026-09-02 23:59:59+08:00")
         self.assertEqual(surv.loc[0, "available_at_rule"], "conservative_plus_5d_eod_from:surv_date")
 
         ipo = common.augment_event_frame(
             pd.DataFrame([{"ts_code": "301000.SZ", "ipo_date": "20260731", "ballot": "0.02"}]),
-            common.EVENT_FLOW_SPECS["new_share"],
+            specs.EVENT_FLOW_SPECS["new_share"],
             trading_dates=["20260803", "20260804"],
         )
         self.assertEqual(ipo.loc[0, "available_at"], "2026-08-04 23:59:59+08:00")
@@ -1930,7 +1931,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         holiday = common.augment_event_frame(
             pd.DataFrame([{"ts_code": "301380.SZ", "ipo_date": "20220930", "ballot": "0.03"}]),
-            common.EVENT_FLOW_SPECS["new_share"],
+            specs.EVENT_FLOW_SPECS["new_share"],
             trading_dates=["20220930", "20221010", "20221011"],
         )
         self.assertEqual(holiday.loc[0, "available_at"], "2022-10-11 23:59:59+08:00")
@@ -1938,7 +1939,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "requires the A-share trading calendar"):
             common.augment_event_frame(
                 pd.DataFrame([{"ts_code": "301380.SZ", "ipo_date": "20220930"}]),
-                common.EVENT_FLOW_SPECS["new_share"],
+                specs.EVENT_FLOW_SPECS["new_share"],
             )
 
     def test_event_date_column_is_stored_without_padding(self):
@@ -1948,7 +1949,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"ts_code": "000004.SZ", "ann_date": "20250512 ", "end_date": "20250509", "holder_num": 30282},
             {"ts_code": "000005.SZ", "ann_date": None, "end_date": "20250509", "holder_num": 1},
         ])
-        out = common.augment_event_frame(rows, common.EVENT_FLOW_SPECS["stk_holdernumber"])
+        out = common.augment_event_frame(rows, specs.EVENT_FLOW_SPECS["stk_holdernumber"])
         self.assertEqual(out.loc[0, "ann_date"], "20250512")
         self.assertIsNone(out.loc[1, "ann_date"])
         self.assertEqual(out.loc[0, "available_at"], "2025-05-12 23:59:59+08:00")
@@ -1964,7 +1965,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def stamp(dataset: str, trade_date: str) -> pd.Timestamp:
             rows = pd.DataFrame([{"trade_date": trade_date, "exchange_id": ex, "ts_code": f"60000{i}.SH"}
                                  for i, ex in enumerate(("SSE", "SZSE", "BSE"))])
-            stamped = common.augment_event_frame(rows, common.EVENT_FLOW_SPECS[dataset], trading_dates=calendar)
+            stamped = common.augment_event_frame(rows, specs.EVENT_FLOW_SPECS[dataset], trading_dates=calendar)
             self.assertEqual(set(stamped["available_at_rule"]), {"official_next_trading_day_09_from:trade_date"})
             self.assertEqual(stamped["available_at"].nunique(), 1)
             return pd.Timestamp(stamped.loc[0, "available_at"])
@@ -1984,7 +1985,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "fewer than 1 open dates after 20261012"):
             stamp("margin", "20261012")
         with self.assertRaisesRegex(RuntimeError, "requires the A-share trading calendar"):
-            common.augment_event_frame(pd.DataFrame([{"trade_date": "20260929"}]), common.EVENT_FLOW_SPECS["margin"])
+            common.augment_event_frame(pd.DataFrame([{"trade_date": "20260929"}]), specs.EVENT_FLOW_SPECS["margin"])
 
     def test_event_available_at_repair_restamps_through_new_files(self):
         # Releases hard-link raw partitions: the repair must replace the live
@@ -1996,7 +1997,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             {"cal_date": f"2026{m:02d}{d:02d}", "is_open": "1" if f"2026{m:02d}{d:02d}" in open_days else "0"}
             for m, d in [(9, 29), (9, 30)] + [(10, d) for d in range(1, 13)]
         ]).to_parquet(cal, index=False)
-        spec = common.EVENT_FLOW_SPECS["margin"]
+        spec = specs.EVENT_FLOW_SPECS["margin"]
         old_rule = "official_next_day_09_from:trade_date"
 
         def land_old(trade_date: str, next_day: str) -> Path:
@@ -2276,7 +2277,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client = WeightClient()
         with patch.object(download, "DEFAULT_CN_INDEX_CODES", ["000300.SH"]):
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None
+                client, self.raw_dir, "20190101", "20211231", specs.RESEARCH_HISTORY_FLOOR, False, None
             )
             base = self.raw_dir / "index_weight" / "index_code=000300.SH"
             # The 2019 window is floored away; both years land as partitions.
@@ -2290,12 +2291,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             # the open year.
             calls_before = len(client.calls)
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20211231", common.RESEARCH_HISTORY_FLOOR, False, None
+                client, self.raw_dir, "20190101", "20211231", specs.RESEARCH_HISTORY_FLOOR, False, None
             )
             self.assertEqual(len(client.calls), calls_before)
             source_rows[2022] = 3
             download.download_index_weight(
-                client, self.raw_dir, "20190101", "20221231", common.RESEARCH_HISTORY_FLOOR, False, None
+                client, self.raw_dir, "20190101", "20221231", specs.RESEARCH_HISTORY_FLOOR, False, None
             )
             new_calls = client.calls[calls_before:]
             self.assertEqual({c["start_date"] for c in new_calls}, {"20220101"})
@@ -2317,8 +2318,8 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_history_floor_is_lowered_only_by_an_explicit_backfill_flag(self):
         plain = argparse.Namespace()
         backfill = argparse.Namespace(history_floor="20140701")
-        self.assertEqual(common.history_floor(common.RESEARCH_HISTORY_FLOOR, plain), "20200101")
-        self.assertEqual(common.history_floor(common.RESEARCH_HISTORY_FLOOR, backfill), "20140701")
+        self.assertEqual(common.history_floor(specs.RESEARCH_HISTORY_FLOOR, plain), "20200101")
+        self.assertEqual(common.history_floor(specs.RESEARCH_HISTORY_FLOOR, backfill), "20140701")
         # Never raised: a spec floor already below the flag stays where it is.
         self.assertEqual(common.history_floor("20100101", backfill), "20100101")
         parser = argparse.ArgumentParser()
@@ -2408,7 +2409,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_parquet_availability_survives_identical_refresh_but_moves_on_revision(self):
         path = self.raw_dir / "stk_auction" / "trade_date=20260713.parquet"
-        keys = list(common.DAILY_SPECS["stk_auction"].key_columns)
+        keys = list(specs.DAILY_SPECS["stk_auction"].key_columns)
         first = pd.DataFrame(
             [{"trade_date": "20260713", "ts_code": "000001.SZ", "price": 10.0}]
         )
@@ -2438,7 +2439,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         previous = self.raw_dir / "stk_auction" / "trade_date=20260710.parquet"
         previous.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"ts_code": "000001.SZ"}, {"ts_code": "600000.SH"}]).to_parquet(previous, index=False)
-        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
 
         def result(items):
             return common.ApiResult(fields, items)
@@ -2509,7 +2510,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             fields=list(original.columns),
         )
         original_bytes = target.read_bytes()
-        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
         partial = common.ApiResult(
             fields,
             [["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0]])
@@ -2540,7 +2541,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_capture_open_auction_polls_on_fixed_start_times(self):
         self._write_trade_cal("20260713")
-        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
         items = [
             ["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0],
         ]
@@ -2676,7 +2677,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_stk_auction_recheck_single_shot_paths(self):
         self._write_trade_cal("20260713")
-        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
         full = [
             ["000001.SZ", "20260713", 1000.0, 10.0, 10000.0, 9.9, 0.1, 1.0, 100000.0],
             ["600000.SH", "20260713", 2000.0, 8.0, 16000.0, 7.9, 0.2, 1.1, 200000.0],
@@ -2766,7 +2767,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "cal_date": ["20260709", "20260710", "20260713"],
             "is_open": ["1", "1", "1"],
         }).to_parquet(cal_path, index=False)
-        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
 
         def day_rows(day):
             return [
@@ -2821,7 +2822,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             "cal_date": ["20260709", "20260710", "20260713"],
             "is_open": ["1", "1", "1"],
         }).to_parquet(cal_path, index=False)
-        fields = common.DAILY_SPECS["stk_auction"].fields.split(",")
+        fields = specs.DAILY_SPECS["stk_auction"].fields.split(",")
 
         def day_rows(day):
             return [
@@ -2865,14 +2866,14 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_default_daily_download_excludes_stk_auction(self):
         selected = common.selected_daily_datasets(argparse.Namespace(datasets=None))
-        self.assertEqual(selected, common.DAILY_DOWNLOAD_DATASETS)
+        self.assertEqual(selected, specs.DAILY_DOWNLOAD_DATASETS)
         self.assertNotIn("stk_auction", selected)
         required = common.selected_daily_datasets(
             argparse.Namespace(datasets=None),
-            default=common.DAILY_REQUIRED_DATASETS,
+            default=specs.DAILY_REQUIRED_DATASETS,
         )
         self.assertIn("stk_auction", required)
-        self.assertIn("stk_auction", common.DAILY_REQUIRED_DATASETS)
+        self.assertIn("stk_auction", specs.DAILY_REQUIRED_DATASETS)
 
     def test_generic_daily_cli_choices_exclude_stk_auction(self):
         parser = download.build_parser()
@@ -3281,7 +3282,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         def post(url, **kwargs):
             payload = kwargs["json"]
             sent.append((url, payload["api_name"], payload["token"]))
-            fields = common.TEXT_SPECS[payload["api_name"]].fields.split(",")
+            fields = specs.TEXT_SPECS[payload["api_name"]].fields.split(",")
             body = {"code": 0, "msg": "", "data": {"fields": fields, "items": []}}
             return SimpleNamespace(status_code=200, text=json.dumps(body), json=lambda: body)
 
@@ -4399,7 +4400,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(text_job["extra_args"][-1], "--force")
         self.assertEqual(
             sorted(text_job["extra_args"][1:-1]),
-            sorted(set(common.TEXT_DATASETS) - {"anns_d"}),
+            sorted(set(specs.TEXT_DATASETS) - {"anns_d"}),
         )
         self.assertEqual(jobs["cn_nightly_anns_full"]["extra_args"], ["--datasets", "anns_d", "--force"])
         # The global tier and the ann-date disclosure tables are natural-day
@@ -4500,7 +4501,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 download.download_trade_date_dataset(
                     DailyMarketClient(),
                     self.raw_dir,
-                    common.DAILY_SPECS[dataset],
+                    specs.DAILY_SPECS[dataset],
                     ["20200102"],
                     True,
                     5000,
@@ -4847,7 +4848,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # As a key field every such restatement read as one removed plus one
         # added key, which the sentinel escalated as a structural rewrite; as a
         # value it is a ledgered field revision on an unchanged key.
-        spec = common.BOARD_TRADING_SPECS["top_list"]
+        spec = specs.BOARD_TRADING_SPECS["top_list"]
         self.assertNotIn("name", spec.key_columns)
         self.assertEqual(set(spec.key_columns), set(spec.fields.split(",")) - {"name"})
         keys = list(spec.key_columns)
@@ -4986,7 +4987,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_zero_rows_ok_event_dataset_extreme_shrink_is_staged(self):
         # Tolerating an EMPTY day says nothing about accepting an answer that
         # removes most of a partition.
-        self.assertTrue(common.EVENT_FLOW_SPECS["cyq_perf"].zero_rows_ok)
+        self.assertTrue(specs.EVENT_FLOW_SPECS["cyq_perf"].zero_rows_ok)
         self._write_trade_cal("20200102")
         path = self.raw_dir / "cyq_perf" / "trade_date=20200102.parquet"
         original = self._seed_shrinkable_partition(
@@ -5049,7 +5050,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             written = download.download_event_range_month(
                 client,
                 self.raw_dir,
-                common.EVENT_FLOW_SPECS["repurchase"],
+                specs.EVENT_FLOW_SPECS["repurchase"],
                 [("20200101", "20200131", "202001")],
                 True,
                 5000,
@@ -5062,7 +5063,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
     def test_event_range_month_counts_only_partitions_it_wrote(self):
         # `written` decides the event/flow no-mutation exit contract, so a
         # partition the writer kept must never be counted as a mutation.
-        spec = common.EVENT_FLOW_SPECS["repurchase"]
+        spec = specs.EVENT_FLOW_SPECS["repurchase"]
         fresh = self.raw_dir / "repurchase" / "month=202002.parquet"
         with redirect_stdout(io.StringIO()):
             written = download.download_event_range_month(
@@ -5103,7 +5104,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # precedes the window start (the request never re-serves it) and kept
         # the stale version of a re-served row whose ann_date the supplier
         # moved past the window.
-        spec = common.EVENT_FLOW_SPECS["top10_floatholders"]
+        spec = specs.EVENT_FLOW_SPECS["top10_floatholders"]
         fields = spec.fields.split(",")
 
         def row(ts_code, ann_date, end_date, amount):
@@ -5150,7 +5151,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
 
     def test_event_range_month_bisects_windows_instead_of_trusting_offset_paging(self):
-        spec = common.EVENT_FLOW_SPECS["stk_holdernumber"]
+        spec = specs.EVENT_FLOW_SPECS["stk_holdernumber"]
         rows = [
             {"ts_code": f"{index:06d}.SZ", "ann_date": f"2026090{1 + index // 2}", "end_date": "20260820", "holder_num": index}
             for index in range(6)
@@ -5170,7 +5171,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # A row served on two pages means as many rows are missing: the answer
         # is defective, the month keeps its current version (here: none) and
         # the defect is recorded instead of ending the run.
-        spec = common.EVENT_FLOW_SPECS["stk_holdernumber"]
+        spec = specs.EVENT_FLOW_SPECS["stk_holdernumber"]
         client = TieUnstablePagingClient([
             {"ts_code": f"{index:06d}.SZ", "ann_date": "20260905", "end_date": "20260820", "holder_num": index}
             for index in range(5)
@@ -5343,7 +5344,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # A covering non-force run must not skip the committed partial day.
         client = EmptyTradeDateClient()
         written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin"], ["20260529"], False, None,
+            client, self.raw_dir, specs.EVENT_FLOW_SPECS["margin"], ["20260529"], False, None,
             trading_dates=["20260529", "20260601"],
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -5394,7 +5395,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 return common.ApiResult(columns, [row])
 
         written, zero_skipped = download.download_event_trade_date_dataset(
-            ShOnlyDetailClient(), self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], True, None,
+            ShOnlyDetailClient(), self.raw_dir, specs.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], True, None,
             trading_dates=["20260529", "20260601"],
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -5408,7 +5409,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         client = EmptyTradeDateClient()
         written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], False, None,
+            client, self.raw_dir, specs.EVENT_FLOW_SPECS["margin_detail"], ["20260529"], False, None,
             trading_dates=["20260529", "20260601"],
         )
         self.assertEqual((written, zero_skipped), (0, 1))
@@ -5453,7 +5454,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 return common.ApiResult(columns, rows)
 
         written, zero_skipped = download.download_event_trade_date_dataset(
-            NoBseSecsClient(), self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260529"], True, None
+            NoBseSecsClient(), self.raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260529"], True, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))
         self.assertFalse((self.raw_dir / "margin_secs" / "trade_date=20260529.parquet").exists())
@@ -5466,7 +5467,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ).to_parquet(secs_dir / "trade_date=20260529.parquet", index=False)
         client = EmptyTradeDateClient()
         written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260529"], False, None
+            client, self.raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260529"], False, None
         )
         self.assertEqual((written, zero_skipped), (0, 1))
         self.assertEqual([api for api, _ in client.calls], ["margin_secs"])
@@ -5618,7 +5619,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(details["missing_sample"], ["885002.TI"])  # type S intentionally not expected
 
     def test_fundamental_extreme_shrink_is_staged(self):
-        spec = common.FUNDAMENTAL_SPECS["fina_mainbz_vip"]
+        spec = specs.FUNDAMENTAL_SPECS["fina_mainbz_vip"]
         keys = list(spec.key_columns)
         d = self.raw_dir / spec.api_name
         d.mkdir(parents=True, exist_ok=True)
@@ -5664,7 +5665,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         client = ThreeExchangeSecsClient()
         written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
+            client, self.raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
         )
         self.assertEqual([api for api, _ in client.calls], ["margin_secs"])
         self.assertEqual((written, zero_skipped), (1, 0))
@@ -5673,7 +5674,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # Once the pair is intact, the same covering run skips it.
         client.calls.clear()
         written, zero_skipped = download.download_event_trade_date_dataset(
-            client, self.raw_dir, common.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
+            client, self.raw_dir, specs.EVENT_FLOW_SPECS["margin_secs"], ["20260601"], False, None
         )
         self.assertEqual(client.calls, [])
         # A replaced Parquet from an interrupted publish is also re-attempted:
@@ -5690,7 +5691,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         ledger = self.root / "daily_skip_heal.jsonl"
         with redirect_stdout(io.StringIO()):
             zero_skipped = download.download_trade_date_dataset(
-                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
+                client, self.raw_dir, specs.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
             )
         self.assertEqual([api for api, _ in client.calls], ["daily"])
         self.assertEqual(zero_skipped, 0)
@@ -5698,7 +5699,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_trade_date_dataset(
-                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
+                client, self.raw_dir, specs.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
             )
         self.assertEqual(client.calls, [])
         sidecar = path.with_suffix(path.suffix + ".meta.json")
@@ -5709,13 +5710,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         client.calls.clear()
         with redirect_stdout(io.StringIO()):
             download.download_trade_date_dataset(
-                client, self.raw_dir, common.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
+                client, self.raw_dir, specs.DAILY_SPECS["daily"], ["20200102"], False, 5000, ledger,
             )
         self.assertEqual([api for api, _ in client.calls], ["daily"])
         self.assertTrue(tushare_io.committed_partition_intact(path))
 
     def test_board_skip_reattempts_partition_without_intact_sidecar(self):
-        spec = common.BOARD_TRADING_SPECS["limit_list_d"]
+        spec = specs.BOARD_TRADING_SPECS["limit_list_d"]
         path = self.raw_dir / spec.api_name / "trade_date=20200102.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         pd.DataFrame([{"trade_date": "20200102", "ts_code": "000001.SZ", "limit": "U"}]).to_parquet(path, index=False)
@@ -5743,11 +5744,11 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # a parquet without its commit identity is re-pulled and committed.
         self._write_trade_cal()
         cases = [
-            (common.TEXT_SPECS["cctv_news"], "date=20200102", ["20200102", "t", "c"],
-             lambda client: download.download_text_day(client, self.raw_dir, common.TEXT_SPECS["cctv_news"], ["20200102"], False)),
-            (common.MACRO_SPECS["sw_daily"], "trade_date=20200102", None,
+            (specs.TEXT_SPECS["cctv_news"], "date=20200102", ["20200102", "t", "c"],
+             lambda client: download.download_text_day(client, self.raw_dir, specs.TEXT_SPECS["cctv_news"], ["20200102"], False)),
+            (specs.MACRO_SPECS["sw_daily"], "trade_date=20200102", None,
              lambda client: download.download_macro_trade_date(
-                 client, self.raw_dir, common.MACRO_SPECS["sw_daily"], "20200102", "20200102", False, 5000)),
+                 client, self.raw_dir, specs.MACRO_SPECS["sw_daily"], "20200102", "20200102", False, 5000)),
         ]
         for spec, partition, row, run in cases:
             columns = spec.fields.split(",")
@@ -5773,7 +5774,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             self.assertEqual(client.calls, [], spec.api_name)
 
     def test_board_progress_counts_only_partitions_publish_wrote(self):
-        spec = common.BOARD_TRADING_SPECS["limit_list_d"]
+        spec = specs.BOARD_TRADING_SPECS["limit_list_d"]
 
         class LimitClient(EmptyTradeDateClient):
             def query(self, api_name, params=None, fields="", retries=5):
@@ -5792,7 +5793,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertIn("written=0 rows_written=0", run())
 
     def test_share_float_skip_reattempts_partition_without_intact_sidecar(self):
-        fields = common.SHARE_FLOAT_FIELDS.split(",")
+        fields = specs.SHARE_FLOAT_FIELDS.split(",")
         path = self.raw_dir / "share_float_ann_date" / "ann_date=20200101.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         seeded = pd.DataFrame([["000001.SZ", "20200101", "20200102", 1.0, 0.1, "h1", "type"]], columns=fields)
@@ -5821,7 +5822,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertTrue(report["skipped"])
 
     def test_fundamental_skip_reattempts_partition_without_intact_sidecar(self):
-        spec = common.FUNDAMENTAL_SPECS["income_vip"]
+        spec = specs.FUNDAMENTAL_SPECS["income_vip"]
         keys = list(spec.key_columns)
         path = self.raw_dir / spec.api_name / "period=20200331.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -5890,7 +5891,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
                 return common.ApiResult(columns, [row])
 
         client = RegistryClient()
-        spec = common.MACRO_SPECS["fut_basic"]
+        spec = specs.MACRO_SPECS["fut_basic"]
         download.download_macro_static_full(client, self.raw_dir, spec, 10000)
 
         path = self.raw_dir / "fut_basic" / "exchange=CFFEX.parquet"
@@ -5907,13 +5908,13 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         from autotrade.data_sources.tushare import audit
 
         args = argparse.Namespace(datasets=None)
-        static_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["fut_basic"], "20240101", "20240110", args)
+        static_paths = audit.expected_macro_paths(self.raw_dir, specs.MACRO_SPECS["fut_basic"], "20240101", "20240110", args)
         self.assertIn(self.raw_dir / "fut_basic" / "exchange=CFFEX.parquet", static_paths)
-        self.assertEqual(len(static_paths), len(common.MACRO_SPECS["fut_basic"].loop_values))
+        self.assertEqual(len(static_paths), len(specs.MACRO_SPECS["fut_basic"].loop_values))
         self._write_trade_cal("20240104")
         # Loop venues that listed later must not be expected before their start.
         self._write_trade_cal("20180104")
-        opt_paths = audit.expected_macro_paths(self.raw_dir, common.MACRO_SPECS["opt_daily"], "20180104", "20180104", args)
+        opt_paths = audit.expected_macro_paths(self.raw_dir, specs.MACRO_SPECS["opt_daily"], "20180104", "20180104", args)
         self.assertEqual({p.parent.name for p in opt_paths}, {"exchange=SSE"})
 
     def test_macro_completeness_month_expectation_clamps_to_open_dates(self):
@@ -6192,15 +6193,15 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_intraday_by_date_audit_errors_on_zero_row_partition(self):
         self._write_trade_cal()
-        path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
-        empty = pd.DataFrame(columns=common.STK_MINS_REQUIRED_COLUMNS)
-        tushare_io.write_parquet(path, empty, api_name=common.STK_MINS_API_NAME, params={}, fields=list(empty.columns))
+        path = self.raw_dir / specs.STK_MINS_BY_DATE_DATASET / "trade_date=20200102.parquet"
+        empty = pd.DataFrame(columns=specs.STK_MINS_REQUIRED_COLUMNS)
+        tushare_io.write_parquet(path, empty, api_name=specs.STK_MINS_API_NAME, params={}, fields=list(empty.columns))
         status_path = self.root / "status.json"
         args = argparse.Namespace(
             raw_dir=str(self.raw_dir),
             start_date="20200102",
             end_date="20200102",
-            output_dataset=common.STK_MINS_BY_DATE_DATASET,
+            output_dataset=specs.STK_MINS_BY_DATE_DATASET,
             codes=None,
             max_codes=None,
             expected_codes_source="none",
@@ -6213,7 +6214,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(audit.audit_intraday_by_date(args), 1)
         status = json.loads(status_path.read_text(encoding="utf-8"))
-        inventory = next(item for item in status["findings"] if item["check"] == f"{common.STK_MINS_BY_DATE_DATASET}_inventory")
+        inventory = next(item for item in status["findings"] if item["check"] == f"{specs.STK_MINS_BY_DATE_DATASET}_inventory")
         self.assertEqual(inventory["severity"], "error")
         self.assertEqual(inventory["details"]["zero_row_files"], 1)
 
@@ -6230,9 +6231,9 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             })
         if duplicate_first_bar:
             rows.append(dict(rows[0]))
-        path = self.raw_dir / common.STK_MINS_BY_DATE_DATASET / f"trade_date={trade_date}.parquet"
+        path = self.raw_dir / specs.STK_MINS_BY_DATE_DATASET / f"trade_date={trade_date}.parquet"
         df = pd.DataFrame(rows)
-        tushare_io.write_parquet(path, df, api_name=common.STK_MINS_API_NAME, params={}, fields=list(df.columns))
+        tushare_io.write_parquet(path, df, api_name=specs.STK_MINS_API_NAME, params={}, fields=list(df.columns))
 
     def test_intraday_by_date_deep_checks_cover_the_newest_dates(self):
         # The head slice re-validated the window's FIRST trading days forever;
@@ -6250,7 +6251,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir),
             start_date="20200102",
             end_date="20200103",
-            output_dataset=common.STK_MINS_BY_DATE_DATASET,
+            output_dataset=specs.STK_MINS_BY_DATE_DATASET,
             codes=None,
             max_codes=None,
             expected_codes_source="none",
@@ -6263,7 +6264,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         self.assertEqual(audit.audit_intraday_by_date(args), 0)
         status = json.loads(status_path.read_text(encoding="utf-8"))
-        deep = next(item for item in status["findings"] if item["check"] == f"{common.STK_MINS_BY_DATE_DATASET}_deep_checks")
+        deep = next(item for item in status["findings"] if item["check"] == f"{specs.STK_MINS_BY_DATE_DATASET}_deep_checks")
         self.assertEqual(deep["details"]["files_checked"], 1)
         self.assertEqual(deep["details"]["bad_days"], 1)
         self.assertEqual(deep["details"]["bad_day_sample"][0]["trade_date"], "20200103")
@@ -6280,7 +6281,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
             raw_dir=str(self.raw_dir),
             start_date=days[0],
             end_date=days[-1],
-            output_dataset=common.STK_MINS_BY_DATE_DATASET,
+            output_dataset=specs.STK_MINS_BY_DATE_DATASET,
             codes=None,
             max_codes=None,
             expected_codes_source="none",
@@ -6293,10 +6294,10 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
         def findings() -> dict[str, dict]:
             status = json.loads(status_path.read_text(encoding="utf-8"))
-            prefix = common.STK_MINS_BY_DATE_DATASET
+            prefix = specs.STK_MINS_BY_DATE_DATASET
             return {item["check"].removeprefix(f"{prefix}_"): item for item in status["findings"]}
 
-        (self.raw_dir / common.STK_MINS_BY_DATE_DATASET).mkdir(parents=True)
+        (self.raw_dir / specs.STK_MINS_BY_DATE_DATASET).mkdir(parents=True)
         self.assertEqual(audit.audit_intraday_by_date(args), 1)
         self.assertEqual(findings()["inventory"]["details"]["missing_files"], 4)
         self.assertEqual(findings()["staleness"]["severity"], "info")
@@ -6320,7 +6321,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         self.assertEqual(found["staleness"]["severity"], "info")
 
     def test_stk_mins_sample_rotates_deterministically_with_seed(self):
-        base = self.raw_dir / common.STK_MINS_DATASET
+        base = self.raw_dir / specs.STK_MINS_DATASET
         files = []
         for code in ("000001.SZ", "000002.SZ", "600000.SH"):
             path = base / f"ts_code={code}" / "year=2020.parquet"
@@ -6426,7 +6427,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         open_days = {"20260924", "20260928", "20260929", "20260930", "20261008", "20261009"}
         days = [f"202609{d:02d}" for d in range(24, 31)] + [f"202610{d:02d}" for d in range(1, 10)]
         pd.DataFrame([{"cal_date": d, "is_open": "1" if d in open_days else "0"} for d in days]).to_parquet(cal, index=False)
-        spec = common.EVENT_FLOW_SPECS["margin"]
+        spec = specs.EVENT_FLOW_SPECS["margin"]
         trading_dates = sorted(open_days)
 
         def land(trade_date: str) -> None:
@@ -6639,12 +6640,12 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         directory), and must keep reproducing the names the lake already holds.
         """
         values = [
-            *common.BOARD_KPL_TAGS,
-            *common.BOARD_THS_LIMIT_TYPES,
-            *common.BOARD_THS_HOT_MARKETS,
-            *common.BOARD_DC_HOT_MARKETS,
-            *common.BOARD_DC_HOT_TYPES,
-            *common.NEWS_SOURCES,
+            *specs.BOARD_KPL_TAGS,
+            *specs.BOARD_THS_LIMIT_TYPES,
+            *specs.BOARD_THS_HOT_MARKETS,
+            *specs.BOARD_DC_HOT_MARKETS,
+            *specs.BOARD_DC_HOT_TYPES,
+            *specs.NEWS_SOURCES,
             "000001.SH",
             "CFFEX",
             "all",
@@ -6721,7 +6722,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
 
     def test_text_source_time_is_normalized_to_china_timezone(self):
         frame = pd.DataFrame([{"title": "sample", "pub_time": "2020-01-02 10:00:00", "src": "x"}])
-        out = common.augment_text_frame(frame, common.TEXT_SPECS["major_news"])
+        out = common.augment_text_frame(frame, specs.TEXT_SPECS["major_news"])
         self.assertEqual(out.loc[0, "available_at"], "2020-01-02 10:00:00+08:00")
         self.assertEqual(out.loc[0, "available_at_rule"], "source:pub_time")
 
@@ -6730,7 +6731,7 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         # evening, so the morning fetch of day D legitimately returns zero
         # rows; the zero-row partition it writes must not block the evening
         # --force refresh from landing the real transcript.
-        spec = common.TEXT_SPECS["cctv_news"]
+        spec = specs.TEXT_SPECS["cctv_news"]
         path = self.raw_dir / "cctv_news" / "date=20260809.parquet"
 
         class DayClient:
@@ -7645,7 +7646,7 @@ class TuShareClientTest(unittest.TestCase):
         self.assertEqual(client._token, "official-dummy")
         self.assertTrue(common.OFFICIAL_TUSHARE_URL.startswith("https://"))
         self.assertEqual(
-            [n for n, s in common.TEXT_SPECS.items() if not s.official], ["report_rc"]
+            [n for n, s in specs.TEXT_SPECS.items() if not s.official], ["report_rc"]
         )
 
     def test_a_request_carries_the_sdk_payload_to_the_pinned_endpoint(self) -> None:
@@ -7749,7 +7750,7 @@ class FundamentalAuditTest(unittest.TestCase):
 
         audit.audit_fundamental_dataset(
             raw,
-            common.FUNDAMENTAL_SPECS[dataset],
+            specs.FUNDAMENTAL_SPECS[dataset],
             {partition},
             "period" if dataset == "disclosure_date" else "ts_code",
             add,
@@ -7999,7 +8000,7 @@ class UuidCommitIdentityTest(unittest.TestCase):
             command = cron_update.history_repull_command(config, "/env/python", dataset, end_date="20261024")
             self.assertEqual(command[2:8], ["download", "--tier", "event_flow", "--datasets", dataset, "--force"])
             start = command[command.index("--start-date") + 1]
-            lag = timedelta(days=common.EVENT_FLOW_SPECS[dataset].report_lag_days)
+            lag = timedelta(days=specs.EVENT_FLOW_SPECS[dataset].report_lag_days)
             self.assertEqual(
                 (datetime.strptime(start, "%Y%m%d") - lag).strftime("%Y%m%d"),  # noqa: DTZ007
                 config["default_start_date"],
@@ -8111,7 +8112,7 @@ class UuidCommitIdentityTest(unittest.TestCase):
             (root / "configs/tushare_update_schedule.json").read_text(encoding="utf-8")
         )
         scheduled = {item["dataset"] for item in schedule["interfaces"]}
-        self.assertEqual(set(common.REFERENCE_DATASETS) - scheduled, set())
+        self.assertEqual(set(specs.REFERENCE_DATASETS) - scheduled, set())
 
     def test_every_selectable_snapshot_dataset_is_registered(self) -> None:
         # The creation form renders one chip per selectable dataset and reads
@@ -8136,8 +8137,8 @@ class UuidCommitIdentityTest(unittest.TestCase):
         )["files"]
         scheduled_datasets = {item["dataset"] for item in schedule["interfaces"]}
 
-        self.assertEqual(set(common.MACRO_DATASETS), set(common.MACRO_SPECS))
-        self.assertTrue(set(common.MACRO_DATASETS).issubset(scheduled_datasets))
+        self.assertEqual(set(specs.MACRO_DATASETS), set(specs.MACRO_SPECS))
+        self.assertTrue(set(specs.MACRO_DATASETS).issubset(scheduled_datasets))
         # The committed inventory covers every SELECTABLE macro dataset, not
         # just the default scope: the unit registry is fail-closed, so a
         # dataset an experiment can opt into must resolve column by column.
@@ -8153,8 +8154,8 @@ class UuidCommitIdentityTest(unittest.TestCase):
         # keeping it up to date.
         self.assertTrue(
             set(SELECTABLE_DATASETS["macro"])
-            <= set(common.MACRO_SPECS) | set(common.REFERENCE_DATASETS)
+            <= set(specs.MACRO_SPECS) | set(specs.REFERENCE_DATASETS)
         )
         self.assertEqual(
-            set(SELECTABLE_DATASETS["macro"]) - set(common.MACRO_SPECS), {"index_weight"}
+            set(SELECTABLE_DATASETS["macro"]) - set(specs.MACRO_SPECS), {"index_weight"}
         )

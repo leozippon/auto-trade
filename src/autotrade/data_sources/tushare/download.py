@@ -36,44 +36,16 @@ from autotrade.environment.data.pit import (
 from . import common as core
 from . import versions
 from .common import (
-    BAK_BASIC_SPEC,
-    BOARD_TRADING_SPECS,
-    DAILY_SPECS,
-    DEFAULT_CN_INDEX_CODES,
-    EVENT_FLOW_DATASETS,
-    EVENT_FLOW_SPECS,
-    FUNDAMENTAL_SPECS,
-    INDEX_WEIGHT_FIELDS,
-    INDEX_WEIGHT_PAGE_LIMIT,
-    INTRADAY_DATASETS,
-    MACRO_SPECS,
     MUTATED_NOT_READY_RETRY_EXIT_CODE,
     NO_MUTATION_FAILURE_EXIT_CODE,
     NO_MUTATION_RETRY_EXIT_CODE,
     OFFICIAL_TOKEN_ENV,
     PHYSICAL_IDENTITY_COLUMNS,
-    REFERENCE_DATASETS,
-    REFERENCE_PAGE_LIMIT,
-    RESEARCH_HISTORY_FLOOR,
     REVISION_EVENTS_PATH,
-    SHARE_FLOAT_FIELDS,
     SHARE_FLOAT_ROW_LIMIT,
     SHARE_FLOAT_UNLOCK_TITLE_PATTERN,
-    STK_MINS_API_NAME,
-    STK_MINS_BATCH_CODES,
-    STK_MINS_BY_DATE_DATASET,
-    STK_MINS_DATASET,
-    STK_MINS_FIELDS,
-    STK_MINS_FREQ,
-    STK_MINS_PAGE_LIMIT,
-    STK_MINS_QUOTA_MARKER,
-    STK_MINS_REQUIRED_COLUMNS,
-    TEXT_SPECS,
-    TRADE_DATE_PAGE_LIMIT,
     WRITTEN_OUTCOMES,
     ApiResult,
-    DatasetSpec,
-    FetchStrategy,
     TuShareClient,
     active_year_windows,
     as_datetime_window,
@@ -137,6 +109,41 @@ from .layout import (
     refuse_moved_range_start,
 )
 from .lock import manual_production_write
+from .specs import (
+    BAK_BASIC_SPEC,
+    BOARD_TRADING_SPECS,
+    DAILY_DOWNLOAD_DATASETS,
+    DAILY_SPECS,
+    DEFAULT_CN_INDEX_CODES,
+    DOWNLOAD_TIER_CHOICES,
+    EVENT_FLOW_DATASETS,
+    EVENT_FLOW_SPECS,
+    FUNDAMENTAL_DATASETS,
+    FUNDAMENTAL_SPECS,
+    INDEX_WEIGHT_FIELDS,
+    INDEX_WEIGHT_PAGE_LIMIT,
+    INTRADAY_DATASETS,
+    MACRO_DATASETS,
+    MACRO_SPECS,
+    REFERENCE_DATASETS,
+    REFERENCE_PAGE_LIMIT,
+    RESEARCH_HISTORY_FLOOR,
+    SHARE_FLOAT_FIELDS,
+    STK_MINS_API_NAME,
+    STK_MINS_BATCH_CODES,
+    STK_MINS_BY_DATE_DATASET,
+    STK_MINS_DATASET,
+    STK_MINS_FIELDS,
+    STK_MINS_FREQ,
+    STK_MINS_PAGE_LIMIT,
+    STK_MINS_QUOTA_MARKER,
+    STK_MINS_REQUIRED_COLUMNS,
+    TEXT_DATASETS,
+    TEXT_SPECS,
+    TRADE_DATE_PAGE_LIMIT,
+    DatasetSpec,
+    FetchStrategy,
+)
 from .versions import (
     DefectiveAnswer,
     answer_defects,
@@ -3377,17 +3384,17 @@ def update_data(args: argparse.Namespace) -> int:
 
 def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("download", help="download TuShare raw data by semantic tier")
-    parser.add_argument("--tier", required=True, choices=core.DOWNLOAD_TIER_CHOICES)
+    parser.add_argument("--tier", required=True, choices=DOWNLOAD_TIER_CHOICES)
     core.add_raw_arg(parser)
     parser.add_argument("--start-date", default="20100101")
     parser.add_argument("--bak-start-date", default="20160101")
     parser.add_argument("--end-date", default=cn_today())
     parser.add_argument("--trade-cal-end-date", help="Optional reference-tier lookahead end date used only for trade_cal coverage.")
     parser.add_argument("--datasets", nargs="+")
-    parser.add_argument("--refresh-daily-datasets", nargs="+", choices=core.DAILY_DOWNLOAD_DATASETS, default=[])
+    parser.add_argument("--refresh-daily-datasets", nargs="+", choices=DAILY_DOWNLOAD_DATASETS, default=[])
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     parser.add_argument("--skip-bak-basic", action="store_true")
-    parser.add_argument("--refresh-reference-datasets", nargs="+", choices=core.REFERENCE_DATASETS, default=[])
+    parser.add_argument("--refresh-reference-datasets", nargs="+", choices=REFERENCE_DATASETS, default=[])
     parser.add_argument("--fundamental-refresh-period-count", type=int, default=0)
     parser.add_argument("--fundamental-refresh-ann-month-count", type=int, default=0)
     parser.add_argument("--fundamental-refresh-ts-code-datasets", nargs="+", choices=["dividend", "fina_audit", "fina_mainbz_vip"], default=[])
@@ -3431,18 +3438,18 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         default=7,
         help="Extend reference trade_cal this many calendar days beyond --end-date so pre-open jobs and next-session PIT mapping have calendar coverage.",
     )
-    parser.add_argument("--daily-datasets", nargs="+", choices=core.DAILY_DOWNLOAD_DATASETS)
+    parser.add_argument("--daily-datasets", nargs="+", choices=DAILY_DOWNLOAD_DATASETS)
     parser.add_argument(
         "--refresh-daily-datasets",
         nargs="+",
-        choices=core.DAILY_DOWNLOAD_DATASETS,
+        choices=DAILY_DOWNLOAD_DATASETS,
         default=[],
         help="Daily trade-date datasets to force-refresh within the update window; cron config selects the routine recent-window revision set.",
     )
     parser.add_argument(
         "--refresh-reference-datasets",
         nargs="+",
-        choices=core.REFERENCE_DATASETS,
+        choices=REFERENCE_DATASETS,
         default=["stock_basic", "stock_company", "namechange", "index_classify", "index_member_all"],
         help="Reference datasets to force-refresh during daily update; heavier datasets should be explicit.",
     )
@@ -3452,7 +3459,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         help="Force-refresh the rolling update window for macro/global/event/board/text/share_float tiers; intended for cron, not large manual history fills.",
     )
     parser.add_argument("--reference-min-interval-seconds", type=float, help="Optional lower call frequency for the reference refresh step.")
-    parser.add_argument("--fundamental-datasets", nargs="+", choices=core.FUNDAMENTAL_DATASETS)
+    parser.add_argument("--fundamental-datasets", nargs="+", choices=FUNDAMENTAL_DATASETS)
     parser.add_argument(
         "--fundamental-refresh-period-count",
         type=int,
@@ -3484,14 +3491,14 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         default=90,
         help="Probe recent dividend date fields to discover affected stocks for targeted ts_code snapshot refresh.",
     )
-    parser.add_argument("--macro-datasets", nargs="+", choices=core.MACRO_DATASETS)
-    parser.add_argument("--global-datasets", nargs="+", choices=core.MACRO_DATASETS)
+    parser.add_argument("--macro-datasets", nargs="+", choices=MACRO_DATASETS)
+    parser.add_argument("--global-datasets", nargs="+", choices=MACRO_DATASETS)
     parser.add_argument(
         "--macro-start-date",
         default=RESEARCH_HISTORY_FLOOR,
         help="Retained lower bound for macro/global range-style datasets during rolling updates; prevents short-window range files from replacing full-context coverage.",
     )
-    parser.add_argument("--event-datasets", nargs="+", choices=[dataset for dataset in core.EVENT_FLOW_DATASETS if dataset != "share_float"])
+    parser.add_argument("--event-datasets", nargs="+", choices=[dataset for dataset in EVENT_FLOW_DATASETS if dataset != "share_float"])
     parser.add_argument("--board-datasets", nargs="+", choices=BOARD_TRADING_DATASETS)
     parser.add_argument(
         "--include-board-trading",
@@ -3499,7 +3506,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         default=True,
         help="Update 打板专题数据 by default; use --no-include-board-trading for lightweight refreshes.",
     )
-    parser.add_argument("--text-datasets", nargs="+", choices=core.TEXT_DATASETS)
+    parser.add_argument("--text-datasets", nargs="+", choices=TEXT_DATASETS)
     parser.add_argument(
         "--include-text",
         action=argparse.BooleanOptionalAction,
@@ -3518,7 +3525,7 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         default=True,
         help="Update final by-date 1-minute files by default; use --no-include-intraday for lightweight metadata-only refreshes.",
     )
-    parser.add_argument("--output-dataset", default=core.STK_MINS_BY_DATE_DATASET)
+    parser.add_argument("--output-dataset", default=STK_MINS_BY_DATE_DATASET)
     parser.add_argument("--expected-codes-source", choices=["daily", "active", "minute"], default="minute")
     parser.add_argument("--codes", nargs="+")
     parser.add_argument("--max-codes", type=int)
@@ -3628,7 +3635,7 @@ def add_repair_text_parser(sub: argparse._SubParsersAction) -> None:
         help="re-derive text available_at locally under the plausibility rule (no API calls)",
     )
     core.add_raw_arg(parser)
-    parser.add_argument("--datasets", nargs="+", default=["anns_d", "report_rc"], choices=sorted(core.TEXT_SPECS))
+    parser.add_argument("--datasets", nargs="+", default=["anns_d", "report_rc"], choices=sorted(TEXT_SPECS))
     event = sub.add_parser(
         "repair-event-available-at",
         help="re-derive trade-date event available_at locally under the current rule (no API calls)",

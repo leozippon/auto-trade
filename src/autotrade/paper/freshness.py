@@ -36,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 
 from autotrade.common.time import CN_TZ
-from autotrade.data_sources.tushare.common import STK_MINS_BY_DATE_DATASET
+from autotrade.data_sources.tushare.specs import STK_MINS_BY_DATE_DATASET
 from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
     EVENING_NODE,

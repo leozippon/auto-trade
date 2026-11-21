@@ -21,9 +21,6 @@ from pathlib import Path
 from typing import Any
 
 from .common import (
-    BOARD_TRADING_SPECS,
-    DatasetSpec,
-    FetchStrategy,
     by_ts_code_universe,
     cli_values,
     date_range_days,
@@ -36,6 +33,11 @@ from .common import (
     year_windows,
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
+)
+from .specs import (
+    BOARD_TRADING_SPECS,
+    DatasetSpec,
+    FetchStrategy,
 )
 
 
