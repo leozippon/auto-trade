@@ -2544,6 +2544,40 @@ def probe_recent_dividend_codes(client: TuShareClient, end_date: str, days: int,
     return codes
 
 
+def land_fundamental(
+    client: TuShareClient,
+    spec: DatasetSpec,
+    parts: list[Partition],
+    request: Callable[[Partition], dict[str, str]],
+    *,
+    skip: Callable[[Partition], bool],
+    page_limit: int,
+    revision_ledger: Path | str | None,
+    unit: str,
+    every: int,
+) -> None:
+    """Pull each fundamental partition whole with the query ``request(part)``;
+    an announcement-month partition's sidecar also names its month."""
+    def pull(part: Partition) -> tuple[bool, int, int]:
+        params = request(part)
+        result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
+        df = frame(result)
+        month = {"ann_month": part.unit[2]} if spec.strategy == FetchStrategy.ANN_MONTH else {}
+        outcome = publish(
+            part.path,
+            df,
+            api_name=spec.api_name,
+            params={**params, **month, "pagination": {"page_limit": page_limit, "pages": pages}},
+            fields=result.fields,
+            key_columns=list(spec.key_columns),
+            ledger=revision_ledger,
+        )
+        written = outcome in WRITTEN_OUTCOMES
+        return written, len(df) if written else 0, pages
+
+    land(parts, pull, skip=skip, revision_ledger=revision_ledger, name=spec.api_name, unit=unit, every=every)
+
+
 def download_fundamental_period_dataset(
     client: TuShareClient,
     raw_dir: Path,
@@ -2555,35 +2589,11 @@ def download_fundamental_period_dataset(
     revision_ledger: Path | str | None = None,
 ) -> None:
     force_periods = force_periods or set()
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for index, period in enumerate(periods, start=1):
-        path = raw_dir / spec.api_name / f"period={period}.parquet"
-        if not force and period not in force_periods and committed_partition_intact(path):
-            skipped += 1
-            continue
-        params = {spec.period_param: period}
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            df = frame(result)
-            meta_params = dict(params)
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            outcome = publish(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=result.fields,
-                key_columns=list(spec.key_columns),
-                ledger=revision_ledger,
-            )
-            if outcome in WRITTEN_OUTCOMES:
-                written += 1
-                total_rows += len(df)
-        if index % 16 == 0:
-            print(f"{spec.api_name} periods {index}/{len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done periods={len(periods)} skipped={skipped} written={written} rows_written={total_rows}")
+    land_fundamental(
+        client, spec, partitions(raw_dir, spec, periods), lambda part: {spec.period_param: part.unit},
+        skip=lambda part: part.unit not in force_periods and should_skip_existing_partition(part.path, force=force),
+        page_limit=page_limit, revision_ledger=revision_ledger, unit="periods", every=16,
+    )
 
 def download_fundamental_ann_month_dataset(
     client: TuShareClient,
@@ -2596,36 +2606,16 @@ def download_fundamental_ann_month_dataset(
     revision_ledger: Path | str | None = None,
 ) -> None:
     force_months = force_months or set()
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for index, (start_date, end_date, ann_month) in enumerate(windows, start=1):
-        path = raw_dir / spec.api_name / f"ann_month={ann_month}.parquet"
-        params = {"start_date": start_date, "end_date": end_date}
-        if ann_month not in force_months and should_skip_existing_partition(path, force=force, requested_params=params):
-            skipped += 1
-            continue
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            df = frame(result)
-            meta_params = dict(params)
-            meta_params["ann_month"] = ann_month
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            outcome = publish(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=result.fields,
-                key_columns=list(spec.key_columns),
-                ledger=revision_ledger,
-            )
-            if outcome in WRITTEN_OUTCOMES:
-                written += 1
-                total_rows += len(df)
-        if index % 24 == 0:
-            print(f"{spec.api_name} months {index}/{len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done months={len(windows)} skipped={skipped} written={written} rows_written={total_rows}")
+
+    def window(part: Partition) -> dict[str, str]:
+        start_date, end_date, _ = part.unit
+        return {"start_date": start_date, "end_date": end_date}
+
+    land_fundamental(
+        client, spec, partitions(raw_dir, spec, windows), window,
+        skip=lambda part: part.unit[2] not in force_months and should_skip_existing_partition(part.path, force=force, requested_params=window(part)),
+        page_limit=page_limit, revision_ledger=revision_ledger, unit="months", every=24,
+    )
 
 def download_fundamental_ts_code_dataset(
     client: TuShareClient,
@@ -2638,37 +2628,11 @@ def download_fundamental_ts_code_dataset(
     revision_ledger: Path | str | None = None,
 ) -> None:
     force_codes = force_codes or set()
-    written = 0
-    skipped = 0
-    total_rows = 0
-    for index, ts_code in enumerate(stock_codes, start=1):
-        path = raw_dir / spec.api_name / f"ts_code={ts_code}.parquet"
-        if not force and ts_code not in force_codes and committed_partition_intact(path):
-            skipped += 1
-            if index % 500 == 0:
-                print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written}")
-            continue
-        params = {"ts_code": ts_code}
-        with answer_defects(path, ledger=revision_ledger):
-            result, pages = query_paged(client, spec.api_name, params, spec.fields, page_limit)
-            df = frame(result)
-            meta_params = dict(params)
-            meta_params["pagination"] = {"page_limit": page_limit, "pages": pages}
-            outcome = publish(
-                path,
-                df,
-                api_name=spec.api_name,
-                params=meta_params,
-                fields=result.fields,
-                key_columns=list(spec.key_columns),
-                ledger=revision_ledger,
-            )
-            if outcome in WRITTEN_OUTCOMES:
-                written += 1
-                total_rows += len(df)
-        if index % 500 == 0:
-            print(f"{spec.api_name} codes {index}/{len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
-    print(f"{spec.api_name} done codes={len(stock_codes)} skipped={skipped} written={written} rows_written={total_rows}")
+    land_fundamental(
+        client, spec, partitions(raw_dir, spec, stock_codes), lambda part: {"ts_code": part.unit},
+        skip=lambda part: part.unit not in force_codes and should_skip_existing_partition(part.path, force=force),
+        page_limit=page_limit, revision_ledger=revision_ledger, unit="codes", every=500,
+    )
 
 def download_intraday(args: argparse.Namespace) -> int:
     repo_root = Path.cwd().resolve()

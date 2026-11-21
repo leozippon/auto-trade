@@ -5,7 +5,8 @@ A partition is ``<raw>/<dataset>/[<key>=<value>/...]<time>=<unit>.parquet``.
 Its directories are the request parameters that split the dataset besides
 time (a board tag, a market, a code, a news source, a venue), outermost
 first and in the order the downloader walks them; its file is its time unit
-(a trade date, a day, a month, a year). Whole-history files have fixed
+(a trade date, a day, a month, a year, a report period) or, for a table
+pulled per code, its code. Whole-history files have fixed
 names (``full.parquet``, ``<loop>=<value>.parquet``, one range file).
 
 Which time units a run covers stays with the caller: a pull clamps them to
@@ -64,6 +65,9 @@ _TIME_KEYS = {
     FetchStrategy.ECO_CAL_MONTH: "month",
     FetchStrategy.DATE_YEAR: "year",
     FetchStrategy.DATE_YEAR_BY_TS_CODE: "year",
+    FetchStrategy.PERIOD: "period",
+    FetchStrategy.ANN_MONTH: "ann_month",
+    FetchStrategy.TS_CODE: "ts_code",
 }
 
 
