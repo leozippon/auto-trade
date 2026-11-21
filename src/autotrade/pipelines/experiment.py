@@ -13,7 +13,8 @@ import re
 import sys
 import time
 import uuid
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from pathlib import Path
@@ -143,6 +144,23 @@ class SessionContext:
             raise ValueError("sandbox_gpu_count override must be an integer in 0..4")
         if self.progress_hook is not None and not callable(self.progress_hook):
             raise TypeError("progress_hook must be callable")
+
+
+@dataclass
+class _Run:
+    """One run of a planned session (:meth:`ExperimentPipeline._recorded_run`)."""
+
+    run_id: str
+    link: dict[str, object]
+    ledger: ExperimentLedger
+    recorded: bool = False
+
+    def append(self, record: dict[str, object]) -> None:
+        """Append one of this run's ledger records: the first makes the run's
+        evidence durable."""
+
+        self.ledger.append(record)
+        self.recorded = True
 
 
 class EnvironmentBlockedAttempt(RuntimeError):
@@ -310,18 +328,13 @@ class ExperimentPipeline:
         resume = resume_state(self.config.experiment_dir, records)
         steps_before = load_recorded_steps(self.config.experiment_dir)
         run_started = time.monotonic()
-        run_id = f"run_{uuid.uuid4().hex}"
         context = session_context or SessionContext()
         progress = context.progress_hook
         budgets = _session_budgets(self.config, context.resource_override)
         current_skills = self._current_skills()
         registered_id: str | None = None
-        wrote_ledger_record = False
-        link = link_head(self.config.experiment_id, SessionKind.RESEARCH, run_id)
-        attempt = {**link, "phase": SessionKind.RESEARCH}
-        # Evidence for a run that never gets to run its own except branch.
-        self.run_markers.begin(attempt)
-        try:
+        with self._recorded_run(SessionKind.RESEARCH) as run:
+            run_id, link = run.run_id, run.link
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=SessionKind.RESEARCH)
             decision, years = self.research_inputs()
             validation = self.validation_span(years)
@@ -375,7 +388,7 @@ class ExperimentPipeline:
                 experiment_end = {"status": ENVIRONMENT_BLOCKED, "reason": session.reason}
                 # The worker log is the operator's other place to see it.
                 print(
-                    f"{utc_now_iso()} {attempt['experiment_id']} {ENVIRONMENT_BLOCKED}: "
+                    f"{utc_now_iso()} {self.config.experiment_id} {ENVIRONMENT_BLOCKED}: "
                     f"{session.reason}",
                     file=sys.stderr,
                     flush=True,
@@ -462,8 +475,7 @@ class ExperimentPipeline:
                 "budget_used": session.budget_used.to_record(),
                 "run_wall_seconds": round(max(0.0, time.monotonic() - run_started), 1),
             }
-            self.ledger.append(record)
-            wrote_ledger_record = True
+            run.append(record)
             expire_experiment_session_inbox(
                 self.config.experiment_dir, SessionKind.RESEARCH, expired_by=run_id
             )
@@ -476,27 +488,37 @@ class ExperimentPipeline:
                 )
             )
             return record
+
+    @contextmanager
+    def _recorded_run(self, phase: SessionKind) -> Iterator[_Run]:
+        """A new run of ``phase`` that leaves evidence however it ends.
+
+        Its run marker is written before anything runs. A run that exits
+        before one of its ledger records is durable appends an
+        ``attempt_failed`` row, its error led by the type name that
+        ``_environment_blocks`` reads. BaseException, not Exception: a
+        terminated worker unwinds through SystemExit (the entrypoint's SIGTERM
+        handler) or KeyboardInterrupt, and those leave the same evidence. The
+        marker is the run's only evidence until one of its records is durable,
+        so it is dropped only once one is; otherwise it stays for the next
+        worker start to record.
+        """
+
+        run_id = f"run_{uuid.uuid4().hex}"
+        link = link_head(self.config.experiment_id, phase, run_id)
+        attempt = {**link, "phase": phase}
+        run = _Run(run_id, link, self.ledger)
+        self.run_markers.begin(attempt)
+        try:
+            yield run
         except BaseException as exc:
-            # BaseException, not Exception: a terminated worker unwinds this
-            # session through SystemExit (the entrypoint's SIGTERM handler) or
-            # KeyboardInterrupt, and those must leave the same evidence as any
-            # other failure.
-            if not wrote_ledger_record:
-                self.ledger.append(
-                    {
-                        **attempt,
-                        "record_type": "attempt_failed",
-                        # Led by the type name, which ``_environment_blocks`` reads.
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
+            if not run.recorded:
+                run.append(
+                    {**attempt, "record_type": "attempt_failed", "error": f"{type(exc).__name__}: {exc}"}
                 )
-                wrote_ledger_record = True
             raise
         finally:
-            # The marker is this run's only evidence until one of its ledger
-            # records is durable, so it is dropped only once one is; otherwise
-            # it stays for the next worker start to record.
-            if wrote_ledger_record:
+            if run.recorded:
                 self.run_markers.finish(run_id)
 
     def _registered_candidate(
@@ -734,21 +756,15 @@ class ExperimentPipeline:
         forward = self.config.geometry.forward
         heldout = self.config.geometry.heldout(self.trading_days)
         progress = (session_context or SessionContext()).progress_hook
-        run_id = f"run_{uuid.uuid4().hex}"
-        link = link_head(self.config.experiment_id, SessionKind.FORWARD, run_id)
-        attempt = {**link, "phase": SessionKind.FORWARD}
-        head = {"record_type": "forward", **link}
-        self.run_markers.begin(attempt)
-        wrote_ledger_record = False
+        with self._recorded_run(SessionKind.FORWARD) as run:
+            run_id = run.run_id
+            head = {"record_type": "forward", **run.link}
 
-        def integrity_failure(row: Mapping[str, object]) -> None:
-            nonlocal wrote_ledger_record
-            self.ledger.append({**head, **row})
-            # The integrity row is this run's record: the fail-fast that
-            # follows must not also log a failed attempt.
-            wrote_ledger_record = True
+            def integrity_failure(row: Mapping[str, object]) -> None:
+                # The integrity row is this run's record: the fail-fast that
+                # follows must not also log a failed attempt.
+                run.append({**head, **row})
 
-        try:
             _publish_progress(progress, "pit_snapshot", run_id=run_id, phase=SessionKind.FORWARD)
             record = {
                 **head,
@@ -763,23 +779,8 @@ class ExperimentPipeline:
                     integrity_failure=integrity_failure,
                 ),
             }
-            self.ledger.append(record)
-            wrote_ledger_record = True
+            run.append(record)
             return record
-        except BaseException as exc:
-            if not wrote_ledger_record:
-                self.ledger.append(
-                    {
-                        **attempt,
-                        "record_type": "attempt_failed",
-                        "error": f"{type(exc).__name__}: {exc}",
-                    }
-                )
-                wrote_ledger_record = True
-            raise
-        finally:
-            if wrote_ledger_record:
-                self.run_markers.finish(run_id)
 
     def replay_registered(
         self,
