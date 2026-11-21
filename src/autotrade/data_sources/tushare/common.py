@@ -223,7 +223,8 @@ SHARE_FLOAT_UNLOCK_TITLE_PATTERN = re.compile(
 # (`history_floor`); the history it lands then carries itself: a range file is
 # never rewritten from a later start than the one it holds
 # (`retained_range_start`), and the index_weight audit expects every year from
-# the earliest one on disk.
+# the earliest one on disk. A range file already on disk is never moved to an
+# earlier start either (`canonical_range_path` refuses it).
 RESEARCH_HISTORY_FLOOR = "20200101"
 
 MACRO_DATASETS = [
@@ -1918,11 +1919,10 @@ def retained_range_start(dataset_dir: Path, start_date: str) -> str:
     """The first date a range dataset's canonical file must keep covering.
 
     A quarter_once/month_once pull rewrites ONE canonical
-    ``range=<start>_latest`` file and prunes every other range file, so a
-    rewrite from a later start than the file on disk holds would delete the
-    history below it -- a backfill under the research-history floor included.
-    The retained start is therefore never later than the start of the
-    canonical file already there.
+    ``range=<start>_latest`` file, so a rewrite from a later start than the
+    file on disk holds would drop the history below it -- a backfill under the
+    research-history floor included. The retained start is therefore never
+    later than the start of the canonical file already there.
     """
 
     starts = [start_date]
@@ -1934,6 +1934,30 @@ def retained_range_start(dataset_dir: Path, start_date: str) -> str:
         elif re.fullmatch(r"\d{6}", token):
             starts.append(f"{token}01")
     return min(starts)
+
+def canonical_range_path(dataset_dir: Path, start: str) -> Path:
+    """The one ``range=<start>_latest`` file of a quarter_once/month_once
+    dataset, ``start`` being its first quarter (``2020Q1``) or month
+    (``202001``).
+
+    The file's name carries its start, so a pull whose start differs from the
+    file already on disk would land as a new partition: outside the versioned
+    path, with every row first seen today (later views would hide the whole
+    series) and the stored file's history and first-seen table left behind.
+    Such a pull is refused; a later start never gets here, because
+    :func:`retained_range_start` keeps the stored one.
+    """
+
+    path = dataset_dir / f"range={start}_latest.parquet"
+    stored = sorted(item.name for item in dataset_dir.glob("range=*_latest.parquet") if item != path)
+    if stored:
+        held = stored[0][len("range="):-len("_latest.parquet")]
+        raise RuntimeError(
+            f"{dataset_dir.name}: refusing to move the start of its range file from {held} "
+            f"(stored: {', '.join(stored)}) to {start}; the file would be replaced under a new "
+            "name outside the versioned write path"
+        )
+    return path
 
 def quarter_end_date(value: str) -> str:
     match = re.fullmatch(r"(\d{4})Q([1-4])", str(value).strip())

@@ -1595,32 +1595,52 @@ class TuShareDownloadUpdateGuardsTest(unittest.TestCase):
         )
         self.assertEqual(expected, {backfilled})
 
-    def test_macro_range_once_prunes_stale_end_suffixed_files(self):
-        stale = self.raw_dir / "cn_cpi" / "range=202001_202605.parquet"
-        pd.DataFrame([{"month": "202001"}]).pipe(
-            lambda df: tushare_io.write_parquet(stale, df, api_name="cn_cpi", params={}, fields=list(df.columns))
-        )
-        args = argparse.Namespace(
-            raw_dir=str(self.raw_dir),
-            tier="macro",
-            start_date="20260504",
-            macro_start_date="20200101",
-            end_date="20260603",
-            datasets=["cn_cpi"],
-            force=True,
-            page_limit=None,
-            revision_ledger=str(self.root / "revision_events.jsonl"),
-            min_interval_seconds=0,
-            timeout_seconds=1,
-        )
+    def test_lowering_the_start_of_a_stored_range_file_is_refused(self):
+        # The range file's name carries its start: a backfill pull from an
+        # earlier start would land a new partition outside the versioned path
+        # (every row first seen today, the stored file and its first-seen
+        # table orphaned), so it must stop before asking the vendor and leave
+        # the stored series untouched.
+        self.raw_dir.mkdir(parents=True)
+        (self.raw_dir / ".raw_generation.json").write_text(json.dumps({
+            "schema_version": 3, "state": "committed", "generation_id": "g", "versioned_since": "20260101",
+        }), encoding="utf-8")
+
+        def run(**overrides):
+            args = argparse.Namespace(
+                raw_dir=str(self.raw_dir), tier="macro", start_date="20260504", macro_start_date="20200101",
+                end_date="20260603", datasets=["cn_cpi"], force=True, page_limit=None,
+                revision_ledger=str(self.root / "revision_events.jsonl"), min_interval_seconds=0, timeout_seconds=1,
+            )
+            for key, value in overrides.items():
+                setattr(args, key, value)
+            client = CountingMacroClient()
+            with redirect_stdout(io.StringIO()), patch.object(download, "load_token", return_value="token"), \
+                    patch.object(download, "TuShareClient", return_value=client):
+                download.download_macro(args)
+            return client
+
+        run()
+        dataset = self.raw_dir / "cn_cpi"
+        stored = {path.name: path.read_bytes() for path in dataset.iterdir()}
+        self.assertEqual(sorted(stored), [
+            "range=202001_latest.parquet", "range=202001_latest.parquet.first_seen", "range=202001_latest.parquet.meta.json",
+        ])
+
         client = CountingMacroClient()
-
-        with patch.object(download, "load_token", return_value="token"), patch.object(download, "TuShareClient", return_value=client):
-            self.assertEqual(download.download_macro(args), 0)
-
-        remaining = sorted(path.name for path in (self.raw_dir / "cn_cpi").glob("range=*.parquet"))
-        self.assertEqual(remaining, ["range=202001_latest.parquet"])
-        self.assertFalse(stale.with_suffix(stale.suffix + ".meta.json").exists())
+        with redirect_stdout(io.StringIO()), patch.object(download, "load_token", return_value="token"), \
+                patch.object(download, "TuShareClient", return_value=client), \
+                self.assertRaisesRegex(RuntimeError, r"cn_cpi: refusing to move the start of its range file from 202001 .* to 201407"):
+            download.download_macro(argparse.Namespace(
+                raw_dir=str(self.raw_dir), tier="macro", start_date="20140701", macro_start_date=None,
+                history_floor="20140701", end_date="20260603", datasets=["cn_cpi"], force=True, page_limit=None,
+                revision_ledger=str(self.root / "revision_events.jsonl"), min_interval_seconds=0, timeout_seconds=1,
+            ))
+        self.assertEqual(client.calls, [])
+        self.assertEqual({path.name: path.read_bytes() for path in dataset.iterdir()}, stored)
+        self.assertFalse((self.root / "raw_versions").exists())
+        # A rolling pull from a later start still rewrites the stored file.
+        self.assertEqual(run(start_date="20260601").calls[0][1]["start_m"], "202001")
 
     def test_fundamental_ann_month_windows_pull_full_natural_months(self):
         windows = download.fundamental_ann_month_windows("20200615", "20200705", {"202004"})

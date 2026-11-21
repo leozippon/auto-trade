@@ -2116,7 +2116,8 @@ def audit_macro_completeness(raw_dir: Path, args: argparse.Namespace, add) -> No
         expected = expected_macro_paths(raw_dir, spec, args.start_date, covered_end, args)
         if spec.strategy in {FetchStrategy.QUARTER_ONCE, FetchStrategy.MONTH_ONCE}:
             # Extra range files duplicate the whole series in snapshot domain
-            # unions; the downloader prunes them, so any survivor is an error.
+            # unions; the downloader writes only the canonical one, so any
+            # other is an error.
             stale = sorted(
                 str(path)
                 for path in (raw_dir / spec.api_name).glob("range=*.parquet")

@@ -83,6 +83,7 @@ from .common import (
     date_range_days,
     format_yyyymmdd,
     frame,
+    canonical_range_path,
     history_floor,
     intraday_expected_codes_for_day,
     latest_sse_calendar_date,
@@ -1157,7 +1158,7 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Data
     start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_q = max(yyyymmdd_to_quarter(start_date), spec.start_quarter)
     end_q = yyyymmdd_to_quarter(end_date)
-    path = raw_dir / spec.api_name / f"range={start_q}_latest.parquet"
+    path = canonical_range_path(raw_dir / spec.api_name, start_q)
     coverage_params = {"start_date": start_date, "end_date": end_date}
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
@@ -1165,14 +1166,13 @@ def download_macro_quarter_once(client: TuShareClient, raw_dir: Path, spec: Data
     with answer_defects(path, ledger=revision_ledger):
         result = client.query(spec.api_name, params, spec.fields)
         _, rows = write_frame(path, augment_macro_frame(frame(result), spec), spec, {**params, **coverage_params}, revision_ledger)
-        prune_stale_range_files(path)
         print(f"{spec.api_name} quarters {start_q}-{end_q} rows={rows}")
 
 def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: DatasetSpec, start_date: str, end_date: str, force: bool, revision_ledger: Path | str | None = None) -> None:
     start_date = retained_range_start(raw_dir / spec.api_name, start_date)
     start_m = max(yyyymmdd_to_month(start_date), spec.start_month)
     end_m = yyyymmdd_to_month(end_date)
-    path = raw_dir / spec.api_name / f"range={start_m}_latest.parquet"
+    path = canonical_range_path(raw_dir / spec.api_name, start_m)
     coverage_params = {"start_date": start_date, "end_date": end_date}
     if should_skip_existing_partition(path, force=force, requested_params=coverage_params):
         return
@@ -1180,22 +1180,7 @@ def download_macro_month_once(client: TuShareClient, raw_dir: Path, spec: Datase
     with answer_defects(path, ledger=revision_ledger):
         result = client.query(spec.api_name, params, spec.fields)
         _, rows = write_frame(path, augment_macro_frame(frame(result), spec), spec, {**params, **coverage_params}, revision_ledger)
-        prune_stale_range_files(path)
         print(f"{spec.api_name} months {start_m}-{end_m} rows={rows}")
-
-def prune_stale_range_files(canonical: Path) -> None:
-    """A range dataset holds exactly ONE file (the canonical `range=*_latest`).
-    Older end-suffixed range files from before canonical naming duplicated the
-    whole series 2-3x in snapshot domain unions — remove them and their meta."""
-    if not canonical.exists():
-        return
-    for stale in sorted(canonical.parent.glob("range=*.parquet")):
-        if stale == canonical:
-            continue
-        meta = stale.with_suffix(stale.suffix + ".meta.json")
-        stale.unlink()
-        meta.unlink(missing_ok=True)
-        print(f"pruned stale range partition {stale}")
 
 def download_macro_static_full(
     client: TuShareClient,
