@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from datetime import date
 from typing import TypeVar
 
+from autotrade.common.records import finite_number
 from autotrade.common.time import utc_now
 
 from .market import date_text
@@ -350,6 +351,31 @@ def gross_exposure(row: Mapping[str, object]) -> float | None:
 
 def _gross_exposures(curve: Sequence[Mapping[str, object]]) -> list[float]:
     return [value for row in curve if (value := gross_exposure(row)) is not None]
+
+
+def mean_cash_share(
+    curve: Sequence[Mapping[str, object]], *, start: str, end: str
+) -> float | None:
+    """Mean over the curve days of ``start..end`` of close cash over same-day
+    equity: how much of the account the book held in cash, the complement of
+    :func:`gross_exposure`.
+
+    ``None`` when the span holds no day, or a day carries no cash split or no
+    positive equity: unlike the exposure diagnostics, which leave such a day
+    out, a mean over part of the span would read as the span's.
+    """
+
+    start = _window_bound(start, "start")
+    end = _window_bound(end, "end")
+    shares: list[float] = []
+    for row in curve:
+        if not start <= str(row.get("trade_date")) <= end:
+            continue
+        cash, equity = finite_number(row.get("cash")), finite_number(row.get("equity"))
+        if cash is None or equity is None or equity <= 0:
+            return None
+        shares.append(cash / equity)
+    return sum(shares) / len(shares) if shares else None
 
 
 def _pnl_concentration(realized: Sequence[Mapping[str, object]]) -> dict[str, object]:

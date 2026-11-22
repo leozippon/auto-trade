@@ -37,6 +37,7 @@ from autotrade.common.records import (
     finite_number,
     read_json_object,
 )
+from autotrade.environment.replay.stats import mean_cash_share
 from autotrade.environment.replay.style import (
     READABLE_STYLE_SCHEMA_VERSIONS,
     STYLE_ARTIFACT_NAME,
@@ -444,13 +445,51 @@ def _result_name(reference: object) -> str | None:
     return path.parent.name if path.name == "result.json" else path.name
 
 
+def _cash_shares(
+    directory: Path, record: Mapping[str, object]
+) -> dict[str, float | None]:
+    """Each period's mean cash share (``replay.stats.mean_cash_share``) over
+    the forward replay's stored equity curve, shown beside the account against
+    its index, which an account can beat by holding cash. Read here, never
+    stored; ``None`` for a period the stored result cannot state it for: no
+    slice, no readable result, or a day without its cash split."""
+
+    slices = as_mapping(record.get("slices"))
+    shares: dict[str, float | None] = {"forward": None, "heldout": None}
+    reference = str(record.get("result_ref") or "")
+    if not reference or not any(
+        isinstance(slices.get(name), Mapping) for name in shares
+    ):
+        return shares
+    try:
+        result = read_json_object(recorded_path(directory, reference))
+    except (OSError, ValueError):
+        return shares
+    curve = result.get("equity_curve")
+    if not isinstance(curve, list):
+        return shares
+    for name in shares:
+        block = slices.get(name)
+        if isinstance(block, Mapping):
+            try:
+                shares[name] = mean_cash_share(
+                    curve,
+                    start=str(block.get("start") or ""),
+                    end=str(block.get("end") or ""),
+                )
+            except ValueError:
+                pass
+    return shares
+
+
 def _forward_view(
-    identity: PublicIdentity, record: Mapping[str, object] | None
+    directory: Path, identity: PublicIdentity, record: Mapping[str, object] | None
 ) -> dict[str, object] | None:
     """The forward record: replay span, slice statistics and readout, as the
-    record stores them, and ``pass_reading``, what the console's label reads
-    (``ledger.pass_reading``). ``None`` until the record exists, which is also
-    when the readout does."""
+    record stores them, ``pass_reading``, what the console's label reads
+    (``ledger.pass_reading``), and ``cash_share``, each period's mean cash
+    share beside it (:func:`_cash_shares`). ``None`` until the record exists,
+    which is also when the readout does."""
 
     if record is None:
         return None
@@ -468,6 +507,7 @@ def _forward_view(
         # The experiment's readout (``validation_record.readout``).
         "readout": dict(as_mapping(record.get("readout"))),
         "pass_reading": pass_reading(record),
+        "cash_share": _cash_shares(directory, record),
     }
 
 
@@ -504,7 +544,7 @@ def summarize_experiment(directory: Path) -> dict[str, object]:
         )
         if raw_status is not None:
             summary["status"] = status
-        forward = _forward_view(identity, forward_record(records))
+        forward = _forward_view(directory, identity, forward_record(records))
         ending = experiment_ending(identity, records, state, forward)
         summary.update(
             {

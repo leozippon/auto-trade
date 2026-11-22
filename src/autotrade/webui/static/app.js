@@ -130,6 +130,9 @@ const LOWER_BOUND_TITLE = "主动序列（登记了种子复现时为定版产�
 // then the active figures the gate grades.
 const HOLDER_TITLE = "定版产物扣费后的账户收益与基准指数（价格指数）同期收益，切片内复利";
 const PLAIN_SELECTION_TITLE = "账户收益减随机对照组合收益，各自复利：选的名字是否赢了同一骨架上的随机名字";
+// A period's mean cash share beside the account against its index
+// (registry._cash_shares): an account can beat a falling index by holding cash.
+const CASH_SHARE_TITLE = "切片内各交易日收盘时现金占总资产的比例取平均，读自前推回放存下的逐日资金：账户可能只因拿着现金而跑赢下跌的指数；回放结果缺这段的现金记录时写不可用";
 const ACTIVE_BETA_TITLE = "主动序列（账户 − 随机对照）对基准指数的回归载荷，只作诊断；为负表示相对随机对照的市场暴露较低，涨市中可能因此落后";
 // A model-training candidate read on its training seeds together (verdict.py
 // `seed_mean` and `forward_lower_bound`): a seed replicate is the same strategy
@@ -505,6 +508,17 @@ document.addEventListener("mouseover", (event) => {
 function fmtPct(value, digits = 2) {
   if (value === null || value === undefined || Number.isNaN(value)) return "—";
   return `${(value * 100).toFixed(digits)}%`;
+}
+
+/* A period's mean cash share as the server read it off the forward replay's
+   equity curve (registry._cash_shares), or 不可用 when the stored result
+   cannot state it: a missing share never reads as a number. */
+function cashShare(forward, name) {
+  return ((forward || {}).cash_share || {})[name];
+}
+
+function fmtCashShare(value) {
+  return Number.isFinite(value) ? fmtPct(value) : "不可用";
 }
 
 /* Any two-decimal figure: a Sharpe, an IR, a probability, a beta. */
@@ -2040,11 +2054,12 @@ function endingLabel(item) {
 }
 
 /* What a registered strategy's label read, one line each: the rule, then per
-   period the account's and the index's return and the two drawdowns against
-   their limits, with the first condition that period failed. A figure the
-   record does not carry is a dash. */
+   period the account's and the index's return, the period's mean cash share
+   and the two drawdowns against their limits, with the first condition that
+   period failed. A figure the record does not carry is a dash. */
 function passLabelLines(item) {
-  const periods = ((item.forward || {}).pass_reading || {}).periods || {};
+  const forward = item.forward || {};
+  const periods = (forward.pass_reading || {}).periods || {};
   const signed = (value) => `${value > 0 ? "+" : ""}${fmtPct(value)}`;
   return [
     `${PASS_RULE}写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}`,
@@ -2053,6 +2068,7 @@ function passLabelLines(item) {
       const failed = Object.keys(conditions).find((key) => conditions[key] !== true);
       return (
         `${PASS_PERIODS[name] || name}：账户 ${signed(p.account_return)}，基准指数 ${signed(p.index_return)}，` +
+        `平均现金占比 ${fmtCashShare(cashShare(forward, name))}，` +
         `回撤 ${fmtPct(p.max_drawdown)}（上限 ${fmtPct(p.max_drawdown_limit)}），主动回撤 ${fmtPct(p.active_max_drawdown)}（上限 ${fmtPct(p.active_max_drawdown_limit)}）` +
         (failed ? `；未过：${PASS_FAILURES[failed] || failed}` : "")
       );
@@ -2109,14 +2125,18 @@ function experimentBadges(...badges) {
   return el("span", { class: "exp-badges" }, ...badges.filter(Boolean));
 }
 
-/* A slice's account and its benchmark as two tiles, each one figure; none
-   when the slice carries no reading. */
-function accountTiles(name, slice) {
+/* A slice's account and its benchmark as two tiles, each one figure, and
+   beside them the period's mean cash share (不可用 when the stored result
+   cannot state it); none when the slice carries no reading. */
+function accountTiles(name, slice, cash) {
   const raw = (slice || {}).raw_readings || {};
-  return presentTiles([
+  const tiles = presentTiles([
     { label: `${name}账户`, value: raw.strategy_return, fmt: fmtPct, signed: true, title: HOLDER_TITLE },
     { label: `${name}基准`, value: raw.benchmark_return, fmt: fmtPct, signed: true, title: HOLDER_TITLE },
   ]);
+  return tiles.length
+    ? [...tiles, { label: `${name}平均现金占比`, value: fmtCashShare(cash), cls: "", title: CASH_SHARE_TITLE }]
+    : tiles;
 }
 
 function fmtPValue(value) {
@@ -2179,10 +2199,11 @@ function evidenceTiles(item) {
    account and its benchmark sit side by side, never joined into one value.
    Null for a replay the strategy's own error stopped before any slice. */
 function forwardTiles(item) {
-  const slices = (item.forward || {}).slices || {};
+  const forward = item.forward || {};
+  const slices = forward.slices || {};
   const f = slices.forward || {};
   const tiles = [
-    ...accountTiles("前推", f),
+    ...accountTiles("前推", f, cashShare(forward, "forward")),
     ...presentTiles([
       {
         label: "前推对随机对照",
@@ -2199,7 +2220,7 @@ function forwardTiles(item) {
         title: IR_TITLE,
       },
     ]),
-    ...accountTiles("Held-out ", slices.heldout),
+    ...accountTiles("Held-out ", slices.heldout, cashShare(forward, "heldout")),
   ];
   return tiles.length ? statTilesRow(tiles) : null;
 }
@@ -3070,16 +3091,18 @@ function sliceStats(slice, fields) {
 }
 
 /* A slice as one sentence in the holder's order: the account against the
-   benchmark, then against its random baseline, then the active series the
-   gate graded. Null without readings. */
-function holderLine(label, slice) {
+   benchmark with the period's mean cash share beside it, then against its
+   random baseline, then the active series the gate graded. Null without
+   readings. */
+function holderLine(label, slice, cash) {
   const raw = (slice || {}).raw_readings;
   if (!raw || raw.strategy_return === null || raw.strategy_return === undefined) return null;
   const active = `主动超额 ${fmtPct(slice.plain_excess)}/年，主动 IR ${fmtSharpe(slice.information_ratio)}（主动市场 β ${fmtSharpe(slice.market_beta)}）`;
   return el(
     "div",
     { class: "meta-line" },
-    `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}）；` +
+    `${label}：账户 ${fmtPct(raw.strategy_return)}，基准 ${fmtPct(raw.benchmark_return)}（原始超额 ${fmtPct(raw.raw_excess)}），` +
+      `平均现金占比 ${fmtCashShare(cash)}；` +
       `随机对照组合 ${fmtPct(raw.baseline_return)}（对随机对照 ${fmtPct(raw.plain_selection)}）；${active}`,
   );
 }
@@ -3249,7 +3272,7 @@ function forwardStagePanel(detail) {
     stageHead("forward", detail),
     replaySpanBar(replay, "forward", { pending: !forward, progress }),
     replayErrorNode(forward),
-    holderLine("前推", f),
+    holderLine("前推", f, cashShare(forward, "forward")),
     seedReadingsTable((forward || {}).slices, ["forward"]),
     el("div", { class: "meta-line section-gap" }, "前推的统计读数只报告；通过与否只看两段的账户盈亏、对指数的超出与回撤"),
     sliceStats(f, FORWARD_STAT_FIELDS),
@@ -3275,7 +3298,7 @@ function heldoutStagePanel(detail) {
     replaySpanBar(replay, "heldout", { pending: !forward, progress }),
     el("div", { class: "meta-line" }, "与前推是同一次连续回测的尾段，读数一并记入读出"),
     replayErrorNode(forward),
-    holderLine("Held-out", h),
+    holderLine("Held-out", h, cashShare(forward, "heldout")),
     seedReadingsTable((forward || {}).slices, ["heldout"]),
     el("div", { class: "meta-line section-gap" }, "Held-out 的统计读数只报告；通过与否只看两段的账户盈亏、对指数的超出与回撤"),
     sliceStats(h, HELDOUT_STAT_FIELDS),
@@ -3325,8 +3348,8 @@ function readoutStagePanel(detail) {
     { class: "panel section-gap" },
     panelHead(STEP_LABELS.readout, badge),
     readout ? readoutBlock(readout, detail.validation_steps) : null,
-    forward ? holderLine("前推", slices.forward) : null,
-    forward ? holderLine("Held-out", slices.heldout) : null,
+    forward ? holderLine("前推", slices.forward, cashShare(forward, "forward")) : null,
+    forward ? holderLine("Held-out", slices.heldout, cashShare(forward, "heldout")) : null,
     seedReadingsTable(slices, ["forward", "heldout"]),
     forward
       ? null

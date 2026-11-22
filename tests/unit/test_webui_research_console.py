@@ -494,7 +494,15 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
     del rows["unflagged"]["forward"]["pass_reading"]["passed"]
     # A replay the strategy's own error stopped: its record states its rules and no slice.
     raised = registry.pass_reading({"acceptance_rules": _forward_record()["acceptance_rules"], "slices": None})
-    rows["raised"] = {**rows["passed"], "forward": {**rows["passed"]["forward"], "pass_reading": raised}}
+    # Nor a cash share: no period of the stored result can state one.
+    rows["raised"] = {
+        **rows["passed"],
+        "forward": {
+            **rows["passed"]["forward"],
+            "pass_reading": raised,
+            "cash_share": {"forward": None, "heldout": None},
+        },
+    }
     rows["unread"] = {**rows["passed"], "forward": None}
     script = (
         Path(__file__).resolve().parents[2] / "src/autotrade/webui/static/app.js"
@@ -506,7 +514,16 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
             *(js_const(script, name) for name in ("ENDING_LABELS", "PASS_RULE", "PASS_PERIODS", "PASS_FAILURES")),
             *(
                 js_function(script, name)
-                for name in ("fmtPct", "endingKey", "endingLabel", "passLabelLines", "endingBadge", "experimentBadge")
+                for name in (
+                    "fmtPct",
+                    "cashShare",
+                    "fmtCashShare",
+                    "endingKey",
+                    "endingLabel",
+                    "passLabelLines",
+                    "endingBadge",
+                    "experimentBadge",
+                )
             ),
             f"const rows = {json.dumps(rows)};",
             "console.log(JSON.stringify(Object.fromEntries(Object.entries(rows).map(([id, row]) => {",
@@ -520,16 +537,18 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
     labels = json.loads(result.stdout)
     reasons = {name: (rows[name]["ending"] or {}).get("reason") for name in rows}
     rule = "前推年与 Held-out 段各自扣费后盈利、跑赢基准指数，且回撤与主动回撤都不超过模拟账户的终止上限写作通过，否则未通过"
+    # Each period's mean cash share is the fixture replay's: a tenth of its equity
+    # in cash every day (registry._cash_shares reads it off the stored curve).
     passing = [
-        "前推年：账户 +6.48%，基准指数 +6.22%，回撤 17.85%（上限 55.00%），主动回撤 12.11%（上限 30.00%）",
-        "Held-out 段：账户 +4.03%，基准指数 -12.92%，回撤 5.04%（上限 55.00%），主动回撤 3.70%（上限 30.00%）",
+        "前推年：账户 +6.48%，基准指数 +6.22%，平均现金占比 10.00%，回撤 17.85%（上限 55.00%），主动回撤 12.11%（上限 30.00%）",
+        "Held-out 段：账户 +4.03%，基准指数 -12.92%，平均现金占比 10.00%，回撤 5.04%（上限 55.00%），主动回撤 3.70%（上限 30.00%）",
     ]
     failing = [
-        "前推年：账户 -17.58%，基准指数 +6.22%，回撤 33.72%（上限 55.00%），主动回撤 23.54%（上限 30.00%）；未过：未盈利",
-        "Held-out 段：账户 +3.66%，基准指数 -12.92%，回撤 15.02%（上限 55.00%），主动回撤 30.53%（上限 30.00%）；未过：主动回撤超过终止上限",
+        "前推年：账户 -17.58%，基准指数 +6.22%，平均现金占比 10.00%，回撤 33.72%（上限 55.00%），主动回撤 23.54%（上限 30.00%）；未过：未盈利",
+        "Held-out 段：账户 +3.66%，基准指数 -12.92%，平均现金占比 10.00%，回撤 15.02%（上限 55.00%），主动回撤 30.53%（上限 30.00%）；未过：主动回撤超过终止上限",
     ]
     unread = [
-        f"{name}：账户 —，基准指数 —，回撤 —（上限 55.00%），主动回撤 —（上限 30.00%）；未过：未盈利"
+        f"{name}：账户 —，基准指数 —，平均现金占比 不可用，回撤 —（上限 55.00%），主动回撤 —（上限 30.00%）；未过：未盈利"
         for name in ("前推年", "Held-out 段")
     ]
     assert labels == {
@@ -552,6 +571,39 @@ def test_a_registered_experiment_is_labelled_passed_or_failed_wherever_its_endin
     assert "status: endingLabel(item)" in js_function(script, "pipelineTailSteps")
     for name in ("experimentCard", "renderDetailPage", "heroPanel"):
         assert "experimentBadge(" in js_function(script, name), name
+
+
+def test_each_period_carries_its_mean_cash_share_or_none_when_the_stored_curve_cannot_state_it(
+    tmp_path: Path,
+) -> None:
+    """An account can beat a falling index by holding cash, so beside each period's
+    account against its index the console reads the period's mean cash share off
+    the forward replay's stored equity curve. A period with a day that carries no
+    cash split, or a result that is not on disk, has none: a mean over part of the
+    period, or the stored exposure's 0 for a curve without cash, would be a wrong
+    number. Nothing stored changes."""
+
+    directory = build_experiment(tmp_path, "experiment", "registered_with_record")
+    ledger = directory / "ledgers/experiment_ledger.jsonl"
+    before = ledger.read_bytes()
+    # The fixture's replay holds a tenth of its equity in cash on every day.
+    shares = summarize_experiment(directory)["forward"]["cash_share"]
+    assert shares == {"forward": pytest.approx(0.1), "heldout": pytest.approx(0.1)}
+    [record] = [row for row in _records(directory) if row["record_type"] == "forward"]
+    result = recorded_path(directory, str(record["result_ref"]))
+    stored = json.loads(result.read_text(encoding="utf-8"))
+    heldout_start = str(record["slices"]["heldout"]["start"])
+    first_heldout = next(
+        row for row in stored["equity_curve"] if row["trade_date"] >= heldout_start
+    )
+    del first_heldout["cash"]
+    write_json_atomic(result, stored)
+    shares = summarize_experiment(directory)["forward"]["cash_share"]
+    assert shares == {"forward": pytest.approx(0.1), "heldout": None}
+    result.unlink()
+    shares = summarize_experiment(directory)["forward"]["cash_share"]
+    assert shares == {"forward": None, "heldout": None}
+    assert ledger.read_bytes() == before
 
 
 def test_the_home_list_flags_a_blocked_experiment_and_an_unresolved_issue(tmp_path: Path) -> None:

@@ -28,6 +28,7 @@ from autotrade.environment.replay.stats import (
     ReplayResult,
     attach_sub_window_benchmark,
     compute_return_stats,
+    mean_cash_share,
     sub_window_stats,
     window_activity,
 )
@@ -628,6 +629,32 @@ class WindowActivityTest(unittest.TestCase):
     def test_a_slice_without_a_replay_day_is_not_measured(self) -> None:
         with self.assertRaisesRegex(ValueError, "no day in 20250801..20250831"):
             window_activity(self.CURVE, self.EXECUTIONS, start="20250801", end="20250831")
+
+    def test_the_cash_share_is_the_mean_close_cash_of_every_slice_day(self) -> None:
+        share = mean_cash_share(self.CURVE, start="20250701", end="20250731")
+        self.assertAlmostEqual(share, (100.0 / 1100.0 + 1150.0 / 1150.0) / 2)
+        later = window_activity(
+            self.CURVE, self.EXECUTIONS, start="20250701", end="20250731"
+        )
+        self.assertAlmostEqual(share, 1.0 - later["mean_gross"])
+
+    def test_a_cash_share_the_curve_cannot_state_is_none(self) -> None:
+        # One slice day without its cash split: the exposure diagnostics leave
+        # it out, but a share over the other day would read as the slice's.
+        partial = (*self.CURVE[:3], {**self.CURVE[3], "cash": None})
+        self.assertIsNone(mean_cash_share(partial, start="20250701", end="20250731"))
+        # A curve with no cash split at all reads a mean exposure of 0, which
+        # is no cash share of 1.
+        bare = tuple(
+            {key: value for key, value in row.items() if key != "cash"}
+            for row in self.CURVE
+        )
+        exposure = window_activity(
+            bare, self.EXECUTIONS, start="20250701", end="20250731"
+        )
+        self.assertEqual(exposure["mean_gross"], 0.0)
+        self.assertIsNone(mean_cash_share(bare, start="20250701", end="20250731"))
+        self.assertIsNone(mean_cash_share(self.CURVE, start="20250801", end="20250831"))
 
 
 if __name__ == "__main__":
