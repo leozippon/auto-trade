@@ -1173,9 +1173,11 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
     """One attempt dies preparing the PIT inputs (no runtime at all), the next
-    while laying out the workspace (a runtime without a working copy). Neither
-    spent or recorded anything, so the third opens the session as a first
-    attempt would instead of failing for a workspace that never existed."""
+    while laying out the workspace (a runtime without a working copy), the
+    third once the skills tree is installed and before the seed record is
+    written. None spent or recorded anything, so the fourth opens the session
+    as a first attempt would instead of failing for a workspace that never
+    existed or for the skills tree the third left."""
 
     from autotrade.agent.prompts import SESSION_DEFAULT_INSTRUCTION
     from autotrade.environment.llm import ProviderResponse
@@ -1212,16 +1214,28 @@ def test_attempts_that_fail_before_the_workspace_is_seeded_leave_a_fresh_start(
     assert workspace.is_dir() and not (workspace / "output" / "main.py").exists()
     monkeypatch.setattr(research_session, "copy_artifact", copy_artifact)
 
+    install_workspace_skills = research_session.install_workspace_skills
+
+    def stopped_after_skills(*args, **kwargs):
+        install_workspace_skills(*args, **kwargs)
+        raise SystemExit("worker stopped")
+
+    monkeypatch.setattr(research_session, "install_workspace_skills", stopped_after_skills)
+    with pytest.raises(SystemExit):
+        run(NominatingLLM([]))
+    assert (workspace / "skills").is_dir() and not (session_root / "runtime" / "seed_record.json").exists()
+    monkeypatch.setattr(research_session, "install_workspace_skills", install_workspace_skills)
+
     # One call is the whole budget: the validate spends it, and the host
     # completes the record from the Validation it recorded.
     llm = NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))])
     run(llm)
     rows = ExperimentLedger(experiment / "ledgers" / "experiment_ledger.jsonl").read()
     assert [row["record_type"] for row in rows] == [
-        "attempt_failed", "attempt_failed", *(["test_step"] * 4), "research_session", "forward"
+        *(["attempt_failed"] * 3), *(["test_step"] * 4), "research_session", "forward"
     ]
     record = rows[-2]
-    assert record["attempts"] == 3 and record["outcome"] == "deadline"
+    assert record["attempts"] == 4 and record["outcome"] == "deadline"
     assert record["budget_used"]["llm_calls"] == len(llm.calls) == 1
     opening = llm.calls[0]["messages"]
     assert [message.role for message in opening] == ["system", "user"]

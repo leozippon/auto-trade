@@ -142,6 +142,7 @@ from .session_tools import (
 )
 from .skills import (
     SKILL_LIBRARY_DIRNAME,
+    SKILLS_DIRNAME,
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
     MemorySource,
@@ -834,6 +835,11 @@ class LLMResearchDeveloper:
             skill_library=_skill_library_record(memory_snapshot, mounted_memory)
         )
         if resume is None:
+            # No seed record yet, so the Agent never ran in this workspace: a
+            # skills tree already here is what an earlier attempt installed
+            # before it stopped short of the record, none of it the Agent's
+            # work, and removing it is safe.
+            rmtree_keeping_file_modes(workspace_root / SKILLS_DIRNAME)
             skills_stats = install_workspace_skills(
                 request.skills_source_ref or None,
                 workspace_root,
