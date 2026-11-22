@@ -40,7 +40,7 @@ from autotrade.pipelines.validation_record import (
 )
 from tests.unit.support.validate_session_fixture import _Session, _strategy
 
-DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
+DATE = re.compile(r"(?<![\d.])(20\d{6})(?!\d)")
 
 
 def _seeded(seed: int) -> str:

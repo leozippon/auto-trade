@@ -53,7 +53,7 @@ from tests.unit.support.synthetic_experiment import (
 pytestmark = pytest.mark.slow
 
 # A calendar day as the session's facts, tool results and views spell it.
-DATE = re.compile(r"(?<!\d)(20\d{6})(?!\d)")
+DATE = re.compile(r"(?<![\d.])(20\d{6})(?!\d)")
 
 
 @pytest.fixture(autouse=True)
