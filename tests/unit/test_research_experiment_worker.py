@@ -36,6 +36,7 @@ from tests.unit.support.agent_fixture import prompt_facts
 from tests.unit.support.synthetic_experiment import (
     GEOMETRY,
     RELEASE_END,
+    STRATEGY,
     TEST_WORKING_COPY,
     VALIDATE_REVEALED,
     VALIDATE_WORKING_COPY,
@@ -1057,6 +1058,10 @@ def test_release_finished_sandbox_removes_only_that_experiment(tmp_path: Path) -
 def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
 ):
+    """The first attempt spent model calls, so the next one must continue its
+    workspace. Without the workspace directory, and then without the whole
+    session runtime, each later attempt fails instead of opening afresh."""
+
     from autotrade.environment.llm import ProviderResponse, ToolCall
     from autotrade.environment.runtime import rmtree_keeping_file_modes
 
@@ -1067,18 +1072,80 @@ def test_a_resume_without_the_interrupted_workspace_fails_the_attempt(
         run_local_interactive_worker(
             options, llm=NominatingLLM([]), command_runner_factory=lambda _workspace: NoShellRunner()
         )
-    rmtree_keeping_file_modes(options.work_root / options.experiment_id / "research")
-
-    with pytest.raises(RuntimeError, match="workspace of the interrupted attempt is missing"):
-        run_local_interactive_worker(
-            load_worker_options(experiment, repo_root=repo),
-            llm=NominatingLLM([ProviderResponse(tool_calls=(ToolCall("f", "test", {"outcome": "no_edge", "reason": "x" * 60}),))]),
-            command_runner_factory=lambda _workspace: NoShellRunner(),
-        )
+    session_root = options.work_root / options.experiment_id / "research"
+    # The host keeps the Agent's mount root read-only.
+    (session_root / "agent").chmod(0o755)
+    for removed in (session_root / "agent" / "workspace", session_root):
+        rmtree_keeping_file_modes(removed)
+        with pytest.raises(RuntimeError, match="workspace of the interrupted attempt is missing"):
+            run_local_interactive_worker(
+                load_worker_options(experiment, repo_root=repo),
+                llm=NominatingLLM([ProviderResponse(tool_calls=(ToolCall("f", "test", {"outcome": "no_edge", "reason": "x" * 60}),))]),
+                command_runner_factory=lambda _workspace: NoShellRunner(),
+            )
     rows = ExperimentLedger(options.experiment.ledger_path).read()
-    assert [row["record_type"] for row in rows] == ["attempt_failed", "attempt_failed"]
+    assert [row["record_type"] for row in rows] == ["attempt_failed"] * 3
     assert "workspace of the interrupted attempt is missing" in rows[-1]["error"]
     assert read_status(experiment / "hitl" / "status.json")["state"] == "failed"
+
+
+def test_a_session_resumes_after_its_agent_deleted_the_working_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, synthetic_provider
+):
+    """The Agent owns its working copy: the first attempt validates output/,
+    then removes it, as one ``rm -rf output`` does, and loses its model. The
+    next worker start still resumes the session and leaves the workspace as
+    the Agent left it: output/ is still gone, and modification_check says so.
+    A rewritten working copy is held to the README the session was seeded
+    with, and the host completes the record from the first attempt's
+    Validation once the call budget runs out."""
+
+    from autotrade.environment.llm import ProviderResponse, ToolCall
+    from autotrade.environment.runtime import rmtree_keeping_file_modes
+
+    repo, experiment = make_experiment(
+        tmp_path, developer_mode="llm", session_max_attempts=1, max_llm_calls=6
+    )
+    (repo / "strategies" / "README.md").write_text("# Output contract\n", encoding="utf-8")
+    monkeypatch.setenv("VLLM_API_KEY", "local-test-key")
+    options = load_worker_options(experiment, repo_root=repo)
+    with pytest.raises(RuntimeError, match="language model unavailable"):
+        run_local_interactive_worker(
+            options,
+            llm=NominatingLLM([ProviderResponse(tool_calls=(VALIDATE_WORKING_COPY,))]),
+            command_runner_factory=lambda _workspace: NoShellRunner(),
+        )
+    output = options.work_root / options.experiment_id / "research" / "agent" / "workspace" / "output"
+    rmtree_keeping_file_modes(output)
+
+    # One batch, run in order (it writes), and a last call that reads its results.
+    second_llm = NominatingLLM(
+        [
+            ProviderResponse(
+                tool_calls=(
+                    ToolCall("m1", "modification_check", {}),
+                    ToolCall("w", "write_file", {"path": "output/main.py", "content": STRATEGY}),
+                    ToolCall("m2", "modification_check", {}),
+                )
+            ),
+            ProviderResponse(tool_calls=(ToolCall("m3", "modification_check", {}),)),
+        ]
+    )
+    result = run_local_interactive_worker(
+        load_worker_options(experiment, repo_root=repo),
+        llm=second_llm,
+        command_runner_factory=lambda _workspace: NoShellRunner(),
+    )
+
+    record = ExperimentLedger(options.experiment.ledger_path).read()[-2]
+    assert (record["attempts"], record["outcome"], len(record["steps"])) == (2, "deadline", 1)
+    assert record["registered"]["source_step_id"] == record["steps"][0]["step_id"]
+    assert result["verdict"]["status"] == "registered_with_record"
+    assert second_llm.calls[0]["messages"][1].content.startswith("本次续接本实验中断的研究会话：")
+    replies = [message.content or "" for message in second_llm.calls[-1]["messages"]]
+    [missing] = [reply for reply in replies if "missing formal output directory: output/" in reply]
+    [restored] = [reply for reply in replies if "README.md: absent or altered" in reply]
+    assert replies.index(missing) < replies.index(restored)
 
 
 def test_a_session_without_its_data_summary_fails_the_attempt(

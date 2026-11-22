@@ -54,6 +54,7 @@ from autotrade.environment.llm.pricing import (
 from autotrade.environment.llm.proxy import output_shares_context_window
 from autotrade.environment.runtime import (
     RunManifest,
+    SandboxPaths,
     chmod_tree,
     rmtree_keeping_file_modes,
 )
@@ -141,7 +142,6 @@ from .session_tools import (
 )
 from .skills import (
     SKILL_LIBRARY_DIRNAME,
-    SKILLS_DIRNAME,
     SKILLS_INDEX_PATH,
     DeleteSkillTool,
     MemorySource,
@@ -483,6 +483,7 @@ class LLMResearchDeveloper:
             output_dir=output_dir,
             models_dir=models_dir,
             source=source,
+            seed_record=paths.seed_record,
         )
         mounted_memory = self._mount_session_inputs(
             request,
@@ -491,6 +492,7 @@ class LLMResearchDeveloper:
             resume=resume,
             workspace_root=workspace_root,
             inputs_dir=inputs_dir,
+            seeded_readonly=seeded_readonly,
         )
         safe = SafeWorkspace(workspace_root)
         # Read-only exploration reaches the PIT view, the start node's
@@ -662,22 +664,23 @@ class LLMResearchDeveloper:
         root = self.runtime_root / request.session_key
         if root.exists() and resume is None:
             raise FileExistsError(f"session runtime already exists: {root.name}")
-        # What a resume continues from: the working copy and the skills tree,
-        # the two things seeding writes that a later attempt does not re-copy.
-        seeded = (root / "agent" / "workspace" / "output" / "main.py").is_file() and (
-            root / "agent" / "workspace" / SKILLS_DIRNAME
-        ).is_dir()
+        # What a resume continues from: the workspace an earlier attempt
+        # seeded, as the host's own seed record says, never a file inside it.
+        # The Agent owns everything in the workspace and may delete any of
+        # it, its working copy included; it cannot reach the record.
+        paths = SandboxPaths(root)
+        seeded = paths.seed_record.is_file() and paths.workspace.is_dir()
         if resume is not None and not seeded:
             if request.steps_before or request.budget_used != BudgetUsed():
                 raise RuntimeError(
-                    "cannot resume the research session: the workspace of the interrupted "
-                    f"attempt is missing under the session runtime root {root.name}"
+                    "cannot resume the research session: the seeded workspace of the "
+                    f"interrupted attempt is missing under the session runtime root {root.name}"
                 )
-            # The earlier attempts failed before the workspace was seeded (while
-            # preparing the PIT view or laying out the runtime) and before they
-            # spent or recorded anything, so there is nothing to continue: this
-            # attempt seeds and opens the session as a first attempt does, over
-            # whatever partial layout they left.
+            # The earlier attempts failed before seeding completed (while
+            # preparing the PIT view, laying out the runtime or seeding), so
+            # the Agent never ran here and nothing was spent or recorded:
+            # this attempt seeds and opens the session as a first attempt
+            # does, over whatever partial layout they left.
             resume = None
         return root, resume, attempt
 
@@ -762,16 +765,21 @@ class LLMResearchDeveloper:
         output_dir: Path,
         models_dir: Path,
         source: Path,
+        seed_record: Path,
     ) -> dict[str, str]:
-        """Seed ``output/`` and ``models/`` on a first attempt, hand them back
-        writable on every attempt, and pin the read-only contract files the
-        session received; returns that pin."""
+        """Seed ``output/`` and ``models/`` writable on a first attempt and pin
+        the read-only contract files they received; returns that pin. A
+        resumed attempt reads the pin back from the seed record and leaves
+        both trees, the Agent's own, as the Agent left them."""
 
         if self.baseline_strategy.name != "main.py":
             raise ValueError(
                 "baseline strategy file must be named main.py for research sessions"
             )
-        if resume is None:
+        if resume is not None:
+            record = read_json_object(seed_record)
+            seeded_readonly = dict(record["readonly_baseline"])  # type: ignore[call-overload]
+        else:
             copy_artifact(source, output_dir)
             # A session starts from an empty ``models/``.
             copy_model_artifacts(None, models_dir)
@@ -780,12 +788,12 @@ class LLMResearchDeveloper:
             seed_output_from_starter(
                 output_dir, self.workspace_reference, repo_root=self.repo_root
             )
-        restore_working_artifacts_writable(output_dir, models_dir)
-        # Pin the read-only contract files to what this session actually
-        # received, and record it for the audit: an initial artifact seeds them
-        # from the live repository template, and editing that template must not
-        # retroactively fail a session already running against the old bytes.
-        seeded_readonly = readonly_baseline(output_dir)
+            restore_working_artifacts_writable(output_dir, models_dir)
+            # Pin the read-only contract files to what this session actually
+            # received: an initial artifact seeds them from the live repository
+            # template, and editing that template must not retroactively fail a
+            # session already running against the old bytes.
+            seeded_readonly = readonly_baseline(output_dir)
         manifest.update(readonly_baseline=seeded_readonly)
         return seeded_readonly
 
@@ -798,10 +806,12 @@ class LLMResearchDeveloper:
         resume: SessionResume | None,
         workspace_root: Path,
         inputs_dir: Path,
+        seeded_readonly: Mapping[str, str],
     ) -> list[MemorySource]:
         """Mount what the session reads beside its working copy: operating
         memory, skills and their index, the reference workspace and the PIT view.
-        Returns the memory sources mounted."""
+        On a first attempt, record the seeding once the skills tree completes
+        it. Returns the memory sources mounted."""
 
         if inputs_dir.exists():
             chmod_tree(inputs_dir, file_mode=0o644, dir_mode=0o755)
@@ -828,6 +838,12 @@ class LLMResearchDeveloper:
                 request.skills_source_ref or None,
                 workspace_root,
                 index_path=inputs_dir / "skills_index.json",
+            )
+            # The skills tree is the last thing seeding writes. From here on
+            # every attempt continues this workspace, whatever the Agent does
+            # to it, held to the contract files it received.
+            write_json_atomic(
+                local.paths.seed_record, {"readonly_baseline": dict(seeded_readonly)}
             )
         else:
             skills_stats = write_skills_index(

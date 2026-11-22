@@ -171,6 +171,12 @@ class SandboxPaths:
         return self.runtime / "host_run_manifest.json"
 
     @property
+    def seed_record(self) -> Path:
+        """Host-only record that the workspace was seeded, with the read-only
+        contract digests it received; never mounted to Agent."""
+        return self.runtime / "seed_record.json"
+
+    @property
     def runtime_env(self) -> Path:
         return self.artifacts / "runtime_env.json"
 
