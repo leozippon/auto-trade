@@ -24,7 +24,13 @@ difference is explained, and every later session is downstream of it:
   the first there, and with ``paper_mode`` ``paper_decision_path`` when the
   Paper engine over the same decisions and release disagrees with the replay
   there, ``data_revised`` when it agrees; else ``unresolved``, with the mounted
-  datasets restated since Paper decided.
+  datasets restated since Paper decided;
+- a cause reached by elimination (``data_revised``, ``rule``, ``unresolved``)
+  is ``code_changed`` unless the book decided and settled every session
+  through that day on the check's own commit (``engine.code_revision``): a
+  replay on today's code cannot say what other code did. A dirty tree is no
+  commit's code, and a session that names none (every session Paper ran
+  before it recorded its code) ran on other code as far as the check can tell.
 
 A real-fill book is compared until its account leaves the simulation
 (``partial``). A check that cannot run is ``failed`` with its reason; none
@@ -37,7 +43,6 @@ while it ran, and never feeds the verdict.
 from __future__ import annotations
 
 import json
-import subprocess
 from bisect import bisect_left
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -66,9 +71,11 @@ from autotrade.pipelines.pit_backend import (
 
 from .book import BOOK_NAME, Book, verify_book_artifact
 from .engine import (
+    DIRTY,
     PAPER_STATE_NAME,
     REFERENCE_KEY,
     DailyPaperEngine,
+    code_revision,
     docker_executor,
     writer_lock,
 )
@@ -92,8 +99,10 @@ CONSISTENCY_SCHEMA_VERSION = 1
 # and the Paper-mode run's account (removed).
 PAPER_CHECK_DIR = Path(".runtime/paper_check")
 PAPER_MODE_NAME = "paper_mode"
-REPO_ROOT = Path(__file__).resolve().parents[3]
 LEVELS = ("opening", "orders", "fills", "close")
+# The causes the check reaches by elimination, each assuming Paper ran the
+# code the check runs.
+_ELIMINATED = frozenset({"data_revised", "rule", "unresolved"})
 # Journal bookkeeping, not account content.
 _BOOKKEEPING = frozenset({"kind", "event_id", REFERENCE_KEY, "recorded"})
 _SETTLEMENT_INPUTS = ("last_close", "pre_close", "cash_per_share")
@@ -155,13 +164,15 @@ def compare(
     replay: Mapping[str, object],
     *,
     vintages: Mapping[str, str],
+    code: str | None,
     repeat: OrdersDue | None = None,
     paper_mode: OrdersDue | None = None,
 ) -> dict[str, object]:
     """The book's settled sessions against ``replay`` (a ``result.json``
     record): the status, a row per session compared, and the first difference
-    with its cause. ``vintages`` are the check's release's; ``repeat`` and
-    ``paper_mode`` are asked only for a first difference in the orders."""
+    with its cause. ``vintages`` are the check's release's and ``code`` its
+    ``code_revision``; ``repeat`` and ``paper_mode`` are asked only for a
+    first difference in the orders."""
 
     curve = list(replay["equity_curve"])
     days = [str(row["trade_date"]) for row in curve]
@@ -221,7 +232,7 @@ def compare(
                     "cash": [equity["cash"], close["cash"]], "equity": [equity["equity"], close["equity"]],
                     "holdings": {s: [held.get(s), replay_held.get(s)] for s in row["holdings"]},
                 }}
-            first = {"trade_date": day, "level": level, **explained}
+            first = {"trade_date": day, "level": level, **_code_changed(explained, records, day, code)}
         rows.append(row)
     if first is not None:
         status, reason = "differs", None
@@ -238,6 +249,28 @@ def compare(
         "first_difference": first,
         "probes": probes,
     }
+
+
+def _code_changed(
+    explained: dict[str, object], records: BookRecords, day: str, code: str | None
+) -> dict[str, object]:
+    """``explained``, unless its cause was reached by elimination and the book
+    decided or settled a session through ``day`` on anything but ``code`` as a
+    clean commit: then ``code_changed``, with the cause it would otherwise
+    have and the revisions Paper ran (None where it recorded none)."""
+
+    ran_on = {
+        row.get("code_revision")
+        for row in (*(records.state.get("decisions") or ()), *records.equity)
+        if str(row["trade_date"]) <= day
+    }
+    clean = code is not None and not code.endswith(DIRTY)
+    other = sorted((revision for revision in ran_on if not clean or revision != code), key=lambda name: name or "")
+    if explained["cause"] not in _ELIMINATED or not other:
+        return explained
+    return {"cause": "code_changed", "evidence": {
+        **dict(explained["evidence"]), "otherwise": explained["cause"], "paper_code_revisions": other,
+    }}
 
 
 def _opening_cause(paper: dict[str, dict], replay: dict[str, dict]) -> dict[str, object]:
@@ -431,7 +464,7 @@ def check_book(
     record: dict[str, object] = {
         "schema_version": CONSISTENCY_SCHEMA_VERSION,
         "checked_at": datetime.now(CN_TZ).isoformat(timespec="seconds"),
-        "code_revision": _code_revision(),
+        "code_revision": code_revision(),
         "artifact_id": book.artifact_id,
     }
     try:
@@ -498,7 +531,10 @@ def check_book(
                 return due((order for rows in journals for order in _order_parts(rows)), day)
 
             record.update(
-                compare(records, replay, vintages=vintages, repeat=repeat, paper_mode=engine if paper_mode else None),
+                compare(
+                    records, replay, vintages=vintages, code=record["code_revision"], repeat=repeat,
+                    paper_mode=engine if paper_mode else None,
+                ),
                 window={"start": start, "end": end},
                 release={"generation_id": release, "vintages": vintages},
                 result=str(result),
@@ -523,18 +559,6 @@ def check_book(
 def _clear(path: Path, book: Book) -> None:
     if not remove_sandbox_tree(path, book.sandbox.spec):
         raise CheckFailed(f"cannot remove the check's work directory {path}")
-
-
-def _code_revision() -> str | None:
-    """The commit of the checking code, when it runs from a git checkout."""
-
-    try:
-        done = subprocess.run(
-            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True, timeout=10, check=False
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return done.stdout.strip() or None
 
 
 __all__ = [

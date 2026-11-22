@@ -33,6 +33,10 @@ print, and every later decision retries every superseded entry until it is gone.
 A book its owner switched to real fills settles every later session from the
 owner's recorded outcomes instead of the simulator's, so each decision sees the
 account the owner actually holds (``paper.fills``).
+
+Each decision and each settled session records the code it ran on
+(``code_revision``), so a later comparison can tell a code change from a
+data or decision-path difference (``paper.consistency``).
 """
 
 from __future__ import annotations
@@ -41,6 +45,7 @@ import fcntl
 import math
 import os
 import shutil
+import subprocess
 import uuid
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager, nullcontext
@@ -108,6 +113,30 @@ RUN_STATUS_NAME = "run_status.json"
 # Journal-row key for the host-side reference quote of an order (last close and
 # name). Namespaced so it cannot collide with a strategy's own order metadata.
 REFERENCE_KEY = "paper_reference"
+# The checkout this code runs from, and the mark ``code_revision`` appends to
+# its commit when a tracked file differs from it.
+REPO_ROOT = Path(__file__).resolve().parents[3]
+DIRTY = "-dirty"
+
+
+def code_revision() -> str | None:
+    """The commit of the checkout this code runs from, with ``DIRTY`` appended
+    when a tracked file differs from it (such a tree is no commit's code), or
+    None when it runs from no git checkout."""
+
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(REPO_ROOT), *args],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+
+    try:
+        head, status = git("rev-parse", "HEAD"), git("status", "--porcelain", "--untracked-files=no")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if head.returncode or status.returncode or not head.stdout.strip():
+        return None
+    return head.stdout.strip() + (DIRTY if status.stdout.strip() else "")
 
 
 def write_run_status(root: Path, trade_date: str, error: BaseException | None = None) -> None:
@@ -268,6 +297,7 @@ class DailyPaperEngine:
         if self.sandbox.spec.pretrained_manifest_sha256:
             require_pretrained_store(self.sandbox.spec.pretrained_manifest_sha256)
         self.executor_factory = executor_factory or docker_executor
+        self.code_revision = code_revision()
         self.decision_check = decision_check
         # Reads the reconciled settlement journals under the writer lock.
         # False is a terminal stop, not a failed strategy decision.
@@ -460,6 +490,7 @@ class DailyPaperEngine:
         self._queue_emission(state, EQUITY_JOURNAL_NAME, {
             "kind": "equity", "trade_date": day, "equity": broker.equity(),
             "cash": broker.cash, "position_count": len(broker.positions), **simulated_equity,
+            "code_revision": self.code_revision,
         })
         state["settled_through"] = day
         self._checkpoint(state, broker, pending)
@@ -532,6 +563,7 @@ class DailyPaperEngine:
             "data_through": prior,
             "generation_id": data.generation_id,
             "vintages": dict(data.vintages),
+            "code_revision": self.code_revision,
             "cash": cash,
             "positions": dict(positions),
             "equity": broker.equity(),

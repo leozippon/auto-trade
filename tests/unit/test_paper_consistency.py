@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -26,8 +27,9 @@ from autotrade.paper.consistency import (
     CheckFailed,
     check_book,
     compare,
+    read_book_records,
 )
-from autotrade.paper.engine import DailyPaperEngine, writer_lock
+from autotrade.paper.engine import DailyPaperEngine, code_revision, writer_lock
 from autotrade.paper.pit import BookPITData, book_data_factory, newest_replay_slot
 from autotrade.pipelines.calendar import anchor_before
 from autotrade.pipelines.config import FORWARD_PHASE
@@ -51,6 +53,8 @@ from tests.unit.support.snapshot_fixture import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAYS = ("20260105", "20260106", "20260107")
 SYMBOL = "000001.SZ"
+# The one clean commit a book and its check ran on, unless a test says otherwise.
+CODE = "c" * 40
 
 
 def _execution(day: str, action: str = "buy", price: float = 10.005, **fields: object) -> dict[str, object]:
@@ -63,14 +67,14 @@ def _execution(day: str, action: str = "buy", price: float = 10.005, **fields: o
 
 
 def _matching() -> tuple[BookRecords, dict[str, object]]:
-    """A book that bought on the first session and sold on the third, and the
-    replay that did exactly the same."""
+    """A book that bought on the first session and sold on the third, all on
+    ``CODE``, and the replay that did exactly the same."""
 
     buy, sell = _execution(DAYS[0]), _execution(DAYS[2], "sell", 10.2, realized_pnl=9.5)
     closes = [(98994.5, 100044.5, {SYMBOL: 100}), (98994.5, 100094.5, {SYMBOL: 100}), (100009.5, 100009.5, {})]
     decisions = [
         {"trade_date": day, "decided_at": f"{day[:4]}-{day[4:6]}-{day[6:]}T05:45:00+08:00", "generation_id": "g_paper",
-         "vintages": {"daily": "v1", "anns_d": "v1"}}
+         "vintages": {"daily": "v1", "anns_d": "v1"}, "code_revision": CODE}
         for day in (*DAYS, "20260108")
     ]
     order = {key: buy[key] for key in ("symbol", "action", "quantity", "execute_at")}
@@ -80,7 +84,7 @@ def _matching() -> tuple[BookRecords, dict[str, object]]:
         executions={DAYS[0]: [buy], DAYS[2]: [sell]},
         corporate_actions={},
         equity=[
-            {"trade_date": day, "cash": cash, "equity": equity, "position_count": len(held)}
+            {"trade_date": day, "cash": cash, "equity": equity, "position_count": len(held), "code_revision": CODE}
             for day, (cash, equity, held) in zip(DAYS, closes, strict=True)
         ],
         corrections=[],
@@ -101,17 +105,17 @@ VINTAGES = {"daily": "v1", "anns_d": "v2"}
 
 def test_identical_records_are_consistent_and_nothing_settled_is_never_consistent():
     records, replay = _matching()
-    result = compare(records, replay, vintages=VINTAGES)
+    result = compare(records, replay, vintages=VINTAGES, code=CODE)
     assert (result["status"], result["sessions_compared"], result["first_difference"]) == ("consistent", 3, None)
     assert all(row["opening"] and row["orders"] and row["fills"] and row["close"] for row in result["sessions"])
 
     empty = BookRecords({"decisions": []}, {}, {}, {}, [], [])
     with pytest.raises(CheckFailed, match="no settled session"):
-        compare(empty, {"equity_curve": [], "executions": [], "corporate_actions": []}, vintages=VINTAGES)
+        compare(empty, {"equity_curve": [], "executions": [], "corporate_actions": []}, vintages=VINTAGES, code=CODE)
     # A replay that does not reach every settled session is no comparison.
     replay["equity_curve"] = replay["equity_curve"][:2]
     with pytest.raises(CheckFailed, match=r"the replay covers 20260105\.\.20260106"):
-        compare(records, replay, vintages=VINTAGES)
+        compare(records, replay, vintages=VINTAGES, code=CODE)
 
 
 def test_an_order_paper_alone_holds_is_the_first_difference_and_what_follows_is_downstream():
@@ -119,7 +123,7 @@ def test_an_order_paper_alone_holds_is_the_first_difference_and_what_follows_is_
     extra = _execution(DAYS[1], "sell")
     records.executions[DAYS[1]] = [{**extra, "status": "rejected", "price": None, "commission": 0.0, "reason": "t1"}]
     records.orders[DAYS[1]] = [{key: extra[key] for key in ("symbol", "action", "quantity", "execute_at")}]
-    result = compare(records, replay, vintages=VINTAGES)
+    result = compare(records, replay, vintages=VINTAGES, code=CODE)
     first = result["first_difference"]
     assert (result["status"], first["trade_date"], first["level"], first["cause"]) == ("differs", DAYS[1], "orders", "unresolved")
     evidence = first["evidence"]
@@ -130,12 +134,12 @@ def test_an_order_paper_alone_holds_is_the_first_difference_and_what_follows_is_
 
     # A second replay that disagrees with the first is the strategy's own noise;
     # one that agrees leaves Paper's decision path to the Paper-mode run.
-    rerun = compare(records, replay, vintages=VINTAGES, repeat=lambda day: [extra])
+    rerun = compare(records, replay, vintages=VINTAGES, code=CODE, repeat=lambda day: [extra])
     assert (rerun["first_difference"]["cause"], rerun["probes"]["repeat"]) == ("nondeterministic", "differs")
     same = lambda day: []  # noqa: E731
-    path = compare(records, replay, vintages=VINTAGES, repeat=same, paper_mode=lambda day: [extra])
+    path = compare(records, replay, vintages=VINTAGES, code=CODE, repeat=same, paper_mode=lambda day: [extra])
     assert (path["first_difference"]["cause"], path["probes"]) == ("paper_decision_path", {"repeat": "equal", "paper_mode": "differs"})
-    data = compare(records, replay, vintages=VINTAGES, repeat=same, paper_mode=same)
+    data = compare(records, replay, vintages=VINTAGES, code=CODE, repeat=same, paper_mode=same)
     assert (data["first_difference"]["cause"], data["probes"]["paper_mode"]) == ("data_revised", "equal")
 
 
@@ -151,7 +155,7 @@ def test_a_decision_on_an_ex_date_of_a_held_name_differs_by_the_accepted_timing(
     records.corporate_actions[DAYS[2]] = [dict(action)]
     replay["corporate_actions"] = [dict(action)]
     replay["executions"][1]["quantity"] = 200
-    first = compare(records, replay, vintages=VINTAGES, repeat=lambda day: [])["first_difference"]
+    first = compare(records, replay, vintages=VINTAGES, code=CODE, repeat=lambda day: [])["first_difference"]
     assert (first["trade_date"], first["level"], first["cause"]) == (DAYS[2], "orders", "ex_date_timing")
 
 
@@ -159,15 +163,15 @@ def test_settlement_differences_are_restated_data_when_their_inputs_moved_and_a_
     # A fill of the same order at another price met another bar.
     records, replay = _matching()
     replay["executions"][0]["price"] = 10.015
-    first = compare(records, replay, vintages=VINTAGES)["first_difference"]
+    first = compare(records, replay, vintages=VINTAGES, code=CODE)["first_difference"]
     assert (first["trade_date"], first["level"], first["cause"]) == (DAYS[0], "fills", "data_revised")
     # The same price with other fees is the rule.
     records, replay = _matching()
     replay["executions"][0]["commission"] = 5.1
-    assert compare(records, replay, vintages=VINTAGES)["first_difference"]["cause"] == "rule"
+    assert compare(records, replay, vintages=VINTAGES, code=CODE)["first_difference"]["cause"] == "rule"
     # Half a cent is the same figure.
     replay["executions"][0]["commission"] = 5.004
-    assert compare(records, replay, vintages=VINTAGES)["status"] == "consistent"
+    assert compare(records, replay, vintages=VINTAGES, code=CODE)["status"] == "consistent"
 
     # An ex-date settled from another reference price is restated data.
     records, replay = _matching()
@@ -177,18 +181,102 @@ def test_settlement_differences_are_restated_data_when_their_inputs_moved_and_a_
     }
     records.corporate_actions[DAYS[1]] = [dict(action)]
     replay["corporate_actions"] = [{**action, "pre_close": 10.4, "cash_per_share": 0.15, "cash_credit": 15.0}]
-    first = compare(records, replay, vintages=VINTAGES)["first_difference"]
+    first = compare(records, replay, vintages=VINTAGES, code=CODE)["first_difference"]
     assert (first["trade_date"], first["level"], first["cause"]) == (DAYS[1], "opening", "data_revised")
     # The same inputs settled to another credit is the rule.
     replay["corporate_actions"] = [{**action, "cash_credit": 9.0}]
-    assert compare(records, replay, vintages=VINTAGES)["first_difference"]["cause"] == "rule"
+    assert compare(records, replay, vintages=VINTAGES, code=CODE)["first_difference"]["cause"] == "rule"
 
     # Equal fills and holdings with another equity met a restated close.
     records, replay = _matching()
     replay["equity_curve"][1]["equity"] += 3.0
-    first = compare(records, replay, vintages=VINTAGES)["first_difference"]
+    first = compare(records, replay, vintages=VINTAGES, code=CODE)["first_difference"]
     assert (first["trade_date"], first["level"], first["cause"]) == (DAYS[1], "close", "data_revised")
     assert first["evidence"]["equity"] == [100094.5, 100097.5]
+
+
+def _ran_on(records: BookRecords, revision: str | None, through: str = DAYS[-1]) -> BookRecords:
+    """``records`` with every decision and settled session through ``through``
+    run on ``revision`` (None: before Paper recorded its code, so naming none)."""
+
+    def stamp(row: dict[str, object]) -> dict[str, object]:
+        if str(row["trade_date"]) > through:
+            return dict(row)
+        if revision is None:
+            return {key: value for key, value in row.items() if key != "code_revision"}
+        return {**row, "code_revision": revision}
+
+    state = {**records.state, "decisions": [stamp(row) for row in records.state["decisions"]]}
+    return dataclasses.replace(records, state=state, equity=[stamp(row) for row in records.equity])
+
+
+def test_a_cause_reached_by_elimination_names_a_code_change_when_the_book_ran_other_code():
+    old, new = "a" * 40, "b" * 40
+    records, replay = _matching()
+    extra = _execution(DAYS[1], "sell")
+    records.executions[DAYS[1]] = [{**extra, "status": "rejected", "price": None, "commission": 0.0, "reason": "t1"}]
+    records.orders[DAYS[1]] = [{key: extra[key] for key in ("symbol", "action", "quantity", "execute_at")}]
+
+    def cause(book: BookRecords, code: str | None, **probes: object) -> tuple[object, ...]:
+        first = compare(book, replay, vintages=VINTAGES, code=code, **probes)["first_difference"]
+        return first["cause"], first["evidence"].get("otherwise"), first["evidence"].get("paper_code_revisions")
+
+    assert cause(_ran_on(records, old), new) == ("code_changed", "unresolved", [old])
+    # The Paper-mode run agrees on today's code: data or the code change.
+    same = lambda day: []  # noqa: E731
+    assert cause(_ran_on(records, old), new, repeat=same, paper_mode=same) == ("code_changed", "data_revised", [old])
+    # It disagrees: today's decision path differs, whatever the old code did.
+    assert cause(_ran_on(records, old), new, repeat=same, paper_mode=lambda day: [extra])[0] == "paper_decision_path"
+    # On the check's own clean commit the cause stands.
+    assert cause(_ran_on(records, new), new) == ("unresolved", None, None)
+    # Sessions Paper ran before it recorded its code ran other code; so does
+    # whatever ran when the check cannot read its own.
+    assert cause(_ran_on(records, None), new) == ("code_changed", "unresolved", [None])
+    assert cause(_ran_on(records, new), None) == ("code_changed", "unresolved", [new])
+    # Only what ran through the session counts.
+    assert cause(_ran_on(_ran_on(records, new), old, through=DAYS[1]), new)[0] == "code_changed"
+    assert cause(_ran_on(_ran_on(records, old), new, through=DAYS[1]), new) == ("unresolved", None, None)
+    # A dirty tree is no commit's code, even the check's own.
+    assert cause(_ran_on(records, new + "-dirty"), new)[0] == "code_changed"
+    assert cause(_ran_on(records, new + "-dirty"), new + "-dirty")[0] == "code_changed"
+
+    # A settlement difference too; an accepted timing is not one.
+    records, replay = _matching()
+    replay["executions"][0]["price"] = 10.015
+    first = compare(_ran_on(records, old), replay, vintages=VINTAGES, code=new)["first_difference"]
+    assert (first["level"], first["cause"], first["evidence"]["otherwise"]) == ("fills", "code_changed", "data_revised")
+    records, replay = _matching()
+    action = {
+        "trade_date": DAYS[2], "symbol": SYMBOL, "last_close": 10.55, "pre_close": 10.45, "cash_per_share": 0.1,
+        "quantity_before": 100, "quantity_after": 100, "cash_credit": 10.0, "dividend_tax_withheld": 0.0,
+    }
+    records.corporate_actions[DAYS[2]] = [dict(action)]
+    replay["corporate_actions"] = [dict(action)]
+    replay["executions"][1]["quantity"] = 200
+    first = compare(_ran_on(records, old), replay, vintages=VINTAGES, code=new)["first_difference"]
+    assert first["cause"] == "ex_date_timing"
+
+
+def test_the_code_revision_is_the_checkouts_commit_marked_dirty_when_a_tracked_file_differs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from autotrade.paper import engine
+
+    def git(*args: str) -> str:
+        done = subprocess.run(["git", "-C", str(tmp_path), *args], capture_output=True, text=True, check=True)
+        return done.stdout.strip()
+
+    monkeypatch.setattr(engine, "REPO_ROOT", tmp_path)
+    assert engine.code_revision() is None  # no checkout
+    git("init", "-q")
+    (tmp_path / "tracked.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "tracked.py")
+    git("-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "init")
+    commit = git("rev-parse", "HEAD")
+    (tmp_path / "untracked.txt").write_text("log\n", encoding="utf-8")
+    assert engine.code_revision() == commit
+    (tmp_path / "tracked.py").write_text("x = 2\n", encoding="utf-8")
+    assert engine.code_revision() == commit + "-dirty"
 
 
 def test_a_real_fill_book_is_compared_until_its_account_leaves_the_simulation():
@@ -200,7 +288,7 @@ def test_a_real_fill_book_is_compared_until_its_account_leaves_the_simulation():
         DAYS[1]: {},
         DAYS[2]: {"09:30 sell 000001.SZ": {"ordered": 100, "simulated": simulated, "real": {**simulated, "quantity": 0}}},
     }}
-    result = compare(dataclasses.replace(records, state=state), replay, vintages=VINTAGES)
+    result = compare(dataclasses.replace(records, state=state), replay, vintages=VINTAGES, code=CODE)
     assert (result["status"], result["sessions_compared"]) == ("partial", 2)
     assert DAYS[2] in result["reason"]
 
@@ -578,6 +666,11 @@ def test_a_stateless_book_is_consistent_with_its_replay_and_only_its_result_is_w
     result = check_book(book, work_dir=tmp_path / "work", execution_mode="trusted", updater_schedule=UPDATER)
     assert result["status"] == "consistent", result.get("reason")
     assert (result["window"], result["sessions_compared"]) == ({"start": "20211011", "end": "20211014"}, 4)
+    # Each decision and each settled session names the code it ran on.
+    records = read_book_records(book.root)
+    assert {row["code_revision"] for row in (*records.state["decisions"], *records.equity)} == {
+        result["code_revision"]
+    } == {code_revision()}
     assert result["release"]["generation_id"] == "g20211015"
     after = _files(book.root)
     assert json.loads(after.pop(CONSISTENCY_NAME)) == result
@@ -587,7 +680,14 @@ def test_a_stateless_book_is_consistent_with_its_replay_and_only_its_result_is_w
     assert Path(result["result"]).is_file()
 
 
-def test_a_book_whose_state_runs_ahead_on_paper_is_caught_where_it_first_orders(tmp_path: Path):
+def test_a_book_whose_state_runs_ahead_on_paper_is_caught_where_it_first_orders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    from autotrade.paper import consistency, engine
+
+    # One clean commit for Paper and the check, whatever state this tree is in.
+    for module in (engine, consistency):
+        monkeypatch.setattr(module, "code_revision", lambda: CODE)
     book = _book(tmp_path / "paper" / "book", _lake(tmp_path), STATE_COUNTER)
     _trade(book)
     plain = check_book(book, work_dir=tmp_path / "work", execution_mode="trusted", updater_schedule=UPDATER)

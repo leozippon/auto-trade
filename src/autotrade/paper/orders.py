@@ -477,6 +477,7 @@ _CHECK_LEVEL = {"opening": "开盘除权除息", "orders": "到期订单", "fill
 _CHECK_CAUSE = {
     "data_revised": "数据修订", "rule": "结算规则", "ex_date_timing": "除权日决策时序（已知差异）",
     "nondeterministic": "策略结果不确定", "paper_decision_path": "模拟账户的决策路径", "unresolved": "原因未判明",
+    "code_changed": "模拟账户运行后代码已变更",
 }
 
 

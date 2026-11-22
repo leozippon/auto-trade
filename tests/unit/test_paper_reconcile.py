@@ -274,6 +274,6 @@ def test_a_book_never_switched_writes_exactly_what_it_wrote_before(tmp_path: Pat
         "emissions", "warnings", "last_error",
     }
     assert {key for row in book.journal("equity_daily.jsonl") for key in row} == {
-        "event_id", "kind", "trade_date", "equity", "cash", "position_count",
+        "event_id", "kind", "trade_date", "equity", "cash", "position_count", "code_revision",
     }
     assert all("recorded" not in row for day in SESSIONS[1:4] for row in book.journal(f"executions_{day}.jsonl"))

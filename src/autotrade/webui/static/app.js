@@ -77,6 +77,7 @@ const CONSISTENCY_CAUSES = {
   nondeterministic: "策略结果不确定",
   paper_decision_path: "模拟账户的决策路径",
   unresolved: "原因未判明",
+  code_changed: "模拟账户运行后代码已变更",
 };
 const VERDICT_REASON_LABELS = {
   account_drawdown_exceeded: "账户回撤超限",
