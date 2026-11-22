@@ -14,7 +14,7 @@ QUANT_PYTHON=/home/lzp/miniconda3/envs/quant/bin/python
 # The ZGCA round files whose experiments may still have to come back,
 # separated by spaces; a closed round stays until all of them are synced, and
 # leaves before its file leaves the tree. Empty: each run only writes its line.
-ZGCA_ROUNDS=scripts/experiments/create_round_20261119.py scripts/experiments/create_round_20261121.py
+ZGCA_ROUNDS=scripts/experiments/create_round_20261121.py
 
 # Every 30 minutes, all day: an experiment ends at no particular hour. A copy
 # of a 6-10 GB experiment takes about an hour through the jump host, so a run
