@@ -5,7 +5,8 @@ A curl in a build step must write a file, and the step's next command must be
 The digest is written in the Dockerfile, or is a build arg declared there with
 a digest as its default, or with an empty one for a download only a build that
 names its URL makes: that build must name the digest too, and the checks run
-below show that an empty digest fails like a wrong one.
+below show that an empty digest fails like a wrong one. The base image is named
+by digest for the same reason.
 """
 
 from __future__ import annotations
@@ -67,6 +68,12 @@ def test_every_url_download_is_checked_against_a_recorded_sha256() -> None:
     # The two the default build downloads record their digest; the CUDA
     # compatibility package's comes with its URL (ops/zgca/remote.sh).
     assert [bool(check["recorded"]) for check in checks] == [True, True, False]
+
+
+def test_the_base_image_is_named_by_digest() -> None:
+    bases = [body for keyword, body in _instructions() if keyword == "FROM"]
+    assert len(bases) == 1, bases
+    assert re.fullmatch(f"[^@\\s]+@sha256:{DIGEST}", bases[0]), bases[0]
 
 
 def test_a_check_passes_only_the_bytes_its_digest_names(tmp_path: Path) -> None:

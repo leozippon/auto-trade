@@ -14,9 +14,18 @@
 # Every file a step fetches by URL is checked, before anything uses it, against
 # the SHA-256 recorded beside its version: a source serving other bytes fails
 # the build, whichever source the build was pointed at.
+# The base is named by the digest of its multi-platform index, so every host
+# builds on the same bytes: python:3.11-slim (Python 3.11.17, Debian trixie) as
+# Docker Hub served it on 2026-10-06, the base of the ZGCA instance's images.
+# The instance's classic builder finds it among its local images without a
+# pull; a builder that lacks it pulls it by digest, and a registry serving other
+# bytes fails the build. The L20 host reaches Docker Hub only through a mirror,
+# and its BuildKit asks the registry for a pinned base even when the image is
+# local, so a build there names the mirror as the base's source with
+# --build-context (docs/DEPLOYMENT_DOCUMENTATION.md, Sandbox 镜像).
 # Project-level build identity is assigned after a successful offline smoke
-# test by the host lifecycle; this build consumes the declared Python tag.
-FROM python:3.11-slim
+# test by the host lifecycle.
+FROM python:3.11-slim@sha256:e88e9763f943ec1834f992a4b51e0f24500486803e8bc534e5767af9ea65f6ce
 
 ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
 ARG NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
