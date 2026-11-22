@@ -763,7 +763,7 @@ class CreatePreflightTest(unittest.TestCase):
         """Not two validators that happen to agree today -- one body both call.
 
         Proved by moving the shared validator and watching both paths follow:
-        a change in `worker._positive_int` has to surface in the console's
+        a change in the `positive_int` the worker calls has to surface in the console's
         create-time 400 AND in the worker's own load of a params.json it
         already accepted. Two copies would diverge here.
 
@@ -787,14 +787,14 @@ class CreatePreflightTest(unittest.TestCase):
         # Baseline: what the console persisted survives the worker's stricter pass.
         worker_module.load_worker_options(directory, repo_root=repository)
 
-        original = worker_module._positive_int
+        original = worker_module.positive_int
 
         def stricter(value: object, name: str) -> int:
             if name == "window_months" and value == WEB_CREATE_DEFAULTS["window_months"]:
                 raise ValueError("window_months is temporarily unavailable")
             return original(value, name)
 
-        with patch.object(worker_module, "_positive_int", stricter):
+        with patch.object(worker_module, "positive_int", stricter):
             with self.assertRaisesRegex(ValueError, "window_months is temporarily unavailable"):
                 worker_module.load_worker_options(directory, repo_root=repository)
             with self.assertRaisesRegex(ManagerError, "window_months is temporarily unavailable"):
