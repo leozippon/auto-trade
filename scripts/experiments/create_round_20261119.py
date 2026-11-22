@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The 2026-11-19 round: three directions on DeepSeek-V4.1-Flash, one after another on the ZGCA A100.
+"""The 2026-11-19 round: two directions on DeepSeek-V4.1-Flash, one after another on the ZGCA A100. Closed.
 
 The round follows the owner's instructions of 2026-11-16 and 2026-11-19:
 
@@ -18,18 +18,12 @@ decision day's cross-section and across each stock's daily series, carrying its
 learned state from decision to decision. It is read against the same
 architecture with the feed-forward blocks back and against itself refit cold
 each quarter.
-`open_200k_10y_flash_zgca_20261119` mounts pack `open_200k_20261117`: the
-direction is open, but every tested candidate runs a model that needs the card.
 
-The instance's fill loop creates the first experiment once the card is free and
-each next one once the one before it has ended:
-
-    ~/miniconda3/envs/quant/bin/python ops/zgca/zgca.py run scripts/experiments/create_round_20261119.py --fill
-
-`--dry-run` with the port contacts no console and creates nothing: it runs the
-console's create-time pre-flight, prints what each experiment sends, and, unless
-a smoke record already covers the contract template on this seed, replays the
-template from every research-year start and over the full span.
+The round is closed: both experiments were created and have ended. A third,
+`open_200k_10y_flash_zgca_20261119` on pack `open_200k_20261117` (the direction
+open, every tested candidate running a model that needs the card), was withdrawn
+by the owner on 2026-11-21 before it was created, so that round 20261121 could
+start earlier; it has left the experiment list.
 """
 
 from __future__ import annotations
@@ -75,11 +69,11 @@ def _experiment(pack: str) -> dict[str, str]:
 EXPERIMENTS: dict[str, dict[str, str]] = {
     "llmadapt_200k_10y_flash_zgca_20261119": _experiment("llmadapt_200k_20261117"),
     "attnonly_200k_10y_flash_zgca_20261119": _experiment("attnonly_200k_20261117"),
-    "open_200k_10y_flash_zgca_20261119": _experiment("open_200k_20261117"),
 }
 
 ROUND = Round(
     experiments=EXPERIMENTS,
+    closed=True,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_TEN_YEAR_CSI1000,
