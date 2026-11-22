@@ -30,7 +30,8 @@ A real-fill book is compared until its account leaves the simulation
 (``partial``). A check that cannot run is ``failed`` with its reason; none
 that compared no session is ``consistent``. The check holds the writer lock
 only to read the journals, works under ``PAPER_CHECK_DIR``, writes only the
-book's ``consistency.json`` (the latest result) and never feeds the verdict.
+book's ``consistency.json`` (the latest result), nothing for a book deleted
+while it ran, and never feeds the verdict.
 """
 
 from __future__ import annotations
@@ -63,7 +64,7 @@ from autotrade.pipelines.pit_backend import (
     required_release_raw_datasets,
 )
 
-from .book import Book, verify_book_artifact
+from .book import BOOK_NAME, Book, verify_book_artifact
 from .engine import (
     PAPER_STATE_NAME,
     REFERENCE_KEY,
@@ -420,7 +421,8 @@ def check_book(
     execution_mode: str = "sandbox",
 ) -> dict[str, object]:
     """Check ``book``, write the result to its ``consistency.json`` and return
-    it. ``take_devices`` gives the cards the replays attach, asked once the
+    it; a book deleted meanwhile gets no file and a ``failed`` result.
+    ``take_devices`` gives the cards the replays attach, asked once the
     views are built; ``generation_id`` names a published release to replay on
     instead of the newest; ``paper_mode`` runs the Paper engine, under the
     updater's ``updater_schedule``, when a decision differs."""
@@ -507,6 +509,13 @@ def check_book(
     except Exception as exc:  # noqa: BLE001 - every failure is the result's reason
         record.update(status="failed", reason=f"{type(exc).__name__}: {exc}")
     record["wall_seconds"] = round(perf_counter() - started, 1)
+    if not (book.root / BOOK_NAME).is_file():
+        # The write would re-create the deleted book's directory, and a new
+        # book cannot take its name while that holds a file (``create_book``).
+        record.update(
+            status="failed", reason=f"the book {book.root.name} was deleted during its check; no result is written"
+        )
+        return record
     write_json_atomic(book.root / CONSISTENCY_NAME, record, private=True, sort_keys=False)
     return record
 

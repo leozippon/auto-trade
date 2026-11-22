@@ -39,6 +39,7 @@ from tests.unit.support.paper_book_fixture import (
     _repo,
     _run_paper,
     paper_root,
+    write_book_record,
 )
 from tests.unit.support.snapshot_fixture import (
     build_fundamental_events,
@@ -211,6 +212,7 @@ def _book(root: Path, lake: Path, source: str, config: SnapshotConfig | None = N
     strategy = root / "strategy" / "output" / "main.py"
     strategy.parent.mkdir(parents=True, exist_ok=True)
     strategy.write_text(source, encoding="utf-8")
+    write_book_record(root)
     return Book(
         root=root, experiment_id="exp", artifact_id="art", note="", strategy_path=strategy, models_dir=None,
         schedule=StrategySchedule("day", "08:30"), profile=BrokerProfile(initial_cash=100_000.0, permitted_boards=("main", "gem")),
@@ -260,6 +262,31 @@ def test_the_check_command_keeps_out_of_the_morning_and_exits_2_for_a_book_it_ca
     result = json.loads((book.root / CONSISTENCY_NAME).read_text(encoding="utf-8"))
     assert (result["status"], result["reason"]) == ("failed", "CheckFailed: the book has no settled session to compare")
     assert "paper_consistency " in capsys.readouterr().out
+
+
+def test_a_book_deleted_during_its_check_gets_no_result_and_no_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
+    """Writing the result would re-create the deleted book's directory, and a
+    new book could not take its name; the check writes nothing and exits 2."""
+
+    from autotrade.paper import consistency
+    from autotrade.paper.books import delete_book
+
+    cli = _run_paper()
+    monkeypatch.setattr(cli, "in_morning_window", lambda _now: False)
+    monkeypatch.setattr(cli, "REPO_ROOT", _repo(tmp_path))
+    book = _registered_book(tmp_path)
+    read_book_records = consistency.read_book_records
+
+    def deleted_first(root: Path) -> BookRecords:
+        delete_book(paper_root(tmp_path), "exp")
+        return read_book_records(root)
+
+    monkeypatch.setattr(consistency, "read_book_records", deleted_first)
+    assert cli.main(["check", "--state-root", str(paper_root(tmp_path))]) == 2
+    assert not book.root.exists()
+    assert "[exp] the book exp was deleted during its check; no result is written\n" in capsys.readouterr().err
 
 
 LAKE_CONFIG = SnapshotConfig(
