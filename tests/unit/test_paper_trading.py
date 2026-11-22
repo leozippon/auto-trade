@@ -537,10 +537,10 @@ def test_a_pre_open_book_reads_a_real_pit_window_without_the_session_bars(tmp_pa
 
 
 def test_a_book_shows_its_strategy_the_bars_a_replay_from_its_first_decision_shows(tmp_path: Path):
-    """The slot opens one session before the book's first decision (book_window),
-    but the Broker and ``context.bars`` start at the decision, as in a replay of
-    the book that starts there; the extra session reaches the strategy only
-    through the Timeview."""
+    """The view and slot are those of a replay of the book from its first
+    decision, so on the first morning the slot, the Broker and
+    ``context.bars`` hold no bars yet; the session before reaches the strategy
+    through the decision view, as in that replay."""
 
     from autotrade.paper.pit import BookPITData, newest_replay_slot
     from tests.unit.support.snapshot_fixture import (
@@ -567,8 +567,12 @@ def test_a_book_shows_its_strategy_the_bars_a_replay_from_its_first_decision_sho
         due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ), schedule={},
     )
     try:
-        slot = pd.read_parquet(newest_replay_slot(tmp_path / "paper") / "daily.parquet")
-        assert sorted(set(slot["trade_date"].astype(str))) == ["20211008"]
+        slot = newest_replay_slot(tmp_path / "paper")
+        assert (data.snapshot_dir.name, slot.name) == (
+            "20211010T235959+0800", "20211011_20211011_20211010T235959+0800"
+        )
+        assert pd.read_parquet(slot / "daily.parquet").empty
+        assert "20211008" in set(pd.read_parquet(data.snapshot_dir / "daily.parquet")["trade_date"].astype(str))
         assert data.market.trade_dates == ()
         assert data.market.visible_count(datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ)) == 0
     finally:

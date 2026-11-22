@@ -114,12 +114,10 @@ REPLAY_SLOTS_SIDECAR = "replay_slots.json"
 _CORE_RAW_DATASETS = ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")
 
 
-def _decision_key(decision: datetime, window_from: datetime | None = None) -> str:
-    """The cache path component one decision view is published under: its
-    anchor, and the instant its windows reach back from when one is given."""
+def _decision_key(decision: datetime) -> str:
+    """The cache path component one decision view is published under."""
 
-    key = decision.strftime("%Y%m%dT%H%M%S%z")
-    return key if window_from is None else f"{key}_from{window_from.strftime('%Y%m%dT%H%M%S%z')}"
+    return decision.strftime("%Y%m%dT%H%M%S%z")
 
 
 def required_release_raw_datasets(config: SnapshotConfig) -> tuple[str, ...]:
@@ -197,25 +195,15 @@ class ResearchPITSnapshotProvider:
         start: str,
         end: str,
         decision_time: datetime,
-        window_from: datetime | None = None,
     ) -> SnapshotBundle:
-        """The decision view at ``decision_time`` and the ``phase`` slot from
-        ``start`` through ``end`` anchored there.
-
-        ``window_from`` is the instant the view's windows reach back from,
-        ``decision_time`` unless given (``SnapshotBuilder.build_decision_snapshot``).
-        A given one is part of the view's key and of the slot's beside it, so
-        a slot still names the view it was prepared with."""
-
         if phase not in _PHASES:
             raise ValueError(f"unsupported PIT snapshot phase: {phase}")
         decision = _cn_datetime(decision_time)
-        window = None if window_from is None else _cn_datetime(window_from)
         start_key = yyyymmdd(start)
         end_key = yyyymmdd(end)
         if start_key > end_key:
             raise ValueError("PIT snapshot phase start cannot be after end")
-        decision_key = _decision_key(decision, window)
+        decision_key = _decision_key(decision)
         decision_dir = self.cache_root / "decision" / decision_key
         replay_dir = (
             self.cache_root
@@ -223,7 +211,7 @@ class ResearchPITSnapshotProvider:
             / phase
             / f"{start_key}_{end_key}_{decision_key}"
         )
-        decision_manifest = self._decision_view(decision_dir, decision, window)
+        decision_manifest = self._decision_view(decision_dir, decision)
         replay_dir = self._replay_view(replay_dir, start_key, end_key, decision, phase)
         return SnapshotBundle(
             snapshot_id=str(decision_manifest.get("snapshot_id") or ""),
@@ -280,17 +268,13 @@ class ResearchPITSnapshotProvider:
                 write_json_atomic(path, record)
         return record
 
-    def _decision_view(
-        self, target: Path, decision: datetime, window_from: datetime | None = None
-    ) -> dict[str, object]:
+    def _decision_view(self, target: Path, decision: datetime) -> dict[str, object]:
         with _exclusive_lock(target.with_suffix(".lock")):
             if target.exists():
                 manifest = load_snapshot_manifest(target)
-                if (
-                    manifest.get("kind") != "decision_input"
-                    or _cn_datetime(datetime.fromisoformat(str(manifest.get("decision_time")))) != decision
-                    or _optional_cn_datetime(manifest.get("window_from")) != window_from
-                ):
+                if manifest.get("kind") != "decision_input" or _cn_datetime(
+                    datetime.fromisoformat(str(manifest.get("decision_time")))
+                ) != decision:
                     raise RuntimeError(f"conflicting cached decision snapshot: {target}")
                 return manifest
             staging = target.with_name(f".{target.name}.{uuid.uuid4().hex}.tmp")
@@ -299,7 +283,6 @@ class ResearchPITSnapshotProvider:
                     decision,
                     staging,
                     self.config,
-                    window_from=window_from,
                 )
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(staging, target)

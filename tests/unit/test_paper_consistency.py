@@ -28,7 +28,7 @@ from autotrade.paper.consistency import (
     compare,
 )
 from autotrade.paper.engine import DailyPaperEngine, writer_lock
-from autotrade.paper.pit import book_data_factory, book_window
+from autotrade.paper.pit import BookPITData, book_data_factory, newest_replay_slot
 from autotrade.pipelines.calendar import anchor_before
 from autotrade.pipelines.config import FORWARD_PHASE
 from autotrade.pipelines.pit_backend import ResearchPITSnapshotProvider
@@ -294,8 +294,8 @@ LAKE_CONFIG = SnapshotConfig(
     include_intraday=False, include_industry=False,
 )
 # A month of history, fundamentals and two sessions of minute bars. A book
-# whose first decision is 20211011 is anchored at 20210930 23:59:59 and a
-# replay of it at 20211010 23:59:59, so 20210909's bars and the income event
+# whose first decision is 20211011 used to be anchored at 20210930 23:59:59,
+# a replay of it at 20211010 23:59:59, so 20210909's bars and the income event
 # of 2021-09-10 18:00 lie between where a month back from each would start.
 EDGE_CONFIG = dataclasses.replace(
     LAKE_CONFIG, window_months=1, fundamental_datasets=("income_vip",), include_intraday=True,
@@ -365,8 +365,11 @@ def _lake(root: Path) -> Path:
     return root
 
 
-def _trade(book: Book) -> None:
-    """Paper decides every session, one morning each, as the cron does."""
+def _trade(book: Book, *, pre_open: bool = False) -> None:
+    """Paper decides every session, one morning each, as the cron does.
+
+    ``pre_open`` runs the first morning on an earlier generation of the lake,
+    one without the bars of that session or any later, as it runs live."""
 
     engine = DailyPaperEngine(
         strategy_path=book.strategy_path, strategy_revision=book.artifact_id, state_root=book.root,
@@ -375,7 +378,23 @@ def _trade(book: Book) -> None:
             path, state_dir=state_dir, models_dir=models_dir
         ),
     )
-    for day in LAKE_SESSIONS:
+    marker = book.raw_dir / ".raw_generation.json"
+    committed = marker.read_text(encoding="utf-8")
+    held = book.raw_dir.parent / "held_out"
+    landed = [
+        path for path in book.raw_dir.rglob("trade_date=*.parquet*")
+        if pre_open and path.name.split("=")[1][:8] >= LAKE_SESSIONS[0]
+    ]
+    for path in landed:
+        (held / path.relative_to(book.raw_dir)).parent.mkdir(parents=True, exist_ok=True)
+        path.rename(held / path.relative_to(book.raw_dir))
+    if pre_open:
+        marker.write_text(json.dumps({**json.loads(committed), "generation_id": "g20211008"}), encoding="utf-8")
+    engine.run_day(LAKE_SESSIONS[0])
+    for path in landed:
+        (held / path.relative_to(book.raw_dir)).rename(path)
+    marker.write_text(committed, encoding="utf-8")
+    for day in LAKE_SESSIONS[1:]:
         engine.run_day(day)
 
 
@@ -440,7 +459,82 @@ def test_a_book_decides_on_the_view_its_replay_shows_down_to_the_oldest_rows(tmp
     }
 
 
-def test_a_view_keeps_its_key_and_manifest_unless_its_windows_reach_back_from_another_instant(tmp_path: Path):
+# A book that reads industries and screens ST names out of its universe.
+ANCHOR_CONFIG = dataclasses.replace(LAKE_CONFIG, include_industry=True, screen_exclude_st=True)
+
+
+def _anchor_lake(root: Path) -> Path:
+    """``_lake`` whose universe changes after 20210930 23:59:59, where a book
+    first deciding on 20211011 used to take it, and before 20211010 23:59:59,
+    where a replay of the book takes it: 000002.SZ turns ST (and so leaves the
+    screened universe), 000001.SZ moves industry and 000004.SZ lists. The
+    rename of 000001.SZ announced on 20211012 comes after both."""
+
+    lake = _lake(root)
+    raw = lake / "data" / "raw"
+    tables = {
+        "stock_basic/list_status=L.parquet": [
+            {"ts_code": "000001.SZ", "name": "平安银行", "exchange": "SZSE", "list_date": "19910403", "delist_date": None},
+            {"ts_code": "000002.SZ", "name": "万科A", "exchange": "SZSE", "list_date": "19910129", "delist_date": None},
+            {"ts_code": "000004.SZ", "name": "新股", "exchange": "SZSE", "list_date": "20211009", "delist_date": None},
+        ],
+        "namechange/namechange.parquet": [
+            {"ts_code": "000001.SZ", "name": "平安银行", "start_date": "20120801", "ann_date": "20120730"},
+            {"ts_code": "000001.SZ", "name": "平安新名", "start_date": "20211013", "ann_date": "20211012"},
+            {"ts_code": "000002.SZ", "name": "万科A", "start_date": "19910129", "ann_date": "19910129"},
+            {"ts_code": "000002.SZ", "name": "ST万科", "start_date": "20211009", "ann_date": "20211008"},
+            {"ts_code": "000004.SZ", "name": "新股", "start_date": "20211009", "ann_date": "20211008"},
+            {"ts_code": "000005.SZ", "name": "世纪星源", "start_date": "19901210", "ann_date": "19901210"},
+        ],
+        "index_classify/src=SW2014.parquet": [
+            {"index_code": "801780.SI", "industry_name": "银行", "level": "L1"},
+            {"index_code": "801790.SI", "industry_name": "非银金融", "level": "L1"},
+            {"index_code": "801180.SI", "industry_name": "房地产", "level": "L1"},
+        ],
+        "index_member/l1_code=801780.SI.parquet": [
+            {"index_code": "801780.SI", "con_code": "000001.SZ", "in_date": "19910403", "out_date": "20211009"},
+        ],
+        "index_member/l1_code=801790.SI.parquet": [
+            {"index_code": "801790.SI", "con_code": "000001.SZ", "in_date": "20211009", "out_date": None},
+        ],
+        "index_member/l1_code=801180.SI.parquet": [
+            {"index_code": "801180.SI", "con_code": "000002.SZ", "in_date": "19910129", "out_date": None},
+        ],
+    }
+    for name, rows in tables.items():
+        write(raw / name, pd.DataFrame(rows))
+        (raw / name).with_suffix(".parquet.meta.json").write_text("{}\n", encoding="utf-8")
+    return lake
+
+
+def _view(book: Book, day: str) -> dict[str, list[str]]:
+    """The view ``VIEW_RECORDER`` recorded in the book's order of ``day``."""
+
+    return json.loads((book.root / f"orders_{day}.jsonl").read_text(encoding="utf-8").splitlines()[0])["view"]
+
+
+def test_a_book_sees_the_universe_and_screen_its_replay_sees_at_its_anchor(tmp_path: Path):
+    """The negative control of the anchor rule (``_anchor_lake``); the book's
+    first morning runs before its session's bars land, as it does live."""
+
+    book = _book(tmp_path / "paper" / "book", _anchor_lake(tmp_path), VIEW_RECORDER, ANCHOR_CONFIG)
+    _trade(book, pre_open=True)
+    decisions = json.loads((book.root / ".paper_state.json").read_text(encoding="utf-8"))["decisions"]
+    assert [row["generation_id"] for row in decisions[:2]] == ["g20211008", "g20211015"]
+    result = check_book(book, work_dir=tmp_path / "work", execution_mode="trusted", updater_schedule=UPDATER)
+    assert result["status"] == "consistent", result.get("first_difference") or result.get("reason")
+    assert result["sessions_compared"] == 4
+    for day in LAKE_SESSIONS[:4]:
+        view = _view(book, day)
+        # ST at the anchor, so screened out of every per-stock table.
+        assert not any("000002.SZ" in row for table in view.values() for row in table)
+        [listed] = [row for row in view["universe"] if "000001.SZ" in row]
+        # Its industry at the anchor, and its name before the later rename.
+        assert ("非银金融" in listed, "平安银行" in listed) == (True, True)
+        assert any("000004.SZ" in row for row in view["universe"])
+
+
+def test_a_book_prepares_the_view_its_replay_prepares_and_research_keys_stay_put(tmp_path: Path):
     lake = _lake(tmp_path)
     provider = ResearchPITSnapshotProvider(
         experiment_dir=tmp_path / "pit", raw_dir=lake / "data" / "raw",
@@ -448,26 +542,33 @@ def test_a_view_keeps_its_key_and_manifest_unless_its_windows_reach_back_from_an
         fundamental_events_status=lake / "results" / "data_quality" / "fundamental_events_status.json",
         config=EDGE_CONFIG,
     )
-    replay = provider.prepare(phase=FORWARD_PHASE, start="20211011", end="20211011", decision_time=anchor_before("20211011"))
+    replay = provider.prepare(phase=FORWARD_PHASE, start="20211011", end="20211012", decision_time=anchor_before("20211011"))
     research = load_snapshot_manifest(replay.decision_ref)
     # The names and fields every research view and seed was built under, as
     # 57040db5 writes them.
     assert (Path(replay.decision_ref).name, Path(replay.replay_ref).name) == (
-        "20211010T235959+0800", "20211011_20211011_20211010T235959+0800"
+        "20211010T235959+0800", "20211011_20211012_20211010T235959+0800"
     )
     assert sorted(research) == [
         "build_profile", "created_at", "data_profile", "data_quality_warnings", "decision_time", "domain_windows",
         "domains", "kind", "raw_generation", "snapshot_id", "window_config", "window_months", "window_start",
     ]
-    slot, anchor, window_from = book_window(("20210929", "20210930", "20211008"), "20211011")
-    paper = provider.prepare(phase="paper", start=slot, end="20211011", decision_time=anchor, window_from=window_from)
-    assert (Path(paper.decision_ref).name, Path(paper.replay_ref).name) == (
-        "20210930T235959+0800_from20211010T235959+0800",
-        "20211008_20211011_20210930T235959+0800_from20211010T235959+0800",
+    book = _book(tmp_path / "paper" / "book", lake, STATELESS, EDGE_CONFIG)
+    paper = BookPITData(
+        state_root=book.root, raw_dir=book.raw_dir, fundamental_events_root=book.fundamental_events_root,
+        fundamental_events_status=book.fundamental_events_status, snapshot_config=EDGE_CONFIG,
+        start="20211011", trade_date="20211012", due_at=book.schedule.at("20211012"), schedule=UPDATER,
     )
-    manifest = load_snapshot_manifest(paper.decision_ref)
-    assert (manifest["decision_time"], manifest["window_from"]) == ("2021-09-30T23:59:59+08:00", "2021-10-10T23:59:59+08:00")
-    assert (manifest["window_start"], manifest["domain_windows"]) == (research["window_start"], research["domain_windows"])
+    try:
+        assert (paper.snapshot_dir.name, newest_replay_slot(book.root).name) == (
+            "20211010T235959+0800", "20211011_20211012_20211010T235959+0800"
+        )
+        # The book's decision view is the replay's, file for file.
+        assert {
+            name: data for name, data in _files(paper.snapshot_dir).items() if name != "manifest.json"
+        } == {name: data for name, data in _files(Path(replay.decision_ref)).items() if name != "manifest.json"}
+    finally:
+        paper.close()
 
 
 def test_a_stateless_book_is_consistent_with_its_replay_and_only_its_result_is_written(tmp_path: Path):

@@ -1,11 +1,17 @@
 """PIT inputs of one Paper run: the newest committed release, one book window.
 
 A run reads the release the data updater committed last, so each morning sees
-the previous session's data. The window is laid out like a research replay of
-the book (``book_window``): a decision view anchored two sessions before the
-book's first decision, whose history windows reach back from the replay's
-anchor, and one replay slot from the session before it through the target
-session, whose own bars do not exist yet. Views are cached per release
+the previous session's data. The window is the one a research replay of the
+book prepares (``paper.consistency``): the decision view anchored at 23:59:59
+of the calendar day before the book's first decision (``anchor_before``) and
+one replay slot from that decision through the target session, whose own bars
+do not exist yet (on the first morning the slot holds no bars at all). So
+every decision sees the rows, the as-of universe (names, ST flags, industries,
+the listed set) and the screened universe that replay shows it, but for the
+news once ``news_window_months`` is set: a slot's news reaches back only that
+far from the slot's end, which is the session being decided on Paper and the
+last settled one in a replay of the whole book, so a book older than that
+window sees older news on Paper than in its replay. Views are cached per release
 generation under the book's state root, and a run drops the caches of every
 older generation and rebuilds that of its own generation when an earlier run
 wrote it under another view cache format. A book whose decision view the
@@ -18,7 +24,7 @@ from __future__ import annotations
 import os
 import shutil
 import uuid
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from datetime import datetime, time
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -56,7 +62,6 @@ from autotrade.pipelines.pit_backend import (
     load_slot_corporate_actions,
     required_release_raw_datasets,
     slot_minute_source,
-    span_daily,
 )
 
 if TYPE_CHECKING:
@@ -149,26 +154,21 @@ class BookPITData:
             # A local lake without a generation record records no refresh
             # times; a stamped one must hold every mounted dataset fresh.
             require_fresh_release(self.generation, snapshot_config, schedule, self.sessions, due_at)
-        slot_start, anchor, window_from = book_window(self.sessions, start)
+        # A replay of the book from its first decision, ending at the target
+        # session: every decision sees the view, the as-of universe and the
+        # screen that replay shows it.
         bundle = provider.prepare(
-            phase=PAPER_PHASE,
-            start=slot_start,
-            end=trade_date,
-            decision_time=anchor,
-            window_from=window_from,
+            phase=PAPER_PHASE, start=start, end=trade_date, decision_time=anchor_before(start)
         )
         self.snapshot_dir = Path(bundle.decision_ref).resolve(strict=True)
         replay_dir = Path(bundle.replay_ref).resolve(strict=True)
         _require_read_only_tree(self.snapshot_dir)
         manifest = load_snapshot_manifest(replay_dir)
         replay = _open_replay_rows(replay_dir)
-        # The Broker and context.bars start at the book's first decision, as in
-        # a replay of the book (span_daily): the slot's extra session reaches
-        # the strategy through the Timeview only. The sheet's quotes read it.
-        self.market = DailyMarketData(
-            span_daily([replay_dir], start, trade_date), load_slot_corporate_actions(replay_dir, manifest)
-        )
+        # The slot's bars are the book's from its first decision on, which the
+        # Broker and context.bars read, as in a replay of the book.
         self._daily = pd.read_parquet(replay_dir / "daily.parquet")
+        self.market = DailyMarketData(self._daily, load_slot_corporate_actions(replay_dir, manifest))
         runtime = generation_dir / "runtime" / trade_date
         if runtime.exists():
             _remove_tree(runtime)
@@ -277,34 +277,6 @@ def book_data_factory(
     return build
 
 
-def book_window(sessions: Sequence[str], start: str) -> tuple[str, datetime, datetime]:
-    """The first session of the replay slot, the instant the decision view is
-    anchored at, and the instant its history windows reach back from, of a
-    book whose first decision is ``start``.
-
-    The slot opens one session before the first decision: a slot needs daily
-    bars, and on the first morning the decision session has none yet. So the
-    view is anchored at 23:59:59 of the session before the slot's first, and
-    the rows of the extra session reach the Timeview through the slot. The
-    windows reach back from the anchor of a replay of the book, 23:59:59 of
-    the calendar day before ``start`` (``anchor_before``), so they start where
-    that replay's start: every decision sees the rows the replay shows, the
-    oldest included. Only the as-of universe (names, ST flags, industries,
-    the listed set) and a screened universe stay those of the earlier anchor,
-    so a change announced between the two anchors differs. The news differs
-    too once ``news_window_months`` is set: a slot's news reaches back only
-    that far from the slot's end, which is the session being decided on Paper
-    and the last settled one in a replay of the whole book, so a book older
-    than that window sees older news on Paper than in its replay.
-    """
-
-    earlier = [day for day in sessions if day < start]
-    if len(earlier) < 2:
-        raise RuntimeError(f"the exchange calendar has fewer than two sessions before {start}")
-    anchor = datetime.combine(pd.Timestamp(earlier[-2]).date(), time(23, 59, 59), tzinfo=CN_TZ)
-    return earlier[-1], anchor, anchor_before(start)
-
-
 def require_audited_fundamentals(
     config: SnapshotConfig,
     *,
@@ -330,11 +302,10 @@ def require_audited_fundamentals(
     start = next((day for day in sessions if day >= today), None)
     if start is None:
         raise RuntimeError(f"the exchange calendar has no session on or after {today}")
-    *_, window_from = book_window(sessions, start)
     builder = SnapshotBuilder(raw_dir, fundamental_events_root, fundamental_events_status)
     try:
         builder.assert_fundamental_events_audited(
-            config.window_start_for(window_from, "fundamentals"), tuple(config.fundamental_datasets)
+            config.window_start_for(anchor_before(start), "fundamentals"), tuple(config.fundamental_datasets)
         )
     except FundamentalAuditScopeError as exc:
         month = exc.needed_month
@@ -408,7 +379,6 @@ __all__ = [
     "PIT_CACHE_NAME",
     "BookPITData",
     "book_data_factory",
-    "book_window",
     "newest_replay_slot",
     "require_audited_fundamentals",
 ]
