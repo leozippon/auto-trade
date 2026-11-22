@@ -610,13 +610,25 @@ class SnapshotBuilder:
         decision_time: datetime,
         output_dir: str | Path,
         config: SnapshotConfig | None = None,
+        *,
+        window_from: datetime | None = None,
     ) -> dict[str, object]:
+        """The decision view at ``decision_time``: every row visible then
+        inside its windows.
+
+        Its windows reach back from ``window_from``, ``decision_time`` unless
+        given: each domain's months start before it, the news window's too,
+        and the minute bars are those of its last ``intraday_trade_days``
+        sessions that are visible at ``decision_time``. A Paper book passes
+        the anchor of the replay its view must equal (``paper.pit.book_window``);
+        the manifest then records it."""
         with self._raw_lake_guard() as raw_generation:
             manifest = self._build_decision_snapshot_impl(
                 decision_time,
                 output_dir,
                 config,
                 raw_generation,
+                window_from,
             )
         return manifest
 
@@ -626,15 +638,19 @@ class SnapshotBuilder:
         output_dir: str | Path,
         config: SnapshotConfig | None,
         raw_generation: dict[str, object] | None,
+        window_from: datetime | None = None,
     ) -> dict[str, object]:
         config = config or SnapshotConfig()
         decision_time = decision_time if decision_time.tzinfo else decision_time.replace(tzinfo=CN_TZ)
         decision_time = decision_time.astimezone(CN_TZ)
-        daily_window_start = config.window_start_for(decision_time, "daily")
-        fundamentals_window_start = config.window_start_for(decision_time, "fundamentals")
-        events_window_start = config.window_start_for(decision_time, "events")
-        macro_window_start = config.window_start_for(decision_time, "macro")
-        text_window_start = config.window_start_for(decision_time, "text")
+        reference = decision_time
+        if window_from is not None:
+            reference = (window_from if window_from.tzinfo else window_from.replace(tzinfo=CN_TZ)).astimezone(CN_TZ)
+        daily_window_start = config.window_start_for(reference, "daily")
+        fundamentals_window_start = config.window_start_for(reference, "fundamentals")
+        events_window_start = config.window_start_for(reference, "events")
+        macro_window_start = config.window_start_for(reference, "macro")
+        text_window_start = config.window_start_for(reference, "text")
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         data_quality_warnings = self._domain_status_gates(config)
@@ -661,8 +677,12 @@ class SnapshotBuilder:
         def build_intraday(completed: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
             if config.include_intraday:
-                daily_meta = completed["daily"][0]
-                intraday, meta = self._build_intraday(decision_time, daily_meta["trade_dates"], config)
+                days = completed["daily"][0]["trade_dates"]
+                if window_from is not None:
+                    visible = self._visible_trade_dates("daily", reference, daily_window_start)
+                    recent = set(visible[-config.intraday_trade_days :])
+                    days = [day for day in days if day in recent]
+                intraday, meta = self._build_intraday(decision_time, days, config)
                 intraday = self._apply_screen(intraday, screened)
                 meta = {**meta, "rows": len(intraday)}
             else:
@@ -751,7 +771,9 @@ class SnapshotBuilder:
 
         def build_text(_: Mapping[str, DomainBuildResult]) -> DomainBuildResult:
             started = time.perf_counter()
-            text_index, meta = self._build_text(config, decision_time, text_window_start, output_dir)
+            text_index, meta = self._build_text(
+                config, decision_time, text_window_start, output_dir, window_from=reference
+            )
             profile = _write_with_profile(
                 output_dir / "text_index.parquet", text_index, build_seconds=time.perf_counter() - started
             )
@@ -804,6 +826,7 @@ class SnapshotBuilder:
             "kind": "decision_input",
             "created_at": utc_now("auto"),
             "decision_time": decision_time.isoformat(),
+            **({"window_from": reference.isoformat()} if window_from is not None else {}),
             "window_start": daily_window_start.isoformat(),
             "window_months": config.months_for("daily"),
             "window_config": config.to_record()["decision_windows"],
@@ -1997,6 +2020,7 @@ class SnapshotBuilder:
         output_dir: Path,
         *,
         keep_first_seen: bool = False,
+        window_from: datetime | None = None,
     ) -> tuple[pd.DataFrame, dict[str, object]]:
         """Text index plus per-dataset body shards under text_library/.
 
@@ -2014,7 +2038,8 @@ class SnapshotBuilder:
                 news_start = window_start
                 if config.news_window_months is not None:
                     news_start = max(
-                        window_start, pd.Timestamp(decision_time) - pd.DateOffset(months=config.news_window_months)
+                        window_start,
+                        pd.Timestamp(window_from or decision_time) - pd.DateOffset(months=config.news_window_months),
                     )
                 if config.news_sources:
                     source_dirs = [dataset_dir / f"src={source}" for source in config.news_sources]

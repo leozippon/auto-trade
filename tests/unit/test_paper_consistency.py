@@ -15,7 +15,7 @@ from autotrade.data_sources.tushare.cron_update import DEFAULT_CONFIG, load_conf
 from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
-from autotrade.environment.data.snapshot import SnapshotConfig
+from autotrade.environment.data.snapshot import SnapshotConfig, load_snapshot_manifest
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
@@ -28,7 +28,10 @@ from autotrade.paper.consistency import (
     compare,
 )
 from autotrade.paper.engine import DailyPaperEngine, writer_lock
-from autotrade.paper.pit import book_data_factory
+from autotrade.paper.pit import book_data_factory, book_window
+from autotrade.pipelines.calendar import anchor_before
+from autotrade.pipelines.config import FORWARD_PHASE
+from autotrade.pipelines.pit_backend import ResearchPITSnapshotProvider
 from tests.unit.support.paper_book_fixture import (
     COUNTER_STRATEGY,
     _Book,
@@ -204,14 +207,14 @@ def test_a_real_fill_book_is_compared_until_its_account_leaves_the_simulation():
 # ---------------------------------------------------------- the whole check
 
 
-def _book(root: Path, lake: Path, source: str) -> Book:
+def _book(root: Path, lake: Path, source: str, config: SnapshotConfig | None = None) -> Book:
     strategy = root / "strategy" / "output" / "main.py"
     strategy.parent.mkdir(parents=True, exist_ok=True)
     strategy.write_text(source, encoding="utf-8")
     return Book(
         root=root, experiment_id="exp", artifact_id="art", note="", strategy_path=strategy, models_dir=None,
         schedule=StrategySchedule("day", "08:30"), profile=BrokerProfile(initial_cash=100_000.0, permitted_boards=("main", "gem")),
-        sandbox=SandboxConfig(), snapshot_config=LAKE_CONFIG, max_intraday_row_group_rows=2_000_000,
+        sandbox=SandboxConfig(), snapshot_config=config or LAKE_CONFIG, max_intraday_row_group_rows=2_000_000,
         raw_dir=lake / "data" / "raw", fundamental_events_root=lake / "data" / "pit" / "fundamental_events",
         fundamental_events_status=lake / "results" / "data_quality" / "fundamental_events_status.json",
         benchmark_index=DEFAULT_BENCHMARK_INDEX, verdict_rules={},
@@ -263,23 +266,32 @@ LAKE_CONFIG = SnapshotConfig(
     events_datasets=(), macro_datasets=(), text_datasets=(), fundamental_datasets=(),
     include_intraday=False, include_industry=False,
 )
+# A month of history, fundamentals and two sessions of minute bars. A book
+# whose first decision is 20211011 is anchored at 20210930 23:59:59 and a
+# replay of it at 20211010 23:59:59, so 20210909's bars and the income event
+# of 2021-09-10 18:00 lie between where a month back from each would start.
+EDGE_CONFIG = dataclasses.replace(
+    LAKE_CONFIG, window_months=1, fundamental_datasets=("income_vip",), include_intraday=True,
+    replay_include_minutes=True, intraday_trade_days=2,
+)
 LAKE_SESSIONS = ("20211011", "20211012", "20211013", "20211014", "20211015")
 UPDATER = load_config(REPO_ROOT / DEFAULT_CONFIG)
 
 
 def _lake(root: Path) -> Path:
     """A committed lake of two names whose sessions run on from the snapshot
-    fixture's: 20210930 and 20211008 before a book's first decision on
-    20211011, then four more."""
+    fixture's: 20210909, 20210929, 20210930 and 20211008 before a book's
+    first decision on 20211011, then four more, with minute bars at 09:30."""
 
     raw = root / "data" / "raw"
     build_raw(raw)
     write(raw / "trade_cal" / "exchange=SSE" / "year=2021.parquet", pd.DataFrame(
-        {"cal_date": ["20210930", "20211008", *LAKE_SESSIONS, "20211018"], "is_open": "1"}
+        {"cal_date": ["20210909", "20210929", "20210930", "20211008", *LAKE_SESSIONS, "20211018"], "is_open": "1"}
     ))
     symbols = ("000001.SZ", "000002.SZ")
-    for index, day in enumerate(LAKE_SESSIONS):
-        price = 10.0 + 0.1 * index
+    for day, price in (
+        ("20210909", 9.0), ("20210929", 9.5), *((day, 10.0 + 0.1 * index) for index, day in enumerate(LAKE_SESSIONS))
+    ):
         write(raw / "daily" / f"trade_date={day}.parquet", pd.DataFrame([
             {"trade_date": day, "ts_code": symbol, "open": price, "high": price + 0.2, "low": price - 0.2,
              "close": price + 0.05, "pre_close": price - 0.05, "pct_chg": 1.0, "vol": 1000.0, "amount": 10000.0}
@@ -296,6 +308,14 @@ def _lake(root: Path) -> Path:
             ))
         write(raw / "suspend_d" / f"trade_date={day}.parquet",
               pd.DataFrame(columns=["trade_date", "ts_code", "suspend_timing", "suspend_type"]))
+    for day in ("20210909", "20210929", "20211008", *LAKE_SESSIONS):
+        stamp = f"{day[:4]}-{day[4:6]}-{day[6:]}"
+        write(raw / "stk_mins_1min_by_date" / f"trade_date={day}.parquet", pd.DataFrame([
+            {"ts_code": symbol, "trade_time": f"{stamp} 09:30:00", "open": 10.0, "high": 10.1, "low": 9.9,
+             "close": 10.0, "vol": 20000.0, "amount": 200000.0, "trade_date": day,
+             "available_at": f"{stamp}T09:30:00+08:00", "available_at_rule": "bar_close"}
+            for symbol in symbols
+        ]))
     build_fundamental_events(root / "data" / "pit" / "fundamental_events")
     status = root / "results" / "data_quality" / "fundamental_events_status.json"
     status.parent.mkdir(parents=True)
@@ -310,7 +330,10 @@ def _lake(root: Path) -> Path:
     refreshed = {"refreshed_at": "2021-10-15T00:00:00+00:00", "vintage": "v1"}
     (raw / ".raw_generation.json").write_text(json.dumps({
         "schema_version": 3, "state": "committed", "generation_id": "g20211015", "issues": [],
-        "datasets": {name: refreshed for name in ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d")},
+        "datasets": {
+            name: refreshed
+            for name in ("daily", "daily_basic", "adj_factor", "stk_limit", "suspend_d", "income_vip", "stk_mins_1min_by_date")
+        },
     }), encoding="utf-8")
     return root
 
@@ -354,6 +377,70 @@ def generate_orders(context):
     day = context.inference_at.strftime("%Y-%m-%d")
     return [{"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T09:30:00+08:00"}]
 """
+
+
+# Records every table of the view it decides on in its order, so the check
+# compares what Paper and the replay showed it, decision by decision.
+VIEW_RECORDER = """import pandas as pd
+
+TABLES = ("auction", "daily", "events", "fundamentals", "intraday_1min", "macro", "text_index", "universe")
+
+
+def generate_orders(context):
+    view = {}
+    for table in TABLES:
+        try:
+            frame = pd.read_parquet(context.asof_dir + "/" + table)
+        except FileNotFoundError:
+            continue
+        view[table] = sorted("|".join(row) for row in frame[sorted(frame.columns)].astype(str).itertuples(index=False))
+    day = context.inference_at.strftime("%Y-%m-%d")
+    return [{"symbol": "000001.SZ", "action": "buy", "quantity": 100, "execute_at": day + "T09:30:00+08:00", "view": view}]
+"""
+
+
+def test_a_book_decides_on_the_view_its_replay_shows_down_to_the_oldest_rows(tmp_path: Path):
+    book = _book(tmp_path / "paper" / "book", _lake(tmp_path), VIEW_RECORDER, EDGE_CONFIG)
+    _trade(book)
+    result = check_book(book, work_dir=tmp_path / "work", execution_mode="trusted", updater_schedule=UPDATER)
+    assert result["status"] == "consistent", result.get("first_difference") or result.get("reason")
+    assert result["sessions_compared"] == 4
+    # Neither side shows what lies between the two windows' starts: the bars
+    # from 20210929 on, no income event, the replay's last two minute days.
+    first = json.loads((book.root / "orders_20211011.jsonl").read_text(encoding="utf-8").splitlines()[0])["view"]
+    assert {table: len(first[table]) for table in ("daily", "fundamentals", "intraday_1min")} == {
+        "daily": 4, "fundamentals": 0, "intraday_1min": 3
+    }
+
+
+def test_a_view_keeps_its_key_and_manifest_unless_its_windows_reach_back_from_another_instant(tmp_path: Path):
+    lake = _lake(tmp_path)
+    provider = ResearchPITSnapshotProvider(
+        experiment_dir=tmp_path / "pit", raw_dir=lake / "data" / "raw",
+        fundamental_events_root=lake / "data" / "pit" / "fundamental_events",
+        fundamental_events_status=lake / "results" / "data_quality" / "fundamental_events_status.json",
+        config=EDGE_CONFIG,
+    )
+    replay = provider.prepare(phase=FORWARD_PHASE, start="20211011", end="20211011", decision_time=anchor_before("20211011"))
+    research = load_snapshot_manifest(replay.decision_ref)
+    # The names and fields every research view and seed was built under, as
+    # 57040db5 writes them.
+    assert (Path(replay.decision_ref).name, Path(replay.replay_ref).name) == (
+        "20211010T235959+0800", "20211011_20211011_20211010T235959+0800"
+    )
+    assert sorted(research) == [
+        "build_profile", "created_at", "data_profile", "data_quality_warnings", "decision_time", "domain_windows",
+        "domains", "kind", "raw_generation", "snapshot_id", "window_config", "window_months", "window_start",
+    ]
+    slot, anchor, window_from = book_window(("20210929", "20210930", "20211008"), "20211011")
+    paper = provider.prepare(phase="paper", start=slot, end="20211011", decision_time=anchor, window_from=window_from)
+    assert (Path(paper.decision_ref).name, Path(paper.replay_ref).name) == (
+        "20210930T235959+0800_from20211010T235959+0800",
+        "20211008_20211011_20210930T235959+0800_from20211010T235959+0800",
+    )
+    manifest = load_snapshot_manifest(paper.decision_ref)
+    assert (manifest["decision_time"], manifest["window_from"]) == ("2021-09-30T23:59:59+08:00", "2021-10-10T23:59:59+08:00")
+    assert (manifest["window_start"], manifest["domain_windows"]) == (research["window_start"], research["domain_windows"])
 
 
 def test_a_stateless_book_is_consistent_with_its_replay_and_only_its_result_is_written(tmp_path: Path):
