@@ -291,7 +291,11 @@ def book_window(sessions: Sequence[str], start: str) -> tuple[str, datetime, dat
     that replay's start: every decision sees the rows the replay shows, the
     oldest included. Only the as-of universe (names, ST flags, industries,
     the listed set) and a screened universe stay those of the earlier anchor,
-    so a change announced between the two anchors differs.
+    so a change announced between the two anchors differs. The news differs
+    too once ``news_window_months`` is set: a slot's news reaches back only
+    that far from the slot's end, which is the session being decided on Paper
+    and the last settled one in a replay of the whole book, so a book older
+    than that window sees older news on Paper than in its replay.
     """
 
     earlier = [day for day in sessions if day < start]
