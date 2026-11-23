@@ -411,6 +411,8 @@ def _smoke_replays(merged: Mapping[str, object], starter: Path) -> str:
                 **merged,
                 "experiments_root": str(scratch),
                 "pretrained_manifest_sha256": pretrained.manifest_digest(),
+                # Stamped by the console at creation, as the pretrained pin is.
+                "delisting_rules": True,
             },
             experiment_dir=experiment_dir,
             repo_root=REPO_ROOT,

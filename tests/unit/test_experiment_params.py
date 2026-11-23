@@ -107,6 +107,7 @@ def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
         ({"data_backend": "daily"}, "console-managed parameters are not accepted: data_backend"),
         ({"work_root": "/elsewhere"}, "console-managed parameters are not accepted: work_root"),
         ({"llm_base_url": "http://x"}, "console-managed parameters are not accepted: llm_base_url"),
+        ({"delisting_rules": False}, "console-managed parameters are not accepted: delisting_rules"),
         ({"research_years": None}, "missing required experiment parameters: research_years"),
         ({"experiment_id": "_hidden"}, "experiment_id must match"),
     ],

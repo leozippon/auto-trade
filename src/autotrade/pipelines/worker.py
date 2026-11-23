@@ -30,6 +30,7 @@ from autotrade.environment.data.snapshot import (
     SELECTABLE_DATASETS,
     SnapshotConfig,
 )
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     LLMProxy,
@@ -525,6 +526,8 @@ def resolve_worker_options(
             dividend_tax=True,
             # Stamped at creation; an experiment without the key buys on every board.
             permitted_boards=stamped_permitted_boards(params),
+            # Stamped at creation; an experiment without the key has no delisting rules.
+            delisting_rules=_strict_bool(read_param(params, "delisting_rules"), "delisting_rules"),
             max_total_holdings=_optional_positive_int(
                 read_param(params, "max_total_holdings"), "max_total_holdings"
             ),
@@ -705,6 +708,12 @@ def build_experiment_pipeline(
             max_intraday_row_group_rows=options.max_intraday_row_group_rows,
             sandbox=strategy_sandbox,
             benchmark_index=options.experiment.benchmark_index,
+            # Read from the pinned release only where the profile acts on it.
+            delistings=(
+                DelistingTable.from_raw(snapshots.release.raw_dir)
+                if options.experiment.broker_profile.delisting_rules
+                else None
+            ),
         )
         trading_days = snapshots.trading_days
     else:

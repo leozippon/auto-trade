@@ -613,6 +613,45 @@ class DefaultsDriftTest(unittest.TestCase):
             {"boards": ["main", "gem"], "rule": PERMITTED_BOARDS_RULE},
         )
 
+    def test_the_delisting_rules_reach_only_an_experiment_created_with_them(self) -> None:
+        """An experiment created before the rules has no key: its Broker keeps
+        the old behaviour and its facts say nothing new. The stamped key
+        reaches the Broker profile and the run facts the README points to."""
+        import tempfile
+
+        from autotrade.agent.experiment_facts import _broker_replay_facts
+        from autotrade.pipelines.worker import resolve_worker_options
+
+        base = {
+            "experiment_id": "delisting_demo",
+            "strategy_path": "configs/agent_output_template/main.py",
+            **REQUIRED_RULES,
+            "data_backend": "pit",
+            **NO_SEED,
+            "raw_dir": "data/raw",
+            "fundamental_events_root": "data/pit/fundamental_events",
+            "fundamental_events_status": "results/data_quality/fundamental_events_status.json",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            (repo_root / "experiments").mkdir()
+
+            def profile(params: dict[str, object]) -> BrokerProfile:
+                return resolve_worker_options(
+                    params,
+                    experiment_dir=repo_root / "experiments/delisting_demo",
+                    repo_root=repo_root,
+                    preflight=True,
+                ).experiment.broker_profile
+
+            recorded, stamped = profile(base), profile({**base, "delisting_rules": True})
+            with self.assertRaisesRegex(ValueError, "delisting_rules must be a boolean"):
+                profile({**base, "delisting_rules": None})
+        self.assertFalse(recorded.delisting_rules)
+        self.assertTrue(stamped.delisting_rules)
+        self.assertNotIn("delisting_rules", _broker_replay_facts({"broker_profile": recorded.to_record()}))
+        self.assertIs(_broker_replay_facts({"broker_profile": stamped.to_record()})["delisting_rules"], True)
+
     def test_the_geometry_and_gate_knobs_reach_the_configuration(self) -> None:
         """A knob accepted and never forwarded is the defect class here."""
         import tempfile

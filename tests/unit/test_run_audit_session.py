@@ -140,6 +140,7 @@ def test_an_experiment_created_from_the_command_line_holds_the_consoles_creation
     created = params()
     assert acceptance_for(created) == AcceptanceRules(**REQUIRED_RULES)
     assert "dividend_tax" not in created
+    assert created["delisting_rules"] is True
     assert acceptance_for(params("--max-drawdown=0.3")).max_drawdown == 0.3
 
 

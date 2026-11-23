@@ -8,6 +8,7 @@ import os
 import re
 import stat
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -21,6 +22,7 @@ from autotrade.environment.artifacts import artifact_fingerprint
 from autotrade.environment.broker import DailyBroker, default_permitted_boards
 from autotrade.environment.broker_core import board_of
 from autotrade.environment.contract_fingerprint import ImageContract
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.executor import (
     IMPORTED_RUNTIME_FINGERPRINT,
     require_local_image,
@@ -390,12 +392,27 @@ def test_a_book_pins_the_boards_its_broker_and_its_verdict_random_baseline_buy_o
     book = load_book(_registered_book(tmp_path, "main_only", permitted_boards=["main"]).root)
     assert book.profile.permitted_boards == ("main",)
     broker = DailyBroker(book.profile)
-    broker.open_day("20260105", {}, distributions={})  # every experiment's account is taxed
+    # Every experiment's account is taxed, and every book has the delisting rules.
+    broker.open_day("20260105", {}, distributions={}, delistings=DelistingTable({}, {}))
     rejected = broker.execute(_order(symbol="300001.SZ"), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
     assert (rejected.status, rejected.reason) == ("rejected", "board_not_permitted")
     assert broker.execute(_order(), _bar(), matched_at=MATCHED_AT, raw_price=10.0).status == "filled"
     drawn = {symbol for draw in _board_draws(book.profile.permitted_boards, 200, 1) for symbol, *_ in draw}
     assert drawn and {board_of(symbol) for symbol in drawn} == {"main"}
+
+
+def test_a_new_book_has_the_delisting_rules_and_one_recorded_before_them_keeps_its_broker(tmp_path: Path):
+    """The fixture experiment was created before the rules (its params carry no
+    key), yet a book opened now has them, as a real account does. A book.json
+    written before the field existed -- the live book's -- loads without them."""
+
+    book = _registered_book(tmp_path)
+    assert read_json_object(book.root / BOOK_NAME)["profile"]["delisting_rules"] is True
+    assert load_book(book.root).profile.delisting_rules is True
+    record = read_json_object(book.root / BOOK_NAME)
+    del record["profile"]["delisting_rules"]
+    write_json_atomic(book.root / BOOK_NAME, record)
+    assert load_book(book.root).profile == replace(book.profile, delisting_rules=False)
 
 
 def test_a_paper_account_keeps_only_the_boards_its_own_capital_qualifies_for(tmp_path: Path):

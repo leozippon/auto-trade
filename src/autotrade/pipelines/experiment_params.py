@@ -223,6 +223,10 @@ class BrokerParams:
     # the stamped params.json always names them; an experiment without the key is
     # unrestricted.
     permitted_boards: tuple[str, ...] | None = _param()
+    # The exchange's delisting rules (``BrokerProfile.delisting_rules``).
+    # Stamped true by the console at creation, never requested; an experiment
+    # without the key keeps the Broker it was created with, without them.
+    delisting_rules: bool = _host(False)
 
 
 @dataclass(frozen=True, kw_only=True)

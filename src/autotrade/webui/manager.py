@@ -429,6 +429,10 @@ class ExperimentManager:
             # pre-flight has just accepted, unless the request named them.
             if merged["permitted_boards"] is None:
                 merged["permitted_boards"] = list(default_permitted_boards(float(merged["initial_cash"])))  # type: ignore[arg-type]
+            # Every experiment created from now on settles delistings and
+            # refuses consolidation-period buys; one created before has no key
+            # and keeps the Broker it was created with.
+            merged["delisting_rules"] = True
             merged["_created_at"] = utc_now("auto")
             write_json_atomic(hitl / "params.json", merged)
             write_control(hitl / "control.json", ControlState())

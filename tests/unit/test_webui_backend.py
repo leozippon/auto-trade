@@ -1362,6 +1362,8 @@ class WebuiBackendTest(unittest.TestCase):
             )
             with self.subTest(experiment=experiment_id):
                 self.assertEqual(written["permitted_boards"], boards)
+                # So are the exchange's delisting rules, for every new experiment.
+                self.assertIs(written["delisting_rules"], True)
 
     def test_creation_stamps_the_experiments_relay_key(self) -> None:
         """``llm_key`` is written into params.json, where every worker

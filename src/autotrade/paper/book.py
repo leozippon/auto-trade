@@ -26,7 +26,10 @@ may buy on, in its Broker profile: those of the experiment's stamp (every board
 when it has none) that the book's own initial cash qualifies for
 (``broker.default_permitted_boards``), so a Paper account opened with less capital
 than its experiment does not keep the STAR Market or the Beijing exchange. The
-book's Broker and its verdict's random baseline both read that one field.
+book's Broker and its verdict's random baseline both read that one field. Every
+book is opened with the exchange's delisting rules (``BrokerProfile.delisting_rules``)
+whatever its experiment was created with, as a real account is subject to them;
+a book opened before they existed keeps its recorded profile without them.
 """
 
 from __future__ import annotations
@@ -223,7 +226,11 @@ def create_book(
     profile = options.experiment.broker_profile
     permitted_boards = profile.permitted_boards or BOARDS
     eligible = default_permitted_boards(profile.initial_cash)
-    profile = replace(profile, permitted_boards=tuple(board for board in permitted_boards if board in eligible))
+    profile = replace(
+        profile,
+        permitted_boards=tuple(board for board in permitted_boards if board in eligible),
+        delisting_rules=True,
+    )
     sandbox = strategy_sandbox_from_spec(
         options.agent_sandbox, **strategy_boundary(options.experiment)
     )

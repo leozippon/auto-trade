@@ -414,6 +414,9 @@ def _broker_replay_facts(manifest: Mapping[str, object]) -> dict[str, object]:
             "permitted_boards": (
                 None if boards is None else {"boards": boards, "rule": PERMITTED_BOARDS_RULE}
             ),
+            # Only where the profile has them, which the template README's
+            # Broker rules read; an account without them says nothing new.
+            "delisting_rules": True if profile.get("delisting_rules") else None,
             "t_plus_one": True,
             "ex_date_settlement": "pre_close_reset_cash_dividend_credited",
             "order_lot_size": 100,

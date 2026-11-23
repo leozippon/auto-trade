@@ -422,6 +422,8 @@ def _build_worker_params(
         "permitted_boards",
         list(default_permitted_boards(float(stamped.get("initial_cash", WEB_CREATE_DEFAULTS["initial_cash"])))),  # type: ignore[arg-type]
     )
+    # So are the exchange's delisting rules, on every experiment created now.
+    stamped.setdefault("delisting_rules", True)
     # Every key a parameter of the record, every value of its type.
     ExperimentParams.from_record(stamped)
     return stamped

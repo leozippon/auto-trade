@@ -20,9 +20,11 @@ from datetime import datetime
 import pandas as pd
 import pytest
 
+from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile, DailyBroker
 from autotrade.environment.delisting import Delisting, DelistingTable
 from autotrade.environment.executor import TrustedStrategyExecutor
+from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay import null_control, run_daily_replay
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
@@ -37,12 +39,15 @@ from autotrade.paper import DailyPaperEngine
 from autotrade.paper import verdict as paper_verdict
 from autotrade.paper.consistency import _rebuild
 from autotrade.paper.verdict import paper_reading
+from autotrade.pipelines import worker
+from autotrade.pipelines.ledger import ExperimentLedger
 from tests.unit.support.paper_book_fixture import _registered_book
 from tests.unit.support.paper_reconcile_fixture import PROFILE as RECONCILE_PROFILE
 from tests.unit.support.paper_reconcile_fixture import SESSIONS as RECONCILE_SESSIONS
 from tests.unit.support.paper_reconcile_fixture import B, _write_slot
 from tests.unit.support.paper_reconcile_fixture import _book as _reconcile_book
 from tests.unit.support.replay_fixture import DAYS, _at, _bar
+from tests.unit.support.synthetic_experiment import make_experiment
 
 FORCED, CLEAN, WINDUP, HALTED = "000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"
 STEADY = ("000005.SZ", "000006.SZ", "000007.SZ")
@@ -476,6 +481,41 @@ def test_a_paper_book_journals_the_settlement_as_the_execution_it_is(tmp_path):
     old = _paper_book(tmp_path / "old", replace(OLD, initial_cash=100_000.0))
     assert not (old / f"executions_{DAYS[8]}.jsonl").exists()
     assert {row["trade_date"]: row["position_count"] for row in _journal(old / "equity_daily.jsonl")}[DAYS[9]] == 1
+
+
+# ---------------------------------------------------------------- the worker
+
+
+def test_the_worker_reads_the_table_from_the_pinned_release_only_under_the_rules(tmp_path):
+    def evaluator(root, **params):
+        repo, experiment = make_experiment(root, **params)
+        raw = repo / "data" / "raw"
+        (raw / "stock_basic").mkdir()
+        (raw / "namechange").mkdir()
+        pd.DataFrame({"ts_code": [FORCED], "delist_date": ["20230105"]}).to_parquet(
+            raw / "stock_basic" / "list_status=D.parquet", index=False
+        )
+        pd.DataFrame(
+            [{"ts_code": FORCED, "name": "*ST甲", "start_date": "20220101", "ann_date": "20220101", "change_reason": "*ST"}]
+        ).to_parquet(raw / "namechange" / "namechange.parquet", index=False)
+        options = worker.resolve_worker_options(
+            json.loads((experiment / "hitl" / "params.json").read_text(encoding="utf-8")),
+            experiment_dir=experiment,
+            repo_root=repo,
+        )
+        build = worker.build_experiment_pipeline(
+            options,
+            ledger=ExperimentLedger(options.experiment.ledger_path),
+            store=FilesystemArtifactStore(experiment / "artifacts" / "strategy"),
+            ref_store=AgentRefStore(experiment),
+        )
+        return options.experiment.broker_profile, build.pipeline.evaluator
+
+    profile, stamped = evaluator(tmp_path / "stamped", delisting_rules=True)
+    assert profile.delisting_rules
+    assert stamped.delistings.delisting(FORCED, "20230105") == Delisting(FORCED, "20230105", True)
+    profile, recorded = evaluator(tmp_path / "recorded")
+    assert not profile.delisting_rules and recorded.delistings is None
 
 
 def test_a_paper_verdict_draws_its_baseline_under_the_books_own_rules(tmp_path, monkeypatch):
