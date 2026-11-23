@@ -298,8 +298,10 @@ def test_a_consolidation_buy_is_refused_and_a_sale_inside_it_fills():
     assert WINDUP not in _held(new, DAYS[9])
     stats = compute_return_stats(new)
     assert stats["reject_counts"] == {"delisting_consolidation": 1}
-    # The settlements are exits: realized, but no rejection.
+    # The two settlements are realized exits, but neither a rejection nor an
+    # order of the strategy's: its one exit is the consolidation-period sale.
     assert stats["trade_count"] == 3
+    assert (stats["order_count"], stats["strategy_exit_fill_count"]) == (7, 1)
 
 
 def test_a_sale_before_the_delisting_date_leaves_nothing_to_settle():

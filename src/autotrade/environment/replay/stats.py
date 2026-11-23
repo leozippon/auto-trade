@@ -170,14 +170,17 @@ def compute_return_stats(
     ]
     pnl_concentration = _pnl_concentration(realized)
 
+    # The Broker's own settlement of a delisted position, the one fill that
+    # carries a reason (``broker.Execution.reason``), is a realized exit and a
+    # fill, but no order of the strategy's: the order counts leave it out.
+    placed = [order for order in orders if not _settlement(order)]
     status_counts: dict[str, int] = {}
     reject_counts: dict[str, int] = {}
-    for order in orders:
+    for order in placed:
         status = str(order.get("status") or "")
         status_counts[status] = status_counts.get(status, 0) + 1
         reason = order.get("reason")
-        # A fill's reason (a delisting settlement) is no rejection.
-        if reason and status != "filled":
+        if reason:
             reject_counts[str(reason)] = reject_counts.get(str(reason), 0) + 1
     # Entry/exit order lifecycle: the audited failure mode is a strategy whose
     # exit leg never fires, so splitting submissions and fills by direction
@@ -188,14 +191,15 @@ def compute_return_stats(
     stamp_duty_paid = 0.0
     dividend_tax_paid = withheld
     for order in orders:
-        group = "exit" if str(order.get("action") or "") in _EXIT_ACTIONS else "entry"
-        bucket = order_lifecycle[group]
-        bucket["total"] += 1
         status = str(order.get("status") or "")
-        # "total" is deliberately not a status name: a still-pending order must
-        # not double-count if stats ever run before the book drains.
-        if status in ("filled", "rejected"):
-            bucket[status] += 1
+        if not _settlement(order):
+            group = "exit" if str(order.get("action") or "") in _EXIT_ACTIONS else "entry"
+            bucket = order_lifecycle[group]
+            bucket["total"] += 1
+            # "total" is deliberately not a status name: a still-pending order must
+            # not double-count if stats ever run before the book drains.
+            if status in ("filled", "rejected"):
+                bucket[status] += 1
         if status != "filled":
             continue
         traded_notional += _filled_notional(order)
@@ -243,7 +247,7 @@ def compute_return_stats(
         "weekly_returns": _weekly_returns(curve, initial),
         "trade_count": len(realized),
         "turnover": float(traded_notional / initial) if initial > 0 else 0.0,
-        "order_count": len(orders),
+        "order_count": len(placed),
         "order_status_counts": status_counts,
         "order_lifecycle": order_lifecycle,
         "strategy_exit_fill_count": order_lifecycle["exit"]["filled"],
@@ -663,6 +667,12 @@ def _window_order_totals(
         if order.get("realized_pnl") is not None:
             exits[index] += 1
     return traded, exits
+
+
+def _settlement(order: Mapping[str, object]) -> bool:
+    """Whether ``order`` is the Broker's settlement of a delisted position."""
+
+    return order.get("status") == "filled" and bool(order.get("reason"))
 
 
 def _fill_date(order: Mapping[str, object]) -> str:
