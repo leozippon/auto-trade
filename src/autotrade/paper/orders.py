@@ -477,8 +477,22 @@ _CHECK_LEVEL = {"opening": "开盘除权除息", "orders": "到期订单", "fill
 _CHECK_CAUSE = {
     "data_revised": "数据修订", "rule": "结算规则", "ex_date_timing": "除权日决策时序（已知差异）",
     "nondeterministic": "策略结果不确定", "paper_decision_path": "模拟账户的决策路径", "unresolved": "原因未判明",
-    "code_changed": "模拟账户运行后代码已变更",
 }
+# How the code a book ran differs from the check's (``code_changed``), worded
+# beside the cause the check found otherwise: either may explain the difference.
+_CODE_DIFFERENCE = {
+    "other_commit": "模拟账户运行时的代码与检查时不同", "unrecorded": "模拟账户运行时未记录代码版本",
+    "dirty": "运行或检查时代码有未提交的改动", "check_unknown": "检查读不出自己的代码版本",
+}
+
+
+def _check_cause(first: Mapping[str, object]) -> str:
+    cause = str(first["cause"])
+    if cause != "code_changed":
+        return _CHECK_CAUSE.get(cause, cause)
+    evidence = first.get("evidence") or {}
+    otherwise, difference = str(evidence.get("otherwise")), str(evidence.get("code_difference"))
+    return f"{_CHECK_CAUSE.get(otherwise, otherwise)}或代码差异（{_CODE_DIFFERENCE.get(difference, difference)}）"
 
 
 def _consistency_line(root: Path) -> str:
@@ -498,7 +512,7 @@ def _consistency_line(root: Path) -> str:
     if isinstance(first, Mapping):
         notes.append(
             f"首个差异在 {_day(str(first['trade_date']))} 的{_CHECK_LEVEL.get(first['level'], first['level'])}，"
-            f"{_CHECK_CAUSE.get(first['cause'], first['cause'])}"
+            f"{_check_cause(first)}"
         )
     if record.get("reason"):
         notes.append(str(record["reason"]))

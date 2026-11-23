@@ -253,6 +253,8 @@ def _consistency(record: dict[str, object] | None) -> dict[str, object] | None:
         orders = {key: evidence.get(key) for key in ("paper_only", "replay_only")}
         difference = {
             **{key: _text(first.get(key)) for key in ("trade_date", "level", "cause")},
+            # A possible code change keeps the cause the check found otherwise.
+            **{key: _text(evidence.get(key)) for key in ("otherwise", "code_difference")},
             "decision": _text(evidence.get("decision")),
             **{key: len(value) if isinstance(value, list) else None for key, value in orders.items()},
             "restated": [name for name in evidence.get("restated") or () if isinstance(name, str)],

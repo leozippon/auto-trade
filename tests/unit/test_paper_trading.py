@@ -717,6 +717,17 @@ def test_the_sheet_carries_the_latest_consistency_check_in_place_of_the_reissue_
     assert "- 与回放一致性：不一致（2026-01-10 检查；首个差异在 2026-01-06（周二） 的到期订单，原因未判明）" in render_orders(
         _sheet_book(book), "20260105"
     )
+    # A possible code change keeps the cause the check found otherwise.
+    (book.root / "consistency.json").write_text(json.dumps({
+        "status": "differs", "checked_at": "2026-01-10T10:00:00+08:00", "sessions_compared": 4,
+        "first_difference": {"trade_date": "20260106", "level": "fills", "cause": "code_changed", "evidence": {
+            "otherwise": "data_revised", "code_difference": "unrecorded", "paper_code_revisions": [None],
+        }},
+    }), encoding="utf-8")
+    assert (
+        "首个差异在 2026-01-06（周二） 的成交，数据修订或代码差异（模拟账户运行时未记录代码版本）"
+        in render_orders(_sheet_book(book), "20260105")
+    )
     # A damaged record never costs the morning its sheet.
     (book.root / "consistency.json").write_text("{", encoding="utf-8")
     assert "- 与回放一致性：consistency.json 无法读取" in render_orders(_sheet_book(book), "20260105")

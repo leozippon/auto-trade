@@ -77,7 +77,14 @@ const CONSISTENCY_CAUSES = {
   nondeterministic: "策略结果不确定",
   paper_decision_path: "模拟账户的决策路径",
   unresolved: "原因未判明",
-  code_changed: "模拟账户运行后代码已变更",
+};
+// How the code an account ran differs from the check's (cause code_changed),
+// worded beside the cause the check found otherwise: either may explain it.
+const CODE_DIFFERENCES = {
+  other_commit: "模拟账户运行时的代码与检查时不同",
+  unrecorded: "模拟账户运行时未记录代码版本",
+  dirty: "运行或检查时代码有未提交的改动",
+  check_unknown: "检查读不出自己的代码版本",
 };
 const VERDICT_REASON_LABELS = {
   account_drawdown_exceeded: "账户回撤超限",
@@ -7739,9 +7746,13 @@ function consistencyDifference(check) {
           ? `：现金差 ${fmtAmountOpt(row.cash_delta)}，总资产差 ${fmtAmountOpt(row.equity_delta)}（回放减模拟账户）`
           : "";
   const restated = (first.restated || []).length ? `；决策后修订的数据：${first.restated.join("、")}` : "";
-  return `${fmtDate(first.trade_date)} 的${CONSISTENCY_LEVELS[first.level] || first.level}不一致${numbers} · ${
-    CONSISTENCY_CAUSES[first.cause] || first.cause
-  }${restated}`;
+  const cause =
+    first.cause === "code_changed"
+      ? `${CONSISTENCY_CAUSES[first.otherwise] || first.otherwise}或代码差异（${
+          CODE_DIFFERENCES[first.code_difference] || first.code_difference
+        }）`
+      : CONSISTENCY_CAUSES[first.cause] || first.cause;
+  return `${fmtDate(first.trade_date)} 的${CONSISTENCY_LEVELS[first.level] || first.level}不一致${numbers} · ${cause}${restated}`;
 }
 
 /* The check's status and day, as the signal's caption carries it. */

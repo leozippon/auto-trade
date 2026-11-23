@@ -219,26 +219,30 @@ def test_a_cause_reached_by_elimination_names_a_code_change_when_the_book_ran_ot
 
     def cause(book: BookRecords, code: str | None, **probes: object) -> tuple[object, ...]:
         first = compare(book, replay, vintages=VINTAGES, code=code, **probes)["first_difference"]
-        return first["cause"], first["evidence"].get("otherwise"), first["evidence"].get("paper_code_revisions")
+        evidence = first["evidence"]
+        return first["cause"], *(evidence.get(key) for key in ("otherwise", "code_difference", "paper_code_revisions"))
 
-    assert cause(_ran_on(records, old), new) == ("code_changed", "unresolved", [old])
+    assert cause(_ran_on(records, old), new) == ("code_changed", "unresolved", "other_commit", [old])
     # The Paper-mode run agrees on today's code: data or the code change.
     same = lambda day: []  # noqa: E731
-    assert cause(_ran_on(records, old), new, repeat=same, paper_mode=same) == ("code_changed", "data_revised", [old])
+    assert cause(_ran_on(records, old), new, repeat=same, paper_mode=same) == (
+        "code_changed", "data_revised", "other_commit", [old]
+    )
     # It disagrees: today's decision path differs, whatever the old code did.
     assert cause(_ran_on(records, old), new, repeat=same, paper_mode=lambda day: [extra])[0] == "paper_decision_path"
     # On the check's own clean commit the cause stands.
-    assert cause(_ran_on(records, new), new) == ("unresolved", None, None)
-    # Sessions Paper ran before it recorded its code ran other code; so does
-    # whatever ran when the check cannot read its own.
-    assert cause(_ran_on(records, None), new) == ("code_changed", "unresolved", [None])
-    assert cause(_ran_on(records, new), None) == ("code_changed", "unresolved", [new])
+    assert cause(_ran_on(records, new), new) == ("unresolved", None, None, None)
+    # Sessions Paper ran before it recorded its code ran other code as far as
+    # the check can tell; so does whatever ran when it cannot read its own.
+    assert cause(_ran_on(records, None), new) == ("code_changed", "unresolved", "unrecorded", [None])
+    assert cause(_ran_on(records, new), None) == ("code_changed", "unresolved", "check_unknown", [new])
     # Only what ran through the session counts.
     assert cause(_ran_on(_ran_on(records, new), old, through=DAYS[1]), new)[0] == "code_changed"
-    assert cause(_ran_on(_ran_on(records, old), new, through=DAYS[1]), new) == ("unresolved", None, None)
-    # A dirty tree is no commit's code, even the check's own.
-    assert cause(_ran_on(records, new + "-dirty"), new)[0] == "code_changed"
-    assert cause(_ran_on(records, new + "-dirty"), new + "-dirty")[0] == "code_changed"
+    assert cause(_ran_on(_ran_on(records, old), new, through=DAYS[1]), new) == ("unresolved", None, None, None)
+    # A dirty tree is no commit's code, on either side, even the check's own.
+    assert cause(_ran_on(records, new + "-dirty"), new) == ("code_changed", "unresolved", "dirty", [new + "-dirty"])
+    assert cause(_ran_on(records, new), new + "-dirty") == ("code_changed", "unresolved", "dirty", [new])
+    assert cause(_ran_on(records, new + "-dirty"), new + "-dirty")[2] == "dirty"
 
     # A settlement difference too; an accepted timing is not one.
     records, replay = _matching()

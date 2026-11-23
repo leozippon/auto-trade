@@ -31,6 +31,10 @@ difference is explained, and every later session is downstream of it:
   replay on today's code cannot say what other code did. A dirty tree is no
   commit's code, and a session that names none (every session Paper ran
   before it recorded its code) ran on other code as far as the check can tell.
+  The evidence keeps the cause otherwise reached and says how the code
+  differs (``code_difference``): the check cannot read its own code
+  (``check_unknown``), a session recorded none (``unrecorded``), a tree was
+  dirty (``dirty``), or Paper ran another commit (``other_commit``).
 
 A real-fill book is compared until its account leaves the simulation
 (``partial``). A check that cannot run is ``failed`` with its reason; none
@@ -257,7 +261,9 @@ def _code_changed(
     """``explained``, unless its cause was reached by elimination and the book
     decided or settled a session through ``day`` on anything but ``code`` as a
     clean commit: then ``code_changed``, with the cause it would otherwise
-    have and the revisions Paper ran (None where it recorded none)."""
+    have, how the code differs (the first that holds, in the module
+    docstring's order) and the revisions Paper ran (None where it recorded
+    none)."""
 
     ran_on = {
         row.get("code_revision")
@@ -268,8 +274,17 @@ def _code_changed(
     other = sorted((revision for revision in ran_on if not clean or revision != code), key=lambda name: name or "")
     if explained["cause"] not in _ELIMINATED or not other:
         return explained
+    if code is None:
+        difference = "check_unknown"
+    elif None in other:
+        difference = "unrecorded"
+    elif not clean or any(revision.endswith(DIRTY) for revision in other):
+        difference = "dirty"
+    else:
+        difference = "other_commit"
     return {"cause": "code_changed", "evidence": {
-        **dict(explained["evidence"]), "otherwise": explained["cause"], "paper_code_revisions": other,
+        **dict(explained["evidence"]), "otherwise": explained["cause"], "code_difference": difference,
+        "paper_code_revisions": other,
     }}
 
 

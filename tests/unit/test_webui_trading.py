@@ -187,9 +187,18 @@ def test_the_book_carries_its_latest_consistency_check_whitelisted(tmp_path: Pat
     check = trading.book_payload(tmp_path, BOOK)["consistency"]
     assert (check["status"], check["stale"], check["start"], check["generation_id"]) == ("differs", False, "20260105", "g1")
     assert check["first_difference"] == {
-        "trade_date": "20260106", "level": "orders", "cause": "unresolved", "decision": "20260106",
-        "paper_only": 1, "replay_only": 0, "restated": ["daily"], "fills": None,
+        "trade_date": "20260106", "level": "orders", "cause": "unresolved", "otherwise": None,
+        "code_difference": None, "decision": "20260106", "paper_only": 1, "replay_only": 0, "restated": ["daily"],
+        "fills": None,
     }
+    # A possible code change carries the cause the check found otherwise.
+    record["first_difference"] = {**record["first_difference"], "cause": "code_changed", "evidence": {
+        **record["first_difference"]["evidence"], "otherwise": "unresolved", "code_difference": "other_commit",
+        "paper_code_revisions": ["a" * 40],
+    }}
+    (root / "consistency.json").write_text(json.dumps(record), encoding="utf-8")
+    first = trading.book_payload(tmp_path, BOOK)["consistency"]["first_difference"]
+    assert (first["cause"], first["otherwise"], first["code_difference"]) == ("code_changed", "unresolved", "other_commit")
     assert check["sessions"][0]["close"] is True and str(tmp_path) not in json.dumps(check)
     assert '"call"' not in json.dumps(check)
     record["checked_at"] = (checked - timedelta(days=9)).isoformat()
@@ -1195,6 +1204,7 @@ def test_the_consistency_check_reads_as_one_sentence_and_one_caption_chip():
             _js_top_level(script, "const CONSISTENCY_STATUS ="),
             _js_top_level(script, "const CONSISTENCY_LEVELS ="),
             _js_top_level(script, "const CONSISTENCY_CAUSES ="),
+            _js_top_level(script, "const CODE_DIFFERENCES ="),
             _js_top_level(script, "function fmtDate("),
             _js_top_level(script, "const TS_FMT ="),
             _js_top_level(script, "function fmtTs("),
@@ -1206,8 +1216,11 @@ def test_the_consistency_check_reads_as_one_sentence_and_one_caption_chip():
                 " decision: '20261118', paper_only: 46, replay_only: 0, restated: ['daily_basic'] }, sessions: [] };"
                 "const close = { first_difference: { trade_date: '20261119', level: 'close', cause: 'data_revised' },"
                 " sessions: [{ trade_date: '20261119', cash_delta: 0, equity_delta: 12.5 }] };"
+                "const code = { first_difference: { trade_date: '20261117', level: 'orders', cause: 'code_changed',"
+                " otherwise: 'unresolved', code_difference: 'dirty', decision: '20261117', paper_only: 5,"
+                " replay_only: 4, restated: [] }, sessions: [] };"
                 "console.log(JSON.stringify([consistencyDifference(orders), consistencyDifference(close),"
-                " consistencyDifference({ first_difference: null }),"
+                " consistencyDifference(code), consistencyDifference({ first_difference: null }),"
                 " consistencyChip({ status: 'consistent', checked_at: '2026-11-21T02:00:00Z', stale: false }),"
                 " consistencyChip({ status: 'differs', checked_at: '2026-11-07T02:00:00Z', stale: true }),"
                 " consistencyChip(null)]));"
@@ -1221,6 +1234,10 @@ def test_the_consistency_check_reads_as_one_sentence_and_one_caption_chip():
     assert json.loads(result.stdout) == [
         "2026-11-18 的到期订单不一致：模拟账户独有 46 笔，回放独有 0 笔（2026-11-18 的决策） · 原因未判明；决策后修订的数据：daily_basic",
         "2026-11-19 的收盘账户不一致：现金差 ¥0.00，总资产差 ¥12.50（回放减模拟账户） · 数据修订",
+        (
+            "2026-11-17 的到期订单不一致：模拟账户独有 5 笔，回放独有 4 笔（2026-11-17 的决策） · "
+            "原因未判明或代码差异（运行或检查时代码有未提交的改动）"
+        ),
         None,
         "回放一致 · 2026-11-21",
         "回放不一致 · 2026-11-07（过期）",
