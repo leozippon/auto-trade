@@ -24,6 +24,7 @@ import pytest
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile, DailyBroker
+from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.delisting import ANNOUNCED, Delisting, DelistingTable
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.identity import AgentRefStore
@@ -36,10 +37,11 @@ from autotrade.environment.replay.null_control import (
     trade_skeleton,
 )
 from autotrade.environment.replay.stats import compute_return_stats
-from autotrade.environment.strategy import StrategyOrder, StrategySchedule
+from autotrade.environment.strategy import CN_TZ, StrategyOrder, StrategySchedule
 from autotrade.paper import DailyPaperEngine
 from autotrade.paper import verdict as paper_verdict
 from autotrade.paper.consistency import _rebuild
+from autotrade.paper.pit import BookPITData
 from autotrade.paper.verdict import paper_reading
 from autotrade.pipelines import worker
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -49,6 +51,11 @@ from tests.unit.support.paper_reconcile_fixture import SESSIONS as RECONCILE_SES
 from tests.unit.support.paper_reconcile_fixture import B, _write_slot
 from tests.unit.support.paper_reconcile_fixture import _book as _reconcile_book
 from tests.unit.support.replay_fixture import DAYS, _at, _bar
+from tests.unit.support.snapshot_fixture import (
+    build_fundamental_events,
+    build_raw,
+    write_fundamental_status,
+)
 from tests.unit.support.synthetic_experiment import make_experiment
 
 FORCED, CLEAN, WINDUP, HALTED = "000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"
@@ -593,3 +600,36 @@ def test_a_paper_verdict_draws_its_baseline_under_the_books_own_rules(tmp_path, 
     assert handed[0].delisting(FORCED, "20230105") == Delisting(FORCED, "20230105", True)
     assert handed[1] is None
 
+
+def test_a_paper_book_without_the_rules_does_not_read_the_delisting_table(tmp_path):
+    """A delisted row without a date stops only a book that acts on the table."""
+
+    raw = tmp_path / "data" / "raw"
+    build_raw(raw)
+    delisted = raw / "stock_basic" / "list_status=D.parquet"
+    pd.read_parquet(delisted).assign(delist_date=None).to_parquet(delisted, index=False)
+    events_root = tmp_path / "data" / "pit" / "fundamental_events"
+    build_fundamental_events(events_root)
+    status = tmp_path / "results" / "data_quality" / "fundamental_events_status.json"
+    status.parent.mkdir(parents=True)
+    write_fundamental_status(status)
+
+    def data(rules: bool) -> BookPITData:
+        return BookPITData(
+            state_root=tmp_path / f"paper_{rules}", raw_dir=raw, fundamental_events_root=events_root,
+            fundamental_events_status=status,
+            snapshot_config=SnapshotConfig(
+                events_datasets=(), macro_datasets=(), text_datasets=(), fundamental_datasets=("income_vip",),
+                include_intraday=False, include_industry=False,
+            ),
+            start="20211011", trade_date="20211011",
+            due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ), schedule={}, delisting_rules=rules,
+        )
+
+    without = data(False)
+    try:
+        assert without.market.delistings is None
+    finally:
+        without.close()
+    with pytest.raises(ValueError, match="without a valid delist_date"):
+        data(True)

@@ -109,12 +109,16 @@ class BookPITData:
         schedule: Mapping[str, object],
         max_intraday_row_group_rows: int = 2_000_000,
         generation_id: str | None = None,
+        delisting_rules: bool = False,
     ) -> None:
         """``due_at`` is the inference time of the decision on ``trade_date``
         and ``schedule`` the updater's schedule: together they say which
         landing runs the pinned release must hold (``paper.freshness``).
         ``generation_id`` names a published release to read instead of the
-        newest (the consistency check's Paper-mode run, ``paper.consistency``)."""
+        newest (the consistency check's Paper-mode run, ``paper.consistency``).
+        ``delisting_rules`` is the book's profile field: only a book with the
+        rules reads the release's delisting table, so a book without them
+        depends on nothing it does not use."""
         cache_root = Path(state_root).resolve() / PIT_CACHE_NAME
         generation_dir = _pin_release(
             cache_root,
@@ -172,7 +176,7 @@ class BookPITData:
         self.market = DailyMarketData(
             self._daily,
             load_slot_corporate_actions(replay_dir, manifest),
-            DelistingTable.from_raw(provider.release.raw_dir),
+            DelistingTable.from_raw(provider.release.raw_dir) if delisting_rules else None,
         )
         runtime = generation_dir / "runtime" / trade_date
         if runtime.exists():
@@ -277,6 +281,7 @@ def book_data_factory(
             schedule=schedule,
             max_intraday_row_group_rows=book.max_intraday_row_group_rows,
             generation_id=generation_id,
+            delisting_rules=book.profile.delisting_rules,
         )
 
     return build
