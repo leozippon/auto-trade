@@ -2,11 +2,13 @@
 consolidation-period buy gate, in the Broker, a replay and its random baseline.
 
 The market is a few main-board names over 20 sessions (``DAYS``): a forced
-delisting (``FORCED``, *ST, last bar ``DAYS[5]``, delisted ``DAYS[8]``), a
-clean one (``CLEAN``, a merger), a consolidation-period delisting
-(``WINDUP``, 退 name from ``DAYS[3]``, announced ``DAYS[1]``, delisted
-``DAYS[9]``), a name suspended for four sessions and back (``HALTED``) and
-names that trade throughout. A profile without the rules is the Broker every
+delisting (``FORCED``, *ST and then 退 in its consolidation period from
+``DAYS[3]``, last bar ``DAYS[5]``, delisted ``DAYS[8]``), a clean one
+(``CLEAN``, a merger), another consolidation-period delisting (``WINDUP``, 退
+name from ``DAYS[3]``, announced ``DAYS[1]``, delisted ``DAYS[9]``), an
+*ST name delisted without a consolidation period above 1 CNY that no
+announcement table lists (``AMBIGUOUS``), a name suspended for four sessions
+and back (``HALTED``) and names that trade throughout. A profile without the rules is the Broker every
 experiment and Paper book created before them still runs: it must replay as
 it always did, table or no table.
 """
@@ -22,7 +24,7 @@ import pytest
 
 from autotrade.environment.artifacts import FilesystemArtifactStore
 from autotrade.environment.broker import BrokerProfile, DailyBroker
-from autotrade.environment.delisting import Delisting, DelistingTable
+from autotrade.environment.delisting import ANNOUNCED, Delisting, DelistingTable
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.replay import null_control, run_daily_replay
@@ -51,7 +53,8 @@ from tests.unit.support.synthetic_experiment import make_experiment
 
 FORCED, CLEAN, WINDUP, HALTED = "000001.SZ", "000002.SZ", "000003.SZ", "000004.SZ"
 STEADY = ("000005.SZ", "000006.SZ", "000007.SZ")
-LAST_BAR = {FORCED: 5, CLEAN: 5, WINDUP: 6}
+AMBIGUOUS = "000008.SZ"
+LAST_BAR = {FORCED: 5, CLEAN: 5, WINDUP: 6, AMBIGUOUS: 5}
 HALT = range(4, 8)
 OLD = BrokerProfile(initial_cash=1_000_000.0, permitted_boards=("main", "gem"))
 NEW = replace(OLD, delisting_rules=True)
@@ -60,12 +63,15 @@ DAYS_ISO = tuple(f"{day[:4]}-{day[4:6]}-{day[6:]}" for day in DAYS)
 
 def _table() -> DelistingTable:
     delisted = pd.DataFrame(
-        {"ts_code": [FORCED, CLEAN, WINDUP], "delist_date": [DAYS[8], DAYS[8], DAYS[9]]}
+        {"ts_code": [FORCED, CLEAN, WINDUP, AMBIGUOUS], "delist_date": [DAYS[8], DAYS[8], DAYS[9], DAYS[8]]}
     )
     names = pd.DataFrame(
         [
             (FORCED, "甲股份", "20200101", "20200101", "其他"),
             (FORCED, "*ST甲", DAYS[0], DAYS[0], "*ST"),
+            (FORCED, "甲退", DAYS[3], DAYS[2], "退市整理期"),
+            (AMBIGUOUS, "戊股份", "20200101", "20200101", "其他"),
+            (AMBIGUOUS, "*ST戊", DAYS[0], DAYS[0], "*ST"),
             (CLEAN, "乙股份", "20200101", "20200101", "其他"),
             (WINDUP, "丙股份", "20200101", "20200101", "其他"),
             (WINDUP, "*ST丙", "20250101", "20241231", "*ST"),
@@ -78,14 +84,14 @@ def _table() -> DelistingTable:
 
 
 def _price(symbol: str, offset: int) -> float:
-    base = {FORCED: 2.0, CLEAN: 12.0, WINDUP: 0.5, HALTED: 20.0}.get(symbol, 10.0 + STEADY.index(symbol) if symbol in STEADY else 10.0)
+    base = {FORCED: 2.0, CLEAN: 12.0, WINDUP: 0.5, HALTED: 20.0, AMBIGUOUS: 5.0}.get(symbol, 10.0 + STEADY.index(symbol) if symbol in STEADY else 10.0)
     return round(base * (1.0 + 0.01 * offset), 2)
 
 
 def _frame() -> pd.DataFrame:
     rows = []
     for offset, day in enumerate(DAYS):
-        for symbol in (FORCED, CLEAN, WINDUP, HALTED, *STEADY):
+        for symbol in (FORCED, CLEAN, WINDUP, HALTED, AMBIGUOUS, *STEADY):
             if offset > LAST_BAR.get(symbol, len(DAYS)) or (symbol == HALTED and offset in HALT):
                 continue
             previous = 3 if symbol == HALTED and offset == 8 else offset - 1
@@ -146,35 +152,73 @@ def _equity(result, day: str) -> float:
 # ---------------------------------------------------------------- the table
 
 
-def test_a_delisting_settles_by_the_name_in_force_and_the_face_value():
+def test_a_delisting_is_forced_by_its_consolidation_period_or_the_face_value_and_clean_by_its_name():
     table = _table()
     assert table.delisting(FORCED, DAYS[7]) is None
     forced = table.delisting(FORCED, DAYS[8])
     assert forced == Delisting(FORCED, DAYS[8], True) and table.delisting(FORCED, DAYS[19]) == forced
     assert forced.settlement_price(2.1) == 0.0
     clean = table.delisting(CLEAN, DAYS[8])
-    assert clean.distressed is False and clean.settlement_price(12.6) == 12.6
+    assert clean.forced is False and clean.settlement_price(12.6) == 12.6
     # A clean name that last closed below the face value was delisted by force.
     assert clean.settlement_price(0.99) == 0.0
-    assert table.delisting(WINDUP, DAYS[9]).distressed is True
+    assert table.delisting(WINDUP, DAYS[9]).forced is True
     assert table.delisting(HALTED, DAYS[19]) is None
 
 
-def test_a_delisting_without_a_name_on_record_is_refused_not_guessed():
+# The nine ST-named delistings since 2015-08 without a consolidation period
+# that closed at or above 1 CNY: name, delisting date and last close.
+ANNOUNCED_CASES = {
+    "000016.SZ": ("*ST康佳A", "20261023", 2.46),
+    "000023.SZ": ("*ST深天", "20240902", 1.72),
+    "000627.SZ": ("*ST天茂", "20250930", 1.58),
+    "000780.SZ": ("ST平能", "20220124", 10.95),
+    "600213.SH": ("*ST亚星", "20241017", 6.36),
+    "600485.SH": ("*ST信威", "20210601", 1.39),
+    "600677.SH": ("*ST航通", "20210318", 3.01),
+    "600680.SH": ("*ST上普", "20190523", 7.69),
+    "603963.SH": ("*ST大药", "20250321", 1.18),
+}
+
+
+def test_the_nine_st_delistings_without_consolidation_settle_as_their_announcements_say():
+    """Six were a merger or voluntary delistings with a cash option (last
+    close), three were forced (zero)."""
+
     table = DelistingTable.from_frames(
-        pd.DataFrame({"ts_code": [FORCED], "delist_date": [DAYS[8]]}),
+        pd.DataFrame({"ts_code": list(ANNOUNCED_CASES), "delist_date": [day for _n, day, _c in ANNOUNCED_CASES.values()]}),
         pd.DataFrame(
-            # Its only name starts after the delisting: nothing is in force then.
-            [(FORCED, "甲股份", DAYS[9], DAYS[9], "其他")],
+            [(code, name, "20180101", "20180101", "*ST") for code, (name, _day, _close) in ANNOUNCED_CASES.items()],
             columns=["ts_code", "name", "start_date", "ann_date", "change_reason"],
         ),
     )
-    unknown = table.delisting(FORCED, DAYS[8])
-    assert unknown.distressed is None
-    with pytest.raises(ValueError, match="cannot be told"):
-        unknown.settlement_price(5.0)
+    assert set(ANNOUNCED_CASES) == set(ANNOUNCED)
+    settled = {
+        code: table.delisting(code, day).settlement_price(close) for code, (_name, day, close) in ANNOUNCED_CASES.items()
+    }
+    paid = {"000016.SZ", "000627.SZ", "000780.SZ", "600213.SH", "600677.SH", "600680.SH"}
+    assert {code for code, price in settled.items() if price == ANNOUNCED_CASES[code][2]} == paid
+    assert {code for code, price in settled.items() if price == 0.0} == {"000023.SZ", "600485.SH", "603963.SH"}
+
+
+def test_an_unlisted_delisting_the_rules_cannot_classify_fails_only_when_it_is_held():
+    table = _table()  # loads although AMBIGUOUS is neither classified nor listed
+    assert table.delisting(AMBIGUOUS, DAYS[8]).forced is None
+    _replay(NEW, table)  # nobody holds it: nothing to settle
+    with pytest.raises(ValueError, match=f"add {AMBIGUOUS} to delisting.ANNOUNCED"):
+        _replay(NEW, table, {DAYS[0]: ((AMBIGUOUS, "buy", 1000),)})
     # Below the face value the delisting was forced whatever the name.
-    assert unknown.settlement_price(0.5) == 0.0
+    assert table.delisting(AMBIGUOUS, DAYS[8]).settlement_price(0.5) == 0.0
+    # So is one with no name on record by its delisting date.
+    unnamed = DelistingTable.from_frames(
+        pd.DataFrame({"ts_code": [AMBIGUOUS], "delist_date": [DAYS[8]]}),
+        pd.DataFrame(
+            [(AMBIGUOUS, "戊股份", DAYS[9], DAYS[9], "其他")],
+            columns=["ts_code", "name", "start_date", "ann_date", "change_reason"],
+        ),
+    )
+    with pytest.raises(ValueError, match="cannot tell a forced delisting"):
+        unnamed.delisting(AMBIGUOUS, DAYS[8]).settlement_price(5.0)
     with pytest.raises(ValueError, match="without a valid delist_date"):
         DelistingTable.from_frames(pd.DataFrame({"ts_code": [FORCED], "delist_date": [None]}), pd.DataFrame(
             columns=["ts_code", "name", "start_date", "ann_date", "change_reason"]
@@ -496,7 +540,7 @@ def test_the_worker_reads_the_table_from_the_pinned_release_only_under_the_rules
             raw / "stock_basic" / "list_status=D.parquet", index=False
         )
         pd.DataFrame(
-            [{"ts_code": FORCED, "name": "*ST甲", "start_date": "20220101", "ann_date": "20220101", "change_reason": "*ST"}]
+            [{"ts_code": FORCED, "name": "甲退", "start_date": "20221201", "ann_date": "20221125", "change_reason": "退市整理期"}]
         ).to_parquet(raw / "namechange" / "namechange.parquet", index=False)
         options = worker.resolve_worker_options(
             json.loads((experiment / "hitl" / "params.json").read_text(encoding="utf-8")),
@@ -534,7 +578,7 @@ def test_a_paper_verdict_draws_its_baseline_under_the_books_own_rules(tmp_path, 
         raw / "stock_basic" / "list_status=D.parquet", index=False
     )
     pd.DataFrame(
-        [{"ts_code": FORCED, "name": "*ST甲", "start_date": "20220101", "ann_date": "20220101", "change_reason": "*ST"}]
+        [{"ts_code": FORCED, "name": "甲退", "start_date": "20221201", "ann_date": "20221125", "change_reason": "退市整理期"}]
     ).to_parquet(raw / "namechange" / "namechange.parquet", index=False)
     handed: list[object] = []
 
@@ -548,3 +592,4 @@ def test_a_paper_verdict_draws_its_baseline_under_the_books_own_rules(tmp_path, 
         paper_reading(replace(registered, root=real.root, profile=replace(profile, delisting_rules=rules)))
     assert handed[0].delisting(FORCED, "20230105") == Delisting(FORCED, "20230105", True)
     assert handed[1] is None
+

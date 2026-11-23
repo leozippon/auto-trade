@@ -9,13 +9,16 @@ Read host-side from the raw lake and never shown to a strategy:
   announced by that day, the one that started last.
 
 A position still held on its delisting date is settled at that session's open:
-at zero for a forced delisting, at its last close for a clean one (a merger,
-privatisation or transfer of listing, whose holders receive shares or cash).
-The delisting is forced when the name in force on the delisting date is ST,
-*ST or 退, or when the last close is below the one-CNY face value (the
-face-value delisting, whose names need not carry ST). A code with no name on
-record by its delisting date and a last close of at least one CNY cannot be
-told either way, and settling it is refused.
+at zero for a forced delisting, at its last close for any other (a merger,
+privatisation, transfer of listing or voluntary delisting, whose holders
+receive shares or cash or are offered cash). The delisting is forced when the
+code went through a consolidation period, or when the last close is below the
+one-CNY face value (the face-value delisting, whose names need not carry ST).
+It is not when the name in force on the delisting date carries no ST. The
+rest -- an ST name (or none) in force, no consolidation period, a last close
+of at least one CNY -- is a voluntary delisting or a merger as often as a
+forced one, so each is settled by what its announcements say (``ANNOUNCED``);
+one not listed there is refused when a held position has to be settled.
 
 A buy is refused while the name in force is the code's delisting consolidation
 period (退市整理期) name and the code is not yet delisted. Each fact is acted on
@@ -35,35 +38,51 @@ import pandas as pd
 
 # ``namechange.change_reason`` of a delisting consolidation period's name.
 CONSOLIDATION_REASON = "退市整理期"
-# A forced delisting's name marks: ST and *ST (risk warnings) and 退 (the
-# consolidation period's name).
+# The marks of a name under a risk warning (ST, *ST) or in a consolidation
+# period (退): a delisting whose name in force has none is not forced.
 DISTRESS_MARKS = ("ST", "退")
 # A name whose last close is below the face value is delisted by force
 # (交易类强制退市), whatever its name.
 FACE_VALUE_CNY = 1.0
+# The delistings the rules cannot classify (an ST name in force, no
+# consolidation period, a last close of at least the face value), each by what
+# its announcements say: True forced (settled at zero), False not (at the last
+# close).
+ANNOUNCED: Mapping[str, bool] = {
+    "000016.SZ": False,  # *ST康佳A, 2026-10-23: voluntary delisting by shareholder resolution, cash option
+    "000023.SZ": True,  # *ST深天, 2024-09-02: forced, market value below 300 million CNY for 20 days
+    "000627.SZ": False,  # *ST天茂, 2025-09-30: voluntary delisting by shareholder resolution, cash option
+    "000780.SZ": False,  # ST平能, 2022-01-24: absorbed by 龙源电力 in a share swap, dissenters' cash option
+    "600213.SH": False,  # *ST亚星, 2024-10-17: voluntary delisting by shareholder resolution, cash option
+    "600485.SH": True,  # *ST信威, 2021-06-01: forced, negative net assets and a disclaimer of audit opinion
+    "600677.SH": False,  # *ST航通, 2021-03-18: voluntary delisting by shareholder resolution, cash option
+    "600680.SH": False,  # *ST上普, 2019-05-23: voluntary delisting by shareholder resolution, cash option
+    "603963.SH": True,  # *ST大药, 2025-03-21: forced, market value below 500 million CNY for 20 days
+}
 
 T = TypeVar("T")
 
 
 @dataclass(frozen=True)
 class Delisting:
-    """One code's delisting: its date (``YYYYMMDD``) and whether the name in
-    force on it carries a distress mark (None: no name on record by then)."""
+    """One code's delisting: its date (``YYYYMMDD``) and whether it was forced
+    (None: neither the rules nor ``ANNOUNCED`` say)."""
 
     symbol: str
     date: str
-    distressed: bool | None
+    forced: bool | None
 
     def settlement_price(self, last_close: float) -> float:
         """What one held share is settled at, given the last close it was marked at."""
 
-        if self.distressed or last_close < FACE_VALUE_CNY:
+        if self.forced or last_close < FACE_VALUE_CNY:
             return 0.0
-        if self.distressed is None:
+        if self.forced is None:
             raise ValueError(
-                f"{self.symbol} was delisted on {self.date} with no name on record by then and a last "
-                f"close of {last_close}: a forced delisting cannot be told from a clean one, so the "
-                "position cannot be settled"
+                f"{self.symbol} was delisted on {self.date} with an ST name (or none) in force, no "
+                f"consolidation period and a last close of {last_close}: the rules cannot tell a forced "
+                "delisting from a voluntary one or a merger, so the position cannot be settled; add "
+                f"{self.symbol} to delisting.ANNOUNCED from its delisting announcement"
             )
         return last_close
 
@@ -133,10 +152,15 @@ class DelistingTable:
             names[symbol] = tuple((public, (name, flag)) for _start, public, name, flag in entries)
         delistings = {}
         for symbol, day in dates.items():
-            name = _in_force(names.get(symbol, ()), day)
-            delistings[symbol] = Delisting(
-                symbol, day, None if name is None else any(mark in name[0] for mark in DISTRESS_MARKS)
-            )
+            entries = names.get(symbol, ())
+            name = _in_force(entries, day)
+            if any(flag and public <= day for public, (_name, flag) in entries):
+                forced: bool | None = True
+            elif name is not None and not any(mark in name[0] for mark in DISTRESS_MARKS):
+                forced = False
+            else:
+                forced = ANNOUNCED.get(symbol)
+            delistings[symbol] = Delisting(symbol, day, forced)
         return cls(
             delistings,
             {symbol: tuple((public, flag) for public, (_name, flag) in names[symbol]) for symbol in consolidation},
@@ -184,6 +208,7 @@ def _day(value: object) -> str | None:
 
 
 __all__ = [
+    "ANNOUNCED",
     "CONSOLIDATION_REASON",
     "DISTRESS_MARKS",
     "FACE_VALUE_CNY",
