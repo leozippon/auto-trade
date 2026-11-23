@@ -872,7 +872,7 @@ class DownloadTest(LakeTestCase):
             self.assertEqual(download.download_reference(args), 0)
         self.assertNotIn("index_member", [api for api, _ in client.calls])
 
-    def test_a_namechange_window_replaces_the_recent_announcements_by_one_call(self):
+    def test_a_namechange_window_replaces_the_recent_announcements_with_its_whole_paged_answer(self):
         path = self.raw_dir / "namechange" / "namechange.parquet"
         path.parent.mkdir(parents=True, exist_ok=True)
         columns = ["ts_code", "name", "start_date", "end_date", "ann_date", "change_reason"]
@@ -884,26 +884,35 @@ class DownloadTest(LakeTestCase):
         answer = [
             ["000004.SZ", "ST国华", "20261110", None, "20261109", "ST"],
             ["000002.SZ", "ST万科", "20261124", None, "20261123", "ST"],
+            ["000005.SZ", "ST星源", "20261120", None, "20261119", "ST"],
         ]
 
         class WindowClient:
+            """Pages its answer by limit and offset, as the vendor does."""
+
             def __init__(self):
                 self.calls = []
 
             def query(self, api_name, params=None, fields="", retries=5):
-                self.calls.append((api_name, dict(params or {})))
-                return tushare_client.ApiResult(fields.split(","), [list(row) for row in answer])
+                params = dict(params or {})
+                self.calls.append((api_name, params))
+                rows = answer[params["offset"]:params["offset"] + params["limit"]]
+                return tushare_client.ApiResult(fields.split(","), [list(row) for row in rows])
 
         client = WindowClient()
-        download.download_namechange(client, self.raw_dir, False, ledger=None, recent_since="20261024")
-        self.assertEqual(client.calls, [("namechange", {"start_date": "20261024"})])
+        with patch.object(download, "REFERENCE_PAGE_LIMIT", 2):
+            download.download_namechange(client, self.raw_dir, False, ledger=None, recent_since="20261024")
+        self.assertEqual(client.calls, [
+            ("namechange", {"start_date": "20261024", "limit": 2, "offset": 0}),
+            ("namechange", {"start_date": "20261024", "limit": 2, "offset": 2}),
+        ])
         table = pd.read_parquet(path)
-        # The window's rows replace theirs (no second copy) and add the new
-        # one; the rest of the table stays as the full loop wrote it.
+        # Both pages land: the window's rows replace theirs (no second copy)
+        # and add the new ones; the rest stays as the full loop wrote it.
         self.assertEqual(
             table[["ts_code", "name", "change_reason"]].values.tolist(),
             [["000001.SZ", "平安银行", "改名"], ["000002.SZ", "万科A", None], ["000002.SZ", "ST万科", "ST"],
-             ["000004.SZ", "ST国华", "ST"]],
+             ["000004.SZ", "ST国华", "ST"], ["000005.SZ", "ST星源", "ST"]],
         )
         # Without a window an existing table is left alone, with no call.
         download.download_namechange(NoQueryClient(), self.raw_dir, False, ledger=None)

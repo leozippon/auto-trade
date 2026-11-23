@@ -270,14 +270,18 @@ def download_namechange(
     """Every code's name history by one call per code (about 80 minutes),
     when the table is missing or ``force``d. An existing table otherwise stays,
     unless ``recent_since`` is given: the changes announced since that day,
-    by one call by announcement date, then replace their rows in it."""
+    by announcement date, then replace their rows in it. That query is paged
+    like the other reference tables: the vendor honours limit and offset on
+    it and served 6,416 rows (every change announced since 2015) to one
+    unpaged call on 2026-11-24, so a short page of REFERENCE_PAGE_LIMIT rows
+    is the whole answer."""
     path = raw_dir / "namechange" / "namechange.parquet"
     if path.exists() and not force and recent_since is None:
         return
     fields = "ts_code,name,start_date,end_date,ann_date,change_reason"
     frames: list[pd.DataFrame] = []
     if path.exists() and not force:
-        recent = frame(client.query("namechange", {"start_date": recent_since}, fields))
+        recent = frame(query_paged(client, "namechange", {"start_date": recent_since}, fields, REFERENCE_PAGE_LIMIT)[0])
         current = pd.read_parquet(path)
         key = ["ts_code", "name", "start_date"]
         frames = [current[~current.set_index(key).index.isin(recent.set_index(key).index)], recent]
