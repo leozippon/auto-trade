@@ -85,7 +85,11 @@ BASELINE_DRAWS = 100
 # Which name of that pool a draw takes is a function of the seed, the draw's
 # index and the round trip's own identity (``_trip_seed``), not of the other
 # trips or their count: a book that differs in one round trip meets a random baseline
-# that differs in that trip's replacements alone.
+# that differs in that trip's replacements alone. The pool itself is not
+# fixed by that identity: a trip still open at the replay's end skips the
+# exit-day filter (``_candidate_pool``), so the same trip closed in a longer
+# replay draws from another pool and nearly always takes another name
+# (``pit_backend.BASELINE_SEED``).
 MATCHED_MEMBERSHIP = "index_membership+affordability"
 MATCHED_DECILE = "circ_mv_decile+affordability"
 # The cash a draw's account opens with. Orders of the candidate's own size

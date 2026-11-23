@@ -832,16 +832,20 @@ def _span_corporate_actions(
 # trade skeleton (entry, exit and money per round trip), the matching pool (the
 # benchmark's membership, what a trip's money can buy) and the slot's bars.
 # Nothing naming the experiment, the revision, the session or the span enters,
-# so identical trades meet the identical names in every replay, whatever its
-# start and end -- a test step reads the same active return in a replay of
-# any length, paired experiments and lineage follow-ups read the same number --
-# and neither a resubmission nor a byte change that leaves the trades alone
-# can re-roll it. This makes a book's random baseline noise reproducible, not
-# smaller. One residual remains: a round trip still open at a replay's end has
-# no exit date, so its pool skips the exit-day filter
-# (``null_control._candidate_pool``) and may draw another name than the same
-# trip closed in a longer replay (at most 0.4 pp on a last step in the
-# 2026-11-15 measurement).
+# so identical trades over one window meet the identical names -- paired
+# experiments and lineage follow-ups read the same number -- and neither a
+# resubmission nor a byte change that leaves the trades alone can re-roll it.
+# This makes a book's random baseline noise reproducible, not smaller. It does
+# not make replays of different lengths agree: a round trip still open at a
+# replay's end has no exit date, so its pool skips the exit-day filter
+# (``null_control._candidate_pool``) and nearly always draws another name than
+# the same trip closed in a longer replay, and a lot sold in parts only later
+# becomes trips of other sizes. A test step can therefore read another active
+# return in a longer replay, on every day from the entry of the earliest such
+# trip, not only on the last step (2026-11-21 TabM arm: 0.04-0.14 of a
+# quarter's residual IR, 2-4 % of its threshold). Thresholds depend on the
+# day count alone and each recorded step is frozen from its own replay, so
+# neither moves.
 BASELINE_SEED = null_control_seed("replay", "panel")
 
 
