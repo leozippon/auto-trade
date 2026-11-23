@@ -50,6 +50,8 @@
         "index_classify",
         "index_member_all",
         "index_basic",
+        "--namechange-recent-days",
+        "30",
         "--refresh-daily-datasets",
         "daily",
         "adj_factor",
@@ -339,7 +341,7 @@
       "skip_if_already_ok": true
     },
     "cn_weekly_reference_deep": {
-      "description": "Weekly deep refresh of the slow per-code reference sweep (the namechange full per-code loop) moved off the nightly critical path; about 80 min of per-code calls once a week instead of nightly.",
+      "description": "Weekly deep refresh of the slow per-code reference sweep (the namechange full per-code loop) moved off the nightly critical path; about 80 min of per-code calls once a week instead of nightly. Between two sweeps cn_evening_full replaces the changes announced in the last 30 days by one call by announcement date, so a name or ST change lands the night it is published.",
       "operation": "download_tier",
       "tier": "reference",
       "end_date_offset_days": 0,

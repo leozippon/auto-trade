@@ -213,7 +213,10 @@ def download_reference(args: argparse.Namespace) -> int:
             should_force("bak_basic"),
             revision_ledger,
         )
-    download_namechange(client, raw_dir, should_force("namechange"), ledger=revision_ledger)
+    recent_since = None
+    if args.namechange_recent_days:
+        recent_since = format_yyyymmdd(parse_yyyymmdd(args.end_date) - timedelta(days=args.namechange_recent_days))
+    download_namechange(client, raw_dir, should_force("namechange"), ledger=revision_ledger, recent_since=recent_since)
     classify = download_index_classify(client, raw_dir, should_force("index_classify"), ledger=revision_ledger)
     download_index_member_all(client, raw_dir, classify["SW2021"], should_force("index_member_all"), ledger=revision_ledger)
     download_index_member_history(client, raw_dir, classify["SW2014"], should_force("index_member"), ledger=revision_ledger)
@@ -261,26 +264,40 @@ def download_bak_basic(
         revision_ledger=revision_ledger, name="bak_basic", every=250,
     )
 
-def download_namechange(client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None) -> None:
+def download_namechange(
+    client: TuShareClient, raw_dir: Path, force: bool, *, ledger: Path | str | None, recent_since: str | None = None
+) -> None:
+    """Every code's name history by one call per code (about 80 minutes),
+    when the table is missing or ``force``d. An existing table otherwise stays,
+    unless ``recent_since`` is given: the changes announced since that day,
+    by one call by announcement date, then replace their rows in it."""
     path = raw_dir / "namechange" / "namechange.parquet"
-    if path.exists() and not force:
+    if path.exists() and not force and recent_since is None:
         return
     fields = "ts_code,name,start_date,end_date,ann_date,change_reason"
     frames: list[pd.DataFrame] = []
-    for index, code in enumerate(load_stock_codes(raw_dir), start=1):
-        result = client.query("namechange", {"ts_code": code}, fields)
-        df = frame(result)
-        if not df.empty:
-            frames.append(df)
-        if index % 500 == 0:
-            print(f"namechange {index}")
+    if path.exists() and not force:
+        recent = frame(client.query("namechange", {"start_date": recent_since}, fields))
+        current = pd.read_parquet(path)
+        key = ["ts_code", "name", "start_date"]
+        frames = [current[~current.set_index(key).index.isin(recent.set_index(key).index)], recent]
+        params = {"strategy": "announced_since", "start_date": recent_since}
+    else:
+        for index, code in enumerate(load_stock_codes(raw_dir), start=1):
+            result = client.query("namechange", {"ts_code": code}, fields)
+            df = frame(result)
+            if not df.empty:
+                frames.append(df)
+            if index % 500 == 0:
+                print(f"namechange {index}")
+        params = {"strategy": "per_ts_code_all_stock_basic"}
     combined = concat_rows(frames) if frames else pd.DataFrame(columns=fields.split(","))
     deduped = combined.drop_duplicates().sort_values(["ts_code", "start_date", "name"], na_position="last").reset_index(drop=True)
     publish(
         path,
         deduped,
         api_name="namechange",
-        params={"strategy": "per_ts_code_all_stock_basic"},
+        params=params,
         fields=fields.split(","),
         key_columns=(),
         ledger=ledger,
@@ -1964,6 +1981,13 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     parser.add_argument("--skip-bak-basic", action="store_true")
     parser.add_argument("--refresh-reference-datasets", nargs="+", choices=REFERENCE_DATASETS, default=[])
+    parser.add_argument(
+        "--namechange-recent-days",
+        type=int,
+        default=0,
+        help="Without a forced namechange: replace the name changes announced in the last N days before "
+        "--end-date (and since) by one call by announcement date, over the table the full per-code loop wrote.",
+    )
     parser.add_argument("--fundamental-refresh-period-count", type=int, default=0)
     parser.add_argument("--fundamental-refresh-ann-month-count", type=int, default=0)
     parser.add_argument("--fundamental-refresh-ts-code-datasets", nargs="+", choices=["dividend", "fina_audit", "fina_mainbz_vip"], default=[])
@@ -2028,6 +2052,13 @@ def add_update_parser(sub: argparse._SubParsersAction) -> None:
         help="Force-refresh the rolling update window for macro/global/event/board/text/share_float tiers; intended for cron, not large manual history fills.",
     )
     parser.add_argument("--reference-min-interval-seconds", type=float, help="Optional lower call frequency for the reference refresh step.")
+    parser.add_argument(
+        "--namechange-recent-days",
+        type=int,
+        default=0,
+        help="Without a forced namechange: replace the name changes announced in the last N days before "
+        "--end-date (and since) by one call by announcement date, over the table the full per-code loop wrote.",
+    )
     parser.add_argument("--fundamental-datasets", nargs="+", choices=FUNDAMENTAL_DATASETS)
     parser.add_argument(
         "--fundamental-refresh-period-count",
