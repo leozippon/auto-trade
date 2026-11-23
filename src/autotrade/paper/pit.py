@@ -46,6 +46,7 @@ from autotrade.environment.data.snapshot import (
     SnapshotConfig,
     load_snapshot_manifest,
 )
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.replay.engine import StrategyDataView
 from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.timeview import Timeview
@@ -168,7 +169,11 @@ class BookPITData:
         # The slot's bars are the book's from its first decision on, which the
         # Broker and context.bars read, as in a replay of the book.
         self._daily = pd.read_parquet(replay_dir / "daily.parquet")
-        self.market = DailyMarketData(self._daily, load_slot_corporate_actions(replay_dir, manifest))
+        self.market = DailyMarketData(
+            self._daily,
+            load_slot_corporate_actions(replay_dir, manifest),
+            DelistingTable.from_raw(provider.release.raw_dir),
+        )
         runtime = generation_dir / "runtime" / trade_date
         if runtime.exists():
             _remove_tree(runtime)

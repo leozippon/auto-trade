@@ -16,6 +16,7 @@ from tempfile import mkdtemp
 
 import pandas as pd
 
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     StrategyExecutor,
@@ -68,11 +69,14 @@ class DailyStrategyPipeline:
         self,
         daily: pd.DataFrame | str | Path,
         corporate_actions: pd.DataFrame | None = None,
+        delistings: DelistingTable | None = None,
     ) -> ReplayResult:
         """``corporate_actions`` is the replay slot's ex-date table; the Broker
         credits its cash dividends on the ex-date (the share leg comes from the
         daily frame's ``pre_close``). The PIT backend always passes it; None is
-        only for the local ``daily`` development backend and unit tests."""
+        only for the local ``daily`` development backend and unit tests.
+        ``delistings`` is the release's delisting table, which a profile with
+        the delisting rules requires (``broker.BrokerProfile``)."""
 
         frame = pd.read_parquet(daily) if isinstance(daily, (str, Path)) else daily
         if not isinstance(frame, pd.DataFrame):
@@ -98,6 +102,7 @@ class DailyStrategyPipeline:
                         context_data=self.context_data,
                         execution_price=self.execution_price,
                         corporate_actions=corporate_actions,
+                        delistings=delistings,
                     )
                 finally:
                     executor.close()

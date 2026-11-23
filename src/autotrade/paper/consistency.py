@@ -62,6 +62,7 @@ from autotrade.environment.data.contracts import (
     dataset_vintages,
     read_committed_raw_generation,
 )
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.executor import TrustedStrategyExecutor
 from autotrade.environment.sandbox import remove_sandbox_tree
 from autotrade.environment.strategy import StrategyOrder
@@ -506,6 +507,9 @@ def check_book(
             backend = PITDailyEvaluationBackend(
                 work_dir / "results", execution_mode=execution_mode, sandbox=book.sandbox,
                 max_intraday_row_group_rows=book.max_intraday_row_group_rows, benchmark_index=book.benchmark_index,
+                delistings=(
+                    DelistingTable.from_raw(provider.release.raw_dir) if book.profile.delisting_rules else None
+                ),
             )
             request = EvaluationRequest(
                 ArtifactRevision(book.artifact_id, book.strategy_path.parent, book.models_dir),

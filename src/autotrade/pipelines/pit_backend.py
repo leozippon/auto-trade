@@ -49,6 +49,7 @@ from autotrade.environment.data.snapshot import (
     SnapshotConfig,
     load_snapshot_manifest,
 )
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     TrustedStrategyExecutor,
@@ -914,7 +915,12 @@ class PITDailyEvaluationBackend:
         sandbox: SandboxConfig | None = None,
         max_intraday_row_group_rows: int = 2_000_000,
         benchmark_index: str,
+        delistings: DelistingTable | None = None,
     ) -> None:
+        """``delistings`` is the pinned release's delisting table, for every
+        replay and random baseline of a profile with the delisting rules
+        (``broker.BrokerProfile``); None serves only profiles without them."""
+
         if execution_mode not in {"sandbox", "trusted"}:
             raise ValueError("execution_mode must be sandbox or trusted")
         self.results_root = Path(results_root).resolve()
@@ -927,6 +933,7 @@ class PITDailyEvaluationBackend:
         self.benchmark_index = benchmark_index
         self.sandbox = sandbox or SandboxConfig()
         self.max_intraday_row_group_rows = int(max_intraday_row_group_rows)
+        self.delistings = delistings
 
     def evaluate(
         self,
@@ -1115,7 +1122,7 @@ class PITDailyEvaluationBackend:
                     context_data=context_data,
                     execution_price=span.execution_price,
                     executor_factory=executor_factory,
-                ).run(daily, corporate_actions=corporate_actions)
+                ).run(daily, corporate_actions=corporate_actions, delistings=self.delistings)
                 record = replay.to_record(
                     start=replay_start,
                     end=replay_end,
@@ -1176,6 +1183,7 @@ class PITDailyEvaluationBackend:
                             ),
                             baselines=True,
                             execution_price=span.execution_price,
+                            delistings=self.delistings,
                         )
                     except Exception as exc:  # noqa: BLE001 - every random baseline failure is the host's
                         baseline_failure = exc
@@ -1319,6 +1327,7 @@ class PITDailyEvaluationBackend:
             corporate_actions=corporate_actions,
             membership=membership,
             execution_price=execution_price,
+            delistings=self.delistings,
         )
 
     @staticmethod

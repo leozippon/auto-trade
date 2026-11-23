@@ -40,6 +40,7 @@ from autotrade.common.records import (
 )
 from autotrade.common.time import CN_TZ
 from autotrade.environment.data.snapshot import load_snapshot_manifest
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.replay.engine import ExecutionPriceProvider
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.replay.stats import (
@@ -93,6 +94,7 @@ def paper_reading(book: Book) -> dict[str, object]:
     if slot is None:
         raise FileNotFoundError(f"{book.root.name} has settled sessions but no replay slot to read them by")
     first, last = str(equity[0]["trade_date"]), str(equity[-1]["trade_date"])
+    delistings = DelistingTable.from_raw(book.raw_dir) if book.profile.delisting_rules else None
     # The decision view beside the slot holds the index sections dated before
     # the book's first session, which its first round trips are matched on.
     decision = (slot.parents[2] / "decision" / slot.name.split("_", 2)[2]).resolve(strict=True)
@@ -107,6 +109,7 @@ def paper_reading(book: Book) -> dict[str, object]:
         membership=slot_membership((decision, slot), benchmark_index=book.benchmark_index),
         previous=previous,
         execution_price=None if minutes is None else minutes.price_at,
+        delistings=delistings,
     )
 
 
@@ -121,6 +124,7 @@ def evidence_reading(
     membership: Mapping[str, Collection[str]] | None = None,
     previous: Mapping[str, object] | None = None,
     execution_price: ExecutionPriceProvider | None = None,
+    delistings: DelistingTable | None = None,
 ) -> dict[str, object]:
     """The reading of ``equity`` (the book's settled days, in order) and its
     fills against ``frame``'s bars of exactly those days.
@@ -129,6 +133,8 @@ def evidence_reading(
     checked again, though the random baseline drawn on a longer window differs.
     ``execution_price`` is the slot's minute prices: the random baseline meets
     a fill at a minute other than 09:30 and 15:00 at that minute's price.
+    ``delistings`` is the delisting table a book with the delisting rules
+    draws its random baseline under.
     """
 
     rules = book.verdict_rules
@@ -173,6 +179,7 @@ def evidence_reading(
         membership=membership,
         baselines=True,
         execution_price=execution_price,
+        delistings=delistings,
     )
     account = daily_returns_from_curve(curve)
     zero_skill = {str(day): float(value) for day, value in baselines["baseline_daily"]}

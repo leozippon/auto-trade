@@ -5,10 +5,11 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import asdict, dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from types import MappingProxyType
 
 from autotrade.common.records import dataclass_from_record, dataclass_record
+from autotrade.common.time import CN_TZ
 from autotrade.environment.broker_core import (
     BOARDS,
     STAMP_DUTY_CUTOVER,
@@ -16,6 +17,7 @@ from autotrade.environment.broker_core import (
     reduce_amount_reject,
     validate_buy_lot,
 )
+from autotrade.environment.delisting import Delisting, DelistingTable
 from autotrade.environment.distributions import Distribution
 from autotrade.environment.dividend_tax import (
     BONUS_SHARE_PAR_CNY,
@@ -23,7 +25,7 @@ from autotrade.environment.dividend_tax import (
     dividend_tax_due,
     dividend_tax_rule,
 )
-from autotrade.environment.strategy import StrategyOrder
+from autotrade.environment.strategy import MARKET_OPEN, StrategyOrder
 
 # A-share prices are quoted to 0.01 CNY, so two quotes closer than half a tick
 # are one price.
@@ -93,6 +95,14 @@ class BrokerProfile:
     # profile recorded before the field existed replays as it was recorded;
     # creation stamps every new experiment's boards (``default_permitted_boards``).
     permitted_boards: tuple[str, ...] | None = None
+    # The exchange's delisting rules (``delisting.py``): a position still held
+    # on its delisting date is settled at that session's open, and a buy in a
+    # delisting consolidation period is rejected. Both read the delisting
+    # table a bare Broker over synthetic data does not have, so the field's own
+    # default is off; creation turns it on for every new experiment and Paper
+    # book, and a profile recorded before the field existed lacks the key and
+    # reads as off (``from_record``), so it replays as it was recorded.
+    delisting_rules: bool = False
     profile_id: str = "gjzq_cash"
     source: str = "docs/ENVIRONMENT_DESIGN.md §3.4"
 
@@ -101,6 +111,8 @@ class BrokerProfile:
             raise ValueError("initial_cash must be a positive finite number")
         if not isinstance(self.dividend_tax, bool):
             raise ValueError("dividend_tax must be a boolean")
+        if not isinstance(self.delisting_rules, bool):
+            raise ValueError("delisting_rules must be a boolean")
         if self.permitted_boards is not None:
             # Canonical, so a profile read back from JSON compares equal.
             object.__setattr__(self, "permitted_boards", _permitted_boards(self.permitted_boards))
@@ -136,6 +148,12 @@ class BrokerProfile:
 
     @classmethod
     def from_record(cls, record: object) -> BrokerProfile:
+        """The profile ``to_record`` wrote. A record from before the delisting
+        rules existed has no such key and was kept without them; every other
+        missing or unknown key fails (``dataclass_from_record``)."""
+
+        if isinstance(record, Mapping) and "delisting_rules" not in record:
+            record = {**record, "delisting_rules": False}
         return dataclass_from_record(cls, record)
 
     # ---- the account's cost math, priced from the fields above ----
@@ -251,6 +269,8 @@ class Execution:
     # realized P&L, so the return statistics never re-derive a cost basis from
     # the fill stream.
     realized_pnl: float | None = None
+    # Why an order was rejected; on a fill only ``delisted``, the Broker's own
+    # settlement of a delisted position (``DailyBroker._settle_delisting``).
     reason: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
     # The order's session and limit price (``StrategyOrder``), recorded only
@@ -298,6 +318,9 @@ class DailyBroker:
         # know when each sold share was bought and what it received.
         self.lots: dict[str, list[Lot]] = {}
         self._current_day: str | None = None
+        # The delisting table of the day open, kept only under the profile's
+        # delisting rules: the buy gate reads it.
+        self._delistings: DelistingTable | None = None
 
     def open_day(
         self,
@@ -306,8 +329,10 @@ class DailyBroker:
         cash_dividends: Mapping[str, float] | None = None,
         *,
         distributions: Mapping[str, Distribution] | None = None,
+        delistings: DelistingTable | None = None,
     ) -> None:
-        """Enter ``trade_date``: release the T+1 locks, then settle ex-dates.
+        """Enter ``trade_date``: settle delistings, release the T+1 locks, then
+        settle ex-dates.
 
         ``bars`` is the day's market frame and ``cash_dividends`` maps a symbol
         to the cash dividend per share going ex on this day. The exchange's
@@ -326,14 +351,27 @@ class DailyBroker:
         ``distributions`` is the authoritative ex-date source: gross cash,
         bonus shares apart from conversions, and record date. Taxed profiles
         require it; ``cash_dividends`` alone is only for untaxed synthetic use.
+
+        ``delistings`` is the exchange's delisting table, which a profile with
+        the delisting rules requires and any other ignores. Under them a held
+        name delisted on or before ``trade_date`` leaves the account first
+        (``_settle_delisting``), and the day's buy gate reads the table.
         """
         if self._current_day == trade_date:
             return
         if self.profile.dividend_tax and distributions is None:
             raise ValueError(f"{trade_date}: dividend tax requires record-dated distributions")
+        if self.profile.delisting_rules and delistings is None:
+            raise ValueError(f"{trade_date}: the delisting rules require the delisting table")
         if distributions is not None and cash_dividends is not None:
             raise ValueError("pass distributions or cash_dividends, not both")
         self._current_day = str(trade_date)
+        if self.profile.delisting_rules:
+            self._delistings = delistings
+            for symbol in list(self.positions):
+                delisting = delistings.delisting(symbol, self._current_day)
+                if delisting is not None:
+                    self._settle_delisting(delisting)
         events = distributions if distributions is not None else {
             symbol: Distribution(cash_per_share=cash) for symbol, cash in (cash_dividends or {}).items()
         }
@@ -346,6 +384,34 @@ class DailyBroker:
                 self._settle_ex_date(
                     position, bar, events.get(symbol, Distribution())
                 )
+
+    def _settle_delisting(self, delisting: Delisting) -> None:
+        """Close a delisted position at the open of the day being entered, as
+        a filled sale with reason ``delisted``: at zero for a forced delisting,
+        at the last close it was marked at for a clean one
+        (``Delisting.settlement_price``). No fee, stamp duty or dividend tax
+        is charged: nothing is sold on the exchange."""
+
+        position = self.positions.pop(delisting.symbol)
+        price = delisting.settlement_price(position.last_price)
+        proceeds = price * position.quantity
+        self.cash += proceeds
+        if self.profile.dividend_tax:
+            del self.lots[delisting.symbol]
+        at = datetime.combine(date.fromisoformat(str(self._current_day)), MARKET_OPEN, tzinfo=CN_TZ).isoformat()
+        self.executions.append(
+            Execution(
+                symbol=delisting.symbol,
+                action="sell",
+                quantity=position.quantity,
+                execute_at=at,
+                matched_at=at,
+                status="filled",
+                price=price,
+                realized_pnl=proceeds - position.average_cost * position.quantity,
+                reason="delisted",
+            )
+        )
 
     def _settle_ex_date(
         self,
@@ -691,6 +757,12 @@ class DailyBroker:
             and board_of(order.symbol) not in self.profile.permitted_boards
         ):
             return "board_not_permitted"
+        if (
+            order.action == "buy"
+            and self._delistings is not None
+            and order.symbol in self._delistings.consolidating(str(self._current_day))
+        ):
+            return "delisting_consolidation"
         if bar is None:
             return "missing_execution_price"
         if bool(bar.get("is_suspended", False)):

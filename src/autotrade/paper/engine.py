@@ -444,14 +444,20 @@ class DailyPaperEngine:
         market = data.market
         bars = market.bars_for_day(day)
         settled_actions = len(broker.corporate_actions)
+        settled_executions = len(broker.executions)
         broker.open_day(
-            day, bars, distributions=market.distributions_for_day(day)
+            day, bars, distributions=market.distributions_for_day(day), delistings=market.delistings
         )
         # Opening the day is the only step that changes the account without a
-        # fill, so its ex-date settlements are journaled like executions.
+        # strategy order, so its ex-date settlements are journaled like
+        # executions, and its delisting settlements as the executions they are.
         for action in broker.corporate_actions[settled_actions:]:
             self._queue_emission(
                 state, journal_name(CORPORATE_ACTIONS_PREFIX, day), {"kind": "corporate_action", **action.to_record()}
+            )
+        for execution in broker.executions[settled_executions:]:
+            self._queue_emission(
+                state, journal_name(EXECUTIONS_PREFIX, day), {"kind": "execution", **execution.to_record()}
             )
         day_end = datetime.combine(date.fromisoformat(day), time.max, tzinfo=CN_TZ)
         due = [order for order in pending if order.execute_at <= day_end]
@@ -722,7 +728,8 @@ class DailyPaperEngine:
         if state.get("schedule") != self.schedule.to_record():
             raise PaperEngineError("strategy schedule differs from the persisted Paper account")
         # Read strictly, as the book's own book.json is: a profile field added
-        # later fails an older account here instead of reading as a default.
+        # later fails an older account here instead of reading as a default
+        # (the delisting rules aside: an older account was kept without them).
         try:
             persisted = BrokerProfile.from_record(state.get("profile"))
         except (TypeError, ValueError) as exc:

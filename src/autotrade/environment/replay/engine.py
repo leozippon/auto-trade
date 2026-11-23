@@ -9,6 +9,7 @@ from time import perf_counter
 
 from autotrade.common.time import CN_TZ
 from autotrade.environment.broker import BrokerProfile, DailyBroker, session_price
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.executor import (
     DockerStrategyExecutor,
     FittableStrategyExecutor,
@@ -149,6 +150,7 @@ class DailyReplayEngine:
                     trade_date,
                     bars,
                     distributions=market.distributions_for_day(trade_date),
+                    delistings=market.delistings,
                 )
                 self._match_due(inference_at, market)
             if due:
@@ -297,10 +299,12 @@ def run_daily_replay(
     context_data: ContextDataProvider | None = None,
     execution_price: ExecutionPriceProvider | None = None,
     corporate_actions=None,
+    delistings: DelistingTable | None = None,
 ) -> ReplayResult:
-    """``corporate_actions`` is the replay slot's ex-date table (see
-    ``DailyMarketData``); it travels with a bar frame, so a prebuilt market
-    must already carry it. A formal slot always passes it; None is only for
+    """``corporate_actions`` is the replay slot's ex-date table and
+    ``delistings`` the release's delisting table (see ``DailyMarketData``);
+    both travel with a bar frame, so a prebuilt market must already carry
+    them. A formal slot always passes the ex-date table; None is only for
     synthetic frames in unit tests."""
 
     # One timer spans the market build and the replay loop, so a single
@@ -308,13 +312,13 @@ def run_daily_replay(
     timer = PhaseTimer()
     with timer.phase("market_build"):
         if isinstance(daily, DailyMarketData):
-            if corporate_actions is not None:
+            if corporate_actions is not None or delistings is not None:
                 raise ValueError(
-                    "corporate_actions must be given to DailyMarketData when the market is prebuilt"
+                    "corporate_actions and delistings must be given to DailyMarketData when the market is prebuilt"
                 )
             market = daily
         else:
-            market = DailyMarketData(daily, corporate_actions)
+            market = DailyMarketData(daily, corporate_actions, delistings)
     return DailyReplayEngine(
         schedule=schedule,
         strategy=strategy,

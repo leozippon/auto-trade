@@ -19,6 +19,7 @@ import numpy as np
 import pandas as pd
 
 from autotrade.common.time import CN_TZ
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.distributions import Distribution, distribution_record_date
 from autotrade.environment.strategy import (
     BarTable,
@@ -37,7 +38,10 @@ class DailyMarketData:
     REQUIRED = ("trade_date", "open", "close", "pre_close")
 
     def __init__(
-        self, daily: pd.DataFrame, corporate_actions: pd.DataFrame | None = None
+        self,
+        daily: pd.DataFrame,
+        corporate_actions: pd.DataFrame | None = None,
+        delistings: DelistingTable | None = None,
     ) -> None:
         """``daily`` is the replay window's bar frame; ``corporate_actions`` the
         slot's ex-date table (``ts_code``/``ex_date``/``cash_per_share``), whose
@@ -47,8 +51,14 @@ class DailyMarketData:
         转增) is read only for the dividend tax; a table built before that
         column existed leaves it unknown. A formal replay slot always passes the
         table; None is only for synthetic frames in unit tests and the
-        single-file ``daily`` Paper backend, which have no dividends at all."""
+        single-file ``daily`` Paper backend, which have no dividends at all.
+
+        ``delistings`` is the release's delisting table, which the Broker reads
+        under a profile with the delisting rules (``broker.BrokerProfile``);
+        like the ex-date table it is Broker-side truth and never reaches the
+        strategy."""
         self._distributions = _distributions_by_ex_date(corporate_actions)
+        self.delistings = delistings
         columns = list(daily.columns)
         symbol_source = "symbol"
         if "symbol" not in columns and "ts_code" in columns:

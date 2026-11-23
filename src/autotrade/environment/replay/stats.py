@@ -176,7 +176,8 @@ def compute_return_stats(
         status = str(order.get("status") or "")
         status_counts[status] = status_counts.get(status, 0) + 1
         reason = order.get("reason")
-        if reason:
+        # A fill's reason (a delisting settlement) is no rejection.
+        if reason and status != "filled":
             reject_counts[str(reason)] = reject_counts.get(str(reason), 0) + 1
     # Entry/exit order lifecycle: the audited failure mode is a strategy whose
     # exit leg never fires, so splitting submissions and fills by direction

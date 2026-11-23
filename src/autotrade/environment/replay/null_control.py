@@ -19,7 +19,10 @@ drops a round trip for want of cash, and each holds its trips at the
 candidate's exposure and costs. Board permission and affordability stay the candidate's: a replacement comes
 only from the boards the profile pins and only where one lot fits the trip's
 own money, and a single-name cap stays the candidate's CNY cap
-(``_draw_profile``). Every figure derived from the draws -- the composite,
+(``_draw_profile``). So do the delisting rules of a profile that has them: a
+delisting settlement ends the candidate's round trip like a sale, a drawn name
+is settled at its own delisting, and no name in its consolidation period on
+the entry day is drawn. Every figure derived from the draws -- the composite,
 its cross-draw spread, each draw's whole-window and step excess -- is read
 off that one series (``_capital_returns``).
 
@@ -30,8 +33,8 @@ grades a strategy on its daily return minus that composite
 (``pipelines/verdict.py``); the percentile beside it stays descriptive.
 
 Everything here is host-side and pure: the caller supplies the result, the
-replay slot's daily frame, the benchmark series, the benchmark membership and
-the Broker profile; no sandbox, no I/O, no raw data lake. Every draw replays
+replay slot's daily frame, the benchmark series, the benchmark membership, the
+delisting table and the Broker profile; no sandbox, no I/O, no raw data lake. Every draw replays
 through a Broker of its own after the graded replay has finished, so nothing
 here can reach the result it measures.
 """
@@ -59,6 +62,7 @@ from autotrade.environment.broker_core import (
     LOT_SIZE,
     board_of,
 )
+from autotrade.environment.delisting import DelistingTable
 from autotrade.environment.strategy import StrategyContext, StrategySchedule
 
 from .engine import ExecutionPriceProvider, run_daily_replay
@@ -237,6 +241,7 @@ def run_null_control(
     membership: Mapping[str, Collection[str]] | None = None,
     baselines: bool = False,
     execution_price: ExecutionPriceProvider | None = None,
+    delistings: DelistingTable | None = None,
 ) -> dict[str, object]:
     """Replay ``k`` random-name copies of ``result``'s skeleton and rank it.
 
@@ -249,7 +254,12 @@ def run_null_control(
     sub-window measured from the equity curves. ``corporate_actions`` is the
     slot's ex-date table, so a null holding is settled through the same
     ex-dates as the observed one; a formal slot always passes it, and None is
-    only for synthetic frames in unit tests.
+    only for synthetic frames in unit tests. ``delistings`` is the release's
+    delisting table, which a profile with the delisting rules requires: the
+    candidate's delisting settlement is a round trip's exit like any sale, a
+    drawn name is settled at its own delisting by its draw's Broker, and a
+    name in its consolidation period on a round trip's entry day is no
+    candidate, since the account could not buy it.
 
     ``membership`` maps a cross-section date (``YYYYMMDD``) to the benchmark's
     constituents published on it; a round trip is matched on the latest one
@@ -274,7 +284,7 @@ def run_null_control(
     if k < 1:
         raise ValueError("k must be a positive integer")
     dates = [str(row["trade_date"]) for row in result.equity_curve]
-    market = DailyMarketData(frame, corporate_actions)
+    market = DailyMarketData(frame, corporate_actions, delistings)
     if tuple(dates) != market.trade_dates:
         raise ValueError("result equity curve and replay frame cover different trading days")
     members = None if membership is None else _Membership(membership)
@@ -296,10 +306,19 @@ def run_null_control(
             idle["baseline_daily"] = [[date, 0.0] for date in dates]
             idle["baseline_draw_sd"] = [[date, 0.0] for date in dates]
         return idle
-    draw_profile = _draw_profile(profile)
+    draw_profile = _draw_profile(profile, delistings)
     capital = _previous_closes(result.equity_curve)
     universe = _Universe(frame)
-    pools = [_candidate_pool(trip, universe, members, profile.permitted_boards) for trip in skeleton]
+    pools = [
+        _candidate_pool(
+            trip,
+            universe,
+            members,
+            profile.permitted_boards,
+            delistings.consolidating(trip.entry_date) if profile.delisting_rules else (),
+        )
+        for trip in skeleton
+    ]
 
     window_benchmark = _benchmark_return(dates, benchmark)
     observed_returns = _capital_returns(result.equity_curve, capital)
@@ -393,13 +412,15 @@ def run_null_control(
     return block
 
 
-def _draw_profile(profile: BrokerProfile) -> BrokerProfile:
+def _draw_profile(profile: BrokerProfile, delistings: DelistingTable | None = None) -> BrokerProfile:
     """The candidate's Broker profile for a draw: the opening balance alone
     changes, to one that is never short of cash.
 
     The boards are the ones the candidate's profile pins, so a profile that
     pins none is refused: a draw may buy only where the candidate's own
-    account could, never where its balance would qualify. A single-name cap
+    account could, never where its balance would qualify. So is a profile
+    with the delisting rules given no delisting table: its draws would hold
+    what the candidate's account cannot. A single-name cap
     is a weight of the opening balance (``DailyBroker._single_name_cap_reject``),
     so it is rescaled to stay the candidate's CNY cap.
     """
@@ -408,6 +429,11 @@ def _draw_profile(profile: BrokerProfile) -> BrokerProfile:
         raise NullControlSetupError(
             "the random baseline draws only on the boards the candidate's account may buy "
             "on, and its Broker profile pins none (BrokerProfile.permitted_boards)"
+        )
+    if profile.delisting_rules and delistings is None:
+        raise NullControlSetupError(
+            "the candidate's Broker profile has the delisting rules, and the random baseline "
+            "was given no delisting table to draw under them (BrokerProfile.delisting_rules)"
         )
     weight = profile.max_single_name_weight
     return replace(
@@ -642,6 +668,7 @@ def _candidate_pool(
     universe: _Universe,
     members: _Membership | None = None,
     permitted_boards: Collection[str] | None = None,
+    unbuyable: Collection[str] = (),
 ) -> tuple[tuple[str, int], ...]:
     """Replacement names for one round trip, with the shares its money buys.
 
@@ -651,7 +678,9 @@ def _candidate_pool(
     Sized from the entry day's open only: the null learns nothing the original
     position did not already know when it was opened. A name on a board the
     account may not buy on is no candidate either, for the same reason;
-    ``permitted_boards`` None restricts nothing.
+    ``permitted_boards`` None restricts nothing. Nor is a name in
+    ``unbuyable``, the names the account may not buy on the entry day (those
+    in their delisting consolidation period).
     """
 
     entry = universe.day(trip.entry_date)
@@ -671,6 +700,8 @@ def _candidate_pool(
         names = names.intersection(universe.day(trip.exit_date).index)
     if permitted_boards is not None:
         names = names[entry.loc[names, "listed_on"].isin(permitted_boards).to_numpy()]
+    if unbuyable:
+        names = names[~names.isin(list(unbuyable))]
     names = names.drop(trip.symbol, errors="ignore")
     bars = entry.loc[names]
     shares = np.floor_divide(trip.notional, bars["open"].to_numpy()).astype(int)
