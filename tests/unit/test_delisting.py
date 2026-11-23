@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import datetime
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -37,11 +38,11 @@ from autotrade.environment.replay.null_control import (
     trade_skeleton,
 )
 from autotrade.environment.replay.stats import compute_return_stats
-from autotrade.environment.strategy import CN_TZ, StrategyOrder, StrategySchedule
+from autotrade.environment.strategy import StrategyOrder, StrategySchedule
 from autotrade.paper import DailyPaperEngine
 from autotrade.paper import verdict as paper_verdict
 from autotrade.paper.consistency import _rebuild
-from autotrade.paper.pit import BookPITData
+from autotrade.paper.pit import book_data_factory
 from autotrade.paper.verdict import paper_reading
 from autotrade.pipelines import worker
 from autotrade.pipelines.ledger import ExperimentLedger
@@ -603,35 +604,42 @@ def test_a_paper_verdict_draws_its_baseline_under_the_books_own_rules(tmp_path, 
     assert handed[1] is None
 
 
-def test_a_paper_book_without_the_rules_does_not_read_the_delisting_table(tmp_path):
-    """A delisted row without a date stops only a book that acts on the table."""
+def test_a_paper_books_market_carries_the_delisting_table_exactly_under_its_rules(tmp_path):
+    """Through the real construction path (``book_data_factory`` to
+    ``BookPITData``'s one market): a book with the rules gets the release's
+    table, one without them never builds it, so a delisted row without a
+    date stops only the book that acts on the table."""
 
     raw = tmp_path / "data" / "raw"
     build_raw(raw)
-    delisted = raw / "stock_basic" / "list_status=D.parquet"
-    pd.read_parquet(delisted).assign(delist_date=None).to_parquet(delisted, index=False)
     events_root = tmp_path / "data" / "pit" / "fundamental_events"
     build_fundamental_events(events_root)
     status = tmp_path / "results" / "data_quality" / "fundamental_events_status.json"
     status.parent.mkdir(parents=True)
     write_fundamental_status(status)
 
-    def data(rules: bool) -> BookPITData:
-        return BookPITData(
-            state_root=tmp_path / f"paper_{rules}", raw_dir=raw, fundamental_events_root=events_root,
+    def market(rules: bool, root: str) -> DelistingTable | None:
+        book = SimpleNamespace(
+            root=tmp_path / root, raw_dir=raw, fundamental_events_root=events_root,
             fundamental_events_status=status,
             snapshot_config=SnapshotConfig(
                 events_datasets=(), macro_datasets=(), text_datasets=(), fundamental_datasets=("income_vip",),
                 include_intraday=False, include_industry=False,
             ),
-            start="20211011", trade_date="20211011",
-            due_at=datetime(2021, 10, 11, 8, 30, tzinfo=CN_TZ), schedule={}, delisting_rules=rules,
+            schedule=StrategySchedule("day", "08:30"), max_intraday_row_group_rows=2_000_000,
+            profile=replace(OLD, delisting_rules=rules),
         )
+        data = book_data_factory(book, {})("20211011", "20211011")
+        try:
+            return data.market.delistings
+        finally:
+            data.close()
 
-    without = data(False)
-    try:
-        assert without.market.delistings is None
-    finally:
-        without.close()
+    # The fixture's lake delists 000005.SZ on 20240426.
+    assert market(True, "on").delisting("000005.SZ", "20240426").date == "20240426"
+    assert market(False, "off") is None
+    delisted = raw / "stock_basic" / "list_status=D.parquet"
+    pd.read_parquet(delisted).assign(delist_date=None).to_parquet(delisted, index=False)
+    assert market(False, "off_broken") is None
     with pytest.raises(ValueError, match="without a valid delist_date"):
-        data(True)
+        market(True, "on_broken")
