@@ -361,7 +361,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         # list lands before the `tracked` step prunes by it, and both come
         # before the seed and the release; then the image, and only then the
         # pretrained store, to the instance's own disk once it is known to
-        # fit; the host report last.
+        # fit; then the deployed commit, and the host report last.
         ran = [self.remote(call) or call["args"][:1] + call["args"][1:][-1:] for call in dev]
         self.assertEqual(ran, [
             ["idle", "deploy"], ["bootstrap"], ["dirs"], ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
@@ -369,7 +369,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
             ["copy", f"dev:{remote}/data/pit_views_seed_test/"], ["copy", f"dev:{remote}/data/pack_payloads/"],
             ["copy", f"dev:{remote}/data/research_releases/gen_test/"],
             ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256], ["local-disk"],
-            ["copy", f"dev:{local}/pretrained/"], ["report"],
+            ["copy", f"dev:{local}/pretrained/"], ["copy", f"dev:{remote}/.runtime/zgca/"], ["report"],
         ])
         # Only the keys the model profiles name leave this host, through the
         # owner-only put: nothing else from the .env.
@@ -381,14 +381,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(manifest.read_bytes(), b"scripts/experiments/create_round_test.py\0")
         self.assertIn(f"--files-from={manifest}", transfers[0]["args"])
         self.assertIn("--from0", transfers[0]["args"])
-        # The commit those files are travels beside the list.
+        self.assertEqual(
+            transfers[1]["args"][-4:-1],
+            [str(state / zgca.DUCKDB_CLI_NAME), str(state / zgca.CUDA_COMPAT_NAME), str(manifest)],
+        )
+        # The commit those files are travels alone, as the last transfer.
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         commit = state / zgca.DEPLOYED_COMMIT_NAME
         self.assertEqual(commit.read_text(encoding="utf-8"), head)
-        self.assertEqual(
-            transfers[1]["args"][-5:-1],
-            [str(state / zgca.DUCKDB_CLI_NAME), str(state / zgca.CUDA_COMPAT_NAME), str(manifest), str(commit)],
-        )
+        self.assertEqual(transfers[6]["args"][-2:], [str(commit), f"dev:{remote}/.runtime/zgca/"])
         # The seed, the release and the store are mirrored, hard links kept;
         # so is the Packs' payload store, empty while no Pack has a payload.
         seed, payloads, release, store = transfers[2:6]
@@ -460,6 +461,28 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual((shipped / "paper_test" / "papers" / "demo" / "paper.txt").read_text(encoding="utf-8"), "Abstract\n")
         self.assertTrue((root / "configs" / "workspace_refs" / "paper_test" / PAYLOAD_MANIFEST).is_file())
 
+    def test_a_deploy_that_stops_at_the_image_records_no_commit_on_the_instance(self) -> None:
+        """The steps before the failure have shipped their files, but the commit
+        `run` and `resume` require is only recorded by a deploy that completes."""
+        self._tracked_repo()
+        self._seed()
+        self._pretrained()
+        (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
+        instance = Path(self.temp.name) / "instance"
+        root = Path(str(instance) + zgca.REMOTE_ROOT)
+        for directory in (root / ".runtime" / "zgca", root / "data" / "research_releases", Path(str(instance) + zgca.LOCAL_ROOT)):
+            directory.mkdir(parents=True)
+        shipped = root / ".runtime" / "zgca"
+        code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_RSYNC=str(instance), MOCK_STEP_EXIT_PREPARE="1")
+        self.assertEqual(code, 1)
+        self.assertIn("remote step prepare failed", err)
+        self.assertEqual(sorted(path.name for path in shipped.iterdir()),
+                         sorted([zgca.CUDA_COMPAT_NAME, zgca.DUCKDB_CLI_NAME, zgca.TRACKED_LIST_NAME]))
+        code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_RSYNC=str(instance))
+        self.assertEqual(code, 0, err)
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
+        self.assertEqual((shipped / zgca.DEPLOYED_COMMIT_NAME).read_text(encoding="utf-8"), head)
+
     def test_release_exclusions_follow_the_seeds_configuration(self) -> None:
         """Only text and minute datasets the configuration does not name stay behind; a seed naming them takes them."""
         self.assertEqual(
@@ -489,9 +512,11 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 done = ran.index(["local-disk"])
                 self.assertEqual(ran[done - 1], ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256])
                 if fits:
-                    self.assertEqual((code, ran[done + 1:]), (0, [["copy", "dev:/ebs/auto-trade/pretrained/"], ["report"]]), err)
+                    self.assertEqual((code, ran[done + 1:]), (0, [["copy", "dev:/ebs/auto-trade/pretrained/"],
+                                                                  ["copy", f"dev:{zgca.REMOTE_ROOT}/.runtime/zgca/"], ["report"]]), err)
                 else:
-                    # Everything else is done, the report shows the disks, and the deploy fails saying why.
+                    # Everything else is done, the report shows the disks, and the deploy fails saying why,
+                    # recording no commit.
                     self.assertEqual((code, ran[done + 1:]), (1, [["report"]]))
                     self.assertIn("the pretrained store does not fit on the instance's own disk", err)
                     self.assertIn(f"{zgca.LOCAL_DISK} has {free / zgca.GIB:.1f} GiB free", err)

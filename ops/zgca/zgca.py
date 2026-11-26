@@ -447,8 +447,8 @@ class Workflow:
         self.dev("copy", *PRESERVE, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{root}/")
         say("deploy: .env (the model gateway keys only)")
         self.dev("put", f"{root}/.env", data=gateway_keys)
-        say(f"deploy: {DUCKDB_CLI_NAME}, {CUDA_COMPAT_NAME}, {TRACKED_LIST_NAME} and {DEPLOYED_COMMIT_NAME}")
-        self.dev("copy", *PRESERVE, str(duckdb_cli), str(cuda_compat), str(manifest), str(deployed), f"dev:{root}/.runtime/zgca/")
+        say(f"deploy: {DUCKDB_CLI_NAME}, {CUDA_COMPAT_NAME} and {TRACKED_LIST_NAME}")
+        self.dev("copy", *PRESERVE, str(duckdb_cli), str(cuda_compat), str(manifest), f"dev:{root}/.runtime/zgca/")
         self.remote("tracked")
         say(f"deploy: {seed}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{seed_dir}/", f"dev:{root}/{seed_path.as_posix()}/")
@@ -479,6 +479,10 @@ class Workflow:
             )
         say(f"deploy: {PRETRAINED} to {store}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{store}/")
+        # The commit goes once everything else is in place: run and resume
+        # take the recorded commit for a complete deploy of it.
+        say(f"deploy: {DEPLOYED_COMMIT_NAME}")
+        self.dev("copy", *PRESERVE, str(deployed), f"dev:{root}/.runtime/zgca/")
         self.dev("report")
         say("deploy: done")
 
