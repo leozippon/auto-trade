@@ -7,6 +7,7 @@ Every test runs against the fixture store ``tests/conftest.py`` points
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from datetime import datetime
 from pathlib import Path
@@ -160,6 +161,23 @@ def test_the_validator_roots_model_directories_like_every_other_file() -> None:
                 "import torch\nfrom transformers import AutoModelForCausalLM\n"
                 f"def generate_orders(context):\n    model = None\n    {source}\n    return []\n"
             )
+
+
+def test_the_contract_loads_kronos_only_through_libraries_a_strategy_may_import() -> None:
+    """The store's Kronos weights have no transformers class, and their authors
+    load them through huggingface_hub, which no strategy may import: the
+    contract's Kronos block clears the static gate, the authors' spellings do not."""
+    readme = (Path(__file__).resolve().parents[2] / "configs" / "agent_output_template" / "README.md").read_text(encoding="utf-8")
+    blocks = [block for block in re.findall(r"```python\n(.*?)```", readme, re.DOTALL) if "Kronos-Tokenizer-base" in block]
+    assert len(blocks) == 1
+    package = frozenset({"lib"})
+    validate_strategy_source(blocks[0], local_modules=package, entrypoints=False)
+    for spelling, module in (
+        ("from huggingface_hub import PyTorchModelHubMixin", "huggingface_hub"),
+        ("from safetensors.torch import load_file", "safetensors"),
+    ):
+        with pytest.raises(StrategyLoadError, match=f"unsupported module: {module}"):
+            validate_strategy_source(f"{spelling}\n{blocks[0]}", local_modules=package, entrypoints=False)
 
 
 # ----- the session container -----
