@@ -67,7 +67,7 @@ with open(os.environ["MOCK_LOG"], "a") as log:
 if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir> <storage> <quota> <floor> <step> ...
     step = args[args.index("remote.sh") + 7]
     root = os.environ.get("MOCK_REMOTE_ROOT")
-    if step == "experiment-state" and root:  # the real step, against a temporary instance root
+    if step in ("experiment-state", "dirs") and root:  # the real step, against a temporary instance root
         import subprocess
         at = args.index("remote.sh")
         sys.exit(subprocess.run(["bash", "-c", args[at - 1], "remote.sh", root, root + "/.venv", root + "/../ebs", *args[at + 4:]]).returncode)
@@ -461,9 +461,12 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertEqual((shipped / "paper_test" / "papers" / "demo" / "paper.txt").read_text(encoding="utf-8"), "Abstract\n")
         self.assertTrue((root / "configs" / "workspace_refs" / "paper_test" / PAYLOAD_MANIFEST).is_file())
 
-    def test_a_deploy_that_stops_at_the_image_records_no_commit_on_the_instance(self) -> None:
-        """The steps before the failure have shipped their files, but the commit
-        `run` and `resume` require is only recorded by a deploy that completes."""
+    def test_only_a_deploy_that_completes_leaves_a_commit_record_on_the_instance(self) -> None:
+        """The steps before a failure have shipped their files, but the commit
+        `run` and `resume` require is only recorded by a deploy that completes,
+        and a redeploy of the recorded commit removes the record before it
+        changes anything a run reads; a deploy refused while experiments run
+        changes nothing, the record included."""
         self._tracked_repo()
         self._seed()
         self._pretrained()
@@ -473,15 +476,25 @@ class ZgcaWorkflowTest(unittest.TestCase):
         for directory in (root / ".runtime" / "zgca", root / "data" / "research_releases", Path(str(instance) + zgca.LOCAL_ROOT)):
             directory.mkdir(parents=True)
         shipped = root / ".runtime" / "zgca"
-        code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_RSYNC=str(instance), MOCK_STEP_EXIT_PREPARE="1")
+        record = shipped / zgca.DEPLOYED_COMMIT_NAME
+        # The instance's transfers are real rsyncs and its dirs step runs for real.
+        instance_env = {"MOCK_RSYNC": str(instance), "MOCK_REMOTE_ROOT": str(root)}
+        code, err = self.run_main("deploy", "data/pit_views_seed_test", **instance_env, MOCK_STEP_EXIT_PREPARE="1")
         self.assertEqual(code, 1)
         self.assertIn("remote step prepare failed", err)
         self.assertEqual(sorted(path.name for path in shipped.iterdir()),
                          sorted([zgca.CUDA_COMPAT_NAME, zgca.DUCKDB_CLI_NAME, zgca.TRACKED_LIST_NAME]))
-        code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_RSYNC=str(instance))
+        code, err = self.run_main("deploy", "data/pit_views_seed_test", **instance_env)
         self.assertEqual(code, 0, err)
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
-        self.assertEqual((shipped / zgca.DEPLOYED_COMMIT_NAME).read_text(encoding="utf-8"), head)
+        self.assertEqual(record.read_text(encoding="utf-8"), head)
+        code, err = self.run_main("deploy", "data/pit_views_seed_test", **instance_env, MOCK_STEP_EXIT_IDLE="1")
+        self.assertEqual(code, 1)
+        self.assertEqual(record.read_text(encoding="utf-8"), head)
+        code, err = self.run_main("deploy", "data/pit_views_seed_test", **instance_env, MOCK_STEP_EXIT_PREPARE="1")
+        self.assertEqual(code, 1)
+        self.assertIn("remote step prepare failed", err)
+        self.assertFalse(record.exists())
 
     def test_release_exclusions_follow_the_seeds_configuration(self) -> None:
         """Only text and minute datasets the configuration does not name stay behind; a seed naming them takes them."""

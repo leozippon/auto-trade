@@ -479,8 +479,9 @@ class Workflow:
             )
         say(f"deploy: {PRETRAINED} to {store}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{store}/")
-        # The commit goes once everything else is in place: run and resume
-        # take the recorded commit for a complete deploy of it.
+        # The commit goes once everything else is in place (the dirs step
+        # removed the last deploy's): run and resume take a recorded commit
+        # for a complete deploy of it.
         say(f"deploy: {DEPLOYED_COMMIT_NAME}")
         self.dev("copy", *PRESERVE, str(deployed), f"dev:{root}/.runtime/zgca/")
         self.dev("report")

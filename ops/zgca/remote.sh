@@ -112,7 +112,10 @@ PY
 # transfers and the steps write into, and data/pretrained as the link to the
 # store on the instance's own disk. Experiments pin only the store's manifest digest
 # and containers bind the link's target, so nothing else knows where it is. A
-# real directory there (a store from before the move) is not touched.
+# real directory there (a store from before the move) is not touched. Then the
+# last deploy's commit record goes, so that one exists only for a deploy that
+# completed: the deploy records its commit as its last transfer, and run and
+# resume take a recorded commit for a complete deploy of it.
 dirs() {
     mkdir -p "$ROOT/data/research_releases" "$ROOT/experiments" "$ROOT/logs/workers" \
         "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca" "$LOCAL/pretrained"
@@ -125,6 +128,7 @@ dirs() {
     else
         ln -s "$LOCAL/pretrained" "$link"
     fi
+    rm -f "$ROOT/.runtime/zgca/deployed_commit"
 }
 
 # Bytes of the files already in the store's directory and bytes free on its
