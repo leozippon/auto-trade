@@ -163,19 +163,31 @@ def test_the_validator_roots_model_directories_like_every_other_file() -> None:
             )
 
 
-def test_the_contract_loads_kronos_only_through_libraries_a_strategy_may_import() -> None:
-    """The store's Kronos weights have no transformers class, and their authors
-    load them through huggingface_hub, which no strategy may import: the
-    contract's Kronos block clears the static gate, the authors' spellings do not."""
+@pytest.mark.parametrize(
+    ("directory", "authors_spellings"),
+    [
+        # Kronos's authors load it through huggingface_hub and safetensors.
+        ("Kronos-Tokenizer-base", (("from huggingface_hub import PyTorchModelHubMixin", "huggingface_hub"),
+                                   ("from safetensors.torch import load_file", "safetensors"))),
+        # Chronos-2's authors' package and the modules its model file imports.
+        ("/chronos-2", (("from chronos import Chronos2Pipeline", "chronos"),
+                        ("import copy", "copy"),
+                        ("from packaging import version", "packaging"))),
+    ],
+    ids=["kronos", "chronos-2"],
+)
+def test_the_contract_loads_a_model_without_a_transformers_class_only_through_libraries_a_strategy_may_import(
+    directory: str, authors_spellings: tuple[tuple[str, str], ...]
+) -> None:
+    """Kronos and Chronos-2 have no transformers class, and their authors' code
+    imports what no strategy may: the contract's block for each clears the
+    static gate as a package module, the authors' spellings do not."""
     readme = (Path(__file__).resolve().parents[2] / "configs" / "agent_output_template" / "README.md").read_text(encoding="utf-8")
-    blocks = [block for block in re.findall(r"```python\n(.*?)```", readme, re.DOTALL) if "Kronos-Tokenizer-base" in block]
+    blocks = [block for block in re.findall(r"```python\n(.*?)```", readme, re.DOTALL) if directory in block]
     assert len(blocks) == 1
     package = frozenset({"lib"})
     validate_strategy_source(blocks[0], local_modules=package, entrypoints=False)
-    for spelling, module in (
-        ("from huggingface_hub import PyTorchModelHubMixin", "huggingface_hub"),
-        ("from safetensors.torch import load_file", "safetensors"),
-    ):
+    for spelling, module in authors_spellings:
         with pytest.raises(StrategyLoadError, match=f"unsupported module: {module}"):
             validate_strategy_source(f"{spelling}\n{blocks[0]}", local_modules=package, entrypoints=False)
 

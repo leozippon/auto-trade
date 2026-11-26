@@ -166,7 +166,7 @@ Random draws must be reproducible, because two replays of the same span that pla
 
 ## Pretrained models
 
-The only pretrained weights available are the eleven Hugging Face model directories of a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell; its `MANIFEST.sha256` lists every file. In an experiment whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty. The hub is unreachable from both containers, so any other model id fails at once. Measured load times, throughput and memory are in the skill `pretrained-costs`.
+The only pretrained weights available are the twelve Hugging Face model directories of a read-only store, `context.pretrained_dir` for the strategy and `/mnt/pretrained` in the session's shell; its `MANIFEST.sha256` lists every file. In an experiment whose `runtime_env.json` shows no `sandbox_spec.pretrained_manifest_sha256`, neither is mounted and `context.pretrained_dir` is empty. The hub is unreachable from both containers, so any other model id fails at once. Measured load times, throughput and memory are in the skill `pretrained-costs`.
 
 | Directory | Weights | Released | Architecture | Use |
 | --- | --- | --- | --- | --- |
@@ -180,8 +180,9 @@ The only pretrained weights available are the eleven Hugging Face model director
 | `Kronos-small` | 24.7M, float32, 94 MiB | 2025-06 | Kronos, 8 layers, 512 dimensions, context up to 512 bars; tokens from `Kronos-Tokenizer-base` | as `Kronos-mini` |
 | `Kronos-base` | 102.3M, float32, 390 MiB | 2025-06 | Kronos, 12 layers, 832 dimensions, context up to 512 bars; tokens from `Kronos-Tokenizer-base` | as `Kronos-mini` |
 | `Kronos-Tokenizer-2k`, `Kronos-Tokenizer-base` | 4.0M each, float32, 15 MiB each | 2025-07, 2025-06 | Kronos tokenizer: a transformer autoencoder that quantizes each normalized bar (open, high, low, close, volume, amount) into a coarse and a fine 10-bit subtoken | the input side of the Kronos models |
+| `chronos-2` | 119.5M, float32, 456 MiB | 2025-10 | Chronos-2: encoder-only time-series transformer, 12 layers, 768 dimensions, input patches of 16 points, context up to 8,192 points; every layer attends along time within a series and then across the series of a group | quantile forecasts (21 levels) of a group of series forecast together, with past-only and known covariates, up to 1,024 steps per forward pass; encoder states; fine-tuning; with `transformers` (below) |
 
-The Qwen3.5 and Qwen3.8 checkpoints are multimodal; they load and serve as text-only language models (`AutoModelForCausalLM` loads the Qwen3.5 ones that way). The embedding models take the last token's hidden state (left padding), L2-normalised; a prefix of the vector, normalised again, is itself an embedding (their cards' Matryoshka training), and their cards put a one-line task instruction before a query (`Instruct: <task>\nQuery:<query>`) but not before a document. The reranker reads one pair through its own chat template and scores it as the probability of "yes" against "no" as the next token. TimesFM 2.5 forecasts each series from its own past alone; this directory is the 2026-02 `transformers` conversion of the 2025-09 checkpoint. Kronos also reads one series at a time.
+The Qwen3.5 and Qwen3.8 checkpoints are multimodal; they load and serve as text-only language models (`AutoModelForCausalLM` loads the Qwen3.5 ones that way). The embedding models take the last token's hidden state (left padding), L2-normalised; a prefix of the vector, normalised again, is itself an embedding (their cards' Matryoshka training), and their cards put a one-line task instruction before a query (`Instruct: <task>\nQuery:<query>`) but not before a document. The reranker reads one pair through its own chat template and scores it as the probability of "yes" against "no" as the next token. TimesFM 2.5 forecasts each series from its own past alone; this directory is the 2026-02 `transformers` conversion of the 2025-09 checkpoint. Kronos also reads one series at a time; Chronos-2 forecasts the series of a group together (below).
 
 Only the Kronos paper states a training-data cutoff (its pretraining bars end in 2024-06); the other cards publish none. So a model may remember replay dates before that cutoff or its release month, and readings through it may be optimistic: an accepted limitation of the experiment, not a reason to avoid the models; encoding what was visible at the decision is legitimate use, asking a model to recall what followed a name or a date is not.
 
@@ -235,6 +236,20 @@ load_checkpoint_in_model(kronos, context.pretrained_dir + "/Kronos-small/model.s
 ```
 
 A Kronos input is a window of bars with six fields, each z-scored over the window and clipped to ±5, plus the minute, hour, weekday, day and month of every bar; a window longer than the context keeps its last bars. `tokenizer.encode(x, half=True)` gives the coarse and fine token ids, and `kronos.decode_s1(...)` returns, for every position, the logits of the next bar's coarse token and the hidden state; the last position's hidden state represents the window's last bar. The authors' decoding loop runs one full forward pass over the window for every bar it generates (there is no key-value cache) and samples with `torch.multinomial`, as the training forward does for its coarse tokens, so seed both.
+
+Chronos-2's model subclasses `transformers.PreTrainedModel`, but `transformers` has no Chronos-2 class and a strategy cannot import the authors' package (Apache-2.0): it uses relative imports and imports `copy`, `packaging` and `contextlib`. The package therefore carries its own copy of the authors' `chronos2/config.py`, `chronos2/layers.py` and `chronos2/model.py`, with `InstanceNorm` and `Patch` from `chronos_bolt.py`: imports made absolute, the `packaging` version check and the `contextlib` fallback removed (the image's `transformers` takes the version-5 branch of both), and `copy.deepcopy(config)` replaced by the config itself (the copy only sets `is_decoder`, already false). `from_pretrained` then reads the directory:
+
+```python
+import torch
+from lib.chronos2.model import Chronos2Model  # the package's copy of the authors' model
+
+chronos = Chronos2Model.from_pretrained(context.pretrained_dir + "/chronos-2").eval()
+with torch.inference_mode():
+    out = chronos(context=history, group_ids=groups, future_covariates=future, num_output_patches=1)
+quantiles = out.quantile_preds  # (series, 21, 16): levels 0.01, 0.05, 0.1, 0.15, ..., 0.9, 0.95, 0.99
+```
+
+`history` is (series, points) with NaN where a value is missing; a longer history keeps its last 8,192 points, and each series is standardised and arcsinh-squashed on its own, so its forecast comes back in its own units. Series sharing a `group_ids` value attend to each other at every patch and distinct values keep series apart (`torch.arange(n)` forecasts each alone). A group lists its targets first, then its past-only covariates, then its known covariates; `future` is (series, horizon) with the known covariates' future values and NaN elsewhere, and only the target rows' forecasts are read. The group mask is dense over the whole call, so a call takes a few hundred series, whole groups together, rather than the whole market. `chronos.encode(...)` returns the encoder states, (series, patches + 1 + output patches, 768), and passing `future_target` (NaN on covariate rows) adds the quantile loss on the target rows as `out.loss` for fine-tuning.
 
 `peft` is installed for adapters, and `flash-linear-attention` and `causal-conv1d` give the Qwen3.5 linear-attention layers fused GPU kernels that each container compiles on first use, so its first GPU forward and first backward each take up to about a minute longer, on the clock of the call that makes them. Whatever is trained during a replay is written under `context.state_dir` (`model.save_pretrained(context.state_dir + "/adapter")`, or a `torch.save` of the weights), never into the store.
 
