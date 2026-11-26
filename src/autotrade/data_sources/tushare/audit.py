@@ -71,10 +71,7 @@ from .common import (
     selected_text_datasets,
 )
 from .intraday import (
-    active_year_windows,
     intraday_expected_codes_for_day,
-    load_minute_universe,
-    selected_intraday_datasets,
     stk_mins_by_date_path,
     validate_stk_mins_by_date_frame,
 )
@@ -104,7 +101,6 @@ from .specs import (
     FUNDAMENTAL_SPECS,
     INDEX_WEIGHT_FIELDS,
     INTEGRATED_DOC_REFS,
-    INTRADAY_DATASETS,
     MACRO_DATASETS,
     MACRO_SPECS,
     REFERENCE_DATASETS,
@@ -113,7 +109,6 @@ from .specs import (
     STK_MINS_API_NAME,
     STK_MINS_BY_DATE_DATASET,
     STK_MINS_DATASET,
-    STK_MINS_PAGE_LIMIT,
     STK_MINS_REQUIRED_COLUMNS,
     TEXT_DATASETS,
     TEXT_SPECS,
@@ -716,121 +711,6 @@ def audit_auction_alignment(args: argparse.Namespace) -> int:
         },
         metadata={},
     )
-
-def expected_stk_mins_paths(raw_dir: Path, args: argparse.Namespace) -> set[Path]:
-    universe_args = argparse.Namespace(codes=getattr(args, "intraday_codes", None), max_codes=getattr(args, "intraday_max_codes", None))
-    universe = load_minute_universe(raw_dir, universe_args)
-    expected: set[Path] = set()
-    for _, row in universe.iterrows():
-        ts_code = str(row["ts_code"])
-        for year, _, _ in active_year_windows(row, args.intraday_start_date, args.intraday_end_date):
-            expected.add(raw_dir / STK_MINS_DATASET / f"ts_code={safe_partition_value(ts_code)}" / f"year={year}.parquet")
-    return expected
-
-def audit_stk_mins_completeness(raw_dir: Path, args: argparse.Namespace, add) -> None:
-    all_files = sorted((raw_dir / STK_MINS_DATASET).glob("ts_code=*/year=*.parquet"))
-    all_meta_files = sorted((raw_dir / STK_MINS_DATASET).glob("ts_code=*/year=*.parquet.meta.json"))
-    expected = expected_stk_mins_paths(raw_dir, args)
-    scoped = bool(getattr(args, "intraday_codes", None) or getattr(args, "intraday_max_codes", None))
-    if scoped:
-        expected_parent_dirs = {path.parent.resolve() for path in expected}
-        files = [path for path in all_files if path.parent.resolve() in expected_parent_dirs]
-        meta_files = [path for path in all_meta_files if path.parent.resolve() in expected_parent_dirs]
-    else:
-        files = all_files
-        meta_files = all_meta_files
-    file_set = {path.resolve() for path in files}
-    expected_set = {path.resolve() for path in expected}
-    missing = sorted(str(path) for path in expected_set - file_set)
-    extra = sorted(str(path) for path in file_set - expected_set)
-    parquet_meta = {str(path.with_suffix(path.suffix + ".meta.json")) for path in files}
-    meta_set = {str(path) for path in meta_files}
-    missing_meta = sorted(parquet_meta - meta_set)
-    orphan_meta = sorted(meta_set - parquet_meta)
-    row_counts = {str(path): parquet_rows(path) for path in files}
-    zero_files = sorted(path for path, rows in row_counts.items() if rows == 0)
-    exact_limit_files = sorted(
-        path
-        for path, rows in row_counts.items()
-        if rows in {STK_MINS_PAGE_LIMIT, 5000, 6000, 7000, 8000, 10000} and not has_pagination_probe(Path(path))
-    )
-    schema_missing: list[str] = []
-    for path in files:
-        schema = set(pq.ParquetFile(path).schema_arrow.names)
-        if not set(STK_MINS_REQUIRED_COLUMNS).issubset(schema):
-            schema_missing.append(str(path))
-    has_error = bool(missing or missing_meta or orphan_meta or schema_missing)
-    sample_seed = str(getattr(args, "intraday_end_date", None) or args.intraday_start_date)
-    add("error" if has_error else "warning" if zero_files or exact_limit_files else "info", f"{STK_MINS_DATASET}_partitions", "stk_mins 1min stock-year partition inventory", {
-        "files": len(files),
-        "expected_files": len(expected),
-        "missing_expected_files": len(missing),
-        "extra_files": len(extra),
-        "meta_files": len(meta_files),
-        "rows": int(sum(row_counts.values())),
-        "zero_row_partitions": len(zero_files),
-        "exact_common_limit_row_count_partitions": len(exact_limit_files),
-        "missing_meta": len(missing_meta),
-        "orphan_meta": len(orphan_meta),
-        "schema_missing_required_columns": len(schema_missing),
-        "missing_sample": missing[:20],
-        "extra_sample": extra[:20],
-        "zero_sample": zero_files[:20],
-        "exact_limit_sample": exact_limit_files[:20],
-        "schema_missing_sample": schema_missing[:10],
-        "unit_rules": {**column_source_units("intraday_1min.parquet"), "official_page_limit": STK_MINS_PAGE_LIMIT, "doc_ref": INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
-    })
-    audit_stk_mins_sample(files, row_counts, args.sample_limit, sample_seed, add)
-
-def audit_stk_mins_sample(files: list[Path], row_counts: dict[str, int], sample_limit: int, seed: str, add) -> None:
-    # Deterministic seed-driven rotation (the revision-sentinel pattern): a
-    # fixed head slice re-read the same lowest ts_codes forever, so the rest of
-    # the store was never sampled. The seed moves with the audit end date, so
-    # coverage rotates daily while any given day stays reproducible.
-    candidates = [path for path in files if row_counts[str(path)] > 0]
-    ranked = sorted(candidates)
-    if ranked:
-        offset = sum((index + 1) * ord(char) for index, char in enumerate(seed)) % len(ranked)
-        ranked = ranked[offset:] + ranked[:offset]
-    sample = ranked[: max(0, sample_limit)]
-    duplicate_key_rows = 0
-    unparseable_trade_time_rows = 0
-    unparseable_available_at_rows = 0
-    missing_0930_files: list[str] = []
-    missing_1500_files: list[str] = []
-    code_partition_mismatch = 0
-    year_partition_mismatch = 0
-    for path in sample:
-        df = pd.read_parquet(path, columns=["ts_code", "trade_time", "trade_date", "available_at"])
-        duplicate_key_rows += int(df.duplicated(["ts_code", "trade_time"]).sum())
-        trade_time = df["trade_time"].astype(str).str.strip()
-        parsed_trade = pd.to_datetime(trade_time, errors="coerce")
-        unparseable_trade_time_rows += int(parsed_trade.isna().sum())
-        available = df["available_at"].astype(str).str.strip()
-        parsed_available = pd.to_datetime(available[available.ne("")], errors="coerce", utc=True, format="mixed")
-        unparseable_available_at_rows += int(parsed_available.isna().sum())
-        times = set(trade_time.str.extract(r"(\d{2}:\d{2})", expand=False).dropna().tolist())
-        if "09:30" not in times:
-            missing_0930_files.append(str(path))
-        if "15:00" not in times:
-            missing_1500_files.append(str(path))
-        expected_code = path.parent.name.split("=", 1)[1]
-        expected_year = partition_value(path)
-        code_partition_mismatch += int((df["ts_code"].astype(str) != expected_code).sum())
-        year_partition_mismatch += int((df["trade_date"].astype(str).str[:4] != expected_year).sum())
-    has_issue = any([duplicate_key_rows, unparseable_trade_time_rows, unparseable_available_at_rows, missing_0930_files, missing_1500_files, code_partition_mismatch, year_partition_mismatch])
-    add("warning" if has_issue else "info", f"{STK_MINS_DATASET}_sample_keys", "stk_mins 1min sampled key/PIT/auction-bar checks", {
-        "files_sampled": len(sample),
-        "duplicate_key_rows": duplicate_key_rows,
-        "unparseable_trade_time_rows": unparseable_trade_time_rows,
-        "unparseable_available_at_rows": unparseable_available_at_rows,
-        "missing_0930_files": len(missing_0930_files),
-        "missing_1500_files": len(missing_1500_files),
-        "code_partition_mismatch_rows": code_partition_mismatch,
-        "year_partition_mismatch_rows": year_partition_mismatch,
-        "missing_0930_sample": missing_0930_files[:10],
-        "missing_1500_sample": missing_1500_files[:10],
-    })
 
 def audit_fundamental_dataset(raw_dir: Path, spec: DatasetSpec, expected: set[str], prefix: str, add) -> dict[str, int]:
     files = sorted((raw_dir / spec.api_name).glob(f"{prefix}=*.parquet"))
@@ -2485,45 +2365,6 @@ def audit_fundamental_raw(args: argparse.Namespace) -> int:
         unresolved_columns=unresolved_columns,
     )
 
-def audit_intraday_only(args: argparse.Namespace) -> int:
-    repo_root = Path.cwd().resolve()
-    raw_dir = (repo_root / args.raw_dir).resolve()
-    if getattr(args, "intraday_end_date", None) is None:
-        args.intraday_end_date = cn_today()
-    output = (repo_root / (args.output or INTRADAY_MINUTES_STATUS_PATH)).resolve()
-    add = Findings()
-
-    intraday_datasets = selected_intraday_datasets(getattr(args, "intraday_datasets", None))
-    audit_integrated_filesystem(raw_dir, intraday_datasets, add)
-    if STK_MINS_DATASET in intraday_datasets:
-        audit_stk_mins_completeness(raw_dir, args, add)
-
-    return write_audit(
-        "intraday",
-        output,
-        add,
-        report_type="intraday_minutes",
-        scope={
-            "data_root": str(raw_dir),
-            "start_date": args.intraday_start_date,
-            "end_date": args.intraday_end_date,
-            "datasets": intraday_datasets,
-            "intraday_codes": getattr(args, "intraday_codes", None),
-            "intraday_max_codes": getattr(args, "intraday_max_codes", None),
-        },
-        metadata={
-            "unit_rules": {
-                STK_MINS_DATASET: {
-                    **column_source_units("intraday_1min.parquet"),
-                    "available_at": "source trade_time in Asia/Shanghai; use as bar-close availability",
-                    "auction_bars": "opening and closing auction are represented by 09:30 and 15:00 1-minute bars; no separate auction dataset is required for historical intraday minute",
-                }
-            },
-            "doc_refs": {STK_MINS_DATASET: INTEGRATED_DOC_REFS[STK_MINS_DATASET]},
-        },
-    )
-
-
 def add_core_market_parser(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("core-market", help="audit reference tables and daily market quotes/constraints")
     add_raw_arg(parser)
@@ -2548,16 +2389,6 @@ def add_fundamental_raw_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--output", help=f"Defaults to {FUNDAMENTAL_RAW_STATUS_PATH}.")
 
 def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("intraday", help="audit stock-year intraday minute raw data")
-    add_raw_arg(parser)
-    parser.add_argument("--intraday-start-date", default="20200101")
-    parser.add_argument("--intraday-end-date")
-    parser.add_argument("--intraday-datasets", nargs="+", choices=INTRADAY_DATASETS + ["stk_mins"])
-    parser.add_argument("--intraday-codes", nargs="+")
-    parser.add_argument("--intraday-max-codes", type=int)
-    parser.add_argument("--sample-limit", type=int, default=10)
-    parser.add_argument("--output", help=f"Defaults to {INTRADAY_MINUTES_STATUS_PATH}.")
-
     by_date = sub.add_parser("intraday-by-date", help="audit final full-market daily minute files")
     add_intraday_by_date_common_args(by_date)
     by_date.add_argument("--full-scan", action="store_true")
@@ -2645,8 +2476,6 @@ def main() -> int:
         return audit_core_market(args)
     if args.command == "fundamental-raw":
         return audit_fundamental_raw(args)
-    if args.command == "intraday":
-        return audit_intraday_only(args)
     if args.command == "intraday-by-date":
         return audit_intraday_by_date(args)
     if args.command == "auction-alignment":

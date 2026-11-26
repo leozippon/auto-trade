@@ -15,7 +15,7 @@ from autotrade.environment.data.contracts import (
     BOARD_TRADING_DATASETS,
 )
 
-DOWNLOAD_TIER_CHOICES = ("reference", "daily", "fundamental", "intraday", "event_flow", "board_trading", "text_evidence", "macro", "global")
+DOWNLOAD_TIER_CHOICES = ("reference", "daily", "fundamental", "event_flow", "board_trading", "text_evidence", "macro", "global")
 
 # stock_company, ths_index and ths_member were retired on 2026-11-21: nothing
 # read them, so they are no longer downloaded or audited. Their directories
@@ -36,8 +36,6 @@ REFERENCE_DATASETS = [
 # gate, but it is written only by dedicated capture and evening backfill.
 DAILY_DOWNLOAD_DATASETS = ["daily", "adj_factor", "daily_basic", "stk_limit", "suspend_d"]
 DAILY_REQUIRED_DATASETS = [*DAILY_DOWNLOAD_DATASETS, "stk_auction"]
-
-INTRADAY_DATASETS = ["stk_mins_1min"]
 
 BOARD_TRADING_DEFAULT_DATASETS = list(BOARD_TRADING_DATASETS)
 

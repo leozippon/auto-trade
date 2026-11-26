@@ -73,11 +73,7 @@ from .common import (
     yyyymmdd_to_month,
     yyyymmdd_to_quarter,
 )
-from .intraday import (
-    compact_intraday_by_date,
-    download_intraday,
-    update_intraday_by_date,
-)
+from .intraday import update_intraday_by_date
 from .io import committed_partition_intact, parquet_rows
 from .layout import (
     Partition,
@@ -102,7 +98,6 @@ from .specs import (
     GLOBAL_CONTEXT_DEFAULT_DATASETS,
     INDEX_WEIGHT_FIELDS,
     INDEX_WEIGHT_PAGE_LIMIT,
-    INTRADAY_DATASETS,
     MACRO_DATASETS,
     MACRO_REGIME_DEFAULT_DATASETS,
     MACRO_SPECS,
@@ -110,7 +105,6 @@ from .specs import (
     REFERENCE_PAGE_LIMIT,
     RESEARCH_HISTORY_FLOOR,
     STK_MINS_BY_DATE_DATASET,
-    STK_MINS_PAGE_LIMIT,
     TEXT_DATASETS,
     TEXT_SPECS,
     TRADE_DATE_PAGE_LIMIT,
@@ -1776,11 +1770,10 @@ def set_download_defaults(args: argparse.Namespace) -> None:
         # lighter tiers tripped it first.
         args.min_interval_seconds = MIN_REQUEST_INTERVAL_SECONDS
     if args.timeout_seconds is None:
-        args.timeout_seconds = 120 if args.tier == "intraday" else 90 if args.tier in {"fundamental", "event_flow", "board_trading", "text_evidence", "macro", "global"} else 60
+        args.timeout_seconds = 90 if args.tier in {"fundamental", "event_flow", "board_trading", "text_evidence", "macro", "global"} else 60
     if args.page_limit is None:
         # None leaves each text and board dataset its spec's own limit.
         args.page_limit = {
-            "intraday": STK_MINS_PAGE_LIMIT,
             "text_evidence": None,
             "fundamental": 7000,
             "daily": TRADE_DATE_PAGE_LIMIT,
@@ -1795,7 +1788,6 @@ def download_selected_tier(args: argparse.Namespace) -> int:
         "reference": (download_reference, lambda: [d for d in REFERENCE_DATASETS if not (d == "bak_basic" and args.skip_bak_basic)]),
         "daily": (download_daily, lambda: selected_daily_datasets(args)),
         "fundamental": (download_fundamental, lambda: selected_fundamental_datasets(args.datasets)),
-        "intraday": (download_intraday, lambda: list(INTRADAY_DATASETS)),
         "event_flow": (download_event_flow, lambda: selected_event_flow_download_datasets(args)),
         "board_trading": (download_board_trading, lambda: selected_board_trading_datasets(args)),
         "text_evidence": (download_text, lambda: selected_text_datasets(args.datasets, news_src=args.news_src)),
@@ -2013,7 +2005,7 @@ def add_download_parser(sub: argparse._SubParsersAction) -> None:
         "defers the empty partitions to the retry job. For pre-open cron attempts that race source publication.",
     )
     parser.add_argument("--max-codes", type=int)
-    parser.add_argument("--codes", nargs="+", help="Optional explicit ts_code list for intraday minute window tests or targeted refreshes.")
+    parser.add_argument("--codes", nargs="+", help="Optional explicit ts_code list for targeted per-code fundamental refreshes.")
     parser.add_argument("--page-limit", type=int, help="Optional requested page size; text evidence datasets are clamped to official per-call limits.")
     parser.add_argument("--news-src", action="append", default=[], help="News short-message source; repeatable. Defaults to all official TuShare sources; use all to expand explicitly.")
     parser.add_argument("--major-news-src", action="append", default=[], help="Optional major_news source filter; repeatable.")
@@ -2187,14 +2179,7 @@ def add_auction_capture_parser(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
     add_runtime_args(parser, min_interval=MIN_REQUEST_INTERVAL_SECONDS, timeout=30)
 
-def add_intraday_parsers(sub: argparse._SubParsersAction) -> None:
-    compact = sub.add_parser("compact-intraday-by-date", help="build final full-market daily minute files from stock-year source partitions")
-    add_intraday_by_date_common_args(compact)
-    compact.add_argument("--force", action="store_true")
-    compact.add_argument("--allow-empty", action="store_true")
-    compact.add_argument("--allow-validation-warnings", action="store_true")
-    compact.add_argument("--revision-ledger", default=REVISION_EVENTS_PATH)
-
+def add_intraday_parser(sub: argparse._SubParsersAction) -> None:
     update = sub.add_parser("update-intraday-by-date", help="download/retry trade dates directly into final daily minute files")
     add_intraday_by_date_common_args(update, expected_codes_choices=["daily", "active", "minute"], expected_codes_default="minute")
     update.add_argument("--force", action="store_true")
@@ -2257,7 +2242,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_update_parser(sub)
     add_auction_capture_parser(sub)
     add_auction_recheck_parser(sub)
-    add_intraday_parsers(sub)
+    add_intraday_parser(sub)
     add_share_float_parser(sub)
     add_repair_text_parser(sub)
     return parser
@@ -2308,8 +2293,6 @@ def _dispatch(args: argparse.Namespace) -> int:
         return capture_open_auction(args)
     if args.command == "recheck-stk-auction":
         return recheck_stk_auction(args)
-    if args.command == "compact-intraday-by-date":
-        return compact_intraday_by_date(args)
     if args.command == "update-intraday-by-date":
         return update_intraday_by_date(args)
     if args.command == "download-share-float-complete":

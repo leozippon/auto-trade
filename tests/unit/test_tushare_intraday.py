@@ -195,12 +195,12 @@ class MinuteUpdateTest(LakeTestCase):
         self.assertEqual(codes, {"000001.SZ"})
 
 
-class IntradayByDateTest(unittest.TestCase):
+class IntradayByDateAuditTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.raw_dir = Path(self.tmp.name) / "raw"
         self._write_reference_inputs()
-        self._write_stock_year_inputs()
+        self._write_by_date_day()
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -235,7 +235,7 @@ class IntradayByDateTest(unittest.TestCase):
             },
         ]).to_parquet(stock_basic, index=False)
 
-    def _write_stock_year_inputs(self):
+    def _write_by_date_day(self):
         rows_by_code = {
             "000001.SZ": [
                 ("2020-01-02 09:30:00", 10.0),
@@ -246,52 +246,32 @@ class IntradayByDateTest(unittest.TestCase):
                 ("2020-01-02 15:00:00", 20.5),
             ],
         }
-        for ts_code, bars in rows_by_code.items():
-            path = self.raw_dir / "stk_mins_1min" / f"ts_code={ts_code}" / "year=2020.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame([
-                {
-                    "ts_code": ts_code,
-                    "trade_time": trade_time,
-                    "open": price,
-                    "high": price,
-                    "low": price,
-                    "close": price,
-                    "vol": 100,
-                    "amount": price * 100,
-                    "trade_date": "20200102",
-                    "available_at": f"{trade_time}+08:00",
-                    "available_at_rule": "source:trade_time_bar_close",
-                }
-                for trade_time, price in bars
-            ]).to_parquet(path, index=False)
-
-    def test_compact_and_audit_intraday_by_date(self):
-        compact_args = argparse.Namespace(
-            raw_dir=str(self.raw_dir),
-            start_date="20200102",
-            end_date="20200102",
-            output_dataset="stk_mins_1min_by_date",
-            codes=None,
-            max_codes=None,
-            expected_codes_source="active",
-            min_rows_per_day=4,
-            allow_missing_codes=0,
-            force=False,
-            allow_empty=False,
-            allow_validation_warnings=False,
-            revision_ledger=common.REVISION_EVENTS_PATH,
+        day = pd.DataFrame([
+            {
+                "ts_code": ts_code,
+                "trade_time": trade_time,
+                "open": price,
+                "high": price,
+                "low": price,
+                "close": price,
+                "vol": 100,
+                "amount": price * 100,
+                "trade_date": "20200102",
+                "available_at": f"{trade_time}+08:00",
+                "available_at_rule": "source:trade_time_bar_close",
+            }
+            for ts_code, bars in rows_by_code.items()
+            for trade_time, price in bars
+        ])
+        intraday.write_stk_mins_by_date(
+            intraday.stk_mins_by_date_path(self.raw_dir, specs.STK_MINS_BY_DATE_DATASET, "20200102"),
+            day,
+            trade_date="20200102",
+            source="daily_incremental_update",
+            params={},
         )
-        self.assertEqual(intraday.compact_intraday_by_date(compact_args), 0)
 
-        output = self.raw_dir / "stk_mins_1min_by_date" / "trade_date=20200102.parquet"
-        self.assertTrue(output.exists())
-        self.assertTrue(output.with_suffix(output.suffix + ".meta.json").exists())
-        df = pd.read_parquet(output)
-        self.assertEqual(len(df), 4)
-        self.assertEqual(sorted(df["ts_code"].unique().tolist()), ["000001.SZ", "000002.SZ"])
-        self.assertEqual(set(df["trade_date"].astype(str)), {"20200102"})
-
+    def test_audit_passes_a_published_day_covering_the_active_universe(self):
         status_path = Path(self.tmp.name) / "intraday_by_date_status.json"
         audit_args = argparse.Namespace(
             raw_dir=str(self.raw_dir),

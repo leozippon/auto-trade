@@ -917,35 +917,6 @@ class AuditTest(LakeTestCase):
         self.assertEqual(found["inventory"]["details"]["missing_files"], 1)
         self.assertEqual(found["staleness"]["severity"], "info")
 
-    def test_stk_mins_sample_rotates_deterministically_with_seed(self):
-        base = self.raw_dir / specs.STK_MINS_DATASET
-        files = []
-        for code in ("000001.SZ", "000002.SZ", "600000.SH"):
-            path = base / f"ts_code={code}" / "year=2020.parquet"
-            path.parent.mkdir(parents=True, exist_ok=True)
-            pd.DataFrame([{
-                "ts_code": code,
-                "trade_time": "2020-01-02 10:00:00",
-                "trade_date": "20200102",
-                "available_at": "2020-01-02T10:00:00+08:00",
-            }]).to_parquet(path, index=False)
-            files.append(path)
-        row_counts = {str(path): 1 for path in files}
-        seed = "20260101"
-        ranked = sorted(files)
-        offset = sum((index + 1) * ord(char) for index, char in enumerate(seed)) % len(ranked)
-        expected_first = (ranked[offset:] + ranked[:offset])[0]
-
-        findings = []
-        def add(severity, check, message, details=None):
-            findings.append({"check": check, "details": details or {}})
-
-        audit.audit_stk_mins_sample(files, row_counts, 1, seed, add)
-        sample_finding = findings[-1]["details"]
-        self.assertEqual(sample_finding["files_sampled"], 1)
-        # No 09:30/15:00 bars in the fixture: the flagged file IS the sampled one.
-        self.assertEqual(sample_finding["missing_0930_sample"], [str(expected_first)])
-
     def test_design_fact_checks_report_as_info(self):
         # Unconditional design-fact notes must not occupy the warning severity:
         # a healthy day should be able to read status=ok (round 18).
