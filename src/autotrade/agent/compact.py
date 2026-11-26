@@ -13,7 +13,9 @@ call, one implementation for the session loop and every sub-agent.
 
 Compaction rewrites history only: the conversation's system prompt is carried
 over verbatim, so the session (or child) keeps the exact contract it was
-composed with and the provider's prefix cache still covers it.
+composed with and the provider's prefix cache still covers it. In an
+experiment with a reference Pack, the session's compactions also restate the
+Pack's README beside the summary (``reference_pack_message``); a child's do not.
 
 What compaction drops is not lost: every event of the session is in the
 Agent-readable transcript under the ``trace`` root, and the summary message
@@ -52,7 +54,7 @@ from autotrade.environment.time_budget import (
 from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
 from autotrade.environment.trace import TraceEvent
 
-from .prompts import PACK_REREAD_NOTE
+from .prompts import REFERENCE_PACK_NOTE
 
 if TYPE_CHECKING:
     from autotrade.environment.tools.base import ToolResultStore
@@ -73,7 +75,8 @@ COMPACT_SYSTEM_PROMPT = (
     "Agent. Write a Markdown continuation summary with exactly these headings, in "
     "this order: " + " / ".join(COMPACT_SUMMARY_HEADINGS) + ". Keep exact file "
     "paths, commands, error strings, artifact ids, node ids, user constraints, "
-    "the reference pack's (refs/README.md) requirements not yet met, "
+    "which of the reference pack's (refs/README.md) requirements are not yet met "
+    "(not the pack's text: the host restates it after the compaction), "
     "numbers, and next steps; drop obsolete details; do not invent facts. When a "
     "previous summary is given, update it: keep everything still relevant, move "
     "finished items under 已完成, and add only what the new messages establish. "
@@ -148,6 +151,7 @@ class ContextCompactor(SessionTimeBudgetAware):
         *,
         result_store: ToolResultStore | None = None,
         trace_ref: str | None = None,
+        reference_pack: str | None = None,
     ) -> None:
         self.llm = llm
         self.config = config or ContextCompactionConfig()
@@ -156,6 +160,9 @@ class ContextCompactor(SessionTimeBudgetAware):
         self.result_store = result_store
         # The run's opaque ref: names the transcript the summary points at.
         self.trace_ref = trace_ref
+        # The host's copy of the experiment's Pack README, restated after
+        # every compaction; None without a Pack.
+        self.reference_pack = reference_pack
         self._consecutive_failures = 0
         self.compaction_count = 0
         self.compaction_attempts = 0
@@ -171,7 +178,8 @@ class ContextCompactor(SessionTimeBudgetAware):
 
         One conversation, one compactor: the call cap and failure circuit are
         per conversation and the counters are not thread-safe, so a child
-        session derives its own instance instead of sharing the parent's.
+        session derives its own instance instead of sharing the parent's. It
+        restates no Pack: a child works from its brief.
         """
 
         return ContextCompactor(
@@ -306,6 +314,7 @@ class ContextCompactor(SessionTimeBudgetAware):
             keep_recent_messages=self.config.keep_recent_messages,
             kind="model",
             trace_ref=self.trace_ref,
+            reference_pack=self.reference_pack,
         )
         event = {
             **decision,
@@ -321,6 +330,7 @@ class ContextCompactor(SessionTimeBudgetAware):
             "summary_chars": len(summary_text),
             "summary": summary_text,
             "files": files,
+            **_reference_pack_field(self.reference_pack),
         }
         if request_context_edit:
             event["request_context_edit"] = request_context_edit
@@ -539,6 +549,7 @@ def compact_with_summary(
     *,
     keep_recent_messages: int,
     trace_ref: str | None = None,
+    reference_pack: str | None = None,
 ) -> ContextCompactionResult:
     """The Agent's own compaction: its summary replaces everything but the
     system prompt and the most recent messages, exactly as the runtime
@@ -564,6 +575,7 @@ def compact_with_summary(
         keep_recent_messages=keep_recent_messages,
         kind="agent",
         trace_ref=trace_ref,
+        reference_pack=reference_pack,
     )
     return ContextCompactionResult(
         messages=compacted,
@@ -575,8 +587,15 @@ def compact_with_summary(
             "summary_chars": len(text),
             "summary": text,
             "files": files,
+            **_reference_pack_field(reference_pack),
         },
     )
+
+
+def _reference_pack_field(reference_pack: str | None) -> dict[str, int]:
+    """The trace's record that a compaction restated the Pack: its size."""
+
+    return {} if reference_pack is None else {"reference_pack_chars": len(reference_pack)}
 
 
 def _cut_summary(text: str, max_chars: int, notice: str) -> str:
@@ -613,11 +632,14 @@ def _rebuild(
     keep_recent_messages: int,
     kind: str,
     trace_ref: str | None,
+    reference_pack: str | None,
 ) -> tuple[tuple[ChatMessage, ...], dict[str, list[str]]]:
-    """System prompt, one summary message, then the retained tail.
+    """System prompt, one summary message, the Pack's README when there is
+    one, then the retained tail.
 
-    An earlier summary message is superseded, never retained; the files trail
-    it carried is merged into the new one.
+    An earlier summary message and Pack README are superseded, never retained
+    or summarized; the files trail the summary carried is merged into the new
+    one.
     """
 
     non_summary = [message for message in messages[1:] if not is_compaction_message(message)]
@@ -626,8 +648,9 @@ def _rebuild(
     summary_message = compaction_summary_message(
         summary_text, files, kind=kind, trace_ref=trace_ref
     )
+    pack = () if reference_pack is None else (reference_pack_message(reference_pack),)
     # The system prompt is reused as the same object, never re-rendered.
-    return (messages[0], summary_message, *recent), files
+    return (messages[0], summary_message, *pack, *recent), files
 
 
 def drop_leading_orphan_tools(seq: Sequence[ChatMessage]) -> list[ChatMessage]:
@@ -809,9 +832,15 @@ def _bounded_context_value(value: object) -> object:
     return text if len(text) <= 300 else text[:297] + "..."
 
 
+# What a compaction leaves before the retained tail, the summary and the
+# Pack's README: the next compaction replaces both, and neither counts as,
+# is summarized with or is kept among the recent messages.
+_COMPACTION_OBSERVATIONS = frozenset({"context_compaction", "reference_pack"})
+
+
 def is_compaction_message(message: ChatMessage) -> bool:
     payload = _compaction_payload(message)
-    return payload is not None and payload.get("observation") == "context_compaction"
+    return payload is not None and payload.get("observation") in _COMPACTION_OBSERVATIONS
 
 
 def _compaction_payload(message: ChatMessage) -> dict[str, Any] | None:
@@ -921,9 +950,7 @@ def compaction_summary_message(
 
     ``kind`` says who wrote the summary: ``agent`` (its own ``compact`` call),
     ``model`` (the runtime compactor) or ``resume`` (an interrupted attempt's
-    last summary, handed to the attempt that continues it). After a
-    compaction the message tells the reader to re-read the reference Pack;
-    a resumed attempt's opening instruction says so instead.
+    last summary, handed to the attempt that continues it).
     """
 
     payload: dict[str, object] = {
@@ -933,7 +960,6 @@ def compaction_summary_message(
             "Older messages were replaced by this summary; the summary and the most "
             "recent messages are the retained context."
         ),
-        **({} if kind == "resume" else {"reference_pack": PACK_REREAD_NOTE}),
         "summary": summary_text,
         "files": files if files is not None else {"read": [], "modified": []},
         "trace": {
@@ -950,6 +976,15 @@ def compaction_summary_message(
     return ChatMessage(
         "user", json.dumps(payload, ensure_ascii=False, default=str, allow_nan=False)
     )
+
+
+def reference_pack_message(readme: str) -> ChatMessage:
+    """The experiment's Pack README as the host restates it: the message after
+    the summary of each of the session's compactions and in a resumed
+    attempt's opening, ``readme`` the host's copy, never the workspace's."""
+
+    payload = {"observation": "reference_pack", "note": REFERENCE_PACK_NOTE, "readme": readme}
+    return ChatMessage("user", json.dumps(payload, ensure_ascii=False, allow_nan=False))
 
 
 def safe_error_summary(exc: BaseException, max_chars: int = 500) -> str:

@@ -26,7 +26,7 @@ from autotrade.agent.compact import COMPACT_SYSTEM_PROMPT
 from autotrade.agent.experiment_facts import NO_SANDBOX_GPUS
 from autotrade.agent.prompts import (
     EXPERIMENT_FACTS_HEADER,
-    PACK_REREAD_NOTE,
+    REFERENCE_PACK_NOTE,
     SESSION_BOUNDARIES_SECTION,
     SESSION_BUDGET_ORIENTATION_BULLET,
     SESSION_DEFAULT_INSTRUCTION,
@@ -168,9 +168,9 @@ def render() -> str:
         "",
         "压缩输入包含上一份结构化摘要与其后的新增消息。回答至少要含一个约定的标题；空回答、不含任何约定标题的回答或模型错误不会替换原会话。主 Runner 仍保存最近完整轮次，并可使用确定性工具观察摘要继续控制上下文规模。确定性工具结果缩写保留省略说明、`original_chars`、`head`、`tail`和可用的`retained_fields`，并明确标记`source_omitted=true`；不生成内容指纹。压缩后留下的摘要消息带根 `trace` 的 transcript 位置，被压缩掉的工具原文、代码与数字从那里取回。",
         "",
-        "参考包的要求只在 `refs/README.md` 里，宿主不检查它们，所以压缩后的摘要消息与续跑尝试的开场说明各带同一句（续跑带过来的那份摘要不再重复）：",
+        "参考包的要求只在 `refs/README.md` 里，宿主不检查它们，所以有参考包的实验里，会话每次压缩后紧跟摘要消息、续跑尝试在开场说明之前，各有一条宿主消息（`observation: reference_pack`）带包的 README 原文，取自宿主保存的原件；下一次压缩把它与摘要一起换掉，子代理的压缩不带它。消息的 `note` 是：",
         "",
-        _block(PACK_REREAD_NOTE),
+        _block(REFERENCE_PACK_NOTE),
         "",
         "## 5. 动态上下文结构",
         "",

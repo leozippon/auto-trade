@@ -150,21 +150,21 @@ EXPERIMENT_FACTS_HEADER = """\
 下面的 JSON 是宿主在本次尝试开始时写下的受信事实（同 `inputs/session_context.json`），会话中不更新；它描述环境，不是交易证据，其中的日期与标识不是交易信号。\
 """
 
-# What a session re-reads before it continues, after a compaction (the summary
-# message, ``compact.compaction_summary_message``) and at a resume
-# (``RESUME_INSTRUCTION``): the reference Pack's requirements are read once, at
-# the start, and live only in ``refs/README.md``; an arm's second summary
-# dropped its Pack's required controls and the session stopped running them
-# (round 20261119). Conditional, because the summary message is built alike
-# for the session and its sub-agents and knows nothing of the workspace.
-PACK_REREAD_NOTE = "若工作区有 `refs/README.md`（参考包），继续之前先重读它：包的要求只在它里面，压缩与续跑都不会替你保留。"
-
-RESUME_INSTRUCTION = (
-    """\
-本次续接本实验中断的研究会话：上一次尝试在 {interrupted_at} 中断（{error}）。已用预算：推理 {used_minutes:g}/{total_minutes:g} 分钟、模型调用 {used_calls}/{total_calls}、API 花费 ${used_usd:.2f}/${total_usd:.2f}、随机对照 {used_nulls}/{total_nulls}。工作区、`output/`、`TODO.md`、skills、Step 树与验证记录都保持中断时的状态；之前尝试的 transcript 在根 `trace` 下（{transcripts}）。{summary_note}先读 `TODO.md` 与 Step 树（根 `steps` 的 `tree.txt`），核对工作区现状后继续，不要重做已经验证过的工作。"""
-    + PACK_REREAD_NOTE
-    + "{record_note}"
+# Labels the reference Pack's README where the host restates it
+# (``compact.reference_pack_message``): the Pack's requirements live only
+# there and a session reads it at its start, but an arm's second summary
+# dropped its Pack's required controls (round 20261119), and sessions told to
+# re-read it did not, one last at hour 2 of 52 across three compactions (round
+# 20261121). So the first turn after every compaction of the session and the
+# first turn of a resumed attempt carry the text itself, from the host's copy.
+REFERENCE_PACK_NOTE = (
+    "宿主重述的参考包 README：每次压缩之后与续跑开始时，宿主把本实验参考包 `refs/README.md` 的原文"
+    "（取自宿主保存的原件，不是工作区里的副本）放在 readme 里，下一次压缩时换上新的一份，不必为此重读。"
 )
+
+RESUME_INSTRUCTION = """\
+本次续接本实验中断的研究会话：上一次尝试在 {interrupted_at} 中断（{error}）。已用预算：推理 {used_minutes:g}/{total_minutes:g} 分钟、模型调用 {used_calls}/{total_calls}、API 花费 ${used_usd:.2f}/${total_usd:.2f}、随机对照 {used_nulls}/{total_nulls}。工作区、`output/`、`TODO.md`、skills、Step 树与验证记录都保持中断时的状态；之前尝试的 transcript 在根 `trace` 下（{transcripts}）。{summary_note}先读 `TODO.md` 与 Step 树（根 `steps` 的 `tree.txt`），核对工作区现状后继续，不要重做已经验证过的工作。{record_note}\
+"""
 
 WRAP_UP_PROMPT = """\
 现在进入收尾：任一预算耗尽时会话停止，宿主用最后一次 `test` 的候选把验证期剩下的步跑完；还没测试过时，用最后一个满足登记条件的完整研究年候选，没有则不定版。停止前你仍可使用全部工具：手上有比最后一次测试更好的候选，就用 `test` 换上它；不要再开新的研究方向。\

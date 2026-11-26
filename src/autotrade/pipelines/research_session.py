@@ -21,7 +21,11 @@ from typing import TYPE_CHECKING
 
 import pandas as pd
 
-from autotrade.agent.compact import ContextCompactionConfig
+from autotrade.agent.compact import (
+    ContextCompactionConfig,
+    compaction_summary_message,
+    reference_pack_message,
+)
 from autotrade.agent.experiment_facts import (
     DATA_SUMMARY_REF,
     RUNTIME_ENV_REF,
@@ -613,6 +617,9 @@ class LLMResearchDeveloper:
                 time_budget=time_budget,
                 run_ref=run_ref,
                 emit_event=emit_event,
+                reference_pack=reference_pack_readme(
+                    self.workspace_reference, repo_root=self.repo_root
+                ),
             )
             (
                 conversation_id,
@@ -1004,9 +1011,12 @@ class LLMResearchDeveloper:
         time_budget: InferenceTimeBudget,
         run_ref: str,
         emit_event: Callable[[TraceEvent, dict[str, object]], None],
+        reference_pack: str | None,
     ) -> AgentSessionRunner:
         """The Agent loop: the role gateways under the shared call budget, the
-        sub-agent engine, compaction and the inbox, over the session prompt."""
+        sub-agent engine, compaction and the inbox, over the session prompt.
+        ``reference_pack`` is the Pack README the session's compactions
+        restate; the sub-agents' restate none."""
 
         from autotrade.agent.compact import ContextCompactor
         from autotrade.agent.prompts import build_system_prompt
@@ -1073,6 +1083,7 @@ class LLMResearchDeveloper:
                     self.context_compaction,
                     result_store=search_roots,
                     trace_ref=run_ref,
+                    reference_pack=reference_pack,
                 )
                 if compact_budgeted is not None
                 else None
@@ -1087,6 +1098,7 @@ class LLMResearchDeveloper:
                 run_id=request.run_id,
             ),
             trace_ref=run_ref,
+            reference_pack=reference_pack,
         )
 
     def _run_agent(
@@ -1100,11 +1112,10 @@ class LLMResearchDeveloper:
         run_ref: str,
     ) -> tuple[str, str, str | None, tuple[str, ...], str, str]:
         """Open the conversation, afresh or with the resume note over the last
-        summary, and run it to its finish: the conversation id, the outcome,
-        the registered candidate (the last test's), its seed replicates, the
-        reason and the finish reason."""
+        summary and the Pack README, and run it to its finish: the
+        conversation id, the outcome, the registered candidate (the last
+        test's), its seed replicates, the reason and the finish reason."""
 
-        from autotrade.agent.compact import compaction_summary_message
         from autotrade.agent.prompts import (
             SESSION_DEFAULT_INSTRUCTION,
             build_resume_instruction,
@@ -1124,14 +1135,8 @@ class LLMResearchDeveloper:
             preamble: list[ChatMessage] = []
             instruction = SESSION_DEFAULT_INSTRUCTION
         else:
-            preamble = (
-                [
-                    compaction_summary_message(
-                        resume.compaction_summary, kind="resume", trace_ref=run_ref
-                    )
-                ]
-                if resume.compaction_summary
-                else []
+            preamble = _resume_preamble(
+                resume, run_ref=run_ref, reference_pack=runner.reference_pack
             )
             instruction = build_resume_instruction(
                 interrupted_at=resume.interrupted_at,
@@ -1755,6 +1760,43 @@ def _resolve_workspace_reference(
         if seed != root and root not in seed.parents:
             raise ValueError("workspace_reference must stay inside the repository")
     return seed
+
+
+def _resume_preamble(
+    resume: SessionResume, *, run_ref: str, reference_pack: str | None
+) -> list[ChatMessage]:
+    """What a resumed attempt's conversation holds before its instruction:
+    the interrupted attempts' last summary, when they compacted, then the
+    Pack README the host restates (``reference_pack_readme``)."""
+
+    preamble: list[ChatMessage] = []
+    if resume.compaction_summary:
+        preamble.append(
+            compaction_summary_message(
+                resume.compaction_summary, kind="resume", trace_ref=run_ref
+            )
+        )
+    if reference_pack is not None:
+        preamble.append(reference_pack_message(reference_pack))
+    return preamble
+
+
+def reference_pack_readme(
+    workspace_reference: str | Path | None,
+    *,
+    repo_root: str | Path | None = None,
+) -> str | None:
+    """The reference workspace's ``README.md``, the Pack's text the host
+    restates after a compaction and at a resume, or None without one.
+
+    Read from the reference workspace itself, the source ``refs/`` is copied
+    from, never from the workspace copy the Agent may have edited or deleted.
+    """
+    seed = _resolve_workspace_reference(workspace_reference, repo_root)
+    if seed is None:
+        return None
+    readme = seed / "README.md"
+    return readme.read_text(encoding="utf-8") if readme.is_file() else None
 
 
 def install_workspace_reference(

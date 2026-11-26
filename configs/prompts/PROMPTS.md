@@ -169,15 +169,15 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 `COMPACT_SYSTEM_PROMPT`：
 
 ```text
-You are a context compaction assistant for a quantitative-strategy coding Agent. Write a Markdown continuation summary with exactly these headings, in this order: ## 目标 / ## 约束与偏好 / ## 进展 / ### 已完成 / ### 进行中 / ### 受阻 / ## 关键决定 / ## 下一步 / ## 关键上下文. Keep exact file paths, commands, error strings, artifact ids, node ids, user constraints, the reference pack's (refs/README.md) requirements not yet met, numbers, and next steps; drop obsolete details; do not invent facts. When a previous summary is given, update it: keep everything still relevant, move finished items under 已完成, and add only what the new messages establish. The system prompt (contract, run facts, directive) is never dropped by compaction; do not restate it. Record only session state: rounds, node ids, results, decisions, open work. Do not call tools, do not output JSON or commentary, and do not mention that messages were compacted.
+You are a context compaction assistant for a quantitative-strategy coding Agent. Write a Markdown continuation summary with exactly these headings, in this order: ## 目标 / ## 约束与偏好 / ## 进展 / ### 已完成 / ### 进行中 / ### 受阻 / ## 关键决定 / ## 下一步 / ## 关键上下文. Keep exact file paths, commands, error strings, artifact ids, node ids, user constraints, which of the reference pack's (refs/README.md) requirements are not yet met (not the pack's text: the host restates it after the compaction), numbers, and next steps; drop obsolete details; do not invent facts. When a previous summary is given, update it: keep everything still relevant, move finished items under 已完成, and add only what the new messages establish. The system prompt (contract, run facts, directive) is never dropped by compaction; do not restate it. Record only session state: rounds, node ids, results, decisions, open work. Do not call tools, do not output JSON or commentary, and do not mention that messages were compacted.
 ```
 
 压缩输入包含上一份结构化摘要与其后的新增消息。回答至少要含一个约定的标题；空回答、不含任何约定标题的回答或模型错误不会替换原会话。主 Runner 仍保存最近完整轮次，并可使用确定性工具观察摘要继续控制上下文规模。确定性工具结果缩写保留省略说明、`original_chars`、`head`、`tail`和可用的`retained_fields`，并明确标记`source_omitted=true`；不生成内容指纹。压缩后留下的摘要消息带根 `trace` 的 transcript 位置，被压缩掉的工具原文、代码与数字从那里取回。
 
-参考包的要求只在 `refs/README.md` 里，宿主不检查它们，所以压缩后的摘要消息与续跑尝试的开场说明各带同一句（续跑带过来的那份摘要不再重复）：
+参考包的要求只在 `refs/README.md` 里，宿主不检查它们，所以有参考包的实验里，会话每次压缩后紧跟摘要消息、续跑尝试在开场说明之前，各有一条宿主消息（`observation: reference_pack`）带包的 README 原文，取自宿主保存的原件；下一次压缩把它与摘要一起换掉，子代理的压缩不带它。消息的 `note` 是：
 
 ```text
-若工作区有 `refs/README.md`（参考包），继续之前先重读它：包的要求只在它里面，压缩与续跑都不会替你保留。
+宿主重述的参考包 README：每次压缩之后与续跑开始时，宿主把本实验参考包 `refs/README.md` 的原文（取自宿主保存的原件，不是工作区里的副本）放在 readme 里，下一次压缩时换上新的一份，不必为此重读。
 ```
 
 ## 5. 动态上下文结构

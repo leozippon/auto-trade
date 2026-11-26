@@ -352,35 +352,110 @@ def test_a_resumed_attempt_opens_with_its_preamble_and_seeded_candidates(tmp_pat
     assert runner._complete_validation_nodes == {node_id}
 
 
-def test_a_compaction_tells_the_session_to_reread_its_pack():
-    """The Pack's requirements live only in refs/README.md, which the session
-    reads at its start, and no summary is bound to keep them: after either
-    compaction trigger the message beside the summary says to re-read it."""
-
-    from autotrade.agent.compact import compact_with_summary
-    from autotrade.agent.prompts import PACK_REREAD_NOTE
-
-    conversation = [ChatMessage("system", "system")]
-    conversation.extend(ChatMessage("user", f"message {index}") for index in range(6))
-    own = compact_with_summary(conversation, SUMMARY, keep_recent_messages=2)
-    runtime = ContextCompactor(
-        ScriptedLLM([ProviderResponse(content="## 目标\ncontinue\n\n## 下一步\n- finish")]),
-        ContextCompactionConfig(token_threshold=1, min_messages=5, keep_recent_messages=2),
-    ).compact(conversation)
-    assert runtime is not None and runtime.event["status"] == "ok"
-    for result in (own, runtime):
-        assert json.loads(result.messages[1].content or "{}")["reference_pack"] == PACK_REREAD_NOTE
+PACK_README = "# 参考包\n- 对照沿用被测试的配置。\n- 最后一次 `test` 之前记录必须完整。\n"
 
 
-def test_a_resumed_attempt_is_told_once_to_reread_its_pack():
-    """The resumed attempt's opening instruction says it after the TODO and
-    Step-tree reading, and the summary carried over from the interrupted
-    attempt does not say it a second time."""
+def _pack_payloads(messages) -> list[dict]:
+    """The host's restated Pack READMEs among ``messages``."""
 
-    from autotrade.agent.compact import compaction_summary_message
-    from autotrade.agent.prompts import PACK_REREAD_NOTE, build_resume_instruction
+    payloads = []
+    for message in messages:
+        if message.role != "user":
+            continue
+        try:
+            payload = json.loads(message.content or "")
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and payload.get("observation") == "reference_pack":
+            payloads.append(payload)
+    return payloads
 
-    note = build_resume_instruction(
+
+@pytest.mark.parametrize("pack", [PACK_README, None])
+def test_each_compaction_restates_the_pack_readme_once_beside_its_summary(
+    tmp_path: Path, pack: str | None
+):
+    """The Pack's requirements live only in its README, and sessions told to
+    re-read it after a compaction did not (round 20261121). With a Pack, every
+    request after either trigger carries the host's copy right after the
+    summary, exactly once: the next compaction replaces it instead of keeping
+    or summarizing it, so the compaction model never reads it. Without a Pack
+    nothing is added."""
+
+    finish, node_id = finish_session_tool(tmp_path)
+    compact_llm = ScriptedLLM([ProviderResponse(content="## 目标\nupdated\n\n## 下一步\n- finish")])
+    llm = ScriptedLLM([*shell_turns(2), _compact_call(), *shell_turns(3, prefix="t"), _finish_call(node_id)])
+    time_budget = InferenceTimeBudget(duration_seconds=120.0)
+    shared = SessionCallBudget(max_calls=40, time_budget=time_budget)
+    events: list[tuple[str, dict[str, object]]] = []
+    runner = make_runner(
+        llm=SessionBudgetLLM(llm, budget=shared, role="main"),
+        tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=12),
+        compactor=ContextCompactor(
+            SessionBudgetLLM(compact_llm, budget=shared, role="compact"),
+            ContextCompactionConfig(
+                token_threshold=1, min_messages=10, keep_recent_messages=2, min_remaining_seconds=0
+            ),
+            reference_pack=pack,
+        ),
+        time_budget=time_budget,
+        event_sink=lambda event, payload: events.append((event, payload)),
+        reference_pack=pack,
+    )
+
+    runner.run("inspect then finish")
+
+    compactions = [payload for event, payload in events if event == "context_compaction"]
+    assert [payload["trigger"] for payload in compactions] == ["agent", "runtime"]
+    first = int(compactions[0]["call_index"])
+    for index, call in enumerate(llm.calls):
+        messages = call["messages"]
+        expected = [pack] if pack is not None and index >= first else []
+        assert [payload["readme"] for payload in _pack_payloads(messages)] == expected
+        if expected:
+            # Right after the summary, before the retained tail.
+            assert _compaction_payloads(messages[1:2]) and _pack_payloads(messages[2:3])
+    assert "对照沿用被测试的配置" not in (compact_llm.calls[0]["messages"][1].content or "")
+    assert [payload.get("reference_pack_chars") for payload in compactions] == [
+        None if pack is None else len(pack)
+    ] * 2
+
+
+def test_a_resumed_attempt_opens_with_the_pack_readme_and_compacts_to_one_copy(tmp_path: Path):
+    """A resumed attempt's first request carries the host's copy after the
+    carried summary and before the opening instruction, which no longer asks
+    for a re-read; the attempt's first compaction leaves exactly one copy.
+    Without a summary only the summary is missing, without a Pack only the
+    README."""
+
+    from dataclasses import replace
+
+    from autotrade.agent.prompts import REFERENCE_PACK_NOTE, build_resume_instruction
+    from autotrade.pipelines.config import BudgetUsed, SessionResume
+    from autotrade.pipelines.research_session import _resume_preamble
+
+    resume = SessionResume(
+        attempt=2,
+        interrupted_at="t",
+        error="e",
+        compaction_summary=SUMMARY,
+        compaction_summary_at="s",
+        budget_used=BudgetUsed(),
+        transcripts=("run_ref_first.txt",),
+    )
+
+    def observations(resume: SessionResume, pack: str | None) -> list[str]:
+        preamble = _resume_preamble(resume, run_ref="run_ref_x", reference_pack=pack)
+        return [json.loads(message.content or "")["observation"] for message in preamble]
+
+    no_summary = replace(resume, compaction_summary=None, compaction_summary_at=None)
+    assert observations(no_summary, PACK_README) == ["reference_pack"]
+    assert observations(resume, None) == ["context_compaction"]
+    assert observations(no_summary, None) == []
+
+    instruction = build_resume_instruction(
         interrupted_at="t",
         error="e",
         summary_at="s",
@@ -389,10 +464,32 @@ def test_a_resumed_attempt_is_told_once_to_reread_its_pack():
         totals={},
         record=None,
     )
-    assert note.count(PACK_REREAD_NOTE) == 1
-    assert note.index("先读 `TODO.md` 与 Step 树") < note.index(PACK_REREAD_NOTE)
-    carried = compaction_summary_message(SUMMARY, kind="resume", trace_ref="run_ref_first")
-    assert PACK_REREAD_NOTE not in (carried.content or "")
+    assert "refs/" not in instruction
+    finish, node_id = finish_session_tool(tmp_path)
+    llm = ScriptedLLM([*shell_turns(2), _compact_call(), _finish_call(node_id)])
+    runner = make_runner(
+        llm=llm,
+        tools=[DeclaredReadOnlyShell(), CompactTool(), finish],
+        system_prompt="inspect",
+        config=AgentSessionConfig(max_llm_calls=8),
+        reference_pack=PACK_README,
+    )
+    runner.run(
+        instruction,
+        preamble=_resume_preamble(resume, run_ref="run_ref_x", reference_pack=PACK_README),
+    )
+
+    [system, summary, readme, opening] = llm.calls[0]["messages"]
+    assert (system.role, opening.content) == ("system", instruction)
+    assert json.loads(summary.content or "")["summary_kind"] == "resume"
+    assert json.loads(readme.content or "") == {
+        "observation": "reference_pack",
+        "note": REFERENCE_PACK_NOTE,
+        "readme": PACK_README,
+    }
+    for call in llm.calls:
+        assert [payload["readme"] for payload in _pack_payloads(call["messages"])] == [PACK_README]
+    assert len(_compaction_payloads(llm.calls[-1]["messages"])) == 1
 
 
 def test_a_short_summary_is_refused_and_nothing_is_compacted(tmp_path: Path):

@@ -21,6 +21,7 @@ from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.research_session import (
     install_workspace_reference,
+    reference_pack_readme,
     seed_output_from_starter,
     session_workspace_map,
 )
@@ -114,6 +115,24 @@ class InstallWorkspaceReferenceTest(unittest.TestCase):
             install_workspace_reference(workspace, "   ")
             self.assertFalse((workspace / "refs").exists())
             self.assertEqual(list((workspace / "output").iterdir()), [])
+
+    def test_the_restated_readme_is_the_packs_whatever_the_workspace_copy_became(self) -> None:
+        """The host restates the README the reference workspace holds, so an
+        edited or deleted ``refs/README.md`` changes nothing; without a Pack
+        there is nothing to restate."""
+
+        with TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pack = _pack(root, starter=False)
+            workspace = root / "workspace"
+            workspace.mkdir()
+            install_workspace_reference(workspace, pack)
+            copy = workspace / "refs" / "README.md"
+            copy.write_text("edited in the workspace\n", encoding="utf-8")
+            self.assertEqual(reference_pack_readme(pack), "pack notes\n")
+            copy.unlink()
+            self.assertEqual(reference_pack_readme(pack), "pack notes\n")
+            self.assertIsNone(reference_pack_readme(""))
 
     def test_worker_requires_an_existing_repo_directory_when_set(self) -> None:
         from autotrade.pipelines.worker import _optional_workspace_reference

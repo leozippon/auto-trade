@@ -348,6 +348,7 @@ class AgentSessionRunner:
         event_sink: Callable[[TraceEvent, dict[str, object]], None] | None = None,
         inbox: AgentInboxHook | None = None,
         trace_ref: str | None = None,
+        reference_pack: str | None = None,
     ) -> None:
         self.llm = llm
         self.tools = tools
@@ -361,6 +362,10 @@ class AgentSessionRunner:
         # The run's opaque ref: the transcript file the compaction summary
         # points the Agent at.
         self.trace_ref = trace_ref
+        # The host's copy of the Pack README, restated after the Agent's own
+        # compactions as after the runtime compactor's and in a resumed
+        # attempt's opening (``research_session``); None without a Pack.
+        self.reference_pack = reference_pack
         # Compaction bookkeeping: the main-loop call count as the events read
         # it, the call the last compaction reached, and whether the advisory
         # went out since then.
@@ -1728,6 +1733,7 @@ class AgentSessionRunner:
             summaries[-1],
             keep_recent_messages=self._compact_keep_recent_messages(),
             trace_ref=self.trace_ref,
+            reference_pack=self.reference_pack,
         )
         self._record_compaction("agent", result.event)
         return list(result.messages)
