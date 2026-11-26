@@ -7,10 +7,12 @@ every dataset in ``DERIVED`` -- one row per stock-day for ``intraday_flow``
 profile), one per bar for the ``intraday_bars_<N>min`` datasets -- and writes
 ``data/raw/<dataset>/trade_date=<D>.parquet`` with the lake's usual sidecar.
 One streamed pass, one minute partition in memory at a time and read once for
-all datasets still missing that day; an output partition whose parquet and
-sidecar are one committed write is skipped unless ``--rebuild``, so the nightly
-run costs one trade date, and a partition a killed run left half-committed is
-built again.
+all datasets still missing that day. Each sidecar names the write of the minute
+partition it was reduced from (``source_write_id``); an output partition that
+is one committed write of the minute partition's present write is skipped
+unless ``--rebuild``, so the nightly run costs one trade date, while a
+partition a killed run left half-committed, and every partition of a day whose
+minutes the lake has since re-written, is built again.
 
 Run it after the minute download has landed:
 
@@ -26,7 +28,7 @@ import sys
 import time
 from pathlib import Path
 
-import pandas as pd
+import pyarrow.parquet as pq
 
 _SCRIPTS = Path(__file__).resolve().parents[1]
 if str(_SCRIPTS) not in sys.path:
@@ -53,6 +55,7 @@ from autotrade.environment.data.intraday_stats import (
     INTRADAY_STATS_MINUTE_COLUMNS,
     aggregate_intraday_stats,
 )
+from autotrade.environment.data.pit import WRITE_ID_METADATA_KEY, parquet_meta
 
 # dataset -> (reducer of one day's minute bars, minute columns it reads)
 DERIVED = {
@@ -85,6 +88,13 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _reduced_from(output: Path, source_write_id: str) -> bool:
+    """Whether ``output`` is one committed write reduced from that write of its minute partition."""
+    if not committed_partition_intact(output):
+        return False
+    return (parquet_meta(output).get("params") or {}).get("source_write_id") == source_write_id
+
+
 def main() -> int:
     args = build_parser().parse_args()
     raw_dir = Path(args.raw_dir)
@@ -112,15 +122,22 @@ def main() -> int:
     rows = dict.fromkeys(datasets, 0)
     days_done = 0
     for day, path in sources:
+        # One open file gives both the identity and the rows, so the write a
+        # sidecar names is the write that was reduced even if the minute job
+        # replaces the partition meanwhile.
+        source = pq.ParquetFile(path)
+        source_write_id = (source.schema_arrow.metadata or {}).get(WRITE_ID_METADATA_KEY, b"").decode("ascii")
+        if not source_write_id:
+            raise SystemExit(f"{path} carries no write id, so what is derived from it could not follow a re-write")
         todo = [
             dataset
             for dataset in datasets
-            if args.rebuild or not committed_partition_intact(raw_dir / dataset / f"trade_date={day}.parquet")
+            if args.rebuild or not _reduced_from(raw_dir / dataset / f"trade_date={day}.parquet", source_write_id)
         ]
         if not todo:
             continue
         columns = sorted({column for dataset in todo for column in DERIVED[dataset][1]})
-        minutes = pd.read_parquet(path, columns=columns)
+        minutes = source.read(columns=columns, use_pandas_metadata=True).to_pandas()
         for dataset in todo:
             aggregate = DERIVED[dataset][0]
             frame = aggregate(minutes)
@@ -137,6 +154,7 @@ def main() -> int:
                     "dataset": dataset,
                     "source_dataset": MINUTE_DATASET,
                     "source_partition": path.name,
+                    "source_write_id": source_write_id,
                     "trade_date": day,
                 },
                 fields=list(frame.columns),

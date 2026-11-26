@@ -29,7 +29,12 @@ from autotrade.environment.data.intraday_bars import (
     INTRADAY_BARS_COLUMNS,
     aggregate_intraday_bars,
 )
-from autotrade.environment.data.pit import to_cn_timestamps
+from autotrade.environment.data.intraday_stats import aggregate_intraday_stats
+from autotrade.environment.data.pit import (
+    parquet_meta,
+    parquet_write_id,
+    to_cn_timestamps,
+)
 from autotrade.environment.data.snapshot import (
     DEFAULT_DATASETS,
     SELECTABLE_DATASETS,
@@ -139,11 +144,11 @@ def _write_minute_partition(raw: Path, trade_date: str, minutes: pd.DataFrame) -
     return stamped
 
 
-def _build(raw: Path, *extra: str) -> dict:
-    """Run the minute-derived build for the bar datasets; its per-dataset summary."""
-    datasets = [flag for dataset in INTRADAY_BARS_DATASETS for flag in ("--dataset", dataset)]
+def _build(raw: Path, *extra: str, datasets: tuple[str, ...] = tuple(INTRADAY_BARS_DATASETS)) -> dict:
+    """Run the minute-derived build for ``datasets`` (none: every derived dataset); its per-dataset summary."""
+    selected = [flag for dataset in datasets for flag in ("--dataset", dataset)]
     done = subprocess.run(
-        [sys.executable, str(SCRIPT), "--raw-dir", str(raw), *datasets, *extra],
+        [sys.executable, str(SCRIPT), "--raw-dir", str(raw), *selected, *extra],
         check=True, capture_output=True, text=True,
     )
     return json.loads(done.stdout)["datasets"]
@@ -445,6 +450,44 @@ class IntradayBarsBuildTest(unittest.TestCase):
                 pd.testing.assert_frame_equal(
                     pd.read_parquet(raw / dataset / f"trade_date={MINUTE_TRADE_DATE}.parquet"), frame
                 )
+
+    def test_every_derived_table_follows_a_rewritten_minute_partition(self):
+        def written(summary: dict) -> dict[str, int]:
+            return {dataset: item["partitions_written"] for dataset, item in summary.items()}
+
+        with tempfile.TemporaryDirectory() as tmp:
+            raw = Path(tmp)
+            source = raw / "stk_mins_1min_by_date" / f"trade_date={MINUTE_TRADE_DATE}.parquet"
+            _write_minute_partition(raw, MINUTE_TRADE_DATE, _minutes("000001.SZ", seed=1))
+            derived = {dataset: raw / dataset / source.name for dataset in sorted(LOCALLY_DERIVED_DATASETS)}
+            self.assertEqual(written(_build(raw, datasets=())), dict.fromkeys(derived, 1))
+            self.assertEqual(written(_build(raw, datasets=())), dict.fromkeys(derived, 0))
+            # The minute job lands another answer for the day: a new write of
+            # the partition, and every table reduced from the old one is stale.
+            revised = _write_minute_partition(raw, MINUTE_TRADE_DATE, _minutes("000001.SZ", seed=2))
+            self.assertEqual(written(_build(raw, datasets=())), dict.fromkeys(derived, 1))
+            for dataset, path in derived.items():
+                self.assertEqual(parquet_meta(path)["params"]["source_write_id"], parquet_write_id(source), dataset)
+            for dataset in INTRADAY_BARS_DATASETS:
+                pd.testing.assert_frame_equal(pd.read_parquet(derived[dataset]), aggregate_intraday_bars(revised, dataset))
+            pd.testing.assert_frame_equal(
+                pd.read_parquet(derived["intraday_stats"]), aggregate_intraday_stats(revised)
+            )
+            self.assertEqual(written(_build(raw, datasets=())), dict.fromkeys(derived, 0))
+            # A partition built before the source was recorded names no write: it is reduced once more.
+            sidecar = derived["intraday_flow"].with_suffix(".parquet.meta.json")
+            meta = json.loads(sidecar.read_text(encoding="utf-8"))
+            del meta["params"]["source_write_id"]
+            sidecar.write_text(json.dumps(meta), encoding="utf-8")
+            self.assertEqual(written(_build(raw, datasets=())), {**dict.fromkeys(derived, 0), "intraday_flow": 1})
+            # A minute partition the lake's writer did not commit has no
+            # identity to follow, and nothing is derived from it.
+            pd.read_parquet(source).to_parquet(source)
+            refused = subprocess.run(
+                [sys.executable, str(SCRIPT), "--raw-dir", str(raw)], capture_output=True, text=True, check=False
+            )
+            self.assertNotEqual(refused.returncode, 0)
+            self.assertIn("carries no write id", refused.stderr)
 
 
 if __name__ == "__main__":

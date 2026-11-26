@@ -14,6 +14,7 @@ from pathlib import Path
 import pandas as pd
 
 from autotrade.data_sources.tushare import audit
+from autotrade.data_sources.tushare.io import write_parquet
 from autotrade.environment.data.contracts import (
     CN_TZ,
     EVENT_DATASET_REFRESH_NODES,
@@ -279,9 +280,11 @@ class MinuteDerivedBuildTest(unittest.TestCase):
         script = REPO_ROOT / "scripts" / "data" / "build_minute_derived.py"
         with tempfile.TemporaryDirectory() as tmp:
             raw = Path(tmp)
-            source = raw / "stk_mins_1min_by_date" / f"trade_date={MINUTE_TRADE_DATE}.parquet"
-            source.parent.mkdir(parents=True)
-            _day("000001.SZ", REFERENCE_CLOSES, REFERENCE_VOLUMES).to_parquet(source)
+            minutes = _day("000001.SZ", REFERENCE_CLOSES, REFERENCE_VOLUMES)
+            write_parquet(
+                raw / "stk_mins_1min_by_date" / f"trade_date={MINUTE_TRADE_DATE}.parquet",
+                minutes, api_name="stk_mins", params={}, fields=list(minutes.columns),
+            )
 
             def build(*datasets: str) -> dict:
                 # The stock-day tables only: this fixture's minutes carry no high and low for the bars.
