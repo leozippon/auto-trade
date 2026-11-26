@@ -59,6 +59,12 @@ from autotrade.pipelines.validation_record import readout
 # bit. A real change of a reading is many orders of magnitude larger.
 REL_TOL = 1e-12
 
+# The seed-replicate gate c76a687d retired (2026-11-07): a registration stored
+# before it keeps two flags beside its replicates that no reading emits now and
+# no pass condition reads. Only a stored key that today's reading lacks is
+# ignored.
+RETIRED_KEYS = frozenset({"seed_replicates.deterministic", "seed_replicates.trains_a_model"})
+
 
 class _Absent:
     """The side of a key that only the other side holds."""
@@ -155,7 +161,12 @@ def check_experiment(experiment: Path) -> list[Judgement]:
     found: list[Judgement] = []
 
     def judge(reading: str, stored: object, now: object) -> None:
-        found.append(Judgement(experiment.name, reading, differences(stored, _stored(now))))
+        kept = [
+            item
+            for item in differences(stored, _stored(now))
+            if not (item[0] in RETIRED_KEYS and item[2] is _ABSENT)
+        ]
+        found.append(Judgement(experiment.name, reading, kept))
 
     for record in records:
         kind = record.get("record_type")

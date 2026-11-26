@@ -4,8 +4,8 @@ experiment the real worker ran to its readout.
 The run over the real experiments reads ``experiments/`` and is made by hand (the
 script's docstring says how); here it reads an experiment small enough for the unit
 suite: every reading the experiment stores reproduces, a float that differs only in
-its last bits still does, and a tampered one is named with both values and fails the
-run.
+its last bits still does, the two keys a retired gate stored do, and a tampered one is
+named with both values and fails the run.
 """
 
 from __future__ import annotations
@@ -21,6 +21,7 @@ from autotrade.common.time import utc_now
 from autotrade.pipelines import pit_backend, worker
 from autotrade.pipelines.worker import load_worker_options, run_local_interactive_worker
 from scripts.dev.check_verdicts import (
+    _ABSENT,
     check_experiment,
     current_experiments,
     main,
@@ -158,5 +159,26 @@ def test_a_tampered_reading_is_named_with_both_values_and_fails_the_run(
         "check_registration": [("passed", False, True)],
         "forward": [("forward.lower_bound", bound * (1 - 1e-6), bound)],
         "readout": [("record.residual_information_ratio", ratio * (1 - 1e-6), ratio)],
+    }
+    assert main(["--experiments", str(copy.parent)]) == 1
+
+
+def test_only_the_retired_seed_gate_keys_a_registration_stored_are_ignored(
+    experiment: Path, tmp_path: Path
+) -> None:
+    """A registration stored before the seed-replicate gate retired keeps its two
+    flags, which today's reading no longer emits; any other key it alone holds is
+    still a difference."""
+
+    def stored_before(records: list[dict]) -> None:
+        seeds = _record(records, "research_session")["registration"]["seed_replicates"]
+        seeds.update(deterministic=True, trains_a_model=False, another_flag=True)
+
+    copy = _copy(experiment, tmp_path / "experiments", stored_before)
+    judgements = {item.reading: item.differences for item in check_experiment(copy)}
+    assert judgements == {
+        "check_registration": [("seed_replicates.another_flag", True, _ABSENT)],
+        "forward": [],
+        "readout": [],
     }
     assert main(["--experiments", str(copy.parent)]) == 1
