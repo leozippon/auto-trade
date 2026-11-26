@@ -22,20 +22,15 @@ from unittest.mock import patch
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.runtime import SandboxPaths
 from autotrade.environment.sandbox import SandboxConfig
-from autotrade.environment.tools import (
-    CommandResult,
-    EditFileTool,
+from autotrade.environment.tools import search as search_module
+from autotrade.environment.tools.base import CommandResult, ToolError, ToolRegistry
+from autotrade.environment.tools.files import EditFileTool, WriteFileTool
+from autotrade.environment.tools.search import (
     GlobTool,
     GrepTool,
     ReadFileTool,
-    SafeWorkspace,
-    SandboxShellTool,
     SearchRoots,
-    ToolError,
-    ToolRegistry,
-    WriteFileTool,
 )
-from autotrade.environment.tools import search as search_module
 from autotrade.environment.tools.shell import (
     ARGV_ONE_ELEMENT_NOTE,
     ARGV_SHELL_NOTE,
@@ -44,10 +39,12 @@ from autotrade.environment.tools.shell import (
     DEFAULT_SHELL_TIMEOUT_SECONDS,
     MAX_SHELL_TIMEOUT_SECONDS,
     SHELL_ARGV_MAX_CHARS,
+    SandboxShellTool,
 )
 from autotrade.environment.tools.workspace import (
     LOW_DISK_SPACE,
     WORKSPACE_MIN_FREE_BYTES,
+    SafeWorkspace,
 )
 from tests.unit.support.acceptance_fixture import RULES
 from tests.unit.support.agent_fixture import make_runner
@@ -1357,7 +1354,8 @@ class TerminalToolWriteLockTest(unittest.TestCase):
         return workspace, roots, finish, node_id
 
     def test_calls_after_the_terminal_tool_are_refused_and_the_session_returns(self) -> None:
-        from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
+        from autotrade.environment.llm import ProviderResponse, ToolCall
+        from autotrade.environment.llm.proxy import ScriptedLLM
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace, roots, finish, node_id = self._finish_tool(Path(tmp))
@@ -1519,7 +1517,8 @@ class StrategyOrderContractTest(unittest.TestCase):
     def test_the_replay_engine_revalidates_every_sandbox_payload(self) -> None:
         import pandas as pd
 
-        from autotrade.environment.replay import BacktestError, run_daily_replay
+        from autotrade.environment.replay import run_daily_replay
+        from autotrade.environment.replay.engine import BacktestError
         from autotrade.environment.strategy import StrategySchedule
 
         daily = pd.DataFrame(
@@ -1548,7 +1547,7 @@ class SequentialDispatchClassificationTest(unittest.TestCase):
     the tools that genuinely have no flag."""
 
     def test_batch_validate_is_sequential_through_its_spec_flag(self) -> None:
-        from autotrade.environment.tools import (
+        from autotrade.environment.tools.base import (
             SEQUENTIAL_TOOL_NAMES,
             is_sequential_tool,
         )
@@ -1559,7 +1558,7 @@ class SequentialDispatchClassificationTest(unittest.TestCase):
         self.assertNotIn("validate", SEQUENTIAL_TOOL_NAMES)
 
     def test_read_only_specs_are_concurrent_and_unknown_names_are_not(self) -> None:
-        from autotrade.environment.tools import (
+        from autotrade.environment.tools.base import (
             SEQUENTIAL_TOOL_NAMES,
             ToolSpec,
             is_sequential_tool,

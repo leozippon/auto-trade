@@ -37,7 +37,8 @@ from autotrade.environment.executor import (
     TrustedStrategyExecutor,
     raised_by_strategy,
 )
-from autotrade.environment.replay import BacktestError, run_daily_replay
+from autotrade.environment.replay import run_daily_replay
+from autotrade.environment.replay.engine import BacktestError
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.sandbox import SandboxConfig, SandboxSpec
 from autotrade.environment.strategy import (
@@ -53,7 +54,7 @@ from autotrade.environment.strategy_loader import (
     load_strategy_module,
     validate_strategy_source,
 )
-from autotrade.environment.tools import ToolError
+from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import (
     AcceptanceRules,

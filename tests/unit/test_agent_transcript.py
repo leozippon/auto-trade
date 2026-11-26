@@ -17,14 +17,11 @@ import pytest
 from autotrade.agent import AgentSessionConfig
 from autotrade.agent.runner import AgentSessionBudgetExhausted
 from autotrade.environment import trace
-from autotrade.environment.llm import ProviderResponse, ScriptedLLM, ToolCall
-from autotrade.environment.tools import (
-    GrepTool,
-    ReadFileTool,
-    SafeWorkspace,
-    SearchRoots,
-    ToolRegistry,
-)
+from autotrade.environment.llm import ProviderResponse, ToolCall
+from autotrade.environment.llm.proxy import ScriptedLLM
+from autotrade.environment.tools.base import ToolRegistry
+from autotrade.environment.tools.search import GrepTool, ReadFileTool, SearchRoots
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.environment.trace import (
     AgentTraceWriter,
     TraceEvent,

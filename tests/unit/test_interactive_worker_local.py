@@ -15,15 +15,15 @@ import pytest
 
 from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
-    LOCAL_QWEN_MODEL,
     MODEL_CHOICES,
     ChatMessage,
     LLMProxyError,
-    OpenAICompatibleProxy,
     ProviderResponse,
-    ScriptedLLM,
     model_profile,
 )
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.environment.llm.openai_compatible import OpenAICompatibleProxy
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.pipelines.config import DEFAULT_RESEARCH_GEOMETRY
 from autotrade.pipelines.hitl_state import (

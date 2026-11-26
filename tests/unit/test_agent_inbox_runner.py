@@ -16,17 +16,10 @@ from autotrade.agent.runner import (
     AgentSessionConfig,
 )
 from autotrade.environment.artifacts import new_revision_id
-from autotrade.environment.llm import (
-    ChatMessage,
-    ProviderResponse,
-    ScriptedLLM,
-    ToolCall,
-)
+from autotrade.environment.llm import ChatMessage, ProviderResponse, ToolCall
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.tools import (
-    ToolResult,
-    ToolSpec,
-)
+from autotrade.environment.tools.base import ToolResult, ToolSpec
 from autotrade.pipelines.agent_inbox import (
     bind_session_inbox,
     enqueue_inbox_message,

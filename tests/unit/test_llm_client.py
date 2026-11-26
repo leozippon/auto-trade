@@ -17,19 +17,21 @@ import pytest
 import autotrade.environment.llm.openai_compatible as openai_compatible_module
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_TOKEN_MARGIN,
-    LOCAL_QWEN_MODEL,
     MODEL_CHOICES,
     ChatMessage,
     LLMProxyError,
     MalformedToolCallError,
-    OpenAICompatibleConfig,
-    OpenAICompatibleProxy,
     build_model_gateway,
     estimate_chat_request_tokens,
     malformed_tool_call_messages,
     model_profile,
 )
-from autotrade.environment.llm.openai_compatible import RETRY_BACKOFF_CAP_SECONDS
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.environment.llm.openai_compatible import (
+    RETRY_BACKOFF_CAP_SECONDS,
+    OpenAICompatibleConfig,
+    OpenAICompatibleProxy,
+)
 from tests.unit.support.llm_fixture import FakeTransport
 
 

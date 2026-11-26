@@ -23,7 +23,7 @@ from autotrade.agent.prompts import (
     SESSION_STATIC_SECTIONS,
 )
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.llm import LOCAL_QWEN_MODEL
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 from autotrade.environment.sandbox import SandboxConfig
 from autotrade.pipelines.config import (
     DEFAULT_BATCH_VALIDATE_MAX_CONCURRENCY,

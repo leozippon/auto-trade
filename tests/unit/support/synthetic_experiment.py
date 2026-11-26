@@ -31,16 +31,13 @@ from typing import ClassVar
 import numpy as np
 import pandas as pd
 
-from autotrade.environment.llm import (
-    LOCAL_QWEN_MODEL,
-    ProviderResponse,
-    ScriptedLLM,
-    ToolCall,
-)
+from autotrade.environment.llm import ProviderResponse, ToolCall
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.strategy import CN_TZ, StrategySchedule
-from autotrade.environment.tools import CommandResult
+from autotrade.environment.tools.base import CommandResult
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION, SnapshotBundle
 from autotrade.pipelines.pit_backend import prebuild_asof_stash
 from tests.unit.support.acceptance_fixture import REQUIRED_RULES

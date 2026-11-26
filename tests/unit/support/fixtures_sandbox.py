@@ -24,7 +24,7 @@ from autotrade.environment.data.units import validate_snapshot_units
 from autotrade.environment.executor import DockerStrategyExecutor
 from autotrade.environment.runtime import new_id
 from autotrade.environment.sandbox import SandboxConfig
-from autotrade.environment.tools import ToolResult
+from autotrade.environment.tools.base import ToolResult
 from autotrade.pipelines.config import SNAPSHOT_CACHE_FORMAT_VERSION
 
 REPO_ROOT = Path(__file__).resolve().parents[3]

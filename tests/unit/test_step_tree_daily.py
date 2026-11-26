@@ -4,7 +4,7 @@ import stat
 from pathlib import Path
 
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.tools import ToolRegistry
+from autotrade.environment.tools.base import ToolRegistry
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.step_rollback import StepRollbackTool
 from tests.unit.support.agent_fixture import TerminalTool

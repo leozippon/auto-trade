@@ -17,8 +17,9 @@ from autotrade.environment.dividend_tax import (
     dividend_tax_rate,
     dividend_tax_rule,
 )
-from autotrade.environment.replay import DailyMarketData, run_daily_replay
+from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.engine import StrategyDataView
+from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.paper import DailyPaperEngine, PaperEngineError

@@ -22,10 +22,10 @@ from autotrade.agent.subagent import SubAgentEngine
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.data.snapshot import SnapshotConfig
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.llm import LLMProxy, ProviderResponse, ScriptedLLM, ToolCall
+from autotrade.environment.llm import LLMProxy, ProviderResponse, ToolCall
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.step_tree import StepTree
-from autotrade.environment.tools import ToolRegistry
-from autotrade.environment.tools.base import ToolResult, ToolSpec
+from autotrade.environment.tools.base import ToolRegistry, ToolResult, ToolSpec
 
 
 class TerminalTool:

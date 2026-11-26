@@ -26,31 +26,26 @@ from autotrade.environment.identity import AgentRefStore
 from autotrade.environment.llm import (
     CONTEXT_OUTPUT_MIN_TOKENS,
     CONTEXT_OUTPUT_TOKEN_MARGIN,
-    LOCAL_QWEN_MODEL,
     ChatMessage,
     LLMProxyError,
     MalformedToolCallError,
     ProviderResponse,
-    ScriptedLLM,
     ToolCall,
     clamp_requested_max_tokens,
     context_request_fits,
     estimate_chat_request_tokens,
     is_context_overflow_error,
 )
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.time_budget import InferenceTimeBudget
-from autotrade.environment.tools import (
-    CompactTool,
-    ReadFileTool,
-    SafeWorkspace,
-    SandboxShellTool,
-    SearchRoots,
-    ToolResult,
-    ToolSpec,
-    WriteFileTool,
-)
-from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS
+from autotrade.environment.tools.base import ToolResult, ToolSpec
+from autotrade.environment.tools.compact import COMPACT_SUMMARY_MAX_CHARS, CompactTool
+from autotrade.environment.tools.files import WriteFileTool
+from autotrade.environment.tools.search import ReadFileTool, SearchRoots
+from autotrade.environment.tools.shell import SandboxShellTool
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget
 from tests.unit.support.agent_fixture import (
     DeclaredReadOnlyShell,
@@ -1521,12 +1516,19 @@ def _prompt_tool_tokens(text: str) -> set[str]:
 
 def _all_registrable_tool_names() -> set[str]:
     """Every tool name any session in this tree can actually register."""
+    import importlib
+    import pkgutil
     import tempfile
 
     import autotrade.environment.tools as tools_pkg
     from autotrade.agent.subagent import AgentTool
-    from autotrade.environment.tools import SafeWorkspace, SearchRoots
-    from autotrade.environment.tools.search import GlobTool, GrepTool, ReadFileTool
+    from autotrade.environment.tools.search import (
+        GlobTool,
+        GrepTool,
+        ReadFileTool,
+        SearchRoots,
+    )
+    from autotrade.environment.tools.workspace import SafeWorkspace
     from autotrade.pipelines.session_tools import (
         NullControlTool,
         SmokeBacktestTool,
@@ -1557,7 +1559,9 @@ def _all_registrable_tool_names() -> set[str]:
             SandboxShellTool(workspace, object()),  # type: ignore[arg-type]
         ]
     candidates = [*instances, AgentTool]
-    candidates.extend(getattr(tools_pkg, name, None) for name in dir(tools_pkg))
+    for module_info in pkgutil.iter_modules(tools_pkg.__path__):
+        module = importlib.import_module(f"{tools_pkg.__name__}.{module_info.name}")
+        candidates.extend(vars(module).values())
     for candidate in candidates:
         spec = getattr(candidate, "spec", None)
         if spec is not None and getattr(spec, "name", None):

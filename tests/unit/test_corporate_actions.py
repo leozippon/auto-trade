@@ -16,8 +16,9 @@ import pandas as pd
 import pytest
 
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.replay import DailyMarketData, run_daily_replay
+from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.engine import StrategyDataView
+from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.null_control import run_null_control
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.paper import DailyPaperEngine

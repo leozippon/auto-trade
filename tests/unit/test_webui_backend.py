@@ -27,7 +27,8 @@ from fastapi.testclient import TestClient
 
 from autotrade.common.records import write_json_atomic
 from autotrade.environment.identity import AgentRefStore
-from autotrade.environment.llm import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL, MODEL_CHOICES
+from autotrade.environment.llm import MODEL_CHOICES
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL
 from autotrade.environment.tools.workspace import WORKSPACE_MIN_FREE_BYTES
 from autotrade.environment.trace import TRACE_PAYLOAD_HEAD_CHARS, AgentTraceWriter
 from autotrade.pipelines.config import (

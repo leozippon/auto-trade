@@ -8,16 +8,17 @@ from pathlib import Path
 import pytest
 
 from autotrade.environment.llm import (
-    MIMO_FLASH_MODEL,
-    MIMO_MODELS,
     MODEL_CHOICES,
     ChatMessage,
     LLMProxyError,
-    OpenAICompatibleConfig,
-    OpenAICompatibleProxy,
     ProviderRefusalError,
     build_model_gateway,
     model_profile,
+)
+from autotrade.environment.llm.model_profiles import MIMO_FLASH_MODEL, MIMO_MODELS
+from autotrade.environment.llm.openai_compatible import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleProxy,
 )
 from tests.unit.support.llm_fixture import FakeTransport
 

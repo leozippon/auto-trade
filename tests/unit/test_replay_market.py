@@ -27,7 +27,8 @@ import pytest
 
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.executor import TrustedStrategyExecutor
-from autotrade.environment.replay import DailyMarketData, engine, run_daily_replay
+from autotrade.environment.replay import engine, run_daily_replay
+from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,

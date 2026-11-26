@@ -29,7 +29,7 @@ from autotrade.environment.strategy_loader import (
     validate_strategy_package,
     validate_strategy_source,
 )
-from autotrade.environment.tools import ToolError
+from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.pipelines.config import experiment_default
 from autotrade.pipelines.experiment import (

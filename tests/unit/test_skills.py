@@ -8,7 +8,9 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.environment.tools import SafeWorkspace, ToolRegistry, WriteFileTool
+from autotrade.environment.tools.base import ToolRegistry
+from autotrade.environment.tools.files import WriteFileTool
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.skills import (
     MAX_SKILL_CHARS,
     MAX_SKILL_FILE_BYTES,

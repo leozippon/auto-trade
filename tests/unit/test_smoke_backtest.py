@@ -22,7 +22,7 @@ from autotrade.environment.broker_core import BOARDS
 from autotrade.environment.data.contracts import DEFAULT_BENCHMARK_INDEX
 from autotrade.environment.strategy import StrategySchedule
 from autotrade.environment.time_budget import InferenceTimeBudget
-from autotrade.environment.tools import ToolError
+from autotrade.environment.tools.base import ToolError
 from autotrade.environment.tools.modification_check import ModificationCheckTool
 from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.config import (
@@ -239,7 +239,7 @@ def test_days_argument_is_bounded(tmp_path: Path) -> None:
 def test_smoke_enforces_the_same_static_gate_as_the_official_run(tmp_path: Path) -> None:
     class RejectingCheck:
         def invoke(self, _arguments):
-            from autotrade.environment.tools import ToolResult
+            from autotrade.environment.tools.base import ToolResult
 
             return ToolResult(False, error="formal output exceeds 8 files")
 

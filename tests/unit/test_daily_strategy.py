@@ -10,12 +10,9 @@ import pytest
 
 from autotrade.agent import StrategyLoadError, load_strategy, validate_strategy_source
 from autotrade.environment.broker import BrokerProfile
-from autotrade.environment.replay import (
-    BacktestError,
-    DailyMarketData,
-    StrategyDataView,
-    run_daily_replay,
-)
+from autotrade.environment.replay import run_daily_replay
+from autotrade.environment.replay.engine import BacktestError, StrategyDataView
+from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.strategy import (
     CN_TZ,
     AccountSnapshot,

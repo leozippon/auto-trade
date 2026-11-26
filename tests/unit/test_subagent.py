@@ -47,32 +47,33 @@ from autotrade.agent.subagent import (
     subagent_system_prompt,
 )
 from autotrade.environment.llm import (
-    MIMO_FLASH_MODEL,
     CallBudgetExhausted,
     ChatMessage,
     MalformedToolCallError,
-    OpenAICompatibleConfig,
-    OpenAICompatibleProxy,
     ProviderResponse,
-    ScriptedLLM,
     ToolCall,
     clamp_requested_max_tokens,
     context_request_fits,
 )
+from autotrade.environment.llm.model_profiles import MIMO_FLASH_MODEL
+from autotrade.environment.llm.openai_compatible import (
+    OpenAICompatibleConfig,
+    OpenAICompatibleProxy,
+)
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.time_budget import InferenceTimeBudget
-from autotrade.environment.tools import (
+from autotrade.environment.tools.base import (
     CommandResult,
-    EditFileTool,
-    ModificationCheckTool,
-    SafeWorkspace,
-    SandboxShellTool,
-    SearchRoots,
+    SessionInterrupt,
     ToolRegistry,
     ToolResult,
     ToolSpec,
-    WriteFileTool,
 )
-from autotrade.environment.tools.base import SessionInterrupt
+from autotrade.environment.tools.files import EditFileTool, WriteFileTool
+from autotrade.environment.tools.modification_check import ModificationCheckTool
+from autotrade.environment.tools.search import SearchRoots
+from autotrade.environment.tools.shell import SandboxShellTool
+from autotrade.environment.tools.workspace import SafeWorkspace
 from autotrade.pipelines.research_session import (
     SessionBudgetLLM,
     SessionCallBudget,
@@ -2733,10 +2734,10 @@ def test_a_child_asks_for_the_reply_limit_it_was_given() -> None:
     """The pipeline hands parent and children their own models' limits; a
     session assembled without them takes the narrowest catalog model's."""
     from autotrade.environment.llm import (
-        LOCAL_QWEN_MODEL,
         MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS,
         model_profile,
     )
+    from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL
 
     fallback = model_profile(LOCAL_QWEN_MODEL).max_output_tokens
     assert MIN_CONTEXT_WINDOW_MAX_OUTPUT_TOKENS == fallback
@@ -4032,7 +4033,7 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
 
 def test_long_child_report_is_clipped_inline_and_spilled_for_read_back(tmp_path: Path) -> None:
     from autotrade.agent.subagent import SUBAGENT_REPORT_MAX_CHARS
-    from autotrade.environment.tools import ReadFileTool
+    from autotrade.environment.tools.search import ReadFileTool
 
     assert SUBAGENT_REPORT_MAX_CHARS == 6_000
     assert f"{SUBAGENT_REPORT_MAX_CHARS} 字符" in AGENT_TOOL_DESCRIPTION

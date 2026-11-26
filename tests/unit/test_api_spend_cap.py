@@ -6,21 +6,19 @@ from __future__ import annotations
 import pytest
 
 from autotrade.environment.llm import (
-    LOCAL_QWEN_MODEL,
-    MIMO_FLASH_MODEL,
     MODEL_CHOICES,
     ApiSpendExhausted,
     ChatMessage,
     ProviderResponse,
-    ScriptedLLM,
-    TokenPrices,
     ToolCall,
     billed_tokens,
     estimate_chat_request_tokens,
     model_profile,
     token_prices,
 )
-from autotrade.environment.llm.pricing import FREE
+from autotrade.environment.llm.model_profiles import LOCAL_QWEN_MODEL, MIMO_FLASH_MODEL
+from autotrade.environment.llm.pricing import FREE, TokenPrices
+from autotrade.environment.llm.proxy import ScriptedLLM
 from autotrade.environment.time_budget import InferenceTimeBudget
 from autotrade.pipelines.config import BudgetUsed
 from autotrade.pipelines.research_session import SessionBudgetLLM, SessionCallBudget

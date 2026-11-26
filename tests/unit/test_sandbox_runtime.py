@@ -46,7 +46,7 @@ from autotrade.environment.executor import (
     strategy_resources_of,
 )
 from autotrade.environment.gpu import MIN_FREE_GPU_MEMORY_MIB, GpuUnavailableError
-from autotrade.environment.replay import DailyMarketData
+from autotrade.environment.replay.market import DailyMarketData
 from autotrade.environment.replay.stats import compute_return_stats
 from autotrade.environment.runtime import chmod_tree
 from autotrade.environment.sandbox import (
