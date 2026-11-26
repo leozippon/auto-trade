@@ -1,0 +1,21 @@
+[
+  {
+    "slug": "chronos2",
+    "title": "Chronos-2: From Univariate to Universal Forecasting",
+    "venue": "arXiv 2025 (technical report)",
+    "paper_url": "https://arxiv.org/pdf/2510.15821v1",
+    "arxiv": "2510.15821v1",
+    "repo": "https://github.com/amazon-science/chronos-forecasting",
+    "commit": "1224fafa91e1ecd6674f5204066b159e40b5e4a1",
+    "licence": "Apache-2.0",
+    "data_end": null,
+    "strip": [
+      ".github",
+      "notebooks/deploy-chronos-to-amazon-sagemaker.ipynb",
+      "test/dummy-*"
+    ],
+    "dataset": [
+      "https://hf-mirror.com/datasets/autogluon/fev_datasets/resolve/d3e7e720f4158eab03ebcb021f1cce779cd92acc/uci_air_quality/1H/train-00000-of-00001.parquet"
+    ]
+  }
+]
