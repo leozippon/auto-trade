@@ -3937,11 +3937,10 @@ def test_time_budget_notice_states_remaining_minutes_and_backtests() -> None:
     ] == [(0.75, 333.3)]
 
 
-def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None:
+def test_role_table_is_the_single_source_for_roles() -> None:
     from autotrade.agent.subagent import (
         DEFAULT_SUBAGENT_MAX_TURNS,
         SUBAGENT_ROLE_TABLE,
-        SubAgentRole,
         resolve_subagent_max_turns,
         subagent_role,
     )
@@ -3950,13 +3949,9 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
     for role in SUBAGENT_ROLE_TABLE:
         assert allowed_subagent_tools(role.name) == role.tools
         assert role.shell == ("shell" in role.tools)
-        # No shipped role pins a level or a budget: both defer to the globals.
-        assert role.thinking is None and role.max_turns is None
-        assert role.default_thinking == DEFAULT_SUBAGENT_THINKING
-        assert role.default_max_turns(DEFAULT_SUBAGENT_MAX_TURNS) == DEFAULT_SUBAGENT_MAX_TURNS
         assert subagent_role(role.name) is role
-        # A role without its own defaults states its capability alone: the
-        # global defaults are the description's.
+        # A role states its capability alone: the launch defaults are the
+        # description's.
         line = (
             f"{role.name}：{role.description}（"
             f"{'有 Sandbox shell 与 smoke_backtest、可写' if role.shell else '只读 glob/grep/read_file，不能执行'}）"
@@ -3965,24 +3960,16 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
     assert {role.name for role in SUBAGENT_ROLE_TABLE if role.shell} == {"general-purpose"}
     with pytest.raises(ValueError, match="valid roles: general-purpose, Explore"):
         subagent_role("auditor")
-    with pytest.raises(ValueError, match="thinking"):
-        SubAgentRole("x", "d", frozenset(), mission="m", thinking="turbo")
-    with pytest.raises(ValueError, match="max_turns"):
-        SubAgentRole("x", "d", frozenset(), mission="m", max_turns=0)
 
-    # Precedence: call argument > role default > global default.
-    pinned = SubAgentRole("x", "d", frozenset(), mission="m", thinking="low", max_turns=12)
-    assert pinned.default_thinking == "low" and pinned.default_max_turns(48) == 12
-    assert resolve_subagent_max_turns(None, "Explore", 48) == 48
-    assert resolve_subagent_max_turns(None, "Explore", None) is None
-    assert resolve_subagent_max_turns(7, "Explore", 48) == 7
-    assert normalize_subagent_thinking(None, "Explore") == DEFAULT_SUBAGENT_THINKING
-    assert normalize_subagent_thinking("xhigh", "Explore") == "xhigh"
+    # Precedence: call argument > global default.
+    assert resolve_subagent_max_turns(None, 48) == 48
+    assert resolve_subagent_max_turns(None, None) is None
+    assert resolve_subagent_max_turns(7, 48) == 7
     for bad in (0, -1, True, "3"):
         with pytest.raises(ValueError, match="max_turns"):
-            resolve_subagent_max_turns(bad, "Explore", 48)
-    # The defaults are stated once, in the description, and a role's own ones
-    # on the agent field; the schema carries the ranges.
+            resolve_subagent_max_turns(bad, 48)
+    # The defaults are stated once, in the description; the schema carries
+    # the ranges.
     assert f"max_turns 默认 {DEFAULT_SUBAGENT_MAX_TURNS} 回合" in AGENT_TOOL_DESCRIPTION
     assert f"thinking 默认 {DEFAULT_SUBAGENT_THINKING}" in AGENT_TOOL_DESCRIPTION
     max_turns_field = AGENT_TOOL_SPEC.input_schema["properties"]["max_turns"]
@@ -3990,16 +3977,11 @@ def test_role_table_is_the_single_source_for_roles_and_launch_defaults() -> None
     assert AGENT_TOOL_SPEC.input_schema["properties"]["thinking"]["enum"] == list(SUBAGENT_THINKING_LEVELS)
 
 
-def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A pinned role tier beats the global default and loses to the call argument;
-    the effective values are what ``subagent_task``/``subagent`` record."""
-
-    import dataclasses
+def test_launch_precedence_reaches_the_child_and_its_trace() -> None:
+    """The call argument beats the global default; the effective values are
+    what ``subagent_task``/``subagent`` record."""
 
     from autotrade.agent import subagent as module
-
-    pinned = dataclasses.replace(module.subagent_role("Explore"), thinking="low", max_turns=3)
-    monkeypatch.setitem(module._ROLES_BY_NAME, "Explore", pinned)
 
     def _run(arguments: dict[str, object]) -> tuple[dict[str, object], dict[str, object]]:
         child = ScriptedLLM([ProviderResponse(content="report")], context_window_tokens=128_000)
@@ -4014,16 +3996,11 @@ def test_launch_precedence_reaches_the_child_and_its_trace(monkeypatch: pytest.M
         ended = next(payload for event, payload in events if event == "subagent")
         return started, ended
 
-    started, ended = _run({})
-    assert (started["thinking"], started["turns_limit"]) == ("low", 3)
-    assert (ended["thinking"], ended["turns_limit"]) == ("low", 3)
+    started, ended = _run({"thinking": "low", "max_turns": 5})
+    assert (started["thinking"], started["turns_limit"]) == ("low", 5)
+    assert (ended["thinking"], ended["turns_limit"]) == ("low", 5)
     assert isinstance(started["thinking_applied"], bool)
-    started, ended = _run({"thinking": "xhigh", "max_turns": 5})
-    assert (started["thinking"], started["turns_limit"]) == ("xhigh", 5)
-    assert (ended["thinking"], ended["turns_limit"]) == ("xhigh", 5)
 
-    # Untouched roles still resolve to the global defaults.
-    monkeypatch.undo()
     started, _ended = _run({})
     assert (started["thinking"], started["turns_limit"]) == (
         module.DEFAULT_SUBAGENT_THINKING,

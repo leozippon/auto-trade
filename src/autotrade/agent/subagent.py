@@ -87,12 +87,11 @@ _LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 # own task path; the shared call-budget share is unchanged, so a wider turn
 # spends the same quota sooner rather than more of it.
 DEFAULT_SUBAGENT_MAX_CONCURRENT = 6
-# Global default child turn budget (the last tier of the launch precedence:
-# call argument > role default > this). A child has the parent's context
-# window and compaction, so the turn cap bounds work, not memory, and is set
-# for bounded work to finish rather than to cut wandering short. The last
-# ``SUBAGENT_GRACE_TURNS`` turns start with a wrap-up notice (Pi's grace-turn
-# pattern); an explicit ``max_turns`` is honoured as given.
+# Global default child turn budget, for a launch that names none. A child has
+# the parent's context window and compaction, so the turn cap bounds work, not
+# memory, and is set for bounded work to finish rather than to cut wandering
+# short. The last ``SUBAGENT_GRACE_TURNS`` turns start with a wrap-up notice
+# (Pi's grace-turn pattern); an explicit ``max_turns`` is honoured as given.
 DEFAULT_SUBAGENT_MAX_TURNS = 48
 SUBAGENT_GRACE_TURNS = 2
 # Global default thinking level; a child never inherits the parent's level.
@@ -166,37 +165,17 @@ _GENERAL_PURPOSE_TOOLS = frozenset(
 
 @dataclass(frozen=True)
 class SubAgentRole:
-    """One row of the role table: a role's identity, tool set, mission and
-    launch defaults, the way a Pi agent-definition file carries them.
-
-    ``thinking`` and ``max_turns`` are the role tier of the launch precedence
-    (call argument > role default > global default); ``None`` defers to the
-    global default, which every shipped role does today.
-    """
+    """One row of the role table: a role's identity, tool set and mission,
+    the way a Pi agent-definition file carries them."""
 
     name: str
     description: str
     tools: frozenset[str]
     mission: str
-    thinking: str | None = None
-    max_turns: int | None = None
-
-    def __post_init__(self) -> None:
-        if self.thinking is not None and self.thinking not in SUBAGENT_THINKING_LEVELS:
-            raise ValueError(f"role {self.name}: unknown thinking level {self.thinking}")
-        if self.max_turns is not None and self.max_turns < 1:
-            raise ValueError(f"role {self.name}: max_turns must be at least 1")
 
     @property
     def shell(self) -> bool:
         return "shell" in self.tools
-
-    @property
-    def default_thinking(self) -> str:
-        return self.thinking or DEFAULT_SUBAGENT_THINKING
-
-    def default_max_turns(self, global_default: int | None) -> int | None:
-        return self.max_turns if self.max_turns is not None else global_default
 
 
 # Two capability classes, not missions: the task text carries the intent. The
@@ -231,8 +210,8 @@ def subagent_role(name: object) -> SubAgentRole:
 
 
 def _role_schema_text() -> str:
-    """Per-role capability for the ``agent`` field, and a role's own launch
-    defaults where it has any; the global defaults are the description's."""
+    """Per-role capability for the ``agent`` field; the launch defaults are the
+    description's."""
 
     lines = []
     for role in SUBAGENT_ROLE_TABLE:
@@ -241,12 +220,7 @@ def _role_schema_text() -> str:
             if role.shell
             else "只读 glob/grep/read_file，不能执行"
         )
-        own = [
-            f"默认 {name} {value}"
-            for name, value in (("thinking", role.thinking), ("max_turns", role.max_turns))
-            if value is not None
-        ]
-        lines.append(f"{role.name}：{role.description}（{'；'.join((tools, *own))}）")
+        lines.append(f"{role.name}：{role.description}（{tools}）")
     return "；".join(lines) + "。"
 
 
@@ -470,20 +444,18 @@ def subagent_system_prompt(role: str) -> str:
     )
 
 
-def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
+def normalize_subagent_thinking(value: object) -> str:
     """Return the effective thinking level for one launch.
 
-    Precedence: the call argument, then the role default, then
-    ``DEFAULT_SUBAGENT_THINKING``; an omitted level falls through to the
-    defaults, and a child never inherits the parent session's reasoning
-    intensity. The legacy aliases are already canonical here: the launch tool
-    maps them in ``normalize_arguments``, before the schema enum that would
-    otherwise reject them.
+    Precedence: the call argument, then ``DEFAULT_SUBAGENT_THINKING``; a child
+    never inherits the parent session's reasoning intensity. The legacy
+    aliases are already canonical here: the launch tool maps them in
+    ``normalize_arguments``, before the schema enum that would otherwise
+    reject them.
     """
 
-    default = subagent_role(role).default_thinking if role is not None else DEFAULT_SUBAGENT_THINKING
     if value is None:
-        return default
+        return DEFAULT_SUBAGENT_THINKING
     if not isinstance(value, str):
         raise ValueError("agent.thinking must be a string")
     text = value.strip().lower()
@@ -494,10 +466,8 @@ def normalize_subagent_thinking(value: object, role: str | None = None) -> str:
     return text
 
 
-def resolve_subagent_max_turns(
-    value: object, role: str, global_default: int | None
-) -> int | None:
-    """The effective turn budget: call argument > role default > global default.
+def resolve_subagent_max_turns(value: object, global_default: int | None) -> int | None:
+    """The effective turn budget: call argument > global default.
 
     ``None`` means only the session deadline and call quota bound the child.
     """
@@ -508,7 +478,7 @@ def resolve_subagent_max_turns(
         return value
     if value is not None:
         raise ValueError("agent.max_turns must be an integer")
-    return subagent_role(role).default_max_turns(global_default)
+    return global_default
 
 
 def deliver_subagent_report(
@@ -687,9 +657,9 @@ class SubAgentEngine(SessionTimeBudgetAware):
             raise ValueError("Sub-agent task cannot be empty")
         allowed = allowed_subagent_tools(role)
         self._validate_tools()
-        # Launch precedence (Pi's): call argument > role default > global.
-        turns_limit = resolve_subagent_max_turns(max_turns, role, self.config.max_turns)
-        thinking = normalize_subagent_thinking(thinking, role)
+        # Launch precedence: call argument > global default.
+        turns_limit = resolve_subagent_max_turns(max_turns, self.config.max_turns)
+        thinking = normalize_subagent_thinking(thinking)
         task_id = task_id or f"{SUBAGENT_TASK_ID_PREFIX}{uuid.uuid4().hex[:12]}"
         llm = llm_with_thinking(self.llm, thinking)
         thinking_applied = llm is not self.llm

@@ -1192,9 +1192,9 @@ class AgentSessionRunner:
         try:
             # Validated here so a bad value is a tool error on the parent's
             # turn; the engine resolves the same precedence for the record.
-            thinking = normalize_subagent_thinking(arguments.get("thinking"), role)
+            thinking = normalize_subagent_thinking(arguments.get("thinking"))
             max_turns = resolve_subagent_max_turns(
-                arguments.get("max_turns"), role, self.subagent.config.max_turns
+                arguments.get("max_turns"), self.subagent.config.max_turns
             )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
