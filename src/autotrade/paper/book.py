@@ -120,6 +120,14 @@ SOURCE_HISTORY_SCHEMA_VERSION = 1
 # from the ZGCA instance names that host's, which the research worker's checks
 # refuse here; a book is resolved without them.
 HOST_PATH_PARAMS = ("experiments_root", "work_root")
+# The experiment parameters only its research sessions read: the prebuilt view
+# cache its views were linked from, with the research release it binds, and the
+# reference workspace its sessions were handed. A book runs no session and
+# builds its own views on the newest release, while either may be gone by the
+# time its strategy passes (a pruned cache, a Pack that left with its round); a
+# book is resolved with each set to "", the value that names none (left out,
+# pit_views_seed would take the console's default cache).
+SESSION_ONLY_PARAMS = ("pit_views_seed", "workspace_reference")
 
 
 @dataclass(frozen=True)
@@ -167,7 +175,7 @@ def create_book(
     cover the book's first decision view (``pit.require_audited_fundamentals``),
     and when its pinned sandbox image is not on this host or bakes another strategy
     runtime than this process enforces (``executor.require_local_image``). The
-    experiment's ``HOST_PATH_PARAMS`` are not read.
+    experiment's ``HOST_PATH_PARAMS`` and ``SESSION_ONLY_PARAMS`` are not read.
     """
 
     root = Path(state_root).resolve()
@@ -212,6 +220,7 @@ def create_book(
     if not params:
         raise ValueError(f"missing experiment params: {experiment / 'hitl' / 'params.json'}")
     params = {key: value for key, value in params.items() if key not in HOST_PATH_PARAMS}
+    params.update(dict.fromkeys(SESSION_ONLY_PARAMS, ""))
     params["initial_cash"] = initial_cash
     options = resolve_worker_options(params, experiment_dir=experiment, repo_root=repo_root, preflight=True)
     if options.data_backend != "pit":

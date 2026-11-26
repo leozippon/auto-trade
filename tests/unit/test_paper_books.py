@@ -254,6 +254,33 @@ def test_a_strategy_synced_from_the_zgca_instance_opens_from_its_directory_here(
     verify_book_artifact(load_book(book))
 
 
+def test_a_book_opens_without_the_view_cache_and_reference_its_sessions_read(tmp_path: Path):
+    """A passed experiment whose prebuilt view cache was pruned and whose Pack left
+    the repository with its round still opens its book, which reads neither; any
+    other parameter the pre-flight refuses still refuses the book."""
+
+    experiment = build_experiment(tmp_path / "experiments", "exp", "registered_with_record")
+    gone = {
+        "pit_views_seed": "data/pit_views_seed_pruned",
+        "workspace_reference": "configs/workspace_refs/retired_pack",
+    }
+    stamped = {**read_json_object(experiment / "hitl/params.json"), **gone}
+    write_json_atomic(experiment / "hitl/params.json", stamped)
+    for key, said in (("pit_views_seed", "must be an existing directory"), ("workspace_reference", "not a directory")):
+        with pytest.raises(ValueError, match=said):
+            resolve_worker_options({**stamped, **{other: "" for other in gone if other != key}},
+                                   experiment_dir=experiment, repo_root=tmp_path, preflight=True)
+    assert open_registered_book(tmp_path, experiment) == "exp"
+    verify_book_artifact(load_book(paper_root(tmp_path) / "exp"))
+
+    refused = build_experiment(tmp_path / "experiments", "refused", "registered_with_record")
+    write_json_atomic(refused / "hitl/params.json", {**read_json_object(refused / "hitl/params.json"), **gone,
+                                                     "slippage_bps": -1.0})
+    with pytest.raises(ValueError, match="slippage_bps must be a non-negative finite number"):
+        open_registered_book(tmp_path, refused)
+    assert not (paper_root(tmp_path) / "refused").exists()
+
+
 def test_a_book_is_refused_on_an_image_it_could_not_run_before_anything_is_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
