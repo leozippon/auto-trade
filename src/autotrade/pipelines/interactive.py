@@ -8,14 +8,19 @@ truth: a session with a durable record is complete, the research session is
 due until research is over, and the forward replay runs only after a registration.
 Integrity-flagged rows are not successes: resume refuses them.
 
-All control state lives under ``experiments/<id>/hitl/`` as single-writer JSON
-files (atomic replace, no locking needed):
+All control state lives under ``experiments/<id>/hitl/``, each JSON file
+replaced atomically; the two files both the console and the worker change are
+guarded by ``hitl_state.control_lock``:
 
-  params.json    creation parameters (written once by the creator; rebuilt into
-                 ExperimentConfig + backends deterministically on every start)
-  control.json   written by the controller (web backend / researcher)
-  status.json    written only by the worker (heartbeat, position, live trace)
-  schedule.json  written by the worker at startup (the research session and the forward replay)
+  params.json        creation parameters (written once by the creator; rebuilt into
+                     ExperimentConfig + backends deterministically on every start)
+  control.json       the console's requests, consumed by the worker (locked)
+  agent_inbox.jsonl  append-only messages to the running session (locked)
+  status.json        the worker's heartbeat, position and live trace
+  schedule.json      the plan the worker writes at startup
+
+The directory also holds the GPU claim, the sandbox image record and any
+archive marker.
 
 Pausing always lands at a session boundary: the worker finishes the session in
 flight, then returns ``status="pause"`` and exits. A deferred restart lands at the same
