@@ -326,7 +326,6 @@ class DailyBroker:
         self,
         trade_date: str,
         bars: Mapping[str, Mapping[str, object]],
-        cash_dividends: Mapping[str, float] | None = None,
         *,
         distributions: Mapping[str, Distribution] | None = None,
         delistings: DelistingTable | None = None,
@@ -334,8 +333,9 @@ class DailyBroker:
         """Enter ``trade_date``: settle delistings, release the T+1 locks, then
         settle ex-dates.
 
-        ``bars`` is the day's market frame and ``cash_dividends`` maps a symbol
-        to the cash dividend per share going ex on this day. The exchange's
+        ``bars`` is the day's market frame and ``distributions`` maps a symbol
+        to what goes ex on this day: gross cash, bonus shares apart from
+        conversions, and record date; taxed profiles require it. The exchange's
         ex-rights reference price (the bar's ``pre_close``) is the truth for the
         share leg: a held name whose ``pre_close`` falls below its last close by
         more than the cash dividend (a bonus issue or split) is reset so that
@@ -348,10 +348,6 @@ class DailyBroker:
         every case, a bonus share's par value only where the reset creates the
         share.
 
-        ``distributions`` is the authoritative ex-date source: gross cash,
-        bonus shares apart from conversions, and record date. Taxed profiles
-        require it; ``cash_dividends`` alone is only for untaxed synthetic use.
-
         ``delistings`` is the exchange's delisting table, which a profile with
         the delisting rules requires and any other ignores. Under them a held
         name delisted on or before ``trade_date`` leaves the account first
@@ -363,8 +359,6 @@ class DailyBroker:
             raise ValueError(f"{trade_date}: dividend tax requires record-dated distributions")
         if self.profile.delisting_rules and delistings is None:
             raise ValueError(f"{trade_date}: the delisting rules require the delisting table")
-        if distributions is not None and cash_dividends is not None:
-            raise ValueError("pass distributions or cash_dividends, not both")
         self._current_day = str(trade_date)
         if self.profile.delisting_rules:
             self._delistings = delistings
@@ -372,9 +366,7 @@ class DailyBroker:
                 delisting = delistings.delisting(symbol, self._current_day)
                 if delisting is not None:
                     self._settle_delisting(delisting)
-        events = distributions if distributions is not None else {
-            symbol: Distribution(cash_per_share=cash) for symbol, cash in (cash_dividends or {}).items()
-        }
+        events = distributions or {}
         for symbol, position in self.positions.items():
             position.available_quantity = position.quantity
             bar = bars.get(symbol)

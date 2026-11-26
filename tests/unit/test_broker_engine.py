@@ -33,6 +33,7 @@ from autotrade.environment.broker_core import (
     reduce_amount_reject,
     validate_buy_lot,
 )
+from autotrade.environment.distributions import Distribution
 from autotrade.environment.replay.stats import ReplayResult, compute_return_stats
 from autotrade.environment.strategy import StrategyOrder
 from tests.unit.support.replay_fixture import MATCHED_AT, _bar, _order
@@ -555,7 +556,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
         # 10 送 10 plus 0.5 CNY cash: pre_close = (10 - 0.5) / 2 = 4.75.
         broker = self._holding(1000)
         cash_before, equity_before = broker.cash, broker.equity()
-        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 0.5})
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, distributions={"000001.SZ": Distribution(cash_per_share=0.5)})
         position = broker.positions["000001.SZ"]
         self.assertEqual(position.quantity, 2000)
         self.assertAlmostEqual(broker.cash, cash_before + 0.5 * 1000)
@@ -572,7 +573,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
 
     def test_created_shares_are_locked_until_the_next_day(self) -> None:
         broker = self._holding(1000)
-        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 0.5})
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, distributions={"000001.SZ": Distribution(cash_per_share=0.5)})
         self.assertEqual(broker.positions["000001.SZ"].available_quantity, 1000)
         ex_day = _bar(pre_close=4.75, up_limit=5.2, down_limit=4.3)
         blocked = broker.execute(_order("sell", quantity=2000), ex_day, matched_at=MATCHED_AT, raw_price=4.8)
@@ -589,7 +590,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
         broker = _broker(initial_cash=100_000, slippage_bps=0)
         broker.execute(_order(quantity=1000), _bar(), matched_at=MATCHED_AT, raw_price=10.0)
         broker.mark({"000001.SZ": _bar(close=10.0)})
-        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 0.5})
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, distributions={"000001.SZ": Distribution(cash_per_share=0.5)})
         broker.open_day("20260107", {"000001.SZ": _bar(pre_close=4.75)})
         sold = broker.execute(
             _order("sell", quantity=2000),
@@ -604,7 +605,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
     def test_pure_cash_dividend_credits_cash_and_keeps_the_shares(self) -> None:
         broker = self._holding(1000)
         cash_before, equity_before = broker.cash, broker.equity()
-        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=9.5)}, {"000001.SZ": 0.5})
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=9.5)}, distributions={"000001.SZ": Distribution(cash_per_share=0.5)})
         self.assertEqual(broker.positions["000001.SZ"].quantity, 1000)
         self.assertAlmostEqual(broker.cash, cash_before + 500.0)
         self.assertAlmostEqual(broker.equity(), equity_before, places=6)
@@ -618,7 +619,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
                 broker = self._holding(1000)
                 broker.mark({"000001.SZ": _bar(close=12.34)})
                 cash_before = broker.cash
-                broker.open_day("20260106", {"000001.SZ": _bar(pre_close=pre_close)}, {"000001.SZ": cash})
+                broker.open_day("20260106", {"000001.SZ": _bar(pre_close=pre_close)}, distributions={"000001.SZ": Distribution(cash_per_share=cash)})
                 position = broker.positions["000001.SZ"]
                 self.assertEqual(position.quantity, 1000)
                 self.assertAlmostEqual(broker.cash, cash_before + 1000 * cash)
@@ -633,7 +634,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
         broker = self._holding(1000)
         broker.mark({"000001.SZ": _bar(close=12.35)})
         cash_before = broker.cash
-        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=9.31)}, {"000001.SZ": 0.25})
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=9.31)}, distributions={"000001.SZ": Distribution(cash_per_share=0.25)})
         position = broker.positions["000001.SZ"]
         self.assertEqual(position.quantity, 1299)
         self.assertAlmostEqual(broker.cash, cash_before + 1000 * 12.35 - 1299 * 9.31, places=6)
@@ -650,7 +651,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
                 broker = _broker(initial_cash=100_000)
                 broker.positions["000538.SZ"] = Position("000538.SZ", quantity, quantity, 127.27, 127.27)
                 cash_before = broker.cash
-                broker.open_day("20210607", {"000538.SZ": _bar(pre_close=123.42)}, {"000538.SZ": 3.9})
+                broker.open_day("20210607", {"000538.SZ": _bar(pre_close=123.42)}, distributions={"000538.SZ": Distribution(cash_per_share=3.9)})
                 position = broker.positions["000538.SZ"]
                 self.assertEqual((position.quantity, position.available_quantity), (quantity, quantity))
                 self.assertAlmostEqual(broker.cash, cash_before + quantity * 3.9, places=6)
@@ -664,7 +665,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
         broker = _broker(initial_cash=100_000)
         broker.positions["000538.SZ"] = Position("000538.SZ", 100, 100, 127.27, 127.27)
         cash_before = broker.cash
-        broker.open_day("20210607", {"000538.SZ": _bar(pre_close=94.9)}, {"000538.SZ": 3.9})
+        broker.open_day("20210607", {"000538.SZ": _bar(pre_close=94.9)}, distributions={"000538.SZ": Distribution(cash_per_share=3.9)})
         position = broker.positions["000538.SZ"]
         self.assertEqual((position.quantity, position.available_quantity), (130, 100))
         self.assertAlmostEqual(broker.cash, cash_before + 390.0, places=6)
@@ -687,7 +688,7 @@ class BrokerCorporateActionTest(unittest.TestCase):
     def test_a_recorded_dividend_without_a_reset_credits_only_the_cash(self) -> None:
         broker = self._holding(1000)
         cash_before = broker.cash
-        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=10.0)}, {"000001.SZ": 0.2})
+        broker.open_day("20260106", {"000001.SZ": _bar(pre_close=10.0)}, distributions={"000001.SZ": Distribution(cash_per_share=0.2)})
         self.assertEqual(broker.positions["000001.SZ"].quantity, 1000)
         self.assertAlmostEqual(broker.cash, cash_before + 200.0)
         self.assertEqual(broker.corporate_actions[0].quantity_after, 1000)
@@ -724,10 +725,10 @@ class BrokerCorporateActionTest(unittest.TestCase):
     def test_an_impossible_reset_fails_fast(self) -> None:
         broker = self._holding(1000)
         with self.assertRaisesRegex(ValueError, "share multiplier"):
-            broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": 12.0})
+            broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, distributions={"000001.SZ": Distribution(cash_per_share=12.0)})
         broker = self._holding(1000)
         with self.assertRaisesRegex(ValueError, "cash dividend"):
-            broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, {"000001.SZ": float("nan")})
+            broker.open_day("20260106", {"000001.SZ": _bar(pre_close=4.75)}, distributions={"000001.SZ": Distribution(cash_per_share=float("nan"))})
 
 
 class PositionCapTest(unittest.TestCase):
