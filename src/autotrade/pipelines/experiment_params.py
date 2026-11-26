@@ -228,8 +228,9 @@ class AgentParams:
     """The session's models and context management (``worker.LLMWorkerSettings``)."""
 
     # The main conversation runs on the relay's gpt-6-astra, the sub-agents
-    # and compaction on its DeepSeek-V4.1-Flash: hosted APIs are the operating
-    # default, the local model the fallback once the API quota is exhausted.
+    # and compaction on its DeepSeek-V4.1-Flash. A local model runs only where
+    # an experiment names it; the one fallback is the relay's other credential
+    # (``llm_key``), never another model.
     model: str = _param(GPT_ASTRA_MODEL)
     subagent_model: str = _param(DEEPSEEK_FLASH_MODEL)
     compact_model: str = _param(DEEPSEEK_FLASH_MODEL)
