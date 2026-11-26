@@ -649,12 +649,11 @@ _FIELDS: list[dict[str, object]] = [
 ]
 
 # Console parameters a create request (a round file) may name but the form does
-# not offer: the reference workspace, the retired approval mode, the attempt count,
-# the boards (stamped from the initial cash) and a snapshot-builder knob.
+# not offer: the reference workspace, the attempt count, the boards (stamped from
+# the initial cash) and a snapshot-builder knob.
 _FORMLESS = frozenset(
     {
         "workspace_reference",
-        "initial_control_mode",
         "session_max_attempts",
         "permitted_boards",
         "max_intraday_row_group_rows",

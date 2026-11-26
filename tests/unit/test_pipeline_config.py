@@ -72,7 +72,6 @@ _CONSOLE_CREATE_PRESET: dict[str, object] = {
     "include_intraday": False,
     "inference_time": "08:00",
     "initial_cash": 1_000_000.0,
-    "initial_control_mode": "auto",
     # The research session's budgets: minutes and calls, spent across every
     # attempt of the experiment's one session.
     "max_research_minutes": 10_080,

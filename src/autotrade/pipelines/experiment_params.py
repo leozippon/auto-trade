@@ -119,8 +119,9 @@ class ScheduleParams:
 
     strategy_period: str = _param("day")
     inference_time: str = _param("08:00")
-    # Sets nothing: a tolerated inert key, accepted because existing params.json files carry it.
-    initial_control_mode: str = _param("auto")
+    # Sets nothing and nothing writes it: an inert key older params.json files
+    # carry, declared so that they still read.
+    initial_control_mode: str = _host("auto")
     benchmark_index: str = _param(experiment_default("benchmark_index"))
 
 

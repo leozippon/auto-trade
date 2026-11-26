@@ -110,6 +110,7 @@ def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
         ({"llm_base_url": "http://x"}, "unknown experiment parameters: llm_base_url"),
         ({"llm_api_key_env": "SECRET"}, "unknown experiment parameters: llm_api_key_env"),
         ({"delisting_rules": False}, "console-managed parameters are not accepted: delisting_rules"),
+        ({"initial_control_mode": "auto"}, "console-managed parameters are not accepted: initial_control_mode"),
         ({"research_years": None}, "missing required experiment parameters: research_years"),
         ({"experiment_id": "_hidden"}, "experiment_id must match"),
     ],
@@ -117,6 +118,12 @@ def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
 def test_a_create_request_states_only_console_parameters(request_: dict[str, object], message: str) -> None:
     with pytest.raises(ValueError, match=message):
         _created(**request_)
+
+
+def test_the_inert_control_mode_is_no_longer_written_but_an_older_file_still_reads() -> None:
+    assert "initial_control_mode" not in _created()
+    older = ExperimentParams.from_record({"experiment_id": "experiment_a", "initial_control_mode": "auto"})
+    assert older.schedule.initial_control_mode == "auto"
 
 
 def test_a_reader_takes_the_one_declared_default_for_a_key_the_file_leaves_out() -> None:

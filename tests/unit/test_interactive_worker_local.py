@@ -1024,7 +1024,6 @@ def test_webui_persistent_create_uses_available_worker_entrypoint(
         created = manager.create_experiment(
             {
                 "experiment_id": "worker_smoke",
-                "initial_control_mode": "manual",
                 **CREATE_RULES,
                 **NO_SEED,
             }
