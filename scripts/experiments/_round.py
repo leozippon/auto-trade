@@ -72,8 +72,7 @@ slots under both limits and the free GPUs, and how many experiments were skipped
 created, refused and are still pending, and how many of those the local-model
 limit, the free GPUs and an unfinished seed hold back -- plus one line per experiment
 it created or that was refused; with `--dry-run` it also lists each pending
-experiment and whether it takes a free slot. The research cron
-(`ops/cron/research_fill.cron`) runs it over several round files in turn.
+experiment and whether it takes a free slot.
 
 Before an experiment is created, and on every dry-run reading of it, `smoke` replays
 what the experiment's `output/` starts as -- its reference workspace's starter, else the contract

@@ -19,11 +19,6 @@ BLOCKS = {
         "# END ADM-Cube TuShare update",
     ),
     "paper": (REPO_ROOT / "ops/cron/paper.cron", "# BEGIN ADM-Cube Paper book", "# END ADM-Cube Paper book"),
-    "research": (
-        REPO_ROOT / "ops/cron/research_fill.cron",
-        "# BEGIN ADM-Cube research fill",
-        "# END ADM-Cube research fill",
-    ),
     "housekeeping": (
         REPO_ROOT / "ops/cron/housekeeping.cron",
         "# BEGIN ADM-Cube housekeeping",

@@ -133,79 +133,6 @@ class CronInstallerTest(unittest.TestCase):
              "logs/paper/cron.log"),
         )
 
-    def test_the_research_fill_block_installs_beside_the_paper_block(self) -> None:
-        template, begin, end = installer.BLOCKS["research"]
-        paper = installer.build_managed_block(*installer.BLOCKS["paper"])
-        research = installer.build_managed_block(template, begin, end)
-        current = f"0 1 * * * unrelated\n\n{paper}"
-        once = installer.replace_managed_block(current, research, begin=begin, end=end)
-        twice = installer.replace_managed_block(once, research, begin=begin, end=end)
-        self.assertEqual(once, twice)
-        self.assertIn(paper, twice)
-        self.assertEqual(twice.count(begin), 1)
-        lines = template.read_text(encoding="utf-8").splitlines()
-        jobs = job_lines("research")
-        self.assertEqual(len(jobs), 1)
-        # Every ten minutes, every day (its lock and log: the locked-jobs test).
-        self.assertEqual(jobs[0].split()[:5], ["*/10", "*", "*", "*", "*"])
-        # The queue it fills has to be open round files this repository holds
-        # (none while nothing is queued): a mistyped or closed one would fail
-        # every ten minutes instead of once.
-        rounds = next(line.split("=", 1)[1] for line in lines if line.startswith("RESEARCH_ROUNDS="))
-        self.assertIn("$RESEARCH_ROUNDS", jobs[0])
-        for round_file in rounds.split():
-            self.assertTrue((installer.REPO_ROOT / round_file).is_file(), round_file)
-            module = importlib.import_module("scripts.experiments." + Path(round_file).stem)
-            self.assertFalse(module.ROUND.closed, round_file)
-
-    def test_the_research_fill_runs_every_round_in_order_and_fails_on_any_refusal(self) -> None:
-        """The job line itself, run by bash with a stand-in interpreter: each
-        round file's fill runs in the listed order under the one lock and into
-        the one log, a round whose fill fails does not stop the ones after it,
-        and the run's exit status still reports the failure."""
-        import os
-        import subprocess
-
-        template, _, _ = installer.BLOCKS["research"]
-        job = next(
-            line for line in template.read_text(encoding="utf-8").splitlines()
-            if "--fill" in line and not line.startswith("#")
-        )
-        command = job.split(None, 5)[5]
-        with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp)
-            stand_in_repository(root)
-            calls = root / "calls"
-            python = root / "python"
-            # Records its arguments and fails the round named `refused`.
-            python.write_text(
-                f'#!/bin/bash\necho "$@" >> {calls}\necho "fill $1"\n'
-                '[ "$1" != refused ]\n',
-                encoding="utf-8",
-            )
-            python.chmod(0o755)
-
-            def run(rounds: str) -> subprocess.CompletedProcess[str]:
-                calls.unlink(missing_ok=True)
-                env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "RESEARCH_ROUNDS": rounds}
-                return subprocess.run(["bash", "-c", command], env=env, capture_output=True, text=True, timeout=60)
-
-            # An empty queue is the steady state between rounds: nothing runs.
-            self.assertEqual(run("").returncode, 0)
-            self.assertFalse(calls.exists())
-            self.assertEqual(run("first second").returncode, 0)
-            self.assertEqual(
-                calls.read_text(encoding="utf-8").splitlines(),
-                ["first 38888 --fill", "second 38888 --fill"],
-            )
-            self.assertEqual(run("first refused last").returncode, 1)
-            self.assertEqual(
-                calls.read_text(encoding="utf-8").splitlines(),
-                ["first 38888 --fill", "refused 38888 --fill", "last 38888 --fill"],
-            )
-            log = (root / "logs/research/cron.log").read_text(encoding="utf-8")
-            self.assertTrue(log.endswith("fill first\nfill refused\nfill last\n"), log)
-
     def test_the_zgca_sync_block_runs_one_pass_over_its_rounds(self) -> None:
         """The block installs beside the others without touching them, its one job
         runs every 30 minutes (its lock and log: the locked-jobs test), every round it
@@ -216,7 +143,7 @@ class CronInstallerTest(unittest.TestCase):
 
         template, begin, end = installer.BLOCKS["zgca"]
         block = installer.build_managed_block(template, begin, end)
-        others = [installer.build_managed_block(*installer.BLOCKS[name]) for name in ("paper", "housekeeping", "research")]
+        others = [installer.build_managed_block(*installer.BLOCKS[name]) for name in ("paper", "housekeeping")]
         once = installer.replace_managed_block("0 1 * * * unrelated\n\n" + "\n".join(others), block, begin=begin, end=end)
         self.assertEqual(installer.replace_managed_block(once, block, begin=begin, end=end), once)
         for other in others:
@@ -256,7 +183,6 @@ class CronInstallerTest(unittest.TestCase):
         line and exit status. Each block keeps its lock, limit and log."""
         expected = {
             "paper": (".runtime/paper/cron.lock", "6h", "paper run", "logs/paper/cron.log"),
-            "research": (".runtime/research/cron.lock", "12h", "research fill", "logs/research/cron.log"),
             "zgca": (".runtime/zgca/sync_cron.lock", "4h", "zgca sync", "logs/zgca/sync_cron.log"),
         }
         for block, (lock, limit, label, log) in expected.items():
@@ -281,7 +207,7 @@ class CronInstallerTest(unittest.TestCase):
             root = Path(tmp)
             stand_in_repository(root)
             python, pids = root / "python", root / "pids"
-            env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "RESEARCH_ROUNDS": "first", "ZGCA_ROUNDS": "first"}
+            env = {"PATH": os.environ["PATH"], "REPO_ROOT": tmp, "QUANT_PYTHON": str(python), "ZGCA_ROUNDS": "first"}
 
             def run(line: str = command) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(["bash", "-c", line], env=env, capture_output=True, text=True, timeout=60)
@@ -292,7 +218,7 @@ class CronInstallerTest(unittest.TestCase):
             python.write_text('#!/bin/bash\necho "job: $*"\nexit 3\n', encoding="utf-8")
             python.chmod(0o755)
             ran = run()
-            self.assertEqual(ran.returncode, 1 if label == "research fill" else 3)  # the fill loop reports any failure as 1
+            self.assertEqual(ran.returncode, 3)
             self.assertEqual(len(logged()), 1)
             self.assertTrue(logged()[0].startswith("job: "), logged())
             with (root / lock).open("a") as held:
@@ -433,15 +359,15 @@ class CronInstallerTest(unittest.TestCase):
                 self.assertEqual((logs / name).read_text(encoding="utf-8"), "earlier\n")
 
     def test_removing_a_block_keeps_every_other_entry_and_is_idempotent(self) -> None:
-        """Pausing one managed job -- the research fill, while a stop window
-        rebuilds the sandbox image -- must not touch the Paper or TuShare
-        jobs, and must leave nothing behind for the next install to duplicate."""
+        """Pausing one managed job -- here the ZGCA sync -- must not touch the
+        Paper or TuShare jobs, and must leave nothing behind for the next
+        install to duplicate."""
 
-        _, begin, end = installer.BLOCKS["research"]
+        _, begin, end = installer.BLOCKS["zgca"]
         paper = installer.build_managed_block(*installer.BLOCKS["paper"])
-        research = installer.build_managed_block(*installer.BLOCKS["research"])
+        zgca = installer.build_managed_block(*installer.BLOCKS["zgca"])
         installed = installer.replace_managed_block(
-            f"0 1 * * * unrelated\n\n{paper}", research, begin=begin, end=end
+            f"0 1 * * * unrelated\n\n{paper}", zgca, begin=begin, end=end
         )
         removed = installer.strip_managed_block(installed, begin=begin, end=end)
         self.assertNotIn(begin, removed)
@@ -450,7 +376,7 @@ class CronInstallerTest(unittest.TestCase):
         self.assertIn(paper, removed)
         # Removing again changes nothing, and reinstalling restores exactly one pair.
         self.assertEqual(installer.strip_managed_block(removed, begin=begin, end=end), removed)
-        restored = installer.replace_managed_block(removed, research, begin=begin, end=end)
+        restored = installer.replace_managed_block(removed, zgca, begin=begin, end=end)
         self.assertEqual(restored.count(begin), 1)
         self.assertIn(paper, restored)
         # The removal's own verification: markers gone is the expected state.
@@ -471,7 +397,7 @@ class CronInstallerTest(unittest.TestCase):
             unrelated = directory / "notes.txt"
             unrelated.write_text("kept\n", encoding="utf-8")
             # Oldest first; alternating blocks make name order differ from age order.
-            blocks = ("research", "paper") * 3 + ("research",)
+            blocks = ("zgca", "paper") * 3 + ("zgca",)
             old = [
                 directory / f"crontab-{block}-2026100{day}-000000-1.bak"
                 for day, block in enumerate(blocks, start=1)
