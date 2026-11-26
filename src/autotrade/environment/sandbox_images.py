@@ -66,16 +66,13 @@ def _load_image_state(path: Path, *, experiment_id: str) -> dict[str, object]:
     # fields are deliberately ignored and never participate in resume.
     SandboxSpec(image=image_ref, build_generation_id=generation_id)
     owned_value = payload.get("owned_image_refs")
-    if owned_value is None:
-        owned_image_refs = [image_ref]
-    elif (
+    if (
         not isinstance(owned_value, list)
         or not owned_value
         or not all(isinstance(item, str) and item for item in owned_value)
     ):
         raise RuntimeError("persisted sandbox image ownership list is invalid")
-    else:
-        owned_image_refs = list(dict.fromkeys(owned_value))
+    owned_image_refs = list(dict.fromkeys(owned_value))
     for owned_ref in owned_image_refs:
         SandboxSpec(image=owned_ref)
     if image_ref not in owned_image_refs:

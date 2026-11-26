@@ -575,6 +575,29 @@ def test_experiment_image_prepare_is_atomic_and_resume_uses_the_same_uuid4_tag(
     assert "image_id" not in state and "image_repo_digests" not in state
 
 
+def test_an_image_state_without_its_ownership_list_is_refused(tmp_path: Path):
+    """Every state file lists the tags it owns; one without the list is not
+    resumed on a guessed owner."""
+    import uuid
+
+    experiment_dir = tmp_path / "experiment"
+    generation_id = str(uuid.uuid4())
+    write_json_atomic(
+        experiment_dir / "hitl/sandbox_image.json",
+        {
+            "experiment_id": "experiment_001",
+            "image_ref": f"autotrade-sandbox:experiment_001-base-{generation_id}",
+            "build_generation_id": generation_id,
+        },
+    )
+    with pytest.raises(RuntimeError, match="ownership list is invalid"):
+        prepare_experiment_sandbox_image(
+            SandboxSpec(gpu=None),
+            experiment_id="experiment_001",
+            experiment_dir=experiment_dir,
+        )
+
+
 def test_experiment_image_smoke_failure_does_not_publish_state(tmp_path: Path):
     experiment_dir = tmp_path / "experiment"
 
