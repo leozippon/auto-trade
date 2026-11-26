@@ -1,0 +1,25 @@
+[
+  {
+    "slug": "kronos",
+    "title": "Kronos: A Foundation Model for the Language of Financial Markets",
+    "venue": "AAAI 2026",
+    "paper_url": "https://arxiv.org/pdf/2508.02739v1",
+    "arxiv": "2508.02739v1",
+    "repo": "https://github.com/shiyu-coder/Kronos",
+    "commit": "67b630e67f6a18c9e9be918d9b4337c960db1e9a",
+    "licence": "MIT",
+    "data_end": "2025-06-05",
+    "strip": [
+      "*.png",
+      "examples/get_*",
+      "examples/prediction_akshare_*",
+      "examples/prediction_cn_markets_day.py",
+      "examples/prediction_new*",
+      "examples/run_backtest_kronos.py",
+      "examples/yuce",
+      "finetune_csv/data",
+      "tests",
+      "webui"
+    ]
+  }
+]
