@@ -11,7 +11,7 @@
 - 分词器（第 3 节，图 3，附录 Implementation Details）：一个 Transformer 自编码器，编码器与解码器各 3 层、256 维、前馈 512、4 头，用 Binary Spherical Quantization 把每根 K 线编码成 k = 20 位的二值码，拆成粗、细两个各 10 位的子词（词表各 1,024）。训练目标是只用粗子词重建、用完整码重建两项 MSE 之和加 BSQ 的量化损失（式 2；β = 0.05、γ0 = 1.0、γ = 1.1、ζ = 0.05、λ = 1、分组 5）。输入先逐个字段在窗口内做 z-score，再截在 ±5（附录 Input Preprocessing）。
 - 预测器：只有解码器的因果 Transformer，RoPE、Pre-RMSNorm；每一步先由隐状态预测粗子词，再以粗子词的嵌入作查询、隐状态作键值做一次交叉注意力，预测细子词（式 4–8）。训练时细子词的条件用模型自己抽样出的粗子词，不用真值（作者说这减轻了暴露偏差）。每根 K 线另加分、时、星期、日、月五个可学的时间嵌入（附录 Model Architecture）。
 - 规模（表 1，附录表 5）：small 8 层、512 维、前馈 1024、8 头、24.7M；base 12 层、832 维、2048、16 头、102.3M；large 18 层、1664 维、3072、32 头、499.2M。最大上下文 512 根。AdamW，余弦学习率，前 15,000 步从峰值的 10% 线性预热；学习率 small 1e-3、base 5e-4、large 2e-4，权重衰减 0.01、0.05、0.10，dropout 随规模减小。论文没有给出预训练的总步数、批大小与耗时；实验环境是三个各 8 张 RTX 4090D 的节点（附录 Experimental Environment）。
-- 预训练语料（第 3 节 Dataset，附录 Dataset Details）：逾 120 亿根 K 线、45 个交易所、30 多个国家，股票、加密货币、期货、外汇；正文说 7 种频率，附录表 4 的清洗参数列了一分钟到周线 12 种。清洗去掉价格跳变、长时间无成交与价格停滞的段；对加密货币、期货、外汇加大采样权重。预训练数据到 2024-06（附录 Forecasting Task Setup），起点与逐项清单没有公开。
+- 预训练语料（第 3 节 Dataset，附录 Dataset Details）：逾 120 亿根 K 线、45 个交易所、30 多个国家，股票、加密货币、期货、外汇；正文说 7 种频率，没有列出是哪几种；附录表 4 的清洗参数列了一分钟到周线 12 种，其中有 5 分钟与 30 分钟。清洗去掉价格跳变、长时间无成交与价格停滞的段；对加密货币、期货、外汇加大采样权重。预训练数据到 2024-06（附录 Forecasting Task Setup），起点与逐项清单没有公开。
 - 推理（第 3 节 Inference，附录表 6）：像生成文本一样逐根自回归解码，温度与 top-p 采样，多条路径取平均。价格与收益预测 T = 0.6、top-p 0.9、N = 10；波动率 T = 0.9、N = 1；投资模拟 T = 0.6、top-p 0.9、N = 10。第 4.4 节图 7：路径数加多，IC 与 RankIC 单调上升。
 
 论文主张的来源是预训练：分词器加预测器在多市场 K 线上的自回归预训练，然后零样本使用。
@@ -24,7 +24,7 @@
 
 - 价格序列预测：每个样本（一条序列、一个时点）内，预测的开、高、低、收四条路径与真实路径之间的 IC、RankIC，四个通道平均：量的是一条序列未来路径的形状。
 - 收益预测：预测收益 = 预测期末收盘价 / 当前收盘价 − 1，IC 与 RankIC 在同一资产类、同一频率的全部样本上合在一起算，不是按日截面。
-- 回看与预测长度按频率定（附录表 8）：5 分钟 480/96、15 分钟 160/32、1 小时 80/12、日线 40/12 等。一分钟线不在预测任务里。
+- 回看与预测长度按频率定（附录表 8）：5 分钟 480/96、15 分钟 160/32、1 小时 80/12、日线 40/12 等。一分钟线与 30 分钟线都不在预测任务里。
 - 测试资产：九个股票交易所（分布内：上海 XSHG、纳斯达克、日本、印度、韩国、香港；分布外：印尼、马来西亚、台湾），币安现货、千余个外汇对。
 
 | 任务（各资产、各频率的平均） | 指标 | Kronos-small / base / large | 最好的从头训练模型 | 最好的通用基础模型 | 出处 |
@@ -98,7 +98,7 @@
 
 mini 配 Tokenizer-2k，作者 README 说上下文 2,048 根；small 与 base 配 Tokenizer-base，上下文 512 根。权重在 2025-06-30（small、base 与 Tokenizer-base）与 2025-07-01（mini 与 Tokenizer-2k）上传，之后的提交按标题只改 README。
 
-会话的 shell 里（`PYTHONPATH=refs/papers/kronos/repo`）：`from model import Kronos, KronosTokenizer, KronosPredictor`，`Kronos.from_pretrained("/mnt/pretrained/Kronos-small")` 与 `KronosTokenizer.from_pretrained("/mnt/pretrained/Kronos-Tokenizer-base")`。包作者在沙箱镜像里断网、只用 CPU 验证过：五个目录都能这样加载；small 与 base 对 4 只股票各 90 根日线贪心解 2 步、mini 对 4 只各 960 根一分钟线贪心解 2 步，输出有限，同样输入两遍逐位相同；`decode_s1` 的第二个输出是隐状态，形状（序列，长度，维数），取最后一个位置即最后一根 K 线处的表示。
+会话的 shell 里（`PYTHONPATH=refs/papers/kronos/repo`）：`from model import Kronos, KronosTokenizer, KronosPredictor`，`Kronos.from_pretrained("/mnt/pretrained/Kronos-small")` 与 `KronosTokenizer.from_pretrained("/mnt/pretrained/Kronos-Tokenizer-base")`。包作者在沙箱镜像里断网、只用 CPU 验证过：五个目录都能这样加载；small 与 base 对 4 只股票各 90 根日线贪心解 2 步、mini 对 4 只各 960 根 K 线（包作者手里的一分钟线；会话里没有一分钟线，只有 5 或 30 分钟线）贪心解 2 步，输出有限，同样输入两遍逐位相同；`decode_s1` 的第二个输出是隐状态，形状（序列，长度，维数），取最后一个位置即最后一根 K 线处的表示。
 
 策略里：把 `model/module.py` 与 `model/kronos.py` 复制进策略包，去掉 `PyTorchModelHubMixin` 基类、`tqdm` 与 `sys.path` 那两行，按目录里 `config.json` 的数构造模块，再读权重。包作者验证过两种读法与 `from_pretrained` 得到的张量逐个相等，镜像里都在：
 
@@ -112,7 +112,7 @@ load_checkpoint_in_model(model, context.pretrained_dir + "/Kronos-small/model.sa
 
 用法与要注意的地方（都来自 `model/kronos.py`）：
 
-- `KronosPredictor.predict` 对每条序列在整个输入窗口上逐字段 z-score（标准差加 1e-5），截在 ±5，预测完再反变换；缺成交量与成交额时补零，缺成交额时用成交量乘均价。时间特征是 `timestamps` 的分、时、星期、日、月。
+- `KronosPredictor.predict` 对每条序列在整个输入窗口上逐字段 z-score（标准差加 1e-5），截在 ±5，预测完再反变换；缺成交量与成交额时补零，缺成交额时用成交量乘均价。时间特征是 `timestamps` 的分、时、星期、日、月；日内 K 线的时间取它的 `trade_time`（这一根的结束时刻）。窗口里的价格要先复权（README 阶段二），否则除权日会成为窗口内的一次跳变。
 - 窗口长于 `max_context` 时只留最后 `max_context` 根。
 - 解码循环每生成一根，就把整个窗口（最多 `max_context` 根）重新送进模型，没有键值缓存；`sample_count` 条路径是把批复制这么多份。抽样用 `torch.multinomial`；`top_k=1` 是贪心。
 - 训练时的 `forward`（`use_teacher_forcing=False`，作者微调脚本的用法）同样对粗子词做多项式抽样，训练要复现就得固定 torch 的随机源；`model.train()` 下各处 dropout 生效。
@@ -127,7 +127,8 @@ load_checkpoint_in_model(model, context.pretrained_dir + "/Kronos-small/model.sa
 | 一次前向取隐状态，日线 90 根 | small 约 2e13，base 约 8.5e13 | small 约 3.4e16，base 约 1.4e17 |
 | 贪心解 3 根，日线 90 根 | small 约 6e13，base 约 2.6e14 | 约三倍于上一行 |
 | 论文的抽样解码，10 条路径 × 10 根 | small 约 2.1e15，base 约 8.9e15 | small 约 3.6e18，base 约 1.5e19 |
-| mini 一次前向，一分钟线 2,048 根 | 约 1.4e14 | 约 2.4e17 |
+| small 或 base 一次前向，日内 K 线 512 根（5 分钟约 10.7 个交易日，30 分钟 64 个） | small 约 1.3e14，base 约 5.3e14 | small 约 2.3e17，base 约 9e17 |
+| mini 一次前向，日内 K 线 2,048 根（5 分钟约 42.7 个交易日，30 分钟 256 个） | 约 1.4e14 | 约 2.4e17 |
 
 作个量级换算：按 A100 bf16 峰值的三成（约 1e14 FLOP/s），论文的抽样解码在 base 上每天约 90 秒、一场研究年约 40 小时，fp32 下约慢十倍；一次前向取隐状态每天不到一秒。作者微调示例的训练量（300 万个 101 根的窗口，前向加反向约三倍前向）在 small 上约 4e16、base 上约 2e17 FLOP，按同样的换算是几分钟到半小时。显存：base 的权重 0.4 GB，AdamW 状态再加约 1.2 GB，激活按批大小增长，批大小按冒烟时的峰值定。
 
@@ -141,4 +142,4 @@ load_checkpoint_in_model(model, context.pretrained_dir + "/Kronos-small/model.sa
 | 使用方式 | 零样本 | 每个决策只能用当时可见的数据训练与选择 |
 | 组合 | Qlib 大账户、等权 50 或 200 只、0.15% 成本 | 20 万元、整手、最低佣金、按本项目成本与持仓规则 |
 
-意味着：直接拿零样本的价格预测排序，读数会受预训练见过研究年的影响而偏高，与论文的读数也不可比；更有希望的是把它当作 K 线编码器，在本项目自己的截面标签上学打分头，再看微调与分钟线能不能加东西。研究年上任何带预训练权重的读数都是上界，2024-07 以后的验证期才是干净的检验。
+意味着：直接拿零样本的价格预测排序，读数会受预训练见过研究年的影响而偏高，与论文的读数也不可比；更有希望的是把它当作 K 线编码器，在本项目自己的截面标签上学打分头，再看微调与日内 K 线能不能加东西。研究年上任何带预训练权重的读数都是上界，2024-07 以后的验证期才是干净的检验。
