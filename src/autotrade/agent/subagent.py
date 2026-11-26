@@ -79,9 +79,6 @@ from .turns import (
 )
 
 SUBAGENT_THINKING_LEVELS = ("off", *REASONING_EFFORTS)
-# Aliases a parent still writes, each mapped to the level it was always sent
-# as: minimal was low on the wire, high and max were xhigh.
-_LEGACY_THINKING_ALIASES = {"minimal": "low", "high": "xhigh", "max": "xhigh"}
 # Children a parent may run at once; the rest queue in the same pool.
 # Several writable children may run together as long as each writes only its
 # own task path; the shared call-budget share is unchanged, so a wider turn
@@ -331,7 +328,7 @@ AGENT_TOOL_SPEC = ToolSpec(
             "thinking": {
                 "type": "string",
                 "enum": list(SUBAGENT_THINKING_LEVELS),
-                "description": "子代理思考强度；high 与 max 是 xhigh 的别名，off 关闭扩展思考。",
+                "description": "子代理思考强度；off 关闭扩展思考。",
             },
             "inherit_context": {
                 "type": "boolean",
@@ -386,22 +383,15 @@ class AgentTool:
         self._launch = launch
 
     def normalize_arguments(self, arguments: Mapping[str, object]) -> Mapping[str, object]:
-        """Settle the two call shapes the advertised enums would reject blindly.
+        """Tell a call that spells ``resume`` as an action the correct form.
 
-        The registry validates against the schema before ``invoke``, so the
-        compatibility this tool documents has to be applied here: the legacy
-        ``thinking`` values map to the canonical level they always meant on the
-        wire, while the schema keeps advertising only the four real ones, and a
-        call that spells ``resume`` as an action is told the correct form.
+        The registry validates against the schema before ``invoke``, and the
+        ``action`` enum alone would reject the call without saying where
+        resuming lives.
         """
 
         if str(arguments.get("action") or "").strip().lower() == "resume":
             raise ToolError(_RESUME_ACTION_HINT, error_type="schema_error")
-        thinking = arguments.get("thinking")
-        if isinstance(thinking, str):
-            canonical = _LEGACY_THINKING_ALIASES.get(thinking.strip().lower())
-            if canonical is not None:
-                return {**arguments, "thinking": canonical}
         return arguments
 
     def invoke(self, arguments: Mapping[str, object]) -> ToolResult:
@@ -448,10 +438,7 @@ def normalize_subagent_thinking(value: object) -> str:
     """Return the effective thinking level for one launch.
 
     Precedence: the call argument, then ``DEFAULT_SUBAGENT_THINKING``; a child
-    never inherits the parent session's reasoning intensity. The legacy
-    aliases are already canonical here: the launch tool maps them in
-    ``normalize_arguments``, before the schema enum that would otherwise
-    reject them.
+    never inherits the parent session's reasoning intensity.
     """
 
     if value is None:

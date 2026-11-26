@@ -1085,35 +1085,20 @@ def test_subagent_arguments_are_validated_by_the_registry() -> None:
     assert runner._wait_subagent_jobs()[-1]["ok"] is True
 
 
-def test_legacy_thinking_values_launch_at_xhigh_through_the_registry() -> None:
-    """The documented ``high``/``max`` aliases must survive the schema enum.
+def test_a_thinking_level_outside_the_four_is_refused_by_the_schema() -> None:
+    """The enum is the four levels the wire knows; the retired aliases
+    (minimal, high, max) fail with it like any unknown level, before a child
+    reaches the pool."""
 
-    The advertised enum is the four canonical levels, so the alias mapping has
-    to run before validation; an unknown level still fails with the enum."""
-
-    runner = make_runner(
-        subagent=make_engine(
-            ProviderResponse(content="ok"),
-            ProviderResponse(content="ok"),
-        ),
-    )
-    for legacy in ("high", "max"):
-        started = runner.tools.invoke(
-            "agent", {"agent": "Explore", "task": "x", "thinking": legacy}
+    runner = make_runner(subagent=make_engine())
+    for level in ("minimal", "high", "max", "turbo"):
+        rejected = runner.tools.invoke(
+            "agent", {"agent": "Explore", "task": "x", "thinking": level}
         )
-        assert started.ok and started.value["status"] == "started"
-        record = runner._wait_subagent_jobs()[-1]
-        assert record["ok"] is True
-        child = record["value"]
-        assert isinstance(child, dict) and child["thinking"] == "xhigh"
-    unknown = runner.tools.invoke(
-        "agent", {"agent": "Explore", "task": "x", "thinking": "turbo"}
-    )
-    assert unknown.ok is False
-    assert unknown.value["error_type"] == "schema_error"
-    assert f"thinking must be one of {list(SUBAGENT_THINKING_LEVELS)}" in unknown.error
-    # A rejected launch never reached the pool.
-    assert runner._subagent_attempts == 2
+        assert rejected.ok is False
+        assert rejected.value["error_type"] == "schema_error"
+        assert f"thinking must be one of {list(SUBAGENT_THINKING_LEVELS)}" in rejected.error
+    assert runner._subagent_attempts == 0
 
 
 def test_agent_action_resume_is_told_the_resume_parameter() -> None:
@@ -2633,7 +2618,6 @@ def test_agent_description_states_role_capabilities_and_thinking_tiers() -> None
     # Resume is a launch parameter, never an action.
     assert "没有 resume 这个 action" in AGENT_TOOL_SPEC.input_schema["properties"]["action"]["description"]
     assert "不写 task_id" in AGENT_TOOL_SPEC.input_schema["properties"]["resume"]["description"]
-    assert "high 与 max 是 xhigh 的别名" in thinking_field
 
 
 def test_agent_result_echoes_running_and_queued_children_with_descriptions() -> None:
