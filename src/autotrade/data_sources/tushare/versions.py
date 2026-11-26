@@ -119,29 +119,6 @@ OUTCOMES = ("unchanged", "appended", "replaced", "restated", "staged", "defect",
 
 REVISION_EVENT_SCHEMA_VERSION = 3
 EVENT_KINDS = ("restatement", "staged", "defect", "deduplicated", "promotion", "revert", "probe")
-REVISION_EVENT_FIELDS = (
-    "schema_version",
-    "event_id",
-    "detected_at",
-    "source",
-    "kind",
-    "dataset",
-    "partition",
-    "key_columns",
-    "old_rows",
-    "new_rows",
-    "old_keys",
-    "new_keys",
-    "added_keys",
-    "removed_keys",
-    "changed_keys",
-    "changed_columns",
-    "duplicate_rows_dropped",
-    "detail",
-    "version",
-    "superseded_version",
-    "write_id",
-)
 
 _ROW_SEPARATOR = "\x1e"
 

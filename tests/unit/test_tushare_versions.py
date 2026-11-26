@@ -222,12 +222,17 @@ class VersionedWriteTest(LakeTestCase):
             superseded_version="20261024T000000000000Z-superseded",
         )
 
-        self.assertEqual(tuple(event), versions.REVISION_EVENT_FIELDS)
-        self.assertEqual(event["schema_version"], versions.REVISION_EVENT_SCHEMA_VERSION)
-        self.assertEqual((event["old_keys"], event["new_keys"]), (3, 3))
-        self.assertEqual((event["changed_keys"], event["added_keys"], event["removed_keys"]), (2, 1, 1))
-        self.assertEqual(event["changed_columns"], {"amount": 1, "close": 1})
-        self.assertFalse(any("sample" in field for field in event))
+        ledger = self.root / "revision_events.jsonl"
+        with redirect_stdout(io.StringIO()):
+            versions.append_event(ledger, event)
+
+        [record] = [json.loads(line) for line in ledger.read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(record, event)
+        self.assertEqual(record["schema_version"], versions.REVISION_EVENT_SCHEMA_VERSION)
+        self.assertEqual((record["old_keys"], record["new_keys"]), (3, 3))
+        self.assertEqual((record["changed_keys"], record["added_keys"], record["removed_keys"]), (2, 1, 1))
+        self.assertEqual(record["changed_columns"], {"amount": 1, "close": 1})
+        self.assertFalse(any("sample" in field for field in record))
 
     def test_empty_answer_defect_does_not_depend_on_a_ledger(self):
         path = self.raw_dir / "limit_list_d" / "trade_date=20200102.parquet"
