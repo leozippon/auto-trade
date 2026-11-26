@@ -1,0 +1,15 @@
+[
+  {
+    "slug": "cograsp",
+    "title": "COGRASP: Co-Occurrence Graph Based Stock Price Forecasting",
+    "venue": "IJCAI 2025",
+    "paper_url": "https://www.ijcai.org/proceedings/2025/0837.pdf",
+    "repo": "https://github.com/NingboSong/COGRASP",
+    "commit": "34e31f856ac396fa5ecea1f4410fe6c7d0bd5851",
+    "licence": "MIT",
+    "data_end": "2024-06-30",
+    "strip": [
+      "*.png"
+    ]
+  }
+]
