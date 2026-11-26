@@ -27,10 +27,7 @@ from autotrade.environment.llm import MODEL_CHOICES
 from autotrade.environment.sandbox import GpuMode
 from autotrade.pipelines.calendar import GEOMETRY_PARAMETERS
 from autotrade.pipelines.config import REQUIRED_ACCEPTANCE_KEYS, AcceptanceRules
-from autotrade.pipelines.experiment_params import (
-    NON_PERSISTABLE_PARAMS,
-    ExperimentParams,
-)
+from autotrade.pipelines.experiment_params import ExperimentParams
 from autotrade.pipelines.hitl_state import (
     WEB_CREATE_DEFAULTS,
     select_gpus,
@@ -355,11 +352,6 @@ def _build_worker_params(
     supplies the keys the operator actually chose. Anything absent here falls
     back to the same default a console-created experiment gets.
     """
-    forbidden = sorted(set(overrides or {}) & NON_PERSISTABLE_PARAMS)
-    if forbidden:
-        raise ValueError(
-            "provider endpoint parameters cannot be persisted: " + ", ".join(forbidden)
-        )
     params: dict[str, object] = {
         "experiment_id": args.experiment_id,
         "experiments_root": _relative(repo_root, args.experiments_root),

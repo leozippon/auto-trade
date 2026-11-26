@@ -122,7 +122,7 @@ def test_an_experiment_created_from_the_command_line_holds_the_consoles_creation
     be: the rules' own defaults, a limit the operator names, and none of the
     retired switches."""
 
-    def params(*flags: str) -> dict[str, object]:
+    def params(*flags: str, overrides: dict[str, object] | None = None) -> dict[str, object]:
         parser = argparse.ArgumentParser()
         parser.add_argument("--experiment-id", required=True)
         parser.add_argument("--max-research-minutes", type=int, default=20)
@@ -135,13 +135,16 @@ def test_an_experiment_created_from_the_command_line_holds_the_consoles_creation
         args = parser.parse_args(
             ["--experiment-id", "audit", "--research-years=1", *flags]
         )
-        return _cli._build_worker_params(args, repo_root=tmp_path)
+        return _cli._build_worker_params(args, repo_root=tmp_path, overrides=overrides)
 
     created = params()
     assert acceptance_for(created) == AcceptanceRules(**REQUIRED_RULES)
     assert "dividend_tax" not in created
     assert created["delisting_rules"] is True
     assert acceptance_for(params("--max-drawdown=0.3")).max_drawdown == 0.3
+    # The retired endpoint and credential overrides are no parameter at all.
+    with pytest.raises(ValueError, match=r"unknown experiment parameters: \['llm_api_key_env', 'llm_base_url'\]"):
+        params(overrides={"llm_base_url": "https://x.example.test/v1", "llm_api_key_env": "SECRET"})
 
 
 def test_the_one_assembly_builds_every_gateway_by_its_role(

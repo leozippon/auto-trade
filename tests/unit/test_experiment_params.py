@@ -106,7 +106,9 @@ def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
         ({"min_dsr_probability": 0.9}, "unknown experiment parameters: min_dsr_probability"),
         ({"data_backend": "daily"}, "console-managed parameters are not accepted: data_backend"),
         ({"work_root": "/elsewhere"}, "console-managed parameters are not accepted: work_root"),
-        ({"llm_base_url": "http://x"}, "console-managed parameters are not accepted: llm_base_url"),
+        # The retired endpoint and credential overrides are no parameter at all.
+        ({"llm_base_url": "http://x"}, "unknown experiment parameters: llm_base_url"),
+        ({"llm_api_key_env": "SECRET"}, "unknown experiment parameters: llm_api_key_env"),
         ({"delisting_rules": False}, "console-managed parameters are not accepted: delisting_rules"),
         ({"research_years": None}, "missing required experiment parameters: research_years"),
         ({"experiment_id": "_hidden"}, "experiment_id must match"),

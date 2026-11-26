@@ -93,13 +93,6 @@ def _host(default: object = None) -> Any:
     return _param(default, surface=Surface.HOST)
 
 
-# Former operator overrides of the provider endpoint and credential. Endpoints
-# and credentials come only from the trusted model profile's fixed environment
-# keys, so no parameter can redirect either: the console and the worker refuse
-# them, and the command line names them in its own refusal.
-NON_PERSISTABLE_PARAMS = frozenset({"llm_api_key_env", "llm_base_url"})
-
-
 @dataclass(frozen=True, kw_only=True)
 class GeometryParams:
     """Research, forward and Held-out dates (``calendar.ResearchGeometry``)."""
@@ -553,8 +546,8 @@ def console_request(
     """
 
     closed = sorted(
-        key for key in request if key in NON_PERSISTABLE_PARAMS
-        or (key in PARAMETERS and PARAMETERS[key].surface in (Surface.MANAGED, Surface.HOST))
+        key for key in request
+        if key in PARAMETERS and PARAMETERS[key].surface in (Surface.MANAGED, Surface.HOST)
     )
     if closed:
         raise ValueError("console-managed parameters are not accepted: " + ", ".join(closed))
@@ -587,7 +580,6 @@ def console_request(
 
 
 __all__ = [
-    "NON_PERSISTABLE_PARAMS",
     "PARAMETERS",
     "AcceptanceParams",
     "AgentParams",

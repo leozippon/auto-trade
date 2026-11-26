@@ -378,9 +378,7 @@ def test_experiment_endpoint_rejects_console_managed_unknown_and_missing_paramet
         json={"params": {"llm_base_url": "https://untrusted.example.test/v1"}},
     )
     assert endpoint.status_code == 400
-    assert endpoint.json()["detail"] == (
-        "console-managed parameters are not accepted: llm_base_url"
-    )
+    assert endpoint.json()["detail"] == "unknown experiment parameters: llm_base_url"
     unknown = client.post("/api/experiments", json={"params": {"period": "month"}})
     assert unknown.status_code == 400
     assert unknown.json()["detail"] == "unknown experiment parameters: period"
