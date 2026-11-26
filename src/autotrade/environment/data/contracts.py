@@ -181,6 +181,11 @@ FUNDAMENTAL_EVENT_DATASETS = (
     "disclosure_date",
 )
 
+# Locally derived intraday bars: the one-minute bars of a trade date aggregated
+# on a fixed grid, one events dataset per bar length in minutes
+# (``intraday_bars.py``; a bar length divides the 120-minute half session).
+INTRADAY_BARS_DATASETS: dict[str, int] = {"intraday_bars_5min": 5, "intraday_bars_30min": 30}
+
 # ---- Agent-visible dataset scope -------------------------------------------
 # Every dataset a domain can load: the raw lake downloads and audits all of
 # them and the fail-closed unit registry classifies every one of their columns,
@@ -229,6 +234,10 @@ SELECTABLE_DATASETS: dict[str, tuple[str, ...]] = {
         # and volume profile of one stock-day. Opt-in likewise: it pays for
         # itself only in a strategy that models intraday dynamics.
         "intraday_stats",
+        # the same minute bars aggregated to coarser bars, for a strategy that
+        # feeds intraday bars to a model without mounting the minute domain.
+        # Opt-in likewise: many rows per stock-day, where the two above hold one.
+        *INTRADAY_BARS_DATASETS,
         # shareholder structure and share supply
         "stk_holdernumber",
         "stk_holdertrade",
@@ -381,10 +390,20 @@ INTRADAY_FLOW_CONTRACT = DatasetContract(
 # same build, so it takes the flow contract rather than restating it.
 INTRADAY_STATS_CONTRACT = replace(INTRADAY_FLOW_CONTRACT, dataset="intraday_stats")
 
+# The coarse intraday bars (``intraday_bars.py``) are that session's minute
+# bars aggregated by the same build: every bar of a trade date takes the same
+# close stamp, whatever minute it ends on, because the minutes only land at night.
+INTRADAY_BARS_CONTRACTS = {
+    dataset: replace(INTRADAY_FLOW_CONTRACT, dataset=dataset) for dataset in INTRADAY_BARS_DATASETS
+}
+
+# Every dataset the minute-derived build writes, by its contract.
+MINUTE_DERIVED_CONTRACTS = (INTRADAY_FLOW_CONTRACT, INTRADAY_STATS_CONTRACT, *INTRADAY_BARS_CONTRACTS.values())
+
 # Raw datasets written outside the updater (scripts/data/build_minute_derived.py,
 # launched from cron without the updater lock): no run records their refresh,
 # and a staged file in their directories may belong to a build still running.
-LOCALLY_DERIVED_DATASETS = frozenset({INTRADAY_FLOW_CONTRACT.dataset, INTRADAY_STATS_CONTRACT.dataset})
+LOCALLY_DERIVED_DATASETS = frozenset(contract.dataset for contract in MINUTE_DERIVED_CONTRACTS)
 
 
 def default_tushare_contracts() -> dict[str, DatasetContract]:
@@ -613,7 +632,8 @@ EVENT_DATASET_REFRESH_NODES: dict[str, tuple[str, ...]] = {
     "limit_cpt_list": (EVENING_NODE, "cn_preopen_board_backfill_0850"),
     # limit_list_ths / ths_hot / dc_hot / hm_detail / hm_list land in the
     # evening window only — the default node is already correct for them.
-    # intraday_flow and intraday_stats keep the default node too: they are
+    # The minute-derived datasets (intraday_flow, intraday_stats and the
+    # intraday bars) keep the default node too: they are
     # derived from the minute partitions cn_nightly_intraday_minutes lands
     # inside the evening node's window, and their build runs inside that window
     # as well (ops/cron/tushare_update.cron), so their rows become queryable on

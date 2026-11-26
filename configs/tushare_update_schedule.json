@@ -1102,6 +1102,26 @@
       "history_repull": "window_only"
     },
     {
+      "dataset": "intraday_bars_5min",
+      "derived_from": "stk_mins_1min_by_date",
+      "builder": "scripts/data/build_minute_derived.py",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "5 分钟线（派生）；本地派生表，由当日 1 分钟线聚合，没有供应商接口和官方入库时刻；与日频订单流同一构建，在分钟数据落地之后运行。",
+      "cron_policy": "derived_build_after_manual_minute_job",
+      "history_repull": "window_only"
+    },
+    {
+      "dataset": "intraday_bars_30min",
+      "derived_from": "stk_mins_1min_by_date",
+      "builder": "scripts/data/build_minute_derived.py",
+      "domain": "event_flow",
+      "frequency": "trade_date",
+      "official_update": "30 分钟线（派生）；本地派生表，由当日 1 分钟线聚合，没有供应商接口和官方入库时刻；与日频订单流同一构建，在分钟数据落地之后运行。",
+      "cron_policy": "derived_build_after_manual_minute_job",
+      "history_repull": "window_only"
+    },
+    {
       "dataset": "kpl_list",
       "api": "kpl_list",
       "domain": "board_trading",

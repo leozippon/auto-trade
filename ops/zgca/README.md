@@ -29,7 +29,7 @@ python ops/zgca/zgca.py --instance <平台实例 id> status
 | 两个构建用文件和受管文件清单 | 复制到开发机的 `.runtime/zgca/` |
 | 预构建视图目录 | 精确镜像（`--delete`，硬链接保留） |
 | 研究包载荷 `data/pack_payloads/` | 整个目录精确镜像（`--delete`）：本机删掉的载荷（它的包已离开仓库）在开发机上也删掉 |
-| 该 release 目录 | 同上，但不带种子快照配置不读的文本数据集与分钟线（新闻与分钟线是 release 的大头：b50c220f 的 51.75 GB 里 38.5 GB）；跳过的目录在开发机上保留不删（`--delete` 不带 `--delete-excluded`），同一 release 的另一份预构建视图可能要读 |
+| 该 release 目录 | 同上，但不带种子快照配置不读的文本数据集、分钟线与由分钟线派生的日内 K 线（`intraday_bars_*`）（新闻与分钟线是 release 的大头：b50c220f 的 51.75 GB 里 38.5 GB）；跳过的目录在开发机上保留不删（`--delete` 不带 `--delete-excluded`），同一 release 的另一份预构建视图可能要读 |
 | 预训练模型库 | 精确镜像到实例自己的盘 `/ebs/auto-trade/pretrained`，只在放得下时（见下） |
 | 这次部署的提交号 | 最后一步，复制成开发机的 `.runtime/zgca/deployed_commit`，`status` 会显示 |
 

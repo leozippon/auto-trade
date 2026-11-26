@@ -273,12 +273,18 @@ class ZgcaWorkflowTest(unittest.TestCase):
         subprocess.run([*git, "commit", "-q", "-m", "fixture"], cwd=self.repo, check=True)
 
     @staticmethod
-    def _provider(generation: str = "gen_test", *, text: tuple[str, ...] = ("anns_d",), intraday: bool = False) -> dict[str, object]:
+    def _provider(
+        generation: str = "gen_test",
+        *,
+        text: tuple[str, ...] = ("anns_d",),
+        events: tuple[str, ...] = (),
+        intraday: bool = False,
+    ) -> dict[str, object]:
         """A seed's provider record, its snapshot configuration as the prebuild records it (the fields deploy reads)."""
         return {
             "generation_id": generation,
             "snapshot_config": {
-                "datasets": {"events": [], "fundamentals": ["income_vip"], "macro": ["index_daily"], "text": list(text)},
+                "datasets": {"events": list(events), "fundamentals": ["income_vip"], "macro": ["index_daily"], "text": list(text)},
                 "include_intraday": intraday,
             },
         }
@@ -400,14 +406,15 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertIn("--delete", payloads["args"])
         self.assertEqual(payloads["args"][-2], f"{self.repo / 'data' / 'pack_payloads'}/")
         self.assertNotIn("--delete", transfers[0]["args"])
-        # The release leaves behind exactly the text and minute datasets the
-        # seed's configuration does not read, and keeps them where an earlier
-        # deploy put them (no --delete-excluded).
+        # The release leaves behind exactly the text, minute and intraday-bar
+        # datasets the seed's configuration does not read, and keeps them
+        # where an earlier deploy put them (no --delete-excluded).
         release = release["args"]
         self.assertEqual(
             [arg for arg in release if arg.startswith("--exclude")],
             [f"--exclude=/raw/{name}/" for name in ("research_report", "report_rc", "irm_qa_sh", "irm_qa_sz",
-                                                    "major_news", "news", "cctv_news", "npr", "stk_mins_1min_by_date")],
+                                                    "major_news", "news", "cctv_news", "npr", "stk_mins_1min_by_date",
+                                                    "intraday_bars_5min", "intraday_bars_30min")],
         )
         self.assertNotIn("--delete-excluded", release)
         # The release files were fetched once, from their official URLs, and are reused by the next deploy.
@@ -497,13 +504,16 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertFalse(record.exists())
 
     def test_release_exclusions_follow_the_seeds_configuration(self) -> None:
-        """Only text and minute datasets the configuration does not name stay behind; a seed naming them takes them."""
+        """Only text, minute and intraday-bar datasets the configuration does not name stay behind; a seed naming them takes them."""
         self.assertEqual(
-            zgca.release_exclusions(self._provider(text=("anns_d", "major_news", "news"), intraday=True)),
-            ["research_report", "report_rc", "irm_qa_sh", "irm_qa_sz", "cctv_news", "npr"],
+            zgca.release_exclusions(
+                self._provider(text=("anns_d", "major_news", "news"), events=("intraday_bars_30min",), intraday=True)
+            ),
+            ["research_report", "report_rc", "irm_qa_sh", "irm_qa_sz", "cctv_news", "npr", "intraday_bars_5min"],
         )
         everything = zgca.release_exclusions(self._provider(text=()))
-        self.assertIn("stk_mins_1min_by_date", everything)
+        for name in ("stk_mins_1min_by_date", "intraday_bars_5min", "intraday_bars_30min"):
+            self.assertIn(name, everything)
         # Datasets every experiment reads outside its configuration never stay behind.
         for name in ("trade_cal", "stock_basic", "namechange", "index_member_all", "index_classify", "daily"):
             self.assertNotIn(name, everything)

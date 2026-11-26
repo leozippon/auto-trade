@@ -256,6 +256,36 @@
     "vol_open30_share",
     "vwap_dev"
    ],
+   "intraday_bars_5min": [
+    "amount",
+    "available_at",
+    "available_at_rule",
+    "close",
+    "dataset",
+    "high",
+    "low",
+    "n_min",
+    "open",
+    "trade_date",
+    "trade_time",
+    "ts_code",
+    "vol"
+   ],
+   "intraday_bars_30min": [
+    "amount",
+    "available_at",
+    "available_at_rule",
+    "close",
+    "dataset",
+    "high",
+    "low",
+    "n_min",
+    "open",
+    "trade_date",
+    "trade_time",
+    "ts_code",
+    "vol"
+   ],
    "stk_holdernumber": [
     "ann_date",
     "available_at",

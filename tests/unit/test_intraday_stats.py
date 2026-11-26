@@ -283,17 +283,19 @@ class MinuteDerivedBuildTest(unittest.TestCase):
             source.parent.mkdir(parents=True)
             _day("000001.SZ", REFERENCE_CLOSES, REFERENCE_VOLUMES).to_parquet(source)
 
-            def build(*extra: str) -> dict:
+            def build(*datasets: str) -> dict:
+                # The stock-day tables only: this fixture's minutes carry no high and low for the bars.
+                selected = [flag for dataset in datasets for flag in ("--dataset", dataset)]
                 done = subprocess.run(
-                    [sys.executable, str(script), "--raw-dir", str(raw), *extra],
+                    [sys.executable, str(script), "--raw-dir", str(raw), *selected],
                     check=True, capture_output=True, text=True,
                 )
                 return json.loads(done.stdout)["datasets"]
 
-            only_flow = build("--dataset", "intraday_flow")
+            only_flow = build("intraday_flow")
             self.assertEqual(list(only_flow), ["intraday_flow"])
             self.assertFalse((raw / "intraday_stats").exists())
-            both = build()
+            both = build("intraday_flow", "intraday_stats")
             self.assertEqual(both["intraday_flow"]["partitions_written"], 0)
             self.assertEqual(both["intraday_stats"]["partitions_written"], 1)
             written = pd.read_parquet(raw / "intraday_stats" / f"trade_date={MINUTE_TRADE_DATE}.parquet")
@@ -307,7 +309,7 @@ class MinuteDerivedBuildTest(unittest.TestCase):
             # partition that is not one committed write: the next run rebuilds
             # it instead of skipping it forever.
             (raw / "intraday_flow" / f"trade_date={MINUTE_TRADE_DATE}.parquet.meta.json").unlink()
-            healed = build()
+            healed = build("intraday_flow", "intraday_stats")
             self.assertEqual(healed["intraday_flow"]["partitions_written"], 1)
             self.assertEqual(healed["intraday_stats"]["partitions_written"], 0)
 

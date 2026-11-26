@@ -18,6 +18,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from autotrade.environment.data.contracts import INTRADAY_BARS_DATASETS
+
 
 @dataclass(frozen=True)
 class FieldRule:
@@ -345,6 +347,33 @@ FIELD_RULES: tuple[FieldRule, ...] = (
               status="verified",
               evidence="241 on every one of the 7,639,286 stock-days built from 20200102-20260821",
               note="session-grid bars present; a complete day has 241"),
+    # Locally derived from the minute lake (intraday_bars.py holds the grid):
+    # the minute bars aggregated without conversion, so the units are those of
+    # intraday_1min.parquet, not the vendor's daily lots and thousands.
+    *(
+        rule
+        for dataset, bar_minutes in INTRADAY_BARS_DATASETS.items()
+        for rule in (
+            FieldRule("events.parquet", dataset, ("open", "high", "low", "close"),
+                      source_unit="CNY_per_share",
+                      evidence="against raw daily on 203,579 stock-days of 2021-03 and 2024-03: the "
+                               "day's close from bars equals daily close on all; its high or low "
+                               "misses the daily one on about a quarter of stock-days in 2021-03 and "
+                               "under 0.1% in 2024-03, its open on 4.2% and 1.4%",
+                      note="unadjusted; first open, extremes and last close of the bar's "
+                           "one-minute bars, so the day's range from bars can be narrower "
+                           "than daily high/low; null in a bar no minute reached"),
+            FieldRule("events.parquet", dataset, ("vol",), source_unit="shares",
+                      note="sum of the bar's one-minute volumes; the first bar of a day "
+                           "includes the opening auction, the last the closing auction"),
+            FieldRule("events.parquet", dataset, ("amount",), source_unit="CNY",
+                      note="sum of the bar's one-minute turnover"),
+            FieldRule("events.parquet", dataset, ("n_min",), source_unit="count",
+                      note=f"one-minute bars behind the bar: {bar_minutes}, and {bar_minutes + 1} "
+                           "for the first bar of a day (it holds the 09:30 minute); fewer "
+                           "means source minutes were missing, 0 an empty bar"),
+        )
+    ),
     # his_high is a proven post-decision price leak and his_low its unverified
     # same-source sibling; both are excluded from the snapshot
     # (SNAPSHOT_EXCLUDED_COLUMNS), so they stand alone here: a mixed rule would

@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """Build the minute-derived raw datasets (docs/DATA_DOCUMENTATION.md §1.7).
 
-Reduces each ``stk_mins_1min_by_date`` partition to one PIT-stamped row per
-stock-day for every dataset in ``DERIVED`` -- ``intraday_flow`` (signed order
-flow) and ``intraday_stats`` (realized moments and the intraday profile) -- and
-writes ``data/raw/<dataset>/trade_date=<D>.parquet`` with the lake's usual
-sidecar. One streamed pass, one minute partition in memory at a time and read
-once for all datasets still missing that day; an output partition whose
-parquet and sidecar are one committed write is skipped unless ``--rebuild``,
-so the nightly run costs one trade date, and a partition a killed run left
-half-committed is built again.
+Reduces each ``stk_mins_1min_by_date`` partition to the PIT-stamped rows of
+every dataset in ``DERIVED`` -- one row per stock-day for ``intraday_flow``
+(signed order flow) and ``intraday_stats`` (realized moments and the intraday
+profile), one per bar for the ``intraday_bars_<N>min`` datasets -- and writes
+``data/raw/<dataset>/trade_date=<D>.parquet`` with the lake's usual sidecar.
+One streamed pass, one minute partition in memory at a time and read once for
+all datasets still missing that day; an output partition whose parquet and
+sidecar are one committed write is skipped unless ``--rebuild``, so the nightly
+run costs one trade date, and a partition a killed run left half-committed is
+built again.
 
 Run it after the minute download has landed:
 
@@ -18,6 +19,7 @@ Run it after the minute download has landed:
 from __future__ import annotations
 
 import argparse
+import functools
 import json
 import re
 import sys
@@ -35,6 +37,11 @@ from _bootstrap import add_repo_src
 add_repo_src(__file__)
 
 from autotrade.data_sources.tushare.io import committed_partition_intact, write_parquet
+from autotrade.environment.data.contracts import INTRADAY_BARS_DATASETS
+from autotrade.environment.data.intraday_bars import (
+    INTRADAY_BARS_MINUTE_COLUMNS,
+    aggregate_intraday_bars,
+)
 from autotrade.environment.data.intraday_flow import (
     INTRADAY_FLOW_DATASET,
     MINUTE_COLUMNS,
@@ -47,10 +54,14 @@ from autotrade.environment.data.intraday_stats import (
     aggregate_intraday_stats,
 )
 
-# dataset -> (stock-day reducer, minute columns it reads)
+# dataset -> (reducer of one day's minute bars, minute columns it reads)
 DERIVED = {
     INTRADAY_FLOW_DATASET: (aggregate_intraday_flow, MINUTE_COLUMNS),
     INTRADAY_STATS_DATASET: (aggregate_intraday_stats, INTRADAY_STATS_MINUTE_COLUMNS),
+    **{
+        dataset: (functools.partial(aggregate_intraday_bars, dataset=dataset), INTRADAY_BARS_MINUTE_COLUMNS)
+        for dataset in INTRADAY_BARS_DATASETS
+    },
 }
 _PARTITION = re.compile(r"trade_date=(\d{8})\.parquet$")
 

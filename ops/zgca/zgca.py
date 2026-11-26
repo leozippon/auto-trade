@@ -195,15 +195,17 @@ def gateway_env(env_file: Path) -> bytes:
 def release_exclusions(provider: dict[str, object]) -> list[str]:
     """The release's ``raw`` datasets a deploy of this seed leaves behind.
 
-    Only the text datasets and the minute bars, the bulk of a release, which
-    nothing reads unless the snapshot configuration names them; every other
-    dataset ships, since the release's readers also open some no configuration
-    names (the SSE calendar, the listing and industry tables). The seed's
-    ``provider.json`` records its configuration; an experiment whose configuration
-    needs a dataset left behind is refused when it pins the release.
+    Only the text datasets, the minute bars and the intraday bars derived
+    from them, the bulk of a release, which nothing reads unless the snapshot
+    configuration names them; every other dataset ships, since the release's
+    readers also open some no configuration names (the SSE calendar, the
+    listing and industry tables). The seed's ``provider.json`` records its
+    configuration; an experiment whose configuration needs a dataset left
+    behind is refused when it pins the release.
     """
 
     _with_project_src()
+    from autotrade.environment.data.contracts import INTRADAY_BARS_DATASETS
     from autotrade.environment.data.intraday_flow import MINUTE_DATASET
     from autotrade.environment.data.snapshot import SELECTABLE_DATASETS, SnapshotConfig
     from autotrade.pipelines.pit_backend import required_release_raw_datasets
@@ -218,7 +220,8 @@ def release_exclusions(provider: dict[str, object]) -> list[str]:
         include_intraday=bool(record["include_intraday"]),
     )
     required = set(required_release_raw_datasets(config))
-    return [name for name in (*SELECTABLE_DATASETS["text"], MINUTE_DATASET) if name not in required]
+    left_behind = (*SELECTABLE_DATASETS["text"], MINUTE_DATASET, *INTRADAY_BARS_DATASETS)
+    return [name for name in left_behind if name not in required]
 
 
 def _tree_bytes(root: Path) -> int:

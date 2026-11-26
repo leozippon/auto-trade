@@ -36,10 +36,9 @@ from autotrade.environment.data.contracts import (
     DOMAIN_REFRESH_NODES,
     EVENING_NODE,
     EVENT_DATASET_REFRESH_NODES,
-    INTRADAY_FLOW_CONTRACT,
-    INTRADAY_STATS_CONTRACT,
     MACRO_DATASET_CONTRACTS,
     MACRO_DATASET_REFRESH_NODES,
+    MINUTE_DERIVED_CONTRACTS,
     NODE_ACTIVE_WEEKDAYS,
     REFRESH_NODES,
     TEXT_DATASET_REFRESH_NODES,
@@ -189,7 +188,7 @@ def snapshot_timing_contract(config: SnapshotConfig) -> dict[str, object]:
         for dataset in config.macro_datasets
         if dataset in MACRO_DATASET_CONTRACTS
     }
-    for contract in (INTRADAY_FLOW_CONTRACT, INTRADAY_STATS_CONTRACT):
+    for contract in MINUTE_DERIVED_CONTRACTS:
         if contract.dataset in config.events_datasets:
             stamps[f"events/{contract.dataset}"] = contract.rule
     names = sorted({name for nodes in assignment.values() for name in nodes})
