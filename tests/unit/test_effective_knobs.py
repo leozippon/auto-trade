@@ -1,8 +1,7 @@
 """Every configurable knob must change behaviour, not merely be accepted.
 
 Half this repository's defects were parameters that existed and did nothing —
-``image_keep``, ``record_failed_attempts``,
-the ``ModificationConstraints`` that never reached the
+``image_keep``, the ``ModificationConstraints`` that never reached the
 tool. A test asserting a knob is accepted is the bug; each test here changes
 the knob and asserts the observable difference.
 """
@@ -27,7 +26,6 @@ from autotrade.environment.sandbox import SandboxConfig
 from autotrade.environment.step_tree import StepTree
 from autotrade.environment.tools.base import ToolRegistry
 from autotrade.environment.tools.modification_check import ModificationCheckTool
-from autotrade.pipelines.config import ExperimentConfig
 from autotrade.pipelines.ledger import ExperimentLedger
 from tests.unit.support.acceptance_fixture import RULES
 
@@ -85,16 +83,15 @@ class ModificationConstraintsReachTheToolTest(unittest.TestCase):
 
 
 class RecordFailedAttemptsTest(unittest.TestCase):
-    """With the knob off, a failed validation leaves no dead-end node.
+    """A failed validation always leaves one dead-end node.
 
-    Driven through the real ``SessionValidations``: the gate lives at its
-    exception path, and asserting the knob's value would prove nothing."""
+    Driven through the real ``SessionValidations``: the record is written at
+    its exception path."""
 
     def _tool(
         self,
         root: Path,
         *,
-        record_failed_attempts: bool,
         error: Exception | None = None,
     ):
         from autotrade.environment.artifacts import FilesystemArtifactStore
@@ -127,7 +124,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             window_months=24,
             max_llm_calls=200,
             deadline_seconds=1200.0,
-            record_failed_attempts=record_failed_attempts,
             benchmark_index=DEFAULT_BENCHMARK_INDEX,
             acceptance_rules=RULES.to_record(),
         )
@@ -175,20 +171,15 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             tree,
         )
 
-    def test_a_failed_validation_records_a_dead_end_only_when_enabled(self) -> None:
+    def test_a_failed_validation_records_a_dead_end(self) -> None:
         from autotrade.environment.tools.base import ToolError
 
         with TemporaryDirectory() as tmp:
             root = Path(tmp)
-            off_tool, off_tree = self._tool(root / "off", record_failed_attempts=False)
+            tool, tree = self._tool(root)
             with self.assertRaises(ToolError):
-                off_tool()
-            self.assertEqual(off_tree.nodes(), [])
-
-            on_tool, on_tree = self._tool(root / "on", record_failed_attempts=True)
-            with self.assertRaises(ToolError):
-                on_tool()
-            nodes = on_tree.nodes()
+                tool()
+            nodes = tree.nodes()
             self.assertEqual([node["status"] for node in nodes], ["failed"])
             self.assertEqual(
                 nodes[0]["error"],
@@ -197,7 +188,7 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             self.assertNotIn(str(root), json.dumps(nodes))
             self.assertNotIn("private/result.json", json.dumps(nodes))
             # The dead end never becomes the working position.
-            self.assertIsNone(on_tree.current_node_id)
+            self.assertIsNone(tree.current_node_id)
 
     def test_failed_validation_exposes_unsupported_os_import(self) -> None:
         from autotrade.environment.strategy_loader import StrategyLoadError
@@ -207,7 +198,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             root = Path(tmp)
             tool, tree = self._tool(
                 root,
-                record_failed_attempts=True,
                 error=StrategyLoadError("strategy imports unsupported module: os"),
             )
             with self.assertRaises(ToolError) as caught:
@@ -228,7 +218,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             root = Path(tmp)
             tool, tree = self._tool(
                 root,
-                record_failed_attempts=True,
                 error=ValueError(
                     "EvaluationRequest mode does not match its immutable replay slot"
                 ),
@@ -254,7 +243,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             root = Path(tmp)
             tool, tree = self._tool(
                 root,
-                record_failed_attempts=True,
                 error=RuntimeError(f"replay failed at {HOST_RESULT_PATH}"),
             )
             with self.assertRaises(ToolError) as caught:
@@ -265,10 +253,6 @@ class RecordFailedAttemptsTest(unittest.TestCase):
             self.assertEqual(
                 message, "daily Validation failed: RuntimeError: replay failed at [host_path]"
             )
-
-    def test_the_config_default_records_them(self) -> None:
-        config = ExperimentConfig("exp", Path("/tmp/experiments"), acceptance=RULES)
-        self.assertTrue(config.record_failed_attempts)
 
 
 class StepTreeNodeTest(unittest.TestCase):

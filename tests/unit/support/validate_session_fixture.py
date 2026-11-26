@@ -297,7 +297,6 @@ class _Session:
         strategy_fail_markers: tuple[str, ...] = (),
         memory_kill_markers: tuple[str, ...] = (),
         rendezvous: int = 0,
-        record_failed_attempts: bool = True,
         deadline_seconds: float = 600.0,
         readonly_template: bool = False,
         trace: list[tuple[str, dict[str, object]]] | None = None,
@@ -354,7 +353,6 @@ class _Session:
             max_llm_calls=10,
             deadline_seconds=deadline_seconds,
             deadline_grace_seconds=60.0,
-            record_failed_attempts=record_failed_attempts,
             # Every year of the fixture is a research year: ``full`` is all of them.
             acceptance_rules={
                 **REQUIRED_RULES,

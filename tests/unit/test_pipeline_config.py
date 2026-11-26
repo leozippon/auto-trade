@@ -811,7 +811,6 @@ RESTORED_CONSOLE_PARAMETERS = (
     "slippage_bps",
     "gpu_count",
     "per_call_timeout_seconds",
-    "record_failed_attempts",
     "max_total_holdings",
     "max_single_name_weight",
 )
@@ -887,12 +886,9 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
             profile.max_single_name_weight,
         )
         config = make_config(Path("/tmp"))
-        for key in (
-            "record_failed_attempts",
-            "per_call_timeout_seconds",
-        ):
-            with self.subTest(key=key):
-                self.assertEqual(WEB_CREATE_DEFAULTS[key], getattr(config, key), key)
+        self.assertEqual(
+            WEB_CREATE_DEFAULTS["per_call_timeout_seconds"], config.per_call_timeout_seconds
+        )
 
     def test_a_create_request_setting_all_of_them_persists_every_value(self) -> None:
         import tempfile
@@ -908,7 +904,6 @@ class ConsoleParameterSurfaceTest(unittest.TestCase):
             "slippage_bps": 7.5,
             "gpu_count": 2,
             "per_call_timeout_seconds": 120,
-            "record_failed_attempts": False,
             "max_total_holdings": 12,
             "max_single_name_weight": 0.15,
         }
@@ -1328,7 +1323,6 @@ def test_a_session_request_takes_every_experiment_field_from_its_config(tmp_path
         experiment_id="experiment_request",
         window_months=36,
         benchmark_index="000905.SH",
-        record_failed_attempts=False,
         max_null_controls=4,
         batch_validate_max_concurrency=2,
         step_constraints=ModificationConstraints(max_strategy_files=3),
@@ -1353,11 +1347,10 @@ def test_a_session_request_takes_every_experiment_field_from_its_config(tmp_path
         request.experiment_id,
         request.window_months,
         request.benchmark_index,
-        request.record_failed_attempts,
         request.max_null_controls,
         request.batch_validate_max_concurrency,
         request.modification_constraints,
-    ) == ("experiment_request", 36, "000905.SH", False, 4, 2, config.step_constraints)
+    ) == ("experiment_request", 36, "000905.SH", 4, 2, config.step_constraints)
     assert request.acceptance_rules == config.acceptance.to_record()
     assert {name: getattr(request, name) for name in budgets} == budgets
     with pytest.raises(TypeError):

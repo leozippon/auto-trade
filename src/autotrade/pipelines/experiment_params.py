@@ -178,7 +178,10 @@ class BudgetParams:
     session_max_attempts: int = _param(experiment_default("session_max_attempts"))
     max_research_minutes: int = _param(experiment_default("max_research_minutes"))
     per_call_timeout_seconds: int = _param(experiment_default("per_call_timeout_seconds"))
-    record_failed_attempts: bool = _param(experiment_default("record_failed_attempts"))
+    # Sets nothing and nothing writes it: a failed Validation always leaves its
+    # dead-end node. An inert key older params.json files carry, declared so
+    # that they still read.
+    record_failed_attempts: bool = _host(True)
 
 
 @dataclass(frozen=True, kw_only=True)

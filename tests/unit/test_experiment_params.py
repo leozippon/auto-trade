@@ -111,6 +111,7 @@ def test_an_undeclared_key_is_refused_and_a_stamp_is_skipped() -> None:
         ({"llm_api_key_env": "SECRET"}, "unknown experiment parameters: llm_api_key_env"),
         ({"delisting_rules": False}, "console-managed parameters are not accepted: delisting_rules"),
         ({"initial_control_mode": "auto"}, "console-managed parameters are not accepted: initial_control_mode"),
+        ({"record_failed_attempts": True}, "console-managed parameters are not accepted: record_failed_attempts"),
         ({"research_years": None}, "missing required experiment parameters: research_years"),
         ({"experiment_id": "_hidden"}, "experiment_id must match"),
     ],
@@ -124,6 +125,13 @@ def test_the_inert_control_mode_is_no_longer_written_but_an_older_file_still_rea
     assert "initial_control_mode" not in _created()
     older = ExperimentParams.from_record({"experiment_id": "experiment_a", "initial_control_mode": "auto"})
     assert older.schedule.initial_control_mode == "auto"
+
+
+def test_the_retired_failed_attempt_switch_is_no_longer_written_but_an_older_file_still_reads() -> None:
+    # Failed Validations are always recorded; 23 of 23 stored files carry true.
+    assert "record_failed_attempts" not in _created()
+    older = ExperimentParams.from_record({"experiment_id": "experiment_a", "record_failed_attempts": True})
+    assert older.budgets.record_failed_attempts is True
 
 
 def test_a_reader_takes_the_one_declared_default_for_a_key_the_file_leaves_out() -> None:

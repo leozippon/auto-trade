@@ -170,7 +170,6 @@ def _research_prompt(
         acceptance_rules=config.acceptance.to_record(),
         schedule=config.schedule,
         broker_profile=config.broker_profile,
-        record_failed_attempts=config.record_failed_attempts,
         attempt=1,
         sandbox_spec=(
             session_sandbox_spec(agent_sandbox, sandbox_gpu_count)

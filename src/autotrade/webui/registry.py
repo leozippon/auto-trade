@@ -1447,9 +1447,8 @@ def _failed_attempts(
 def _failed_validations(identity: PublicIdentity, directory: Path) -> dict[str, object]:
     """How many of the research session's Validations failed, how many of those
     the environment failed, and the last one's reason. A failed Validation is no attempt failure and leaves no
-    ledger row: its one record is its dead-end node in the step tree (written
-    while ``record_failed_attempts`` is on, the default), the same nodes the
-    step-tree view marks failed. A failed replay over the validation period
+    ledger row: its one record is its dead-end node in the step tree, the
+    same nodes the step-tree view marks failed. A failed replay over the validation period
     (a test leg or a revealed-span candidate) tells the session its class
     alone; the host keeps its error (``session_tools.validation_period_failures``),
     counted and shown here for the operator."""

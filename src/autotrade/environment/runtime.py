@@ -484,7 +484,6 @@ def _agent_visible_manifest(
             "modification_constraints",
             "broker_profile",
             "attempt",
-            "record_failed_attempts",
             "budgets",
             "per_call_timeout_seconds",
             "sandbox_spec",

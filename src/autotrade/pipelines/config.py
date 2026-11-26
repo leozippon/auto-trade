@@ -605,9 +605,6 @@ class ExperimentConfig:
     # Whether the curated repository library mounts read-only into every
     # session (``curated``) or nothing does (``none``).
     skill_library: str = DEFAULT_SKILL_LIBRARY
-    # Also record failed validation attempts as lightweight dead-end nodes
-    # (no output snapshot) so later sessions can see what was already tried.
-    record_failed_attempts: bool = True
     schedule: StrategySchedule = field(default_factory=StrategySchedule)
     broker_profile: BrokerProfile = field(default_factory=BrokerProfile)
     # The experiment's effective rules (``acceptance_for``): a tracking mandate only
@@ -1068,7 +1065,6 @@ class ResearchSessionRequest:
         default_factory=ModificationConstraints
     )
     snapshot_config: Mapping[str, object] = field(default_factory=dict)
-    record_failed_attempts: bool = True
     # Cap on the session's own ``run_null_control`` calls; the experiment default
     # is the single source (ExperimentConfig.max_null_controls).
     max_null_controls: int = ExperimentConfig.max_null_controls
@@ -1120,7 +1116,6 @@ class ResearchSessionRequest:
             benchmark_index=config.benchmark_index,
             acceptance_rules=config.acceptance.to_record(),
             modification_constraints=config.step_constraints,
-            record_failed_attempts=config.record_failed_attempts,
             max_null_controls=config.max_null_controls,
             batch_validate_max_concurrency=config.batch_validate_max_concurrency,
             max_llm_calls=int(budgets["max_llm_calls"]),

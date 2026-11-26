@@ -128,7 +128,6 @@ def _research_request() -> ResearchSessionRequest:
         window_months=24,
         max_llm_calls=3,
         deadline_seconds=2.0,
-        record_failed_attempts=False,
         benchmark_index=DEFAULT_BENCHMARK_INDEX,
         acceptance_rules=RULES.to_record(),
     )

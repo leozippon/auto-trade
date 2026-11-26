@@ -348,7 +348,6 @@ def _artifact_contract_facts(
             "start": compact_mapping(start),
             "modification_constraints": manifest.get("modification_constraints"),
             "acceptance_rules": acceptance_rules,
-            "record_failed_attempts": manifest.get("record_failed_attempts"),
         }
     )
 

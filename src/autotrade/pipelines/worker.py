@@ -505,9 +505,6 @@ def resolve_worker_options(
             read_param(params, "workspace_reference"), repository
         ),
         skill_library=resolve_skill_library(read_param(params, "skill_library")),
-        record_failed_attempts=_strict_bool(
-            read_param(params, "record_failed_attempts"), "record_failed_attempts"
-        ),
         per_call_timeout_seconds=read_param(params, "per_call_timeout_seconds"),
         strategy_fit_timeout_seconds=read_param(params, "strategy_fit_timeout_seconds"),
         strategy_inference_timeout_seconds=read_param(params, "strategy_inference_timeout_seconds"),

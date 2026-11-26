@@ -935,8 +935,8 @@ class SessionValidations:
         A name is never reused within the attempt: the attempt is recorded
         under it whether the replay completes, fails or never starts. Across
         attempts the numbering continues after the session's nodes, so a name
-        comes again only where no node carries it (a failure while
-        ``record_failed_attempts`` is off).
+        comes again only where no node carries it (a replay whose attempt
+        stopped before recording it).
         """
         names = [
             f"{RESULT_NAME_PREFIX}{self.last_result_number + offset + 1:03d}"
@@ -2242,18 +2242,17 @@ class ValidateTool(SessionTimeBudgetAware):
             # hypothesis was falsified or the host simply got in the way.
             "cause": cause,
         }
-        if request.record_failed_attempts:
-            # record_failed_attempt leaves the tree position alone by design,
-            # so a dead end never becomes anybody's parent.
-            self.backtest.tree.record_failed_attempt(
-                epoch_id=SessionKind.RESEARCH,
-                session_ref=self.backtest.session_ref,
-                run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
-                result_name=result_name,
-                error=public_error,
-                metadata=metadata,
-            )
-            self.backtest.publish_tree()
+        # record_failed_attempt leaves the tree position alone by design, so a
+        # dead end never becomes anybody's parent.
+        self.backtest.tree.record_failed_attempt(
+            epoch_id=SessionKind.RESEARCH,
+            session_ref=self.backtest.session_ref,
+            run_id=self.backtest.ref_store.get_or_create("run", request.run_id),
+            result_name=result_name,
+            error=public_error,
+            metadata=metadata,
+        )
+        self.backtest.publish_tree()
         self.backtest.append_manifest_summary(
             {
                 "result_name": result_name,
