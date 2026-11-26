@@ -214,7 +214,6 @@ class StepTree:
         run_id: str,
         result_name: str,
         error: str,
-        metrics: dict[str, object] | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> str:
         """Append a lightweight failed-attempt node so later sessions see dead-ends.
@@ -236,7 +235,7 @@ class StepTree:
                 "complete_validation": False,
                 "status": "failed",
                 "error": error,
-                "metrics": metrics or {},
+                "metrics": {},
                 "attachments": {},
                 "created_at": utc_now("auto"),
                 # Same shape as a recorded Step: a batch's dead end keeps its

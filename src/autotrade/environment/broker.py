@@ -604,11 +604,11 @@ class DailyBroker:
             {symbol: position.quantity for symbol, position in sorted(self.positions.items())}
         )
 
-    def mark(self, bars: Mapping[str, Mapping[str, object]], *, price_field: str = "close") -> None:
+    def mark(self, bars: Mapping[str, Mapping[str, object]]) -> None:
         for symbol, position in self.positions.items():
             bar = bars.get(symbol)
             if bar is not None:
-                price = _price(bar.get(price_field))
+                price = _price(bar.get("close"))
                 if price is not None:
                     position.last_price = price
 

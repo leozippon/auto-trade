@@ -423,11 +423,10 @@ def selected_text_datasets(
     values: Iterable[str] | None,
     *,
     news_src: list[str] | None = None,
-    default: Iterable[str] | None = None,
 ) -> list[str]:
     datasets = select_datasets(
         values,
-        default=TEXT_DATASETS if default is None else default,
+        default=TEXT_DATASETS,
         allowed=TEXT_SPECS,
         label="text",
     )

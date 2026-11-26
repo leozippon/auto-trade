@@ -337,17 +337,15 @@ class DatasetContract:
     dataset: str
     partition_key: str
     available_time: time
-    lag_days: int = 0
     pit_notes: str = ""
 
     def available_at(self, partition_date: date) -> datetime:
-        return datetime.combine(partition_date + timedelta(days=self.lag_days), self.available_time, tzinfo=CN_TZ)
+        return datetime.combine(partition_date, self.available_time, tzinfo=CN_TZ)
 
     @property
     def rule(self) -> str:
         """``available_at_rule`` label for rows stamped by this contract."""
-        lag = f"+{self.lag_days}d" if self.lag_days else ""
-        return f"contract_{self.available_time:%H%M}{lag}_from:{self.partition_key}"
+        return f"contract_{self.available_time:%H%M}_from:{self.partition_key}"
 
     def stamp(self, frame: pd.DataFrame) -> pd.DataFrame:
         """``frame`` with ``available_at``/``available_at_rule`` from this
@@ -357,9 +355,7 @@ class DatasetContract:
         the conservative direction like an unparseable raw stamp."""
         dates = pd.to_datetime(frame[self.partition_key].astype(str).str.strip(), format="%Y%m%d", errors="coerce")
         clock = self.available_time
-        stamped = dates + pd.Timedelta(
-            days=self.lag_days, hours=clock.hour, minutes=clock.minute, seconds=clock.second
-        )
+        stamped = dates + pd.Timedelta(hours=clock.hour, minutes=clock.minute, seconds=clock.second)
         out = frame.copy()
         out["available_at"] = stamped.dt.strftime("%Y-%m-%d %H:%M:%S+08:00").fillna("")
         out["available_at_rule"] = self.rule

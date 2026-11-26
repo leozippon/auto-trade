@@ -312,15 +312,10 @@ def enforce_share_float_rescue_date_code_budget(args: argparse.Namespace, ann_da
         )
     return estimated_calls
 
-def read_ts_codes_from_parquet(path: Path, *, extra_filter: tuple[str, str] | None = None) -> list[str]:
+def read_ts_codes_from_parquet(path: Path) -> list[str]:
     if not path.exists() or parquet_rows(path) == 0:
         return []
-    columns = ["ts_code"]
-    if extra_filter:
-        columns.append(extra_filter[0])
-    df = pd.read_parquet(path, columns=list(dict.fromkeys(columns)))
-    if extra_filter and extra_filter[0] in df.columns:
-        df = df[df[extra_filter[0]].astype(str).str.strip() == extra_filter[1]]
+    df = pd.read_parquet(path, columns=["ts_code"])
     if "ts_code" not in df.columns:
         return []
     return unique_ordered(df["ts_code"].dropna().astype(str).str.strip().tolist())
