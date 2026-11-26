@@ -1,36 +1,16 @@
 """Research pipeline package (docs/PIPELINE_DESIGN.md).
 
-The facade re-exports only what callers outside the package actually import
+The facade re-exports only the names the command-line entry points import
 through it; everything else is reached from its own module (``from
-autotrade.pipelines import worker``). Keeping the list to its consumers also
-keeps ``import autotrade.pipelines`` from pulling the worker's provider
-gateways and sandbox-image machinery into every reader of a ledger.
+autotrade.pipelines import worker``).
 """
 
-from autotrade.environment.artifacts import ArtifactRevision, RegisteredArtifact
-
-from .config import (
-    EvaluationResult,
-    ExperimentConfig,
-    StepResult,
-    StrategyExperimentConfig,
-)
-from .experiment import ExperimentPipeline
+from .config import StrategyExperimentConfig
 from .ledger import ExperimentLedger
-from .pit_backend import (
-    ResearchPITSnapshotProvider,
-)
 from .replay_backend import DailyStrategyPipeline
 
 __all__ = [
-    "ArtifactRevision",
     "DailyStrategyPipeline",
-    "EvaluationResult",
-    "ExperimentConfig",
     "ExperimentLedger",
-    "ExperimentPipeline",
-    "RegisteredArtifact",
-    "ResearchPITSnapshotProvider",
-    "StepResult",
     "StrategyExperimentConfig",
 ]

@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent import AgentSessionConfig
-from autotrade.agent.runner import AgentSessionBudgetExhausted
+from autotrade.agent.runner import AgentSessionBudgetExhausted, AgentSessionConfig
 from autotrade.environment import trace
 from autotrade.environment.llm import ProviderResponse, ToolCall
 from autotrade.environment.llm.proxy import ScriptedLLM

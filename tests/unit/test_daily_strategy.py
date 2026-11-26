@@ -8,7 +8,6 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from autotrade.agent import StrategyLoadError, load_strategy, validate_strategy_source
 from autotrade.environment.broker import BrokerProfile
 from autotrade.environment.replay import run_daily_replay
 from autotrade.environment.replay.engine import BacktestError, StrategyDataView
@@ -20,6 +19,11 @@ from autotrade.environment.strategy import (
     StrategyContractError,
     StrategySchedule,
     validate_order_payload,
+)
+from autotrade.environment.strategy_loader import (
+    StrategyLoadError,
+    load_strategy,
+    validate_strategy_source,
 )
 from autotrade.pipelines import DailyStrategyPipeline, StrategyExperimentConfig
 

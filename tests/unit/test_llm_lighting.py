@@ -14,8 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent import AgentSessionConfig
-from autotrade.agent.runner import AgentSessionBudgetExhausted
+from autotrade.agent.runner import AgentSessionBudgetExhausted, AgentSessionConfig
 from autotrade.agent.subagent import AGENT_TOOL_SPEC
 from autotrade.common.env import env_value
 from autotrade.environment.llm import (

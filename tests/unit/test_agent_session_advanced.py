@@ -6,19 +6,19 @@ from pathlib import Path
 
 import pytest
 
-from autotrade.agent import (
-    AgentSessionConfig,
-    AgentSessionRunner,
+from autotrade.agent.compact import (
     ContextCompactionConfig,
     ContextCompactor,
-)
-from autotrade.agent.compact import (
     fit_tool_results_to_context,
     summarize_tool_result_for_context,
 )
 from autotrade.agent.experiment_facts import build_experiment_facts
 from autotrade.agent.prompts import build_system_prompt
-from autotrade.agent.runner import COMPACT_ADVISORY_FRACTION
+from autotrade.agent.runner import (
+    COMPACT_ADVISORY_FRACTION,
+    AgentSessionConfig,
+    AgentSessionRunner,
+)
 from autotrade.agent.turns import PROVIDER_TRANSIENT_FAILURE_HINT
 from autotrade.environment.artifacts import new_revision_id
 from autotrade.environment.broker import BrokerProfile
