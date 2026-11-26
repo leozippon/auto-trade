@@ -94,6 +94,10 @@ class SnapshotBuilderTest(unittest.TestCase):
         active = 0
         maximum_active = 0
         finished: set[str] = set()
+        # The three independent domains wait for one another, so the pool is
+        # seen running a full window at once; a pool that ran fewer breaks
+        # the barrier and fails the build.
+        independent = threading.Barrier(snapshot_module.SNAPSHOT_DOMAIN_WORKERS, timeout=30)
 
         def task(name: str, required: str | None = None):
             def build(completed):
@@ -104,7 +108,8 @@ class SnapshotBuilderTest(unittest.TestCase):
                 with lock:
                     active += 1
                     maximum_active = max(maximum_active, active)
-                time.sleep(0.02)
+                if required is None:
+                    independent.wait()
                 with lock:
                     active -= 1
                     finished.add(name)
@@ -193,22 +198,37 @@ class SnapshotBuilderTest(unittest.TestCase):
             active = 0
             maximum_active = 0
             completion_order: list[str] = []
+            workers = snapshot_module._MINUTE_PARTITION_WORKERS
+            # The first window is in flight at once (a pool that ran fewer
+            # breaks the barrier), and the earliest input finishes only after
+            # a later one; the writer must still emit its row group first.
+            first_window = threading.Barrier(workers, timeout=30)
+            later_done = threading.Event()
 
             def delayed_read(path, *args, **kwargs):
                 nonlocal active, maximum_active
                 trade_date = Path(path).stem.split("=", 1)[1]
+                index = trade_dates.index(trade_date)
                 with lock:
+                    # A partition starts only once the one a window before it
+                    # is done: the prefetch never runs ahead of the writer by
+                    # more than the window.
+                    if index >= workers:
+                        assert trade_dates[index - workers] in completion_order, trade_date
                     active += 1
                     maximum_active = max(maximum_active, active)
-                # The earliest input deliberately finishes last; the writer
-                # must still emit its row group first.
-                time.sleep(0.06 if trade_date == trade_dates[0] else 0.01)
                 try:
+                    if index < workers:
+                        first_window.wait()
+                    if index == 0:
+                        assert later_done.wait(30), "no later partition finished"
                     return original_read(path, *args, **kwargs)
                 finally:
                     with lock:
                         active -= 1
                         completion_order.append(trade_date)
+                    if index > 0:
+                        later_done.set()
 
             output = Path(tmp) / "parallel.parquet"
             with patch.object(snapshot_module.pd, "read_parquet", side_effect=delayed_read):
@@ -216,7 +236,7 @@ class SnapshotBuilderTest(unittest.TestCase):
                     trade_dates[0], trade_dates[-1], output, None
                 )
 
-            self.assertEqual(maximum_active, snapshot_module._MINUTE_PARTITION_WORKERS)
+            self.assertEqual(maximum_active, workers)
             self.assertNotEqual(completion_order[0], trade_dates[0])
             parquet = pq.ParquetFile(output)
             self.assertEqual(parquet.metadata.num_row_groups, len(trade_dates))
