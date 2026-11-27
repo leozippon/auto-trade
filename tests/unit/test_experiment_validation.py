@@ -219,8 +219,8 @@ def test_a_test_advances_the_test_horizon_one_step_and_records_it_once() -> None
             "max_drawdown", "turnover", "fees",
         ]
         assert list(value["significance"]) == [
-            "residual_information_ratio", "threshold", "p_value", "residual_excess", "residual_tracking_error",
-            "market_beta", "size_beta", "value_beta", "days", "years",
+            "residual_information_ratio", "threshold", "excess", "significant", "p_value", "residual_excess",
+            "residual_tracking_error", "market_beta", "size_beta", "value_beta", "days", "years",
         ]
         # The replay ran from the validation start to the new test horizon.
         assert harness.evaluator.requests[-1] == ("20250701", "20260630", "20250930")

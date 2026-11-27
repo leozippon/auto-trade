@@ -14,10 +14,14 @@ benchmark (market) and the size, value and turnover legs of the names the
 account may buy on (``style.FACTOR_SERIES``) removes style, and the residual
 information ratio is read against ``z(1 − alpha) / √years`` for the
 series' length (:func:`residual_statistics`, :func:`residual_threshold`), with
-its one-sided null p-value (:func:`null_p_value`). The validation record is
-read this way (``validation_record.record_significance``), and so is every
-forward and Held-out slice. Nothing is judged: the slices read the
-series as it is -- its annualised mean is its
+its one-sided null p-value (:func:`null_p_value`). A reading meets that bar
+only when the plain excess of the same series is above zero too
+(:func:`significance_flag`, the ``significant`` every reading that states a
+threshold carries): the residual credits a long-only book for leg loadings
+it cannot collect. The validation record is read this way
+(``validation_record.record_significance``), and so is every forward and
+Held-out slice. Nothing is judged: no stage refuses on a reading, and the
+slices read the series as it is -- its annualised mean is its
 plain excess, its annualised standard deviation its tracking error and their
 ratio its IR (``stats.plain_statistics``) -- and its residual reading, which
 :func:`pooled_reading` pools across registered strategies. The holder's readings
@@ -242,16 +246,50 @@ def residual_reading(
     return {"series": GRADED_SERIES, **residual_statistics(rows[:, 0], legs, alpha=alpha), "dropped_days": dropped}
 
 
+def significance_flag(reading: Mapping[str, object], plain_excess: object) -> dict[str, bool]:
+    """Whether a residual ``reading`` meets the bar, as ``{"significant": ...}``:
+    the one definition of it.
+
+    True exactly when its residual IR reaches its own threshold (``>=``, the
+    p ≤ alpha side of :func:`residual_threshold`) and ``plain_excess`` -- the
+    annualised mean of the same active series over the same span
+    (``stats.plain_statistics``, :func:`graded_statistics`) -- is above zero.
+    The residual IR alone credits a long-only book for leg loadings it
+    cannot collect: a book that lost to its random baseline can read above
+    its threshold on its betas. An unmeasured reading (``unmeasured`` set)
+    carries no flag, ``{}``; a measured one whose residual IR, threshold or
+    plain excess is not finite raises ``ValueError``: no flag is read off a
+    number that was not measured.
+    """
+
+    if reading.get("unmeasured"):
+        return {}
+    ratio, threshold, excess = (
+        finite_number(value)
+        for value in (reading.get("residual_information_ratio"), reading.get("threshold"), plain_excess)
+    )
+    if ratio is None or threshold is None or excess is None:
+        raise ValueError(
+            "a reading is placed against its bar only on finite figures, got residual IR "
+            f"{reading.get('residual_information_ratio')!r}, threshold {reading.get('threshold')!r} "
+            f"and plain excess {plain_excess!r}"
+        )
+    return {"significant": ratio >= threshold and excess > 0}
+
+
 def _reported_residual(
-    analysis: Mapping[str, object], *, start: str, end: str, alpha: float
+    analysis: Mapping[str, object], *, start: str, end: str, alpha: float, plain_excess: float
 ) -> dict[str, object]:
-    """:func:`residual_reading` of a reported slice, or why it could not be
-    read under ``unmeasured``: a reading nothing judges never fails a stage."""
+    """:func:`residual_reading` of a reported slice with its
+    :func:`significance_flag` on the slice's ``plain_excess``, or why it could
+    not be read under ``unmeasured``: a reading nothing judges never fails a
+    stage."""
 
     try:
-        return residual_reading(analysis, start=start, end=end, alpha=alpha)
+        reading = residual_reading(analysis, start=start, end=end, alpha=alpha)
     except ValueError as exc:
         return {"unmeasured": str(exc)}
+    return {**reading, **significance_flag(reading, plain_excess)}
 
 
 def null_p_value(residual_information_ratio: float, years: float) -> float:
@@ -846,7 +884,8 @@ def forward_slice(
     never judged (docs/PIPELINE_DESIGN.md, the readout).
 
     The graded series is read as it is (:func:`graded_statistics`) and
-    through the residual-IR significance test (``residual_reading``, what
+    through the residual-IR significance test (``residual_reading`` with its
+    :func:`significance_flag` on the slice's plain excess; what
     :func:`pooled_reading` pools across registered strategies). F2 is
     ``lower_bound``, the ``forward_confidence`` lower bound of its plain
     excess over the book and the seed replicates the registration accepted
@@ -903,7 +942,9 @@ def forward_slice(
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),
-        "residual_reading": _reported_residual(analysis, start=start, end=end, alpha=rules.alpha),
+        "residual_reading": _reported_residual(
+            analysis, start=start, end=end, alpha=rules.alpha, plain_excess=statistics["plain_excess"]
+        ),
         "lower_bound": forward_lower_bound(
             [analysis, *(sidecar for _identity, sidecar in seed_replicates)],
             start=start,
@@ -940,8 +981,9 @@ def heldout_slice(
     """The Held-out slice's readings under the experiment's ``rules``: reported,
     never judged (docs/PIPELINE_DESIGN.md, the readout).
 
-    The graded series' statistics and its residual reading, the equity and
-    the graded series' drawdowns and the mean gross exposure, the holder's
+    The graded series' statistics and its residual reading with its
+    :func:`significance_flag`, the equity and the graded series' drawdowns
+    and the mean gross exposure, the holder's
     readings (:func:`holder_readings`), and the seed replicates' slices and
     their :func:`seed_mean` with the book, which the slice carries as
     :func:`forward_slice` does.
@@ -964,7 +1006,9 @@ def heldout_slice(
         **statistics,
         **readings,
         **_with_seed_replicates(readings, seed_replicates, start, end),
-        "residual_reading": _reported_residual(analysis, start=start, end=end, alpha=rules.alpha),
+        "residual_reading": _reported_residual(
+            analysis, start=start, end=end, alpha=rules.alpha, plain_excess=statistics["plain_excess"]
+        ),
         "max_drawdown": drawdown,
         "active_max_drawdown": active_drawdown,
         "mean_gross": mean_gross,

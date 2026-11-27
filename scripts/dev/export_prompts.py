@@ -178,7 +178,7 @@ def render() -> str:
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
-            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice；工作区存储的额度、哪些文件算在内、宿主不检查}\n\n"
+            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值，以及达标还要主动超额为正；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice；工作区存储的额度、哪些文件算在内、宿主不检查}\n\n"
             f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts 的紧凑 JSON（不缩进），含 inputs/skills_index.json 引用}\n\n"
             f"{build_exploration_section('[存在时注入]')}\n\n"
@@ -194,7 +194,7 @@ def render() -> str:
         "| `research_geometry` | 研究年（`years` 只列研究年及其日期）、验证期与测试终点的日期，决策时点、会话的输入窗口与 span 写法 |",
         "| `visible_timeline` | 快照窗口、日级时钟、历史研究域可用性，以及股票池筛选（只在实验设了筛选时出现） |",
         "| `budgets` | 推理时间、模型调用、API 花费、随机对照与 `validate` 次数，策略容器超时与资源、`validate` 并发路数，工作区存储额度，压缩预算；只有数，没有说明文字 |",
-        "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量与门槛、登记条件与前推报告什么 |",
+        "| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量、门槛与达标条件、登记条件与前推报告什么 |",
         "| `broker_replay` | 资金、费用、手数、T+1、调度（`schedule`）与精确执行价格来源 |",
         f"| `runtime_tools` | Python、可用本地工具、网络模式和安装策略、Sandbox 的 GPU（`sandbox_gpus`：卡数 × 卡型，如 `1 × A100`；没有卡时为 `{NO_SANDBOX_GPUS}`），以及各读文件根在 `shell` 里的挂载路径 |",
         "| `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |",

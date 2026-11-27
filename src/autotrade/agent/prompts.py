@@ -88,7 +88,7 @@ SESSION_BUDGET_ORIENTATION_BULLET = (
 
 SESSION_READINGS_SECTION = """\
 # 读数
-宿主读的是验证记录：各步条目按日拼成的主动序列（策略扣除全部成本后的日收益减去随机选股对照组合的日收益），对市场、规模、价值、低换手四条因子腿做 OLS 后的残差信息比率，门槛是 z(1−α)/√年数，区间越短门槛越高；定义见运行事实 `acceptance_rules`。`validate` 与 `test` 报告的统计量和门槛是读数，不是判决。\
+宿主读的是验证记录：各步条目按日拼成的主动序列（策略扣除全部成本后的日收益减去随机选股对照组合的日收益），对市场、规模、价值、低换手四条因子腿做 OLS 后的残差信息比率，门槛是 z(1−α)/√年数，区间越短门槛越高；残差信息比率达到门槛、且同一区间的主动超额（`excess`，主动序列的年化均值）为正，读数才达标（`significant`）；定义见运行事实 `acceptance_rules`。`validate` 与 `test` 报告的统计量、门槛和是否达标都是读数，不是判决。\
 """
 
 SESSION_BOUNDARIES_SECTION = """\
@@ -286,7 +286,7 @@ def build_run_section(experiment_facts: Mapping[str, object]) -> str:
         f"- 研究年：{years} 个，{geometry['research_period']}。",
         f"- 验证期：{geometry['validation_period']}，共 {geometry['steps']} 步，每步{step}；本次尝试开始时已测试 {tested} 步"
         + (f"，测到 {geometry['test_horizon']}。" if tested else "。"),
-        f"- 门槛：α = {significance['alpha']}；一年区间约 {significance['threshold_over_one_year']}，整个验证期约 {significance['threshold_over_validation_period']}。",
+        f"- 门槛：α = {significance['alpha']}；一年区间约 {significance['threshold_over_one_year']}，整个验证期约 {significance['threshold_over_validation_period']}；达标还要主动超额为正。",
         f"- `validate`：第一次 `test` 之前、以及相邻两次 `test` 之间，各至多 {allowance} 次。",
     ]
     for line in (_run_budget_line(budgets), _run_storage_line(budgets)):  # type: ignore[arg-type]

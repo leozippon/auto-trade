@@ -170,7 +170,45 @@ def test_the_significance_test_reads_the_stitched_entries_with_the_threshold_for
     # Too few days to regress is said, not failed.
     short = record_significance([{**entries[0], "daily": entries[0]["daily"][:3]}], alpha=0.05)
     assert "unmeasured" in short and "residual_information_ratio" not in short
+    assert "significant" not in short and "plain_excess" not in short
     assert record_significance([], alpha=0.05)["unmeasured"] == "the record has no entry yet"
+
+
+def _rally_entries(loading: float) -> list[dict[str, object]]:
+    """Two entries of a book through a rally of 0.15 % a day whose names earn
+    12 % a year after the legs, with ``loading`` on the market against its
+    random baseline. The market and the noise are demeaned, so the active
+    series' annualised mean is exactly ``0.12 + loading × 0.0015 × 244``."""
+
+    days = _days("20200803", 250)
+    rng = np.random.default_rng(7)
+    market = rng.normal(0.0, 0.01, len(days))
+    market += 0.0015 - market.mean()
+    legs = rng.normal(0.0, 0.003, (3, len(days)))
+    baseline = 0.9 * market + rng.normal(0.0, 0.003, len(days))
+    noise = rng.normal(0.0, 0.003, len(days))
+    active = 0.12 / 244 + loading * market + noise - noise.mean()
+    rows = [
+        [day, float(baseline[i] + active[i]), float(baseline[i]), float(market[i]), *map(float, legs[:, i])]
+        for i, day in enumerate(days)
+    ]
+    return [{"daily": rows[:125], "turnover": 0.5}, {"daily": rows[125:], "turnover": 0.5}]
+
+
+def test_a_record_that_lost_to_its_random_baseline_does_not_meet_the_bar_on_its_betas() -> None:
+    """The residual credits a long-only book for leg loadings it cannot collect:
+    a book that held lower-beta names than its random copies through a rally
+    reads a residual IR above its threshold while the active series it earned
+    has a negative mean. The record states that plain excess and does not
+    meet the bar; the same names without the loading do."""
+
+    lagged = record_significance(_rally_entries(-0.5), alpha=0.05)
+    assert lagged["residual_information_ratio"] >= lagged["threshold"]
+    assert lagged["plain_excess"] == pytest.approx(0.12 - 0.5 * 0.0015 * 244)
+    assert lagged["significant"] is False
+    held = record_significance(_rally_entries(0.0), alpha=0.05)
+    assert held["residual_information_ratio"] >= held["threshold"]
+    assert held["plain_excess"] == pytest.approx(0.12) and held["significant"] is True
 
 
 def test_a_record_stored_on_three_legs_reads_as_it_was_and_never_beside_four() -> None:

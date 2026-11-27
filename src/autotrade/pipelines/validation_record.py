@@ -17,9 +17,10 @@ The record's significance test (:func:`record_significance`) reads the entries' 
 rows stitched in step order with the residual statistic every other reading
 uses (``pipelines/verdict.py``): the residual information ratio of the active
 series on the factor legs (``style.FACTOR_SERIES``), its betas, the threshold for the record's
-length and the one-sided null p-value, beside the stitched return, drawdown
-and turnover. A test reads its own replay step by step (:func:`step_table`),
-the rows it returns as ``candidate_by_step``. A test of bytes an earlier test
+length, the one-sided null p-value, the series' plain excess and whether the
+record meets the bar (``verdict.significance_flag``), beside the stitched
+return, drawdown and turnover. A test reads its own replay step by step
+(:func:`step_table`), the rows it returns as ``candidate_by_step``. A test of bytes an earlier test
 replayed compares the two books over the days both cover (:func:`reproduction`),
 which says whether the record's steps from those bytes are one account's path.
 """
@@ -47,7 +48,12 @@ from autotrade.environment.replay.style import (
 from .calendar import Slot, step_windows
 from .config import ReplaySpan
 from .ledger import LINK_KEYS, TEST_STEP_RECORD_TYPE, VerdictStatus
-from .verdict import null_p_value, residual_reading
+from .verdict import (
+    graded_statistics,
+    null_p_value,
+    residual_reading,
+    significance_flag,
+)
 
 # The series an entry's daily row carries after its date, by the row's width:
 # every factor leg, or the market, size and value legs of an entry recorded
@@ -240,13 +246,17 @@ def record_significance(entries: Sequence[Mapping[str, object]], *, alpha: float
     The entries' daily rows, stitched in order, give the book's, the random baseline's
     and the legs' daily series; ``verdict.residual_reading`` grades the
     active series at ``alpha`` (residual IR, betas, days, years, threshold), and the
-    one-sided null p-value (``verdict.null_p_value``) is stated beside it.
+    one-sided null p-value (``verdict.null_p_value``), the active series'
+    ``plain_excess`` (its annualised mean, ``verdict.graded_statistics``) and
+    ``significant``, whether the record meets the bar
+    (``verdict.significance_flag``), are stated beside it.
     ``return`` and ``max_drawdown`` compound the stitched book, ``turnover``
     sums the entries' own. A record the statistic cannot read yet (too few
     days, or legs that explain it exactly) says why under ``unmeasured`` and
-    carries the compounded figures alone; one it read carries ``unmeasured``
-    as None, so every reader sees one shape. Entries recorded before the
-    turnover leg joined are read on the three legs they carry; a record whose
+    carries the compounded figures alone, no flag among them; one it read
+    carries ``unmeasured`` as None, so every reader sees one shape. Entries
+    recorded before the turnover leg joined are read on the three legs they
+    carry; a record whose
     entries carry different legs raises ``ValueError``: one regression never
     reads two leg sets.
     """
@@ -279,10 +289,13 @@ def record_significance(entries: Sequence[Mapping[str, object]], *, alpha: float
         reading = residual_reading(series, alpha=alpha)
     except ValueError as exc:
         return {**figures, "unmeasured": str(exc)}
+    plain_excess = graded_statistics(series)["plain_excess"]
     return {
         **figures,
         **reading,
         "p_value": null_p_value(float(reading["residual_information_ratio"]), float(reading["years"])),  # type: ignore[arg-type]
+        "plain_excess": plain_excess,
+        **significance_flag(reading, plain_excess),
         "unmeasured": None,
     }
 
@@ -363,12 +376,13 @@ def readout(
     stood: nothing here passes or fails.
 
     ``record`` is the validation record read as one series
-    (:func:`record_significance`: residual IR, one-sided p-value, threshold, years)
+    (:func:`record_significance`: residual IR, one-sided p-value, threshold,
+    years, plain excess and whether it meets the bar)
     with its span and how often the candidate changed
     (:func:`candidate_changes`). ``forward`` is the registered strategy's reading
     over the Forward year, the slice ``verdict.forward_slice`` read: its
-    lower bound and residual reading; a book that raised in its own code
-    during the replay has ``strategy_error`` there instead (the slice it
+    lower bound and residual reading with its flag; a book that raised in its
+    own code during the replay has ``strategy_error`` there instead (the slice it
     raised in and the error), which is a reading too. The block has one shape
     either way, with None where a reading does not exist.
     """

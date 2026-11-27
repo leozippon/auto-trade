@@ -301,6 +301,7 @@ class AcceptanceRulesTest(unittest.TestCase):
         # The legs are regression_method's, named there once.
         self.assertIn("the four legs of regression_method", statistic["statistic"])
         self.assertIn("z(1 - alpha) / sqrt(years)", statistic["threshold"])
+        self.assertIn("residual_information_ratio >= threshold and excess > 0", statistic["significant"])
         self.assertEqual(statistic["alpha"], 0.05)
         self.assertEqual(statistic["threshold_over_one_year"], 1.645)
         self.assertEqual(statistic["threshold_over_validation_period"], round(verdict.residual_threshold(5.0, 0.05), 3))

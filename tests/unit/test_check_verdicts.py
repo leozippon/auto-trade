@@ -4,8 +4,8 @@ experiment the real worker ran to its readout.
 The run over the real experiments reads ``experiments/`` and is made by hand (the
 script's docstring says how); here it reads an experiment small enough for the unit
 suite: every reading the experiment stores reproduces, a float that differs only in
-its last bits still does, the two keys a retired gate stored do, and a tampered one is
-named with both values and fails the run.
+its last bits still does, the two keys a retired gate stored do, a reading stored before
+the bar's flag does, and a tampered one is named with both values and fails the run.
 """
 
 from __future__ import annotations
@@ -161,6 +161,35 @@ def test_a_tampered_reading_is_named_with_both_values_and_fails_the_run(
         "readout": [("record.residual_information_ratio", ratio * (1 - 1e-6), ratio)],
     }
     assert main(["--experiments", str(copy.parent)]) == 1
+
+
+def test_a_reading_stored_before_the_flag_reproduces_and_a_flipped_flag_does_not(
+    experiment: Path, tmp_path: Path
+) -> None:
+    """A forward record written before the bar gained its plain-excess condition
+    states no ``significant`` beside a threshold and no record ``plain_excess``;
+    every number it does state is still compared. A stored flag that disagrees
+    with today's is a difference."""
+
+    def stored_before(records: list[dict]) -> None:
+        forward = _record(records, "forward")
+        for block in (forward["slices"]["forward"], forward["slices"]["heldout"], forward["readout"]["forward"]):
+            del block["residual_reading"]["significant"]
+        del forward["readout"]["record"]["plain_excess"], forward["readout"]["record"]["significant"]
+
+    copy = _copy(experiment, tmp_path / "before" / "experiments", stored_before)
+    assert [item.differences for item in check_experiment(copy)] == [[], [], []]
+
+    def flipped(records: list[dict]) -> None:
+        record = _record(records, "forward")["readout"]["record"]
+        record["significant"] = not record["significant"]
+
+    copy = _copy(experiment, tmp_path / "flipped" / "experiments", flipped)
+    stored = _record(
+        [json.loads(line) for line in (experiment / LEDGER).read_text(encoding="utf-8").splitlines()], "forward"
+    )["readout"]["record"]["significant"]
+    judgements = {item.reading: item.differences for item in check_experiment(copy)}
+    assert judgements["readout"] == [("record.significant", not stored, stored)]
 
 
 def test_only_the_retired_seed_gate_keys_a_registration_stored_are_ignored(
