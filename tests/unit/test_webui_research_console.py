@@ -1745,7 +1745,7 @@ const fmtAmount = String;
                 js_function(script, name)
                 for name in (
                     "el", "panelHead", "dataTable", "fmtSteps", "fmtSharpe", "fmtPValue",
-                    "fmtSignificant", "fmtPct", "signCls", "drawdownOf", "recordPanel",
+                    "fmtSignificant", "fmtPctPerYear", "fmtPct", "signCls", "drawdownOf", "recordPanel",
                 )
             ),
             f"const record = {json.dumps({**record, 'curve': {}})};",

@@ -178,7 +178,7 @@ def render() -> str:
         "",
         _block(
             f"{SESSION_DYNAMIC_CONTEXT_HEADER.strip()}\n\n"
-            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值，以及达标还要主动超额为正；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice；工作区存储的额度、哪些文件算在内、宿主不检查}\n\n"
+            "## 本次运行\n{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值，以及达标另需主动超额为正；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice；工作区存储的额度、哪些文件算在内、宿主不检查}\n\n"
             f"{EXPERIMENT_FACTS_HEADER.strip()}\n\n"
             "{experiment_facts 的紧凑 JSON（不缩进），含 inputs/skills_index.json 引用}\n\n"
             f"{build_exploration_section('[存在时注入]')}\n\n"

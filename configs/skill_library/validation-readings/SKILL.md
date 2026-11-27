@@ -18,7 +18,7 @@
 
 主动读数赢了对照组合，账户却可能没赢基准：对照组合本身扣费后也会亏（`book.baseline_return`），赢一个亏钱的对照组合不等于账户赚钱。`active.excess` 是主动序列逐日差的年化均值，`book.excess_vs_baseline` 是两条复利收益之差，两者同号居多，但不是同一个数。
 
-`active.market_beta` 为负说明账户持有的名字比随机副本更低 β：指数大涨的年份主动序列落后于对照组合，大跌的年份领先；`active.turnover_beta` 为正说明账户偏向近 20 个交易日平均换手率低的名字（低换手腿是前一交易日这一均值最低三成减最高三成）；残差统计量不算这四条腿能解释的部分，所以账户输给对照组合（`active.excess` 为负）时残差信息比率也可能过门槛：这样的读数不达标，`significant` 还要 `active.excess` 为正。设了跟踪约束的实验，登记比的是策略自身收益的市场载荷与跟踪误差（`result_ref` 记录里的 `stats.benchmark.market_beta` 与 `stats.benchmark.tracking_error`，见 `acceptance_rules.registration.tracking_mandate`），不是主动序列的。
+`active.market_beta` 为负说明账户持有的名字比随机副本更低 β：指数大涨的年份主动序列落后于对照组合，大跌的年份领先；`active.turnover_beta` 为正说明账户偏向近 20 个交易日平均换手率低的名字（低换手腿是前一交易日这一均值最低三成减最高三成）；残差统计量不算这四条腿能解释的部分，所以账户输给对照组合（`active.excess` 为负）时残差信息比率也可能过门槛，这样的读数不达标（`significant` 为 false）。设了跟踪约束的实验，登记比的是策略自身收益的市场载荷与跟踪误差（`result_ref` 记录里的 `stats.benchmark.market_beta` 与 `stats.benchmark.tracking_error`，见 `acceptance_rules.registration.tracking_mandate`），不是主动序列的。
 
 ## 与策略无关的读数噪声
 

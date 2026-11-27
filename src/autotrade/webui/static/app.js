@@ -2159,6 +2159,12 @@ function fmtSignificant(value) {
   return value === true ? "是" : value === false ? "否" : "—";
 }
 
+/* An annualised share with its unit; a dash alone where the record states none. */
+function fmtPctPerYear(value) {
+  const text = fmtPct(value);
+  return text === "—" ? text : `${text}/年`;
+}
+
 /* How far the experiment has walked through its validation period: the steps
    its validation record holds (none before the first test) out of the steps
    the period tiles into (`validation_steps`). The one figure the card shows as
@@ -3410,7 +3416,7 @@ function readoutBlock(readout, total) {
       "验证记录",
       record.unmeasured
         ? `未读出：${record.unmeasured}`
-        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· 主动超额 ${fmtPct(record.plain_excess)}/年 · 达标 ${fmtSignificant(record.significant)} · p = ${fmtPValue(record.p_value)}`,
+        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· 主动超额 ${fmtPctPerYear(record.plain_excess)} · 达标 ${fmtSignificant(record.significant)} · p = ${fmtPValue(record.p_value)}`,
     ),
     kvRow("步数 · 换候选", `${fmtSteps(record.steps, total)} 步 · 换候选 ${record.candidate_changes ?? "—"} 次`),
     kvRow(
@@ -4096,7 +4102,7 @@ function recordPanel(detail) {
     : null;
   const headline = record.unmeasured
     ? `未读出：${record.unmeasured}`
-    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}）· 主动超额 ${fmtPct(record.plain_excess)}/年 · 达标 ${fmtSignificant(record.significant)} · p = ${fmtPValue(record.p_value)}`;
+    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}）· 主动超额 ${fmtPctPerYear(record.plain_excess)} · 达标 ${fmtSignificant(record.significant)} · p = ${fmtPValue(record.p_value)}`;
   return el(
     "div",
     { class: "panel section-gap" },
