@@ -279,7 +279,8 @@ def test_every_way_an_experiment_can_end_reads_as_one_ending_with_a_reason(tmp_p
     readout = rows["registered_with_record"]["forward"]["readout"]
     assert endings["registered_with_record"]["reason"] == (
         f"验证记录 残差 IR {readout['record']['residual_information_ratio']:.2f}"
-        f" · p {readout['record']['p_value']:.2f} · 换候选 0 次"
+        f" · p {readout['record']['p_value']:.2f}"
+        f" · 达标 {'是' if readout['record']['significant'] else '否'} · 换候选 0 次"
         f" · 前推下界 {readout['forward']['lower_bound'] * 100:+.2f}%"
     )
     assert rows["registered_with_record"]["paper_openable"] is True
@@ -1005,7 +1006,7 @@ def test_the_listing_names_the_research_curve_and_the_replay_its_thresholds(tmp_
     result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=False)
     assert result.returncode == 0, result.stderr
     assert result.stdout.startswith("1 个研究年之后的验证期 3 年按 3 个月一步走完或预算用尽后，")
-    assert "读出验证记录（整段残差 IR 的门槛约 0.95，α = 0.05）；" in result.stdout
+    assert "读出验证记录（整段残差 IR 的门槛约 0.95，α = 0.05，达标还要主动超额为正）；" in result.stdout
     assert (
         "前推年与 Held-out 段各自扣费后盈利、跑赢基准指数，且回撤与主动回撤都不超过模拟账户的终止上限写作通过，否则未通过"
         in result.stdout
@@ -1744,7 +1745,7 @@ const fmtAmount = String;
                 js_function(script, name)
                 for name in (
                     "el", "panelHead", "dataTable", "fmtSteps", "fmtSharpe", "fmtPValue",
-                    "fmtPct", "signCls", "drawdownOf", "recordPanel",
+                    "fmtSignificant", "fmtPct", "signCls", "drawdownOf", "recordPanel",
                 )
             ),
             f"const record = {json.dumps({**record, 'curve': {}})};",
