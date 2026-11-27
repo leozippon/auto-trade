@@ -234,13 +234,19 @@ class ResearchReleaseTest(unittest.TestCase):
         the releases its seeds were built from and no live lake) is the same
         release: its sources are compared where they sit relative to the
         repository, so the copy pins without the manifest being rewritten,
-        while another raw root in the same repository is still refused."""
+        while another raw root in the same repository is still refused. There
+        the releases sit on the instance's own disk, the repository's
+        data/research_releases a link to them: a pin and its resume read the
+        release in place through the link, and the experiment keeps only its
+        manifest and quality copy."""
         published = self._pin("seed")
         instance = self.root / "instance"
+        disk = self.root / "ebs" / "research_releases"
         shutil.copytree(
-            self.root / "data" / "research_releases" / published.generation_id,
-            instance / "data" / "research_releases" / published.generation_id,
+            self.root / "data" / "research_releases" / published.generation_id, disk / published.generation_id
         )
+        (instance / "data").mkdir(parents=True)
+        (instance / "data" / "research_releases").symlink_to(disk)
         roots = {
             "fundamental_events_root": instance / "data" / "pit" / "fundamental_events",
             "fundamental_events_status": instance / "results" / "data_quality" / self.status.name,
@@ -249,14 +255,19 @@ class ResearchReleaseTest(unittest.TestCase):
         copied = published_research_release(
             generation_id=published.generation_id, raw_dir=instance / "data" / "raw", **roots
         )
-        self.assertEqual(copied.raw_dir, instance / "data" / "research_releases" / published.generation_id / "raw")
-        pinned = pin_research_release(
-            experiment_dir=instance / "experiments" / "moved",
-            generation_id=published.generation_id,
-            raw_dir=instance / "data" / "raw",
-            **roots,
+        self.assertEqual(copied.raw_dir, disk / published.generation_id / "raw")
+        for _ in range(2):  # the pin, then a resume's
+            pinned = pin_research_release(
+                experiment_dir=instance / "experiments" / "moved",
+                generation_id=published.generation_id,
+                raw_dir=instance / "data" / "raw",
+                **roots,
+            )
+            self.assertEqual((pinned.generation_id, pinned.raw_dir), (published.generation_id, copied.raw_dir))
+        self.assertEqual(
+            sorted(path.name for path in (instance / "experiments" / "moved" / "research_release").iterdir()),
+            ["manifest.json", "quality"],
         )
-        self.assertEqual(pinned.generation_id, published.generation_id)
         with self.assertRaisesRegex(RuntimeError, "different raw/PIT/status contract"):
             published_research_release(
                 generation_id=published.generation_id, raw_dir=instance / "data" / "raw_alt", **roots
