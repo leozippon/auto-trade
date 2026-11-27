@@ -865,12 +865,12 @@ class BatchValidateRunTest(unittest.TestCase):
                     [
                         "excess", "information_ratio", "residual_information_ratio", "residual_excess",
                         "tracking_error", "max_drawdown", *(name for name, _series in FACTOR_SERIES),
-                        "excess_at_cost_stress",
+                        "excess_at_cost_stress", "significant",
                     ],
                 )
                 self.assertEqual(
                     list(row["recent"]),
-                    ["span", "residual_information_ratio", "residual_excess", "threshold"],
+                    ["span", "excess", "residual_information_ratio", "residual_excess", "threshold", "significant"],
                 )
                 self.assertEqual(
                     list(row["book"]),
@@ -930,6 +930,11 @@ class BatchValidateRunTest(unittest.TestCase):
                     self.assertEqual(row["recent"]["span"], "Y3..Y4")
                     for key in ("residual_information_ratio", "residual_excess", "threshold"):
                         self.assertAlmostEqual(row["recent"][key], last_two[key], places=6, msg=key)
+                    self.assertAlmostEqual(
+                        row["recent"]["excess"],
+                        graded_statistics(sidecar, start=years[2][0], end=years[3][1])["plain_excess"],
+                        places=6,
+                    )
                     self.assertNotAlmostEqual(row["recent"]["threshold"], value["threshold"], places=3)
                     # Fewer than three research years leave no "last two" beside the span.
                     two_years = replace(
@@ -1335,8 +1340,8 @@ class BatchValidateContractTest(unittest.TestCase):
         from autotrade.pipelines.session_tools import SmokeBacktestTool, TestTool
 
         limits = (
-            (ValidateTool.spec, 2_400),
-            (TestTool.spec, 1_500),
+            (ValidateTool.spec, 2_500),
+            (TestTool.spec, 1_575),
             (SmokeBacktestTool.spec, 900),
             (NullControlTool(SimpleNamespace(), max_calls=12).spec, 700),  # type: ignore[arg-type]
             (ModificationCheckTool.spec, 212),

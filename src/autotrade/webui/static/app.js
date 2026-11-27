@@ -118,7 +118,11 @@ const REASON_LABELS = {
 const EXCESS_TITLE = "主动序列（账户日收益 − 随机对照组合日收益，不做回归）的年化均值";
 const TRACKING_ERROR_TITLE = "主动序列日收益的年化标准差";
 const IR_TITLE = "主动超额 ÷ 主动跟踪误差";
-const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值与低换手因子腿回归的残差 IR（低换手腿 2026-11-15 加入，此前存下的读数只有前三条）；门槛 z(1−α)/√年数";
+const RECORD_IR_TITLE = "验证记录各步的主动序列拼接后，对市场、规模、价值与低换手因子腿回归的残差 IR（低换手腿 2026-11-15 加入，此前存下的读数只有前三条）；门槛 z(1−α)/√年数，达标还要主动超额为正";
+// Whether a reading meets the bar, as the host flags it (verdict.py
+// `significance_flag`); the console never recomputes it. A reading stored
+// before the flag existed, or one not measured, carries none and reads "—".
+const SIGNIFICANT_TITLE = "残差 IR 达到门槛且同一序列的主动超额为正；只报告，不作判定；这条规则加入之前存下的读数没有这一项";
 const P_VALUE_TITLE = "零技能原假设下读到至少这么高的残差 IR 的单侧概率；只报告，不作判定";
 // The holder's money, which no active figure is: the account's own return
 // after every cost minus the benchmark index's price return over the same days.
@@ -2151,6 +2155,16 @@ function fmtPValue(value) {
   return Number.isFinite(value) ? value.toFixed(3) : "—";
 }
 
+function fmtSignificant(value) {
+  return value === true ? "是" : value === false ? "否" : "—";
+}
+
+/* An annualised share with its unit; a dash alone where the record states none. */
+function fmtPctPerYear(value) {
+  const text = fmtPct(value);
+  return text === "—" ? text : `${text}/年`;
+}
+
 /* How far the experiment has walked through its validation period: the steps
    its validation record holds (none before the first test) out of the steps
    the period tiles into (`validation_steps`). The one figure the card shows as
@@ -3032,6 +3046,7 @@ const SLICE_ROWS = [
   ["days", "交易日", String],
   ["information_ratio", "主动 IR", fmtSharpe, true, IR_TITLE],
   ["residual_information_ratio", "残差 IR（因子腿）", fmtSharpe, true],
+  ["significant", "达标", fmtSignificant, false, SIGNIFICANT_TITLE],
   ["lower_bound", (t) => `${fmtPct(t.forward_confidence, 0)} 下界`, fmtPct, true, LOWER_BOUND_TITLE],
   ["max_drawdown", "最大回撤", fmtPct],
   ["active_max_drawdown", "主动回撤", fmtPct],
@@ -3055,6 +3070,7 @@ const FORWARD_STAT_FIELDS = [
   "days",
   "information_ratio",
   "residual_information_ratio",
+  "significant",
   "lower_bound",
   "max_drawdown",
   "active_max_drawdown",
@@ -3067,6 +3083,7 @@ const HELDOUT_STAT_FIELDS = [
   "days",
   "information_ratio",
   "residual_information_ratio",
+  "significant",
   "max_drawdown",
   "active_max_drawdown",
   "mean_gross",
@@ -3083,6 +3100,7 @@ function sliceStats(slice, fields) {
     ...slice,
     ...(slice.raw_readings || {}),
     residual_information_ratio: (slice.residual_reading || {}).residual_information_ratio,
+    significant: (slice.residual_reading || {}).significant,
   };
   const rows = SLICE_ROWS.filter(
     ([field]) => fields.includes(field) && values[field] !== null && values[field] !== undefined,
@@ -3237,6 +3255,7 @@ function validationWindowBlock(readouts) {
         { label: "残差 IR", num: true, title: RECORD_IR_TITLE },
         { label: "年数", num: true },
         { label: "p 值", num: true, title: P_VALUE_TITLE },
+        { label: "达标", title: SIGNIFICANT_TITLE },
         { label: "步数", num: true },
         { label: "换候选", num: true },
       ],
@@ -3245,6 +3264,7 @@ function validationWindowBlock(readouts) {
         { value: fmtSharpe(row.residual_information_ratio), cls: signCls(row.residual_information_ratio) },
         { value: fmtSharpe(row.years) },
         { value: fmtPValue(row.p_value) },
+        { value: fmtSignificant(row.significant) },
         { value: String(row.steps ?? "—") },
         { value: String(row.candidate_changes ?? "—") },
       ]),
@@ -3376,15 +3396,15 @@ function readoutStagePanel(detail) {
    (PASS_RULE, ledger.pass_reading), which is also the Paper gate. */
 function readoutRule(t) {
   return (
-    `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录（整段残差 IR 的门槛约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}）；` +
+    `${t.research_years ?? "—"} 个研究年之后的验证期 ${t.validation_years ?? "—"} 年按 ${t.test_step_months ?? "—"} 个月一步走完或预算用尽后，宿主回放前推与 Held-out 并读出验证记录（整段残差 IR 的门槛约 ${fmtSharpe(t.threshold)}，α = ${t.alpha ?? "—"}，达标还要主动超额为正）；` +
     `${PASS_RULE}写作${ENDING_LABELS.passed}，否则${ENDING_LABELS.failed}；只有${ENDING_LABELS.passed}的策略能建立模拟账户`
   );
 }
 
 /* The readout as the record states it: the validation record's significance
-   test with its threshold and years, its steps out of the validation period's
-   `total` and candidate changes, and the forward reading or the strategy error
-   in its place. */
+   test with its threshold and years, its plain excess and whether it meets the
+   bar, its steps out of the validation period's `total` and candidate changes,
+   and the forward reading or the strategy error in its place. */
 function readoutBlock(readout, total) {
   const record = readout.record || {};
   const forward = readout.forward || {};
@@ -3396,14 +3416,14 @@ function readoutBlock(readout, total) {
       "验证记录",
       record.unmeasured
         ? `未读出：${record.unmeasured}`
-        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· p = ${fmtPValue(record.p_value)}`,
+        : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}，${fmtSharpe(record.years)} 年）· 主动超额 ${fmtPctPerYear(record.plain_excess)} · 达标 ${fmtSignificant(record.significant)} · p = ${fmtPValue(record.p_value)}`,
     ),
     kvRow("步数 · 换候选", `${fmtSteps(record.steps, total)} 步 · 换候选 ${record.candidate_changes ?? "—"} 次`),
     kvRow(
       "前推读数",
       error
         ? `${SLICE_NAMES[error.slice] || error.slice}段策略报错：${error.error || "—"}`
-        : `${fmtPct(forward.lower_bound)} 下界 · 残差 IR ${fmtSharpe((forward.residual_reading || {}).residual_information_ratio)}`,
+        : `${fmtPct(forward.lower_bound)} 下界 · 残差 IR ${fmtSharpe((forward.residual_reading || {}).residual_information_ratio)} · 达标 ${fmtSignificant((forward.residual_reading || {}).significant)}`,
     ),
   );
 }
@@ -4082,7 +4102,7 @@ function recordPanel(detail) {
     : null;
   const headline = record.unmeasured
     ? `未读出：${record.unmeasured}`
-    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}）· p = ${fmtPValue(record.p_value)}`;
+    : `残差 IR ${fmtSharpe(record.residual_information_ratio)}（门槛 ${fmtSharpe(record.threshold)}）· 主动超额 ${fmtPctPerYear(record.plain_excess)} · 达标 ${fmtSignificant(record.significant)} · p = ${fmtPValue(record.p_value)}`;
   return el(
     "div",
     { class: "panel section-gap" },

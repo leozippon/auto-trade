@@ -386,21 +386,27 @@ def experiment_ending(
 
 # The continuous replay's two slices, as the console names them.
 _SLICE_LABELS = {"forward": "前推", "heldout": "Held-out "}
+# Whether a reading meets the bar, as the console words the host's flag.
+_SIGNIFICANT_WORDS = {True: "是", False: "否"}
 
 
 def _readout_line(readout: Mapping[str, object]) -> str:
     """One line of a registered strategy's readout: the validation record's residual
-    IR, its p-value and candidate changes, then the forward lower bound, or the
-    slice the strategy's own error stopped the replay in."""
+    IR, its p-value, whether it meets the bar (``verdict.significance_flag``;
+    a readout recorded before the flag, or of a record not measured, states
+    none and reads ``—``) and candidate changes, then the forward lower bound,
+    or the slice the strategy's own error stopped the replay in."""
 
     record = as_mapping(readout.get("record"))
     forward = as_mapping(readout.get("forward"))
     ratio, p_value = finite_number(record.get("residual_information_ratio")), finite_number(record.get("p_value"))
+    significant = record.get("significant")
     bound = finite_number(forward.get("lower_bound"))
     error = as_mapping(forward.get("strategy_error"))
     return (
         f"验证记录 残差 IR {'—' if ratio is None else f'{ratio:.2f}'}"
         f" · p {'—' if p_value is None else f'{p_value:.2f}'}"
+        f" · 达标 {_SIGNIFICANT_WORDS[significant] if isinstance(significant, bool) else '—'}"
         f" · 换候选 {record.get('candidate_changes', '—')} 次"
         + (
             f" · 前推下界 {_percent(bound)}"
@@ -1241,8 +1247,9 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
 
     ``validation_window``: every registered strategy's validation record over the
     same validation period -- its residual IR, years, one-sided null p-value
-    (``verdict.null_p_value``), steps and candidate changes -- and how many
-    there are. No reading is adjusted for the others and no threshold moves with
+    (``verdict.null_p_value``), whether it meets the bar (``significant``, None
+    where its readout states no flag), steps and candidate changes -- and how
+    many there are. No reading is adjusted for the others and no threshold moves with
     their count; the count is what a p-value is weighed against.
     ``forward_pool``: every registered strategy's residual reading over the same
     forward months, pooled (``verdict.pooled_reading``): one forward year
@@ -1277,6 +1284,7 @@ def _record_readouts(root: Path, record: Mapping[str, object] | None) -> dict[st
                     "residual_information_ratio": ratio,
                     "years": years,
                     "p_value": finite_number(block.get("p_value")),
+                    "significant": block.get("significant") if isinstance(block.get("significant"), bool) else None,
                     "steps": block.get("steps"),
                     "candidate_changes": block.get("candidate_changes"),
                 }

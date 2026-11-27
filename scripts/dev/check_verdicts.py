@@ -64,6 +64,18 @@ REL_TOL = 1e-12
 # no pass condition reads. Only a stored key that today's reading lacks is
 # ignored.
 RETIRED_KEYS = frozenset({"seed_replicates.deterministic", "seed_replicates.trains_a_model"})
+# The bar gained the plain-excess condition (2026-11-27): a reading stored
+# before it states no ``significant`` flag beside its threshold, and its
+# readout's record no ``plain_excess``. Only a key the stored reading lacks
+# and today's reading adds is ignored; every number it stored is compared.
+ADDED_KEYS = frozenset(
+    {
+        "forward.residual_reading.significant",
+        "heldout.residual_reading.significant",
+        "record.plain_excess",
+        "record.significant",
+    }
+)
 
 
 class _Absent:
@@ -165,6 +177,7 @@ def check_experiment(experiment: Path) -> list[Judgement]:
             item
             for item in differences(stored, _stored(now))
             if not (item[0] in RETIRED_KEYS and item[2] is _ABSENT)
+            and not (item[0] in ADDED_KEYS and item[1] is _ABSENT)
         ]
         found.append(Judgement(experiment.name, reading, kept))
 

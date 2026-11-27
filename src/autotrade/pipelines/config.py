@@ -429,6 +429,11 @@ class AcceptanceRules:
                     f"years = trading days / {years}"
                 ),
                 "threshold": "z(1 - alpha) / sqrt(years): the level a zero-skill reading reaches with probability alpha",
+                "significant": (
+                    "residual_information_ratio >= threshold and excess > 0, each as the same block "
+                    "reports it: only then does a reading meet the bar, since the residual credits a "
+                    "long-only book for leg betas it cannot collect"
+                ),
                 "alpha": self.alpha,
                 "threshold_over_one_year": round(verdict.residual_threshold(1.0, self.alpha), 3),
                 "threshold_over_validation_period": round(

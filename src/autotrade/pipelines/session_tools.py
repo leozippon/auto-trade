@@ -125,6 +125,7 @@ from .verdict import (
     graded_statistics,
     holder_readings,
     residual_reading,
+    significance_flag,
     summary_excess_at_cost_stress,
 )
 
@@ -716,7 +717,11 @@ class SessionValidations:
             "record": [self.record_row(row) for row in self.tests],
             "significance": _rounded_row(
                 {
-                    **{key: significance[key] for key in SIGNIFICANCE_KEYS if key in significance},
+                    **{
+                        SIGNIFICANCE_SHOWN_AS.get(key, key): significance[key]
+                        for key in SIGNIFICANCE_KEYS
+                        if key in significance
+                    },
                     **({"unmeasured": significance["unmeasured"]} if significance.get("unmeasured") else {}),
                 }
             ),
@@ -1198,11 +1203,13 @@ def active_reading(
     tracking error and information ratio, and the series' loadings on the
     factor legs), the residual statistic of the same
     regression at the experiment's ``alpha`` (``verdict.residual_reading``)
-    with the ``threshold`` for the replay's length for the caller to place,
-    the drawdown of its compounded path as the replay states it, and the
-    excess after the cost stress on the replay's turnover
-    (``verdict.summary_excess_at_cost_stress``). ``unmeasured`` says why a
-    replay the residual statistic cannot read has none."""
+    with the ``threshold`` for the replay's length and ``significant``,
+    whether the reading meets that bar with the excess
+    (``verdict.significance_flag``), the drawdown of its compounded path as
+    the replay states it, and the excess after the cost stress on the
+    replay's turnover (``verdict.summary_excess_at_cost_stress``).
+    ``unmeasured`` says why a replay the residual statistic cannot read has
+    none, and no flag."""
 
     try:
         graded = graded_statistics(analysis)
@@ -1226,6 +1233,7 @@ def active_reading(
             graded, summary, cost_stress_multiplier=rules.cost_stress_multiplier
         ),
         "threshold": reading.get("threshold"),
+        **significance_flag(reading, graded["plain_excess"]),
         **({"unmeasured": reading["unmeasured"]} if "unmeasured" in reading else {}),
     }
     return _rounded_row(block)
@@ -1340,9 +1348,10 @@ def recent_reading(
     analysis: Mapping[str, object], span: ReplaySpan, *, rules: AcceptanceRules
 ) -> dict[str, object]:
     """``recent``: a full-span replay of three or more research years read
-    over its last two (``Yn-1..Yn``) as the whole span is read
-    (``verdict.residual_reading`` of that window: its own regression and the
-    threshold for its own length), or ``unmeasured`` with why; nothing for
+    over its last two (``Yn-1..Yn``) as the whole span is read (the window's
+    excess, ``verdict.graded_statistics``, and ``verdict.residual_reading``
+    of that window: its own regression, the threshold for its own length and
+    ``verdict.significance_flag``), or ``unmeasured`` with why; nothing for
     any other span. A reading only: registration, the record and every
     label read the whole span."""
 
@@ -1352,17 +1361,20 @@ def recent_reading(
     count = len(span.year_windows)
     try:
         reading = residual_reading(analysis, start=start, end=end, alpha=rules.alpha)
+        excess = graded_statistics(analysis, start=start, end=end)["plain_excess"]
     except ValueError as exc:
-        reading = {"unmeasured": str(exc)}
+        reading, excess = {"unmeasured": str(exc)}, None
     return {
         "recent": _rounded_row(
             {
                 "span": f"Y{count - 1}..Y{count}",
+                **({} if excess is None else {"excess": excess}),
                 **{
                     key: reading[key]
                     for key in ("residual_information_ratio", "residual_excess", "threshold", "unmeasured")
                     if key in reading
                 },
+                **significance_flag(reading, excess),
             }
         )
     }
@@ -1582,7 +1594,7 @@ class ValidateTool(SessionTimeBudgetAware):
         "candidates over one span in one call; the only way to make a node that "
         "test can take. A span of years replays as one continuous book from its "
         "first year. A full-span row of three or more research years also carries "
-        "recent: residual_* and threshold over its last two years alone; once a "
+        "recent: excess, residual_*, threshold and significant over its last two years alone; once a "
         "step is tested, also revealed: its candidate over the tested steps, "
         "replayed and reported as test does. "
         "At most budgets.validates_per_step counted calls "
@@ -1598,7 +1610,8 @@ class ValidateTool(SessionTimeBudgetAware):
         "calls are used up, two candidates are byte-identical or one fails "
         "modification_check. It "
         "waits briefly for sub-agents that can write and is refused while one "
-        "runs.\n\nthreshold is this span's level (acceptance_rules.significance). "
+        "runs.\n\nthreshold is this span's level (acceptance_rules.significance); "
+        "significant: residual_information_ratio >= threshold and excess > 0. "
         "In each row, active reads the graded series (acceptance_rules.graded_series): "
         "excess, tracking_error, information_ratio, residual_* and betas from its "
         "OLS on the four legs, and excess_at_cost_stress (excess less what "
@@ -2372,7 +2385,8 @@ TEST_DESCRIPTION = (
     "book with that replay over the days it covered, exactly: the host's replay "
     "is deterministic, so a difference is the strategy's. "
     "record is authoritative, as recorded. significance reads the record as "
-    "acceptance_rules.significance defines."
+    "acceptance_rules.significance defines; significant: "
+    "residual_information_ratio >= threshold and excess > 0."
 )
 
 
@@ -2626,7 +2640,8 @@ class TestTool(SessionTimeBudgetAware):
             for index, row in enumerate(step_readings(replay, analysis, steps, through=step))
         ]
         active = active_reading(analysis, evaluation.summary, rules=backtest.rules)
-        # The record's own threshold is the one significance reads.
+        # The record's own threshold is the one significance reads: this
+        # replay covers the record's days, so its flag reads against that one.
         active.pop("threshold", None)
         value: dict[str, object] = {
             "status": "step_recorded",
@@ -2699,10 +2714,14 @@ def _rounded_row(row: Mapping[str, object]) -> dict[str, object]:
 # figures.
 REPLICATE_STEP_KEYS = ("active_return", "return")
 RECORD_ENTRY_KEYS = ("return", "active_return", "index_return", "max_drawdown", "turnover", "fees")
-# The record's significance test as a test result carries it.
+# The record's significance test as a test result carries it, each figure
+# under its ``record_significance`` name except the plain excess, which is
+# ``excess`` as in every ``active`` block.
 SIGNIFICANCE_KEYS = (
     "residual_information_ratio",
     "threshold",
+    "plain_excess",
+    "significant",
     "p_value",
     "residual_excess",
     "residual_tracking_error",
@@ -2710,6 +2729,7 @@ SIGNIFICANCE_KEYS = (
     "days",
     "years",
 )
+SIGNIFICANCE_SHOWN_AS = {"plain_excess": "excess"}
 # The null-control fields a ``run_null_control`` result carries.
 # ``rejects_mean`` rides along because a null whose orders are mostly rejected
 # is a weaker comparison, ``status``/``reason`` because a failed or unavailable

@@ -19,6 +19,7 @@ from autotrade.environment.replay.stats import (
 from autotrade.environment.replay.style import factor_ols
 from autotrade.pipelines import verdict
 from autotrade.pipelines.config import ACCEPTANCE_KEYS, AcceptanceRules
+from autotrade.pipelines.session_tools import active_reading
 from tests.unit.support.acceptance_fixture import REQUIRED_RULES
 
 SCALE = math.sqrt(TRADING_DAYS_PER_YEAR)
@@ -349,10 +350,14 @@ def test_the_forward_slice_reports_its_readings_and_judges_none():
     assert _forward(analysis, turnover=breakeven * 2, cost_stress_multiplier=1.0)[
         "excess_at_cost_stress"
     ] == pytest.approx(base["plain_excess"])
-    # The record's statistic over the forward months, for the pool.
-    assert base["residual_reading"] == verdict.residual_reading(
-        _with_baselines(analysis, np.zeros(len(FORWARD_DAYS))), start=FORWARD_START, end=FORWARD_END, alpha=0.05
-    )
+    # The record's statistic over the forward months, for the pool, and
+    # whether it meets the bar with the slice's own plain excess.
+    assert base["residual_reading"] == {
+        **verdict.residual_reading(
+            _with_baselines(analysis, np.zeros(len(FORWARD_DAYS))), start=FORWARD_START, end=FORWARD_END, alpha=0.05
+        ),
+        "significant": True,
+    }
 
 
 def test_the_forward_slice_states_the_draws_its_replay_holds():
@@ -593,6 +598,11 @@ def test_f2_grades_a_negative_market_loading_on_what_it_earned():
     assert judged["market_beta"] == pytest.approx(-0.5, abs=0.05)
     assert raw["plain_selection"] < 0
     assert judged["lower_bound"] < judged["plain_excess"] < 0
+    # Its residual IR clears the threshold on the loading alone; the bar also
+    # asks for the plain excess, so the slice does not meet it.
+    reading = judged["residual_reading"]
+    assert reading["residual_information_ratio"] >= reading["threshold"]
+    assert reading["significant"] is False
 
 
 def test_heldout_reads_a_negative_market_loading_on_what_it_earned():
@@ -778,6 +788,69 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
     }
     retired = {"sealed", "validity", "strategy_error", "graduat"}
     assert not any(word in reason for reason in reasons for word in retired)
+
+
+def test_a_reading_meets_the_bar_only_at_its_threshold_with_a_positive_plain_excess():
+    """The bar is the residual IR at or above its own threshold (the p <= alpha
+    side) and the plain excess of the same series above zero, both measured.
+    A reading the statistic could not read carries no flag, and neither does
+    one with a number missing or not finite: no flag is derived from it."""
+
+    flag = verdict.significance_flag
+    threshold = verdict.residual_threshold(5.0, 0.05)
+    above = {"residual_information_ratio": threshold + 0.4, "threshold": threshold}
+    at = {"residual_information_ratio": threshold, "threshold": threshold}
+    below = {"residual_information_ratio": threshold - 0.01, "threshold": threshold}
+    assert flag(above, 0.04) == flag(at, 0.04) == {"significant": True}
+    # A residual above its threshold beside a book that lost to its random baseline.
+    assert flag(above, -0.10) == flag(above, 0.0) == flag(at, 0.0) == {"significant": False}
+    assert flag(below, 0.04) == {"significant": False}
+    unmeasured = {"unmeasured": "59 day(s) carry every factor leg, fewer than 60"}
+    assert flag(unmeasured, 0.04) == flag(unmeasured, None) == {}
+    for reading, excess in (
+        (above, None),
+        (above, math.nan),
+        ({"residual_information_ratio": math.inf, "threshold": threshold}, 0.04),
+        ({"residual_information_ratio": threshold + 0.4}, 0.04),
+    ):
+        assert flag(reading, excess) == {}
+
+
+def test_a_replay_with_a_non_finite_day_renders_its_readings_without_a_flag():
+    """A non-finite daily return leaves the plain excess not a number while the
+    regression drops that day: the row and the slice render as before, the
+    excess as it is, and carry no flag."""
+
+    analysis = _analysis(_segment(FORWARD_DAYS, 0.30, np.random.default_rng(41), te=0.05))
+    analysis["strategy_daily"][5][1] = math.nan
+    row = active_reading(analysis, {}, rules=AcceptanceRules(**REQUIRED_RULES))
+    assert math.isnan(row["excess"]) and math.isfinite(row["residual_information_ratio"])
+    assert "significant" not in row
+    reading = _forward(analysis)["residual_reading"]
+    assert math.isfinite(reading["residual_information_ratio"]) and "significant" not in reading
+
+
+def test_the_flag_follows_the_excess_its_block_reports_over_every_day_of_the_span():
+    """The residual reads only the days that carry every leg; the excess beside
+    it, and so the flag, reads every day of the span. Leading days without
+    legs that earned enough turn a book that lost to its baseline over the
+    regressed days into a positive excess over the span: the block reports
+    that excess and the flag follows it, so it can be read off the block."""
+
+    rally = _rally_book(np.random.default_rng(118), alpha=0.12, active_beta=-0.5)
+    regressed = verdict.residual_reading(rally, alpha=0.05)
+    assert regressed["residual_information_ratio"] >= regressed["threshold"]
+    assert verdict.graded_statistics(rally)["plain_excess"] < 0
+    leading = _weekdays("20250616", "20250630")
+    book = {
+        **rally,
+        "strategy_daily": [[day, 0.03] for day in leading] + rally["strategy_daily"],
+        "baseline_daily": [[day, 0.0] for day in leading] + rally["baseline_daily"],
+    }
+    row = active_reading(book, {}, rules=AcceptanceRules(**REQUIRED_RULES))
+    assert row["residual_information_ratio"] == pytest.approx(regressed["residual_information_ratio"], abs=1e-6)
+    assert row["excess"] > 0
+    assert row["significant"] is True
 
 
 def test_a_reading_is_weighed_by_its_null_p_value_and_readings_pool_by_their_years():

@@ -61,7 +61,7 @@ Sandbox 挂有 GPU 时（运行事实 `runtime_tools.sandbox_gpus` 不是 `none`
 
 ```text
 # 读数
-宿主读的是验证记录：各步条目按日拼成的主动序列（策略扣除全部成本后的日收益减去随机选股对照组合的日收益），对市场、规模、价值、低换手四条因子腿做 OLS 后的残差信息比率，门槛是 z(1−α)/√年数，区间越短门槛越高；定义见运行事实 `acceptance_rules`。`validate` 与 `test` 报告的统计量和门槛是读数，不是判决。
+宿主读的是验证记录：各步条目按日拼成的主动序列（策略扣除全部成本后的日收益减去随机选股对照组合的日收益），对市场、规模、价值、低换手四条因子腿做 OLS 后的残差信息比率，门槛是 z(1−α)/√年数，区间越短门槛越高；残差信息比率达到门槛、且同一区间的主动超额（`excess`，主动序列的年化均值）为正，读数才达标（`significant`）；定义见运行事实 `acceptance_rules`。`validate` 与 `test` 报告的统计量、门槛和是否达标都是读数，不是判决。
 ```
 
 ### 1.5 不可越过的边界
@@ -189,7 +189,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 这部分由宿主为本次尝试生成，各会话不同。
 
 ## 本次运行
-{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice；工作区存储的额度、哪些文件算在内、宿主不检查}
+{由运行事实生成：数据视图止于研究年末的日期；研究年的个数与日期；验证期的日期、步数、每步长度、本次尝试开始时已测试的步数与测试终点；α 与一年区间和整个验证期的门槛数值，以及达标另需主动超额为正；第一次 test 之前与相邻两次 test 之间 validate 的次数上限；推理时间、模型调用与 API 花费三项预算的总量，推理时间怎样计、没有 token 预算，以及宿主在用到哪些比例时发 budget_notice；工作区存储的额度、哪些文件算在内、宿主不检查}
 
 ## 运行事实
 下面的 JSON 是宿主在本次尝试开始时写下的受信事实（同 `inputs/session_context.json`），会话中不更新；它描述环境，不是交易证据，其中的日期与标识不是交易信号。
@@ -216,7 +216,7 @@ You are a context compaction assistant for a quantitative-strategy coding Agent.
 | `research_geometry` | 研究年（`years` 只列研究年及其日期）、验证期与测试终点的日期，决策时点、会话的输入窗口与 span 写法 |
 | `visible_timeline` | 快照窗口、日级时钟、历史研究域可用性，以及股票池筛选（只在实验设了筛选时出现） |
 | `budgets` | 推理时间、模型调用、API 花费、随机对照与 `validate` 次数，策略容器超时与资源、`validate` 并发路数，工作区存储额度，压缩预算；只有数，没有说明文字 |
-| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量与门槛、登记条件与前推报告什么 |
+| `artifact_contract` | 必需入口、订单返回合同、起点、修改约束，`acceptance_rules` 里的主动序列、统计量、门槛与达标条件、登记条件与前推报告什么 |
 | `broker_replay` | 资金、费用、手数、T+1、调度（`schedule`）与精确执行价格来源 |
 | `runtime_tools` | Python、可用本地工具、网络模式和安装策略、Sandbox 的 GPU（`sandbox_gpus`：卡数 × 卡型，如 `1 × A100`；没有卡时为 `none`），以及各读文件根在 `shell` 里的挂载路径 |
 | `workspace` / `forbidden` | 工作区索引与禁止访问的范围 |
