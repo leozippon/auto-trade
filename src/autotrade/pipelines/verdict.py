@@ -252,11 +252,19 @@ def significance_flag(reading: Mapping[str, object], plain_excess: object) -> di
 
     True exactly when its residual IR reaches its own threshold (``>=``, the
     p ≤ alpha side of :func:`residual_threshold`) and ``plain_excess`` -- the
-    annualised mean of the same active series over the same span
-    (``stats.plain_statistics``, :func:`graded_statistics`) -- is above zero.
-    The residual IR alone credits a long-only book for leg loadings it
-    cannot collect: a book that lost to its random baseline can read above
-    its threshold on its betas.
+    excess the same block reports: the annualised mean of the same active
+    series over every day of its span (``stats.plain_statistics``,
+    :func:`graded_statistics`) -- is above zero, so the flag follows from the
+    numbers shown beside it. The residual IR alone credits a long-only book
+    for leg loadings it cannot collect: a book that lost to its random
+    baseline can read above its threshold on its betas.
+
+    A limitation, accepted: the residual statistic reads only the days that
+    carry every leg with finite values (:func:`_regression_rows`), the excess
+    every day of the span, so the two differ by the days a leg is missing --
+    a replay's first day on three legs, the first ten trading days of one
+    opening on the view cache's first month on four -- and on a small excess
+    those days can decide its sign.
 
     A reading with no residual IR, threshold or excess to read -- unmeasured
     (``unmeasured`` set), or with a number missing or not finite -- carries no

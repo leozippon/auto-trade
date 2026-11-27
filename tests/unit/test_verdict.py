@@ -830,6 +830,29 @@ def test_a_replay_with_a_non_finite_day_renders_its_readings_without_a_flag():
     assert math.isfinite(reading["residual_information_ratio"]) and "significant" not in reading
 
 
+def test_the_flag_follows_the_excess_its_block_reports_over_every_day_of_the_span():
+    """The residual reads only the days that carry every leg; the excess beside
+    it, and so the flag, reads every day of the span. Leading days without
+    legs that earned enough turn a book that lost to its baseline over the
+    regressed days into a positive excess over the span: the block reports
+    that excess and the flag follows it, so it can be read off the block."""
+
+    rally = _rally_book(np.random.default_rng(118), alpha=0.12, active_beta=-0.5)
+    regressed = verdict.residual_reading(rally, alpha=0.05)
+    assert regressed["residual_information_ratio"] >= regressed["threshold"]
+    assert verdict.graded_statistics(rally)["plain_excess"] < 0
+    leading = _weekdays("20250616", "20250630")
+    book = {
+        **rally,
+        "strategy_daily": [[day, 0.03] for day in leading] + rally["strategy_daily"],
+        "baseline_daily": [[day, 0.0] for day in leading] + rally["baseline_daily"],
+    }
+    row = active_reading(book, {}, rules=AcceptanceRules(**REQUIRED_RULES))
+    assert row["residual_information_ratio"] == pytest.approx(regressed["residual_information_ratio"], abs=1e-6)
+    assert row["excess"] > 0
+    assert row["significant"] is True
+
+
 def test_a_reading_is_weighed_by_its_null_p_value_and_readings_pool_by_their_years():
     """Under the null a residual IR over ``years`` is normal with standard
     deviation 1/sqrt(years): its one-sided p-value is 1 - Phi(IR sqrt(years)),

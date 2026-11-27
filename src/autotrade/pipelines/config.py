@@ -430,8 +430,8 @@ class AcceptanceRules:
                 ),
                 "threshold": "z(1 - alpha) / sqrt(years): the level a zero-skill reading reaches with probability alpha",
                 "significant": (
-                    "residual_information_ratio >= threshold and excess > 0, both of the same series "
-                    "and span: only then does a reading meet the bar, since the residual credits a "
+                    "residual_information_ratio >= threshold and excess > 0, each as the same block "
+                    "reports it: only then does a reading meet the bar, since the residual credits a "
                     "long-only book for leg betas it cannot collect"
                 ),
                 "alpha": self.alpha,
