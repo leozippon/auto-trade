@@ -36,12 +36,15 @@ INSTANCE_ID = "mpo06t71crmmtdsrb98ckwk29"
 INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 GIB = 2**30
 # The instance's layout, stated here alone: remote.sh receives it on every
-# call. The repository root is on the instance's persistent personal storage,
-# the only place code, the .env, seeds and releases go (~/zgca-compute/README.md,
-# 配额、规格与存储), and the venv the console and its workers run on sits
-# beside it. The pretrained store lives in <LOCAL_ROOT>/pretrained on the
-# instance's own disk, which also holds its root and Docker's images
-# (~/zgca-compute/README.md, 火山平台 Docker); the root's data/pretrained links to it.
+# call. The repository root is on the instance's persistent personal storage
+# (~/zgca-compute/README.md, 配额、规格与存储) with the code, the .env, the
+# seeds and the experiments, which hard-link a seed and so share its file
+# system; the venv the console and its workers run on sits beside it. The
+# pretrained store and the research releases, read in place and kept on this
+# host, live in <LOCAL_ROOT>/pretrained and <LOCAL_ROOT>/research_releases on
+# the instance's own disk, which also holds its root and Docker's images
+# (~/zgca-compute/README.md, 火山平台 Docker); the root's data/pretrained and
+# data/research_releases link to them.
 STORAGE = "/personal_fast_storage"
 REMOTE_ROOT = f"{STORAGE}/auto-trade"
 REMOTE_VENV = f"{STORAGE}/envs/quant"
@@ -59,8 +62,8 @@ STORAGE_QUOTA = 100 * GIB
 STORAGE_FLOOR = 40 * GIB
 LOCAL_DISK = "/ebs"
 LOCAL_ROOT = f"{LOCAL_DISK}/auto-trade"
-# Left free on that disk beside the store: the new layers of an image rebuild
-# and the containers' scratch. Filling it would stop Docker.
+# Left free on that disk beside the store and the releases: the new layers of
+# an image rebuild and the containers' scratch. Filling it would stop Docker.
 LOCAL_DISK_RESERVE = 20 * 2**30
 RELEASES = "data/research_releases"
 UNFINISHED_SEED_MARKER = "prebuild_unfinished.json"
@@ -224,15 +227,16 @@ def release_exclusions(provider: dict[str, object]) -> list[str]:
     return [name for name in left_behind if name not in required]
 
 
-def _tree_bytes(root: Path) -> int:
-    """The bytes of the regular files below ``root``, as remote.sh's local-disk step adds them up."""
+def _tree_bytes(root: Path, skipped: Sequence[str] = ()) -> int:
+    """The bytes of the regular files below ``root`` outside its ``skipped`` subdirectories, as remote.sh's local-disk step adds them up."""
 
-    return sum(
-        info.st_size
-        for directory, _, names in os.walk(root)
-        for info in (os.lstat(os.path.join(directory, name)) for name in names)
-        if stat.S_ISREG(info.st_mode)
-    )
+    pruned = {os.path.join(root, name) for name in skipped}
+    total = 0
+    for directory, subdirectories, names in os.walk(root):
+        subdirectories[:] = [name for name in subdirectories if os.path.join(directory, name) not in pruned]
+        infos = (os.lstat(os.path.join(directory, name)) for name in names)
+        total += sum(info.st_size for info in infos if stat.S_ISREG(info.st_mode))
+    return total
 
 
 def _said(completed: subprocess.CompletedProcess[bytes]) -> str:
@@ -428,6 +432,7 @@ class Workflow:
             raise WorkflowError("git ls-files listed no tracked files in " + str(self.repo_root))
         payloads = self.require_pack_payloads(listed)
         store_bytes = _tree_bytes(pretrained)
+        release_bytes = _tree_bytes(release_dir, [f"raw/{name}" for name in excluded])
         duckdb_cli = self.release_file(DUCKDB_CLI_URL, DUCKDB_CLI_NAME, DUCKDB_CLI_SHA256)
         cuda_compat = self.release_file(CUDA_COMPAT_URL, CUDA_COMPAT_NAME, CUDA_COMPAT_SHA256)
         # The list rsync copies from is also what the instance keeps: shipped
@@ -446,6 +451,24 @@ class Workflow:
         self.remote("idle", "deploy")
         self.dev("bootstrap")
         self.remote("dirs")
+        # The store and the release go to the instance's own disk, to the
+        # directories the root's links name; nothing is sent unless what they
+        # still miss there fits beside the reserve.
+        store, releases = f"{LOCAL_ROOT}/pretrained", f"{LOCAL_ROOT}/research_releases"
+        shown = self.remote("local-disk", generation, *excluded, capture=True).split()[-3:]
+        store_present, release_present, free = (int(field) for field in shown)
+        store_missing, release_missing = max(store_bytes - store_present, 0), max(release_bytes - release_present, 0)
+        if store_missing + release_missing + LOCAL_DISK_RESERVE > free:
+            self.dev("report")
+            raise WorkflowError(
+                f"the pretrained store and research release {generation} do not fit on the instance's own disk: the store "
+                f"needs {store_missing / GIB:.1f} GiB more ({store_bytes / GIB:.1f} GiB in all, {store_present / GIB:.1f} GiB "
+                f"already in {store}), the release {release_missing / GIB:.1f} GiB more ({release_bytes / GIB:.1f} GiB shipped, "
+                f"{release_present / GIB:.1f} GiB already in {releases}/{generation}), plus {LOCAL_DISK_RESERVE / GIB:.0f} GiB "
+                f"kept free for image rebuilds and container scratch, and {LOCAL_DISK} has {free / GIB:.1f} GiB free. Nothing "
+                f"was transferred; run and resume refuse until a deploy completes. Make room there (a release in {releases} "
+                "that no experiment pins) and deploy again"
+            )
         say(f"deploy: tracked files of commit {commit}")
         self.dev("copy", *PRESERVE, f"--files-from={manifest}", "--from0", f"{self.repo_root}/", f"dev:{root}/")
         say("deploy: .env (the model gateway keys only)")
@@ -461,25 +484,11 @@ class Workflow:
         self.dev("copy", *PRESERVE, "--delete", f"{payloads}/", f"dev:{root}/{shipped}/")
         # Excluded directories are also kept on the instance (--delete without
         # --delete-excluded): another seed of the same release may read them.
-        say(f"deploy: {RELEASES}/{generation} without {', '.join(excluded) or 'nothing'}")
+        say(f"deploy: {RELEASES}/{generation} to {releases}/{generation} without {', '.join(excluded) or 'nothing'}")
         self.dev("copy", *PRESERVE, "-H", "--delete", *(f"--exclude=/raw/{name}/" for name in excluded),
-                 f"{release_dir}/", f"dev:{root}/{RELEASES}/{generation}/")
+                 f"{release_dir}/", f"dev:{releases}/{generation}/")
         say("deploy: preparing the instance")
         self.remote("prepare", DUCKDB_CLI_SHA256, CUDA_COMPAT_SHA256)
-        # The store goes last and only where it fits, so the steps above are
-        # done whatever its size; a store that does not fit fails the deploy.
-        store = f"{LOCAL_ROOT}/pretrained"
-        present, free = (int(field) for field in self.remote("local-disk", capture=True).split()[-2:])
-        missing = max(store_bytes - present, 0)
-        if missing + LOCAL_DISK_RESERVE > free:
-            self.dev("report")
-            raise WorkflowError(
-                f"the pretrained store does not fit on the instance's own disk: it needs {missing / GIB:.1f} GiB more "
-                f"({store_bytes / GIB:.1f} GiB in all, {present / GIB:.1f} GiB already in {store}) plus "
-                f"{LOCAL_DISK_RESERVE / GIB:.0f} GiB kept free for image rebuilds and container scratch, and "
-                f"{LOCAL_DISK} has {free / GIB:.1f} GiB free. Code, seed, release and image are deployed; the store "
-                "is not, so no experiment can be created or started there until it has room and deploy runs again"
-            )
         say(f"deploy: {PRETRAINED} to {store}")
         self.dev("copy", *PRESERVE, "-H", "--delete", f"{pretrained}/", f"dev:{store}/")
         # The commit goes once everything else is in place (the dirs step
@@ -823,7 +832,7 @@ def main(
     )
     commands = parser.add_subparsers(dest="command", required=True, metavar="command")
     commands.add_parser("up", help="instance start: wait for RUNNING and SSH")
-    deploy = commands.add_parser("deploy", help="refuse an uncommitted tree, a Pack payload unlike its manifest or running experiments; copy code, the model gateway keys, a seed, the Pack payloads and the seed's release; prepare ripgrep, venv, image; copy the pretrained store")
+    deploy = commands.add_parser("deploy", help="refuse an uncommitted tree, a Pack payload unlike its manifest, running experiments or a store and release that do not fit on the instance's own disk; copy code, the model gateway keys, a seed, the Pack payloads and the seed's release; prepare ripgrep, venv, image; copy the pretrained store")
     deploy.add_argument("seed", help="prebuilt view cache directory, relative to the repository (data/pit_views_seed_...)")
     run = commands.add_parser("run", help="refuse unless the instance runs this checkout's HEAD; start the console, or restart it when no experiment runs, then a round launcher in tmux; --fill repeats it every ten minutes, holding a pass while the storage floor is not free, until nothing is pending")
     run.add_argument("round_file", help="scripts/experiments/create_round_*.py")
