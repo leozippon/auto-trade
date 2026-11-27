@@ -67,12 +67,13 @@ with open(os.environ["MOCK_LOG"], "a") as log:
 if "remote.sh" in args:  # bash -lc <script> remote.sh <root> <venv> <local dir> <storage> <quota> <floor> <step> ...
     step = args[args.index("remote.sh") + 7]
     root = os.environ.get("MOCK_REMOTE_ROOT")
-    if step in ("experiment-state", "dirs") and root:  # the real step, against a temporary instance root
+    if step in ("experiment-state", "dirs") and root:  # the real step, against a temporary instance root and local directory
         import subprocess
         at = args.index("remote.sh")
-        sys.exit(subprocess.run(["bash", "-c", args[at - 1], "remote.sh", root, root + "/.venv", root + "/../ebs", *args[at + 4:]]).returncode)
-    if step == "local-disk":  # bytes already in the store's directory, bytes free on its disk
-        print(os.environ.get("MOCK_LOCAL_DISK", "0 100000000000000"))
+        local = os.environ.get("MOCK_REMOTE_LOCAL") or root + "/../ebs"
+        sys.exit(subprocess.run(["bash", "-c", args[at - 1], "remote.sh", root, root + "/.venv", local, *args[at + 4:]]).returncode)
+    if step == "local-disk":  # bytes already in the store's and in the release's directory, bytes free on their disk
+        print(os.environ.get("MOCK_LOCAL_DISK", "0 0 100000000000000"))
     if step == "storage":  # the storage line, and whether the floor is free
         print(os.environ.get("MOCK_STORAGE", "storage: 56.2 of 100 GiB used, 43.8 free (du of /personal_fast_storage)"))
     if step == "deployed-commit":
@@ -362,19 +363,22 @@ class ZgcaWorkflowTest(unittest.TestCase):
             if self.remote(call) is not None:
                 self.assertEqual(call["args"][:10], ["bash", "-lc", script, "remote.sh", remote, "/personal_fast_storage/envs/quant", local,
                                                      "/personal_fast_storage", str(100 * 2**30), str(40 * 2**30)])
-        # No experiment runs, then the base tools; then transfers (by
-        # destination) and remote steps in the order they ran: the tracked
-        # list lands before the `tracked` step prunes by it, and both come
-        # before the seed and the release; then the image, and only then the
-        # pretrained store, to the instance's own disk once it is known to
-        # fit; then the deployed commit, and the host report last.
+        # No experiment runs, then the base tools and the directories; then
+        # what the store and the release miss on the instance's own disk is
+        # measured before anything is sent; then transfers (by destination)
+        # and remote steps in the order they ran: the tracked list lands
+        # before the `tracked` step prunes by it, and both come before the
+        # seed and the release, which goes to the instance's own disk; then
+        # the image, and only then the pretrained store, to that disk too;
+        # then the deployed commit, and the host report last.
         ran = [self.remote(call) or call["args"][:1] + call["args"][1:][-1:] for call in dev]
         self.assertEqual(ran, [
-            ["idle", "deploy"], ["bootstrap"], ["dirs"], ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
+            ["idle", "deploy"], ["bootstrap"], ["dirs"], ["local-disk", "gen_test", *zgca.release_exclusions(self._provider())],
+            ["copy", f"dev:{remote}/"], ["put", f"{remote}/.env"],
             ["copy", f"dev:{remote}/.runtime/zgca/"], ["tracked"],
             ["copy", f"dev:{remote}/data/pit_views_seed_test/"], ["copy", f"dev:{remote}/data/pack_payloads/"],
-            ["copy", f"dev:{remote}/data/research_releases/gen_test/"],
-            ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256], ["local-disk"],
+            ["copy", f"dev:{local}/research_releases/gen_test/"],
+            ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256],
             ["copy", f"dev:{local}/pretrained/"], ["copy", f"dev:{remote}/.runtime/zgca/"], ["report"],
         ])
         # Only the keys the model profiles name leave this host, through the
@@ -453,7 +457,7 @@ class ZgcaWorkflowTest(unittest.TestCase):
         # The instance's file system as the dirs step leaves it.
         instance = Path(self.temp.name) / "instance"
         root = Path(str(instance) + zgca.REMOTE_ROOT)
-        for directory in (root / ".runtime" / "zgca", root / "data" / "research_releases", Path(str(instance) + zgca.LOCAL_ROOT)):
+        for directory in (root / ".runtime" / "zgca", root / "data", Path(str(instance) + zgca.LOCAL_ROOT) / "research_releases"):
             directory.mkdir(parents=True)
         shipped = root / "data" / "pack_payloads"
         for retired in ((), ("retired_pack", "paper.txt")):
@@ -479,13 +483,13 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self._pretrained()
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
         instance = Path(self.temp.name) / "instance"
-        root = Path(str(instance) + zgca.REMOTE_ROOT)
-        for directory in (root / ".runtime" / "zgca", root / "data" / "research_releases", Path(str(instance) + zgca.LOCAL_ROOT)):
+        root, local = Path(str(instance) + zgca.REMOTE_ROOT), Path(str(instance) + zgca.LOCAL_ROOT)
+        for directory in (root / ".runtime" / "zgca", local):
             directory.mkdir(parents=True)
         shipped = root / ".runtime" / "zgca"
         record = shipped / zgca.DEPLOYED_COMMIT_NAME
         # The instance's transfers are real rsyncs and its dirs step runs for real.
-        instance_env = {"MOCK_RSYNC": str(instance), "MOCK_REMOTE_ROOT": str(root)}
+        instance_env = {"MOCK_RSYNC": str(instance), "MOCK_REMOTE_ROOT": str(root), "MOCK_REMOTE_LOCAL": str(local)}
         code, err = self.run_main("deploy", "data/pit_views_seed_test", **instance_env, MOCK_STEP_EXIT_PREPARE="1")
         self.assertEqual(code, 1)
         self.assertIn("remote step prepare failed", err)
@@ -495,6 +499,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertEqual(code, 0, err)
         head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True).stdout
         self.assertEqual(record.read_text(encoding="utf-8"), head)
+        # The release went to the instance's own disk, where the root's link finds it.
+        self.assertEqual(os.readlink(root / zgca.RELEASES), str(local / "research_releases"))
+        self.assertTrue((root / zgca.RELEASES / "gen_test" / "manifest.json").is_file())
+        self.assertTrue((local / "research_releases" / "gen_test" / "manifest.json").is_file())
         code, err = self.run_main("deploy", "data/pit_views_seed_test", **instance_env, MOCK_STEP_EXIT_IDLE="1")
         self.assertEqual(code, 1)
         self.assertEqual(record.read_text(encoding="utf-8"), head)
@@ -518,32 +526,52 @@ class ZgcaWorkflowTest(unittest.TestCase):
         for name in ("trade_cal", "stock_basic", "namechange", "index_member_all", "index_classify", "daily"):
             self.assertNotIn(name, everything)
 
-    def test_deploy_finishes_everything_but_the_store_when_the_store_does_not_fit_and_fails(self) -> None:
+    def test_deploy_transfers_nothing_unless_the_store_and_the_release_fit_on_the_instance_disk(self) -> None:
+        """One check before the first transfer: the bytes the store and the shipped part of the release
+        still miss on the instance's own disk, plus the reserve, against its free bytes."""
         self._tracked_repo()
         self._seed()
         self._pretrained()
         (self.repo / ".env").write_text(LOCAL_ENV, encoding="utf-8")
-        store = sum(path.stat().st_size for path in (self.repo / zgca.PRETRAINED).rglob("*") if path.is_file())
+        release_dir = self.repo / zgca.RELEASES / "gen_test"
+        for name, size in (("daily", 1000), ("news", 5000)):
+            (release_dir / "raw" / name).mkdir(parents=True)
+            (release_dir / "raw" / name / "part.parquet").write_bytes(b"x" * size)
+        store = zgca._tree_bytes(self.repo / zgca.PRETRAINED)
+        # news is left behind by the seed's configuration, so it is neither shipped nor counted.
+        release = zgca._tree_bytes(release_dir) - 5000
+        self.assertEqual(release, 1000 + len("{}"))
         reserve = zgca.LOCAL_DISK_RESERVE
-        # What is already there counts: exactly the reserve plus what is missing fits.
-        for present, free, fits in ((0, reserve + store, True), (0, reserve + store - 1, False),
-                                    (store, reserve, True), (store - 1, reserve, False)):
-            with self.subTest(present=present, free=free):
+        # What is already there counts, part by part: exactly the reserve plus what is missing fits.
+        for present_store, present_release, free, fits in (
+            (0, 0, reserve + store + release, True), (0, 0, reserve + store + release - 1, False),
+            (store, release, reserve, True), (store, release - 1, reserve, False), (store - 1, release, reserve, False),
+            (store + 10, release - 1, reserve, False),
+        ):
+            with self.subTest(present_store=present_store, present_release=present_release, free=free):
                 self.log.unlink(missing_ok=True)
-                code, err = self.run_main("deploy", "data/pit_views_seed_test", MOCK_LOCAL_DISK=f"{present} {free}")
-                ran = [self.remote(call) or call["args"][:1] + call["args"][1:][-1:] for call in self.calls("dev")]
-                done = ran.index(["local-disk"])
-                self.assertEqual(ran[done - 1], ["prepare", zgca.DUCKDB_CLI_SHA256, zgca.CUDA_COMPAT_SHA256])
+                code, err = self.run_main(
+                    "deploy", "data/pit_views_seed_test", MOCK_LOCAL_DISK=f"{present_store} {present_release} {free}"
+                )
+                ran = [self.step(call) for call in self.calls("dev")]
+                self.assertEqual(ran[:4], ["idle", "bootstrap", "dirs", "local-disk"])
                 if fits:
-                    self.assertEqual((code, ran[done + 1:]), (0, [["copy", "dev:/ebs/auto-trade/pretrained/"],
-                                                                  ["copy", f"dev:{zgca.REMOTE_ROOT}/.runtime/zgca/"], ["report"]]), err)
+                    self.assertEqual(code, 0, err)
+                    self.assertEqual(ran[-3:], ["copy", "copy", "report"])
                 else:
-                    # Everything else is done, the report shows the disks, and the deploy fails saying why,
-                    # recording no commit.
-                    self.assertEqual((code, ran[done + 1:]), (1, [["report"]]))
-                    self.assertIn("the pretrained store does not fit on the instance's own disk", err)
-                    self.assertIn(f"{zgca.LOCAL_DISK} has {free / zgca.GIB:.1f} GiB free", err)
-                    self.assertIn("Code, seed, release and image are deployed; the store is not", err)
+                    # Nothing is transferred, the report shows the disks, and the deploy fails naming both parts.
+                    self.assertEqual((code, ran[4:]), (1, ["report"]))
+                    for said in (
+                        "the pretrained store and research release gen_test do not fit on the instance's own disk",
+                        f"the store needs {max(store - present_store, 0) / zgca.GIB:.1f} GiB more",
+                        f"GiB already in {zgca.LOCAL_ROOT}/pretrained)",
+                        f"the release {max(release - present_release, 0) / zgca.GIB:.1f} GiB more",
+                        f"GiB already in {zgca.LOCAL_ROOT}/research_releases/gen_test)",
+                        f"plus {reserve / zgca.GIB:.0f} GiB kept free",
+                        f"{zgca.LOCAL_DISK} has {free / zgca.GIB:.1f} GiB free",
+                        "Nothing was transferred",
+                    ):
+                        self.assertIn(said, err)
 
     def test_release_files_come_through_the_proxy_first_then_github_and_only_with_the_pinned_digest(self) -> None:
         self._tracked_repo()
@@ -650,40 +678,55 @@ class ZgcaWorkflowTest(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "does not give build arg DUCKDB_CLI_SHA256 one default"):
                 zgca.dockerfile_pin("DUCKDB_CLI_SHA256", "([0-9a-f]{64})")
 
-    def test_the_dirs_step_links_the_store_to_the_instance_disk_and_refuses_anything_else(self) -> None:
-        """Run for real against temporary roots: the link, its idempotence, and the refusals."""
+    def test_the_dirs_step_links_the_store_and_the_releases_to_the_instance_disk_and_refuses_anything_else(self) -> None:
+        """Run for real against temporary roots: the links, their idempotence, what local-disk counts, and the refusals."""
         base = Path(self.temp.name)
         root, local = base / "instance", base / "ebs"
 
-        def step(name: str) -> subprocess.CompletedProcess[str]:
-            return self.remote_step(root, name)
+        def step(*args: str) -> subprocess.CompletedProcess[str]:
+            return self.remote_step(root, *args)
 
-        link = root / "data" / "pretrained"
         for _ in range(2):
             made = step("dirs")
             self.assertEqual(made.returncode, 0, made.stderr)
-            self.assertEqual(os.readlink(link), str(local / "pretrained"))
+            for name in ("pretrained", "research_releases"):
+                self.assertEqual(os.readlink(root / "data" / name), str(local / name))
         (local / "pretrained" / "Model").mkdir()
         (local / "pretrained" / "Model" / "config.json").write_text("{}\n", encoding="utf-8")
         # Counted as the deploy counts the local store: the bytes of its files,
         # past 2^31 too (a sparse file takes no disk).
         with open(local / "pretrained" / "Model" / "model.safetensors", "wb") as large:
             large.truncate(3 * 2**30)
-        present, free = map(int, step("local-disk").stdout.split())
+        # A release written through the root's link lands on the local disk; the datasets the
+        # deploy leaves behind are not counted, as the deploy does not count them.
+        release = root / zgca.RELEASES / "gen_test"
+        for name, size in (("daily", 10), ("news", 7), ("newsroom", 5)):
+            (release / "raw" / name).mkdir(parents=True)
+            (release / "raw" / name / "part.parquet").write_bytes(b"x" * size)
+        (release / "manifest.json").write_text("{}", encoding="utf-8")
+        present, present_release, free = map(int, step("local-disk", "gen_test", "news", "npr").stdout.split())
         self.assertEqual(present, zgca._tree_bytes(local / "pretrained"))
         self.assertEqual(present, 3 + 3 * 2**30)
+        self.assertEqual(present_release, zgca._tree_bytes(local / "research_releases" / "gen_test", ["raw/news", "raw/npr"]))
+        self.assertEqual(present_release, 10 + 5 + 2)
         self.assertGreater(free, 0)
-        link.unlink()
-        link.symlink_to(base / "elsewhere")
-        refused = step("dirs")
-        self.assertEqual(refused.returncode, 1)
-        self.assertIn(f"not to the store's directory {local / 'pretrained'}", refused.stderr)
-        link.unlink()
-        link.mkdir()
-        refused = step("dirs")
-        self.assertEqual(refused.returncode, 1)
-        self.assertIn("is a directory, but the store lives in", refused.stderr)
-        self.assertTrue(link.is_dir() and not link.is_symlink())
+        self.assertEqual(step("local-disk", "gen_absent").stdout.split()[1], "0")
+        for name, instruction in (("pretrained", "the store lives in"), ("research_releases", "research releases live in")):
+            with self.subTest(link=name):
+                link = root / "data" / name
+                link.unlink()
+                link.symlink_to(base / "elsewhere")
+                refused = step("dirs")
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn(f"not to its directory {local / name} on the instance's own disk", refused.stderr)
+                link.unlink()
+                link.mkdir()
+                refused = step("dirs")
+                self.assertEqual(refused.returncode, 1)
+                self.assertIn(f"{link} is a directory, but {instruction} {local / name} on the instance's own disk", refused.stderr)
+                self.assertTrue(link.is_dir() and not link.is_symlink())
+                link.rmdir()
+                link.symlink_to(local / name)
 
     def test_deploy_stops_at_the_first_primitive_that_fails(self) -> None:
         self._tracked_repo()
@@ -695,8 +738,10 @@ class ZgcaWorkflowTest(unittest.TestCase):
             # Running experiments: nothing on the instance changes.
             ({"MOCK_STEP_EXIT_IDLE": "1"}, "remote step idle failed (exit 1)", ["idle"]),
             ({"MOCK_DEV_EXIT_BOOTSTRAP": "100"}, "dev bootstrap failed (exit 100)", ["idle", "bootstrap"]),
-            ({"MOCK_DEV_EXIT_COPY": "1"}, f"dev copy failed (exit 1): {self.repo}/ dev:{remote}/", ["idle", "bootstrap", "dirs", "copy"]),
-            ({"MOCK_DEV_EXIT_PUT": "1"}, f"dev put failed (exit 1): {remote}/.env", ["idle", "bootstrap", "dirs", "copy", "put"]),
+            ({"MOCK_DEV_EXIT_COPY": "1"}, f"dev copy failed (exit 1): {self.repo}/ dev:{remote}/",
+             ["idle", "bootstrap", "dirs", "local-disk", "copy"]),
+            ({"MOCK_DEV_EXIT_PUT": "1"}, f"dev put failed (exit 1): {remote}/.env",
+             ["idle", "bootstrap", "dirs", "local-disk", "copy", "put"]),
         ):
             with self.subTest(reason=reason):
                 self.log.unlink(missing_ok=True)

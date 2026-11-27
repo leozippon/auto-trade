@@ -9,10 +9,12 @@
 # steps that read two of them against zgca.py's names and compare the other
 # two, the release files only the image build reads. Runs as the instance's root;
 # everything persistent lives on the quota-bound storage except the pretrained
-# store, which is too large for that quota and lives in <local dir>/pretrained
-# on the instance's own disk, linked from the root's data/pretrained. The
-# generic host work (base tools, transfers, GPU/disk/tmux report) is
-# ~/zgca-compute's `dev`, which the workflow calls around these steps.
+# store and the research releases, which are read in place and would crowd that
+# quota: they live in <local dir>/pretrained and <local dir>/research_releases
+# on the instance's own disk, linked from the root's data/pretrained and
+# data/research_releases. The generic host work (base tools, transfers,
+# GPU/disk/tmux report) is ~/zgca-compute's `dev`, which the workflow calls
+# around these steps.
 set -euo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -108,36 +110,57 @@ except SandboxImageContractMismatch as exc:
 PY
 }
 
-# Before a deploy's first transfer (after `dev bootstrap`): the directories the
-# transfers and the steps write into, and data/pretrained as the link to the
-# store on the instance's own disk. Experiments pin only the store's manifest digest
-# and containers bind the link's target, so nothing else knows where it is. A
-# real directory there (a store from before the move) is not touched. Then the
-# last deploy's commit record goes, so that one exists only for a deploy that
-# completed: the deploy records its commit as its last transfer, and run and
-# resume take a recorded commit for a complete deploy of it.
-dirs() {
-    mkdir -p "$ROOT/data/research_releases" "$ROOT/experiments" "$ROOT/logs/workers" \
-        "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca" "$LOCAL/pretrained"
-    local link="$ROOT/data/pretrained"
+# local_link <name> <what to do with a real directory there>: the root's
+# data/<name> as the link to <local dir>/<name> on the instance's own disk,
+# that directory created. A link to anywhere else, or a real directory (one
+# from before the move), is refused and not touched.
+local_link() {
+    local link="$ROOT/data/$1" target="$LOCAL/$1"
+    mkdir -p "$target"
     if [ -L "$link" ]; then
-        [ "$(readlink "$link")" = "$LOCAL/pretrained" ] \
-            || die "$link links to $(readlink "$link"), not to the store's directory $LOCAL/pretrained; remove the link and deploy again"
+        [ "$(readlink "$link")" = "$target" ] \
+            || die "$link links to $(readlink "$link"), not to its directory $target on the instance's own disk; remove the link and deploy again"
     elif [ -e "$link" ]; then
-        die "$link is a directory, but the store lives in $LOCAL/pretrained on the instance's own disk: move its models there (ops/zgca/README.md, 存储布局), remove it, and deploy again"
+        die "$link is a directory, but $2"
     else
-        ln -s "$LOCAL/pretrained" "$link"
+        ln -s "$target" "$link"
     fi
+}
+
+# Before a deploy's first transfer (after `dev bootstrap`): the directories the
+# transfers and the steps write into, and the links to the store and the
+# releases on the instance's own disk. Experiments pin only the store's manifest
+# digest and a release's generation id, containers bind the store link's target,
+# and the worker opens a release through data/research_releases (no container
+# mounts one), so nothing else knows where they are. Then the last deploy's
+# commit record goes, so that one exists only for a deploy that completed: the
+# deploy records its commit as its last transfer, and run and resume take a
+# recorded commit for a complete deploy of it.
+dirs() {
+    mkdir -p "$ROOT/data" "$ROOT/experiments" "$ROOT/logs/workers" \
+        "$ROOT/logs/webui" "$ROOT/logs/zgca" "$ROOT/.runtime/zgca"
+    local_link pretrained "the store lives in $LOCAL/pretrained on the instance's own disk: move its models there (ops/zgca/README.md, 存储布局), remove it, and deploy again"
+    local_link research_releases "research releases live in $LOCAL/research_releases on the instance's own disk: move the generations an experiment there still pins into it or remove it (ops/zgca/README.md, 存储布局), and deploy again"
     rm -f "$ROOT/.runtime/zgca/deployed_commit"
 }
 
-# Bytes of the files already in the store's directory and bytes free on its
-# disk, for the deploy to decide whether the store fits (the disk is local, so
-# walking it is cheap). The sum is printed as a float: mawk's %d stops at
-# 2^31 - 1.
+# The bytes of the regular files find lists under its arguments (a directory,
+# then any pruning), printed as a float: mawk's %d stops at 2^31 - 1.
+tree_bytes() { find "$@" -type f -printf '%s\n' | awk '{ s += $1 } END { printf "%.0f", s }'; }
+
+# local_disk <generation> [dataset...]: bytes of the files already in the
+# store's directory, bytes of those in the release generation's directory that
+# the deploy mirrors (not its raw/<dataset> directories, which it leaves
+# behind), and bytes free on that disk, for the deploy to decide whether what
+# it sends there fits (the disk is local, so walking it is cheap).
 local_disk() {
-    [ -d "$LOCAL/pretrained" ] || die "no $LOCAL/pretrained: the dirs step creates it"
-    echo "$(find "$LOCAL/pretrained" -type f -printf '%s\n' | awk '{ s += $1 } END { printf "%.0f", s }') $(df -B1 --output=avail "$LOCAL" | tail -n 1 | tr -d ' ')"
+    local release="$LOCAL/research_releases/$1" prune=() name present=0
+    shift
+    [ -d "$LOCAL/pretrained" ] && [ -d "$LOCAL/research_releases" ] \
+        || die "no $LOCAL/pretrained or $LOCAL/research_releases: the dirs step creates them"
+    for name in "$@"; do prune+=(-path "$release/raw/$name" -prune -o); done
+    [ ! -d "$release" ] || present=$(tree_bytes "$release" "${prune[@]}")
+    echo "$(tree_bytes "$LOCAL/pretrained") $present $(df -B1 --output=avail "$LOCAL" | tail -n 1 | tr -d ' ')"
 }
 
 # Keep only tracked files inside the top-level directories that hold them, by
@@ -396,7 +419,8 @@ while :; do if held=\$(storage_check $qstorage $QUOTA $FLOOR); then $command >>$
 }
 
 # The project's part of `status`; `dev report` has shown GPUs, disks and tmux,
-# but its free space on the storage is the shared file system's, not the quota's.
+# but its free space on the storage is the shared file system's, not the
+# quota's. Its root disk is the instance's own, where the store and the releases are.
 status() {
     storage_check "$STORAGE" "$QUOTA" "$FLOOR" || true
     cd "$ROOT" 2>/dev/null || { echo "repository: not deployed at $ROOT"; return 0; }
@@ -608,7 +632,7 @@ case "$step" in
     idle) [ $# -eq 1 ] || die "idle needs the command it guards"; idle "$1" ;;
     dirs) dirs ;;
     tracked) tracked ;;
-    local-disk) local_disk ;;
+    local-disk) [ $# -ge 1 ] || die "local-disk needs the release generation and the datasets the deploy leaves behind"; local_disk "$@" ;;
     prepare) [ $# -eq 2 ] || die "prepare needs the pinned DuckDB CLI and CUDA compatibility package digests"; prepare "$1" "$2" ;;
     console-up) console_up ;;
     round) [ $# -ge 1 ] || die "round needs the round file"; round "$@" ;;
