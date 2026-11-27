@@ -256,10 +256,11 @@ def significance_flag(reading: Mapping[str, object], plain_excess: object) -> di
     (``stats.plain_statistics``, :func:`graded_statistics`) -- is above zero.
     The residual IR alone credits a long-only book for leg loadings it
     cannot collect: a book that lost to its random baseline can read above
-    its threshold on its betas. An unmeasured reading (``unmeasured`` set)
-    carries no flag, ``{}``; a measured one whose residual IR, threshold or
-    plain excess is not finite raises ``ValueError``: no flag is read off a
-    number that was not measured.
+    its threshold on its betas.
+
+    A reading with no residual IR, threshold or excess to read -- unmeasured
+    (``unmeasured`` set), or with a number missing or not finite -- carries no
+    flag, ``{}``: a flag is never derived from a number that was not measured.
     """
 
     if reading.get("unmeasured"):
@@ -269,11 +270,7 @@ def significance_flag(reading: Mapping[str, object], plain_excess: object) -> di
         for value in (reading.get("residual_information_ratio"), reading.get("threshold"), plain_excess)
     )
     if ratio is None or threshold is None or excess is None:
-        raise ValueError(
-            "a reading is placed against its bar only on finite figures, got residual IR "
-            f"{reading.get('residual_information_ratio')!r}, threshold {reading.get('threshold')!r} "
-            f"and plain excess {plain_excess!r}"
-        )
+        return {}
     return {"significant": ratio >= threshold and excess > 0}
 
 

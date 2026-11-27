@@ -19,6 +19,7 @@ from autotrade.environment.replay.stats import (
 from autotrade.environment.replay.style import factor_ols
 from autotrade.pipelines import verdict
 from autotrade.pipelines.config import ACCEPTANCE_KEYS, AcceptanceRules
+from autotrade.pipelines.session_tools import active_reading
 from tests.unit.support.acceptance_fixture import REQUIRED_RULES
 
 SCALE = math.sqrt(TRADING_DAYS_PER_YEAR)
@@ -792,8 +793,8 @@ def test_the_condition_table_is_the_one_list_of_what_a_record_can_carry():
 def test_a_reading_meets_the_bar_only_at_its_threshold_with_a_positive_plain_excess():
     """The bar is the residual IR at or above its own threshold (the p <= alpha
     side) and the plain excess of the same series above zero, both measured.
-    A reading the statistic could not read carries no flag; a measured one is
-    never flagged off a number that is missing or not finite."""
+    A reading the statistic could not read carries no flag, and neither does
+    one with a number missing or not finite: no flag is derived from it."""
 
     flag = verdict.significance_flag
     threshold = verdict.residual_threshold(5.0, 0.05)
@@ -812,8 +813,21 @@ def test_a_reading_meets_the_bar_only_at_its_threshold_with_a_positive_plain_exc
         ({"residual_information_ratio": math.inf, "threshold": threshold}, 0.04),
         ({"residual_information_ratio": threshold + 0.4}, 0.04),
     ):
-        with pytest.raises(ValueError, match="finite"):
-            flag(reading, excess)
+        assert flag(reading, excess) == {}
+
+
+def test_a_replay_with_a_non_finite_day_renders_its_readings_without_a_flag():
+    """A non-finite daily return leaves the plain excess not a number while the
+    regression drops that day: the row and the slice render as before, the
+    excess as it is, and carry no flag."""
+
+    analysis = _analysis(_segment(FORWARD_DAYS, 0.30, np.random.default_rng(41), te=0.05))
+    analysis["strategy_daily"][5][1] = math.nan
+    row = active_reading(analysis, {}, rules=AcceptanceRules(**REQUIRED_RULES))
+    assert math.isnan(row["excess"]) and math.isfinite(row["residual_information_ratio"])
+    assert "significant" not in row
+    reading = _forward(analysis)["residual_reading"]
+    assert math.isfinite(reading["residual_information_ratio"]) and "significant" not in reading
 
 
 def test_a_reading_is_weighed_by_its_null_p_value_and_readings_pool_by_their_years():
