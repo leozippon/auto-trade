@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The 2026-11-21 round: three paper Packs on DeepSeek-V4.1-Flash, one after another on the ZGCA A100.
+"""The 2026-11-21 round: two paper Packs on DeepSeek-V4.1-Flash, one after another on the ZGCA A100. Closed.
 
 The round follows the owner's instruction of 2026-11-21, verbatim:
 
@@ -27,23 +27,12 @@ AlphaQCM (ICML 2025), distributional reinforcement learning that mines a pool
 of formulaic alphas, read against the same miner without its QCM variance
 bonus, against a random formula pool of the same size and against a LightGBM
 ranker on the same price-volume fields.
-`timesfm_200k_10y_flash_zgca_20261121` mounts pack `timesfm_200k_20261121`:
-TimesFM (ICML 2024), a decoder-only time-series foundation model, used
-through the store's TimesFM 2.5 checkpoint and read against the same
-architecture randomly initialised, against the frozen checkpoint when the
-candidate is fine-tuned and against a LightGBM ranker on features of the same
-series.
 
-The instance's fill loop creates the first experiment once the card is free and
-each next one once the one before it has ended:
-
-    ~/miniconda3/envs/quant/bin/python ops/zgca/zgca.py run scripts/experiments/create_round_20261121.py --fill
-
-`--dry-run` with the port contacts no console and creates nothing: it runs the
-console's create-time pre-flight, the Packs' payload check included, prints
-what each experiment sends, and, unless a smoke record already covers the
-contract template on this seed, replays the template from every research-year
-start and over the full span.
+The round is closed: both experiments were created. A third,
+`timesfm_200k_10y_flash_zgca_20261121` on pack `timesfm_200k_20261121`
+(TimesFM, ICML 2024, through the store's TimesFM 2.5 checkpoint), was withdrawn
+by the owner on 2026-11-28 before it was created, so that round 20261127 could
+start once AlphaQCM ended; it has left the experiment list.
 """
 
 from __future__ import annotations
@@ -89,11 +78,11 @@ def _experiment(pack: str) -> dict[str, str]:
 EXPERIMENTS: dict[str, dict[str, str]] = {
     "tabm_200k_10y_flash_zgca_20261121": _experiment("tabm_200k_20261121"),
     "alphaqcm_200k_10y_flash_zgca_20261121": _experiment("alphaqcm_200k_20261121"),
-    "timesfm_200k_10y_flash_zgca_20261121": _experiment("timesfm_200k_20261121"),
 }
 
 ROUND = Round(
     experiments=EXPERIMENTS,
+    closed=True,
     pit_views_seed=FUND_TITLE_TEN_YEAR_PIT_VIEWS_SEED,
     overrides={
         **FUND_TITLE_TEN_YEAR_CSI1000,
