@@ -38,3 +38,18 @@ FUND_TITLE_TEN_YEAR_CSI1000: dict[str, object] = {
     "max_drawdown": 0.55,
     "active_max_drawdown": 0.30,
 }
+
+# The default ten-year selection plus the thirty-minute intraday bars, its one
+# events dataset, and the broker research reports and news beside the
+# announcement titles: what fits the ZGCA instance's personal-storage quota,
+# where five-minute bars do not. Moneyflow stays out: by the raw-to-seed ratios
+# measured on the default seed it would add about 3.5 GiB. Its seed is prebuilt
+# by scripts/data/prebuild_pit_views_seed.py with exactly these fields as its
+# snapshot overrides.
+BARS30_TEXT_TEN_YEAR_PIT_VIEWS_SEED = "data/pit_views_seed_research_10y_bars30text_20261130"
+BARS30_TEXT_TEN_YEAR_SELECTION: dict[str, object] = {
+    "include_events": True,
+    "events_datasets": ["intraday_bars_30min"],
+    "text_datasets": ["anns_d", "news", "research_report"],
+    "include_intraday": False,
+}
