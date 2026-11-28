@@ -3,8 +3,8 @@
 The mock `instance` (the shared lifecycle entry) and the mock `dev` (whose
 copy, put, bootstrap and report primitives verify their own results) record
 their arguments and the instance they were pointed at, and answer from the
-environment; both are tested for real in ~/zgca-compute, and the workflow
-reaches the API through those two alone. The mock copy moves nothing or,
+environment; both are tested for real in ~/compute/zgca-zenith/tests, and the
+workflow reaches the API through those two alone. The mock copy moves nothing or,
 given a stand-in of the instance's file system, is a real rsync verified by a
 dry run as `dev copy` verifies. The remote script's steps run for real against a temporary layout (a root with its
 venv inside, a local directory beside it), with stubs for the venv's python,
@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -174,15 +175,16 @@ class ZgcaWorkflowTest(unittest.TestCase):
         remote = self.remote(call)
         return remote[0] if remote is not None else call["args"][0]
 
-    def run_main(self, *argv: str, **env: str) -> tuple[int, str]:
-        """Run the CLI against the mocks; (exit code, stderr), and its stdout in ``self.out``."""
+    def run_main(self, *argv: str, inject: bool = True, **env: str) -> tuple[int, str]:
+        """Run the CLI against the mocks, or with ``inject`` false against the tools it finds itself, as under cron;
+        (exit code, stderr), and its stdout in ``self.out``."""
         saved = dict(os.environ)
         os.environ.clear()
         os.environ.update(self.env | env)
         err, out = io.StringIO(), io.StringIO()
         try:
             with contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
-                code = zgca.main(argv, repo_root=self.repo, tools=self.tools)
+                code = zgca.main(argv, repo_root=self.repo, tools=self.tools if inject else None)
         finally:
             os.environ.clear()
             os.environ.update(saved)
@@ -1221,8 +1223,11 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertTrue(self.out.splitlines()[-1].endswith(" zgca sync no round: 0 experiments: 0 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"))
         code, err = self.run_main("sync-rounds", "scripts/experiments/create_round_missing.py")
         self.assertEqual(code, 1)
-        self.assertIn("create_round_missing.py is not a round file", err)
         self.assertFalse(self.calls())
+        # Its last line is dated and headed as a summary, so `tail -1` of the cron log still shows when and why.
+        stamp, head = err.splitlines()[-1].split(" ", 1)
+        self.assertIsNotNone(datetime.fromisoformat(stamp).tzinfo)
+        self.assertTrue(head.startswith("zgca sync create_round_missing: ERROR: scripts/experiments/create_round_missing.py is not a round file"), head)
 
     def test_sync_rounds_retries_what_a_pass_could_not_finish_and_never_marks_a_partial_copy(self) -> None:
         """A failed copy leaves no marker and the next pass copies again; a sync run by hand
@@ -1607,6 +1612,32 @@ class ZgcaWorkflowTest(unittest.TestCase):
                 self.assertIn(said, shown.stdout)
                 self.assertIn("console health: {}", shown.stdout)
                 self.assertEqual((temp / "calls").read_text(encoding="utf-8").split(), calls)
+
+    def test_the_entries_are_those_of_compute_zgca_zenith_unless_zgca_compute_names_another_directory(self) -> None:
+        """With no tools injected, as under cron, the workflow calls the entries in ~/compute/zgca-zenith, or in the
+        directory ZGCA_COMPUTE names, and refuses a directory without them before any call."""
+        home = Path(self.temp.name) / "home"
+        default = home / "compute" / "zgca-zenith"
+        default.parent.mkdir(parents=True)
+        refused = "/dev is not executable: ZGCA_COMPUTE must name the zgca-zenith toolkit directory (default ~/compute/zgca-zenith)"
+
+        def status(**env: str) -> tuple[int, str]:
+            self.log.unlink(missing_ok=True)
+            return self.run_main("status", inject=False, HOME=str(home), MOCK_STATE="STOPPED", **env)
+
+        code, err = status()
+        self.assertEqual(code, 1)
+        self.assertIn(f"{default}{refused}", err)
+        self.assertFalse(self.calls())
+        self.assertEqual(status(ZGCA_COMPUTE=str(self.tools))[0], 0)
+        self.assertEqual([call["args"][0] for call in self.calls()], ["show", "state"])
+        default.symlink_to(self.tools)
+        self.assertEqual(status()[0], 0)
+        self.assertEqual([call["args"][0] for call in self.calls()], ["show", "state"])
+        code, err = status(ZGCA_COMPUTE=str(home))
+        self.assertEqual(code, 1)
+        self.assertIn(f"{home}{refused}", err)
+        self.assertFalse(self.calls())
 
     def test_the_tools_must_exist_and_the_remote_script_rejects_unknown_steps(self) -> None:
         for name in ("instance", "dev"):

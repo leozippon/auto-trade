@@ -13,8 +13,8 @@
 # quota: they live in <local dir>/pretrained and <local dir>/research_releases
 # on the instance's own disk, linked from the root's data/pretrained and
 # data/research_releases. The generic host work (base tools, transfers,
-# GPU/disk/tmux report) is ~/zgca-compute's `dev`, which the workflow calls
-# around these steps.
+# GPU/disk/tmux report) is ~/compute/zgca-zenith's `dev`, which the workflow
+# calls around these steps.
 set -euo pipefail
 
 die() { echo "ERROR: $*" >&2; exit 1; }
