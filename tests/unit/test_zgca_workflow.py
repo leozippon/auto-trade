@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -1222,8 +1223,11 @@ class ZgcaWorkflowTest(unittest.TestCase):
         self.assertTrue(self.out.splitlines()[-1].endswith(" zgca sync no round: 0 experiments: 0 synced, 0 untagged, 0 running, 0 interrupted, 0 pending, 0 failed"))
         code, err = self.run_main("sync-rounds", "scripts/experiments/create_round_missing.py")
         self.assertEqual(code, 1)
-        self.assertIn("create_round_missing.py is not a round file", err)
         self.assertFalse(self.calls())
+        # Its last line is dated and headed as a summary, so `tail -1` of the cron log still shows when and why.
+        stamp, head = err.splitlines()[-1].split(" ", 1)
+        self.assertIsNotNone(datetime.fromisoformat(stamp).tzinfo)
+        self.assertTrue(head.startswith("zgca sync create_round_missing: ERROR: scripts/experiments/create_round_missing.py is not a round file"), head)
 
     def test_sync_rounds_retries_what_a_pass_could_not_finish_and_never_marks_a_partial_copy(self) -> None:
         """A failed copy leaves no marker and the next pass copies again; a sync run by hand

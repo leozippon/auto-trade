@@ -160,6 +160,13 @@ def say(message: str) -> None:
     print(f"{datetime.now(tz=UTC):%H:%M:%S}Z {message}", flush=True)
 
 
+def sync_head(round_files: Sequence[str]) -> str:
+    """The head of the line a sync-rounds pass ends with, its summary or its error: the local time and the rounds."""
+
+    names = ", ".join(Path(round_file).stem for round_file in round_files) or "no round"
+    return f"{datetime.now().astimezone().isoformat(timespec='seconds')} zgca sync {names}: "
+
+
 def instance_id(value: str) -> str:
     """An --instance value; an empty one would let `dev` pick any RUNNING machine."""
 
@@ -724,8 +731,7 @@ class Workflow:
             except WorkflowError as exc:
                 say(f"{experiment}: failed, retried next pass: {exc}")
                 counts["failed"] += 1
-        names = ", ".join(Path(round_file).stem for round_file in round_files) or "no round"
-        line = f"{datetime.now().astimezone().isoformat(timespec='seconds')} zgca sync {names}: {len(experiments)} experiments: "
+        line = f"{sync_head(round_files)}{len(experiments)} experiments: "
         line += ", ".join(f"{counts[name]} {name}" for name in SYNC_COUNTS)
         if problem:
             line += f", {len(unsynced)} not checked ({problem})"
@@ -874,7 +880,9 @@ def main(
         else:
             workflow.down()
     except WorkflowError as exc:
-        print(f"ERROR: {exc}", file=sys.stderr)
+        # A sync-rounds pass that fails before its summary still ends the cron log with a dated line of its shape.
+        head = sync_head(options.round_files) if options.command == "sync-rounds" else ""
+        print(f"{head}ERROR: {exc}", file=sys.stderr)
         return 1
     return 0
 
