@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """The ZGCA A100 development instance, end to end: up, deploy, run, resume, status, sync, sync-rounds, down.
 
-Every command reaches the platform through ~/zgca-compute's `instance` and
-`dev` alone, runs its instance-side steps from ops/zgca/remote.sh and verifies
-its own result; the command list below says what each does. The rules behind
-them (deploy's checks and transfers, the fill loop and its storage floor,
-sync's markers, tag and release, the sync cron) are in ops/zgca/README.md.
+Every command reaches the platform through ~/compute/zgca-zenith's `instance`
+and `dev` alone, runs its instance-side steps from ops/zgca/remote.sh and
+verifies its own result; the command list below says what each does. The
+rules behind them (deploy's checks and transfers, the fill loop and its
+storage floor, sync's markers, tag and release, the sync cron) are in
+ops/zgca/README.md.
 
 usage: zgca.py [--instance <id>] up | deploy <seed dir> |
        run <round file> [launcher args...] | resume <experiment id> | status |
@@ -32,19 +33,22 @@ from pathlib import Path
 # Tesla-A100-80G since 2026-11-02 (the name keeps the two cards it was created
 # with); its id is the platform ledger id the API addresses it by, not a secret.
 INSTANCE_ID = "mpo06t71crmmtdsrb98ckwk29"
-# The platform's own shape for an instance id (~/zgca-compute/dev).
+# The platform's own shape for an instance id (~/compute/zgca-zenith/dev).
 INSTANCE_ID_SHAPE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
+# The ZGCA Zenith toolkit, the zgca-zenith directory of ~/compute, whose
+# `instance` and `dev` the workflow calls directly; ZGCA_COMPUTE names another.
+COMPUTE_TOOLS = "~/compute/zgca-zenith"
 GIB = 2**30
 # The instance's layout, stated here alone: remote.sh receives it on every
 # call. The repository root is on the instance's persistent personal storage
-# (~/zgca-compute/README.md, 配额、规格与存储) with the code, the .env, the
-# seeds and the experiments, which hard-link a seed and so share its file
+# (~/compute/zgca-zenith/README.md, 配额、规格与存储) with the code, the .env,
+# the seeds and the experiments, which hard-link a seed and so share its file
 # system; the venv the console and its workers run on sits beside it. The
 # pretrained store and the research releases, read in place and kept on this
 # host, live in <LOCAL_ROOT>/pretrained and <LOCAL_ROOT>/research_releases on
 # the instance's own disk, which also holds its root and Docker's images
-# (~/zgca-compute/README.md, 火山平台 Docker); the root's data/pretrained and
-# data/research_releases link to them.
+# (~/compute/zgca-zenith/README.md, 火山平台 Docker); the root's
+# data/pretrained and data/research_releases link to them.
 STORAGE = "/personal_fast_storage"
 REMOTE_ROOT = f"{STORAGE}/auto-trade"
 REMOTE_VENV = f"{STORAGE}/envs/quant"
@@ -100,8 +104,9 @@ RELEASE_PROXY_ENV = "ZGCA_GITHUB_PROXY"
 # (build arg CUDA_COMPAT_URL), other builds do not. Pinned to the digest of
 # NVIDIA's Debian 12 package index (rechecked 2026-11-21, with the index held
 # to the repository's Release file), after a probe on the instance
-# (~/zgca-compute/PLATFORM_RECORDS.md, GPU 驱动); the build checks its
-# download against the digest too (build arg CUDA_COMPAT_SHA256).
+# (~/compute/zgca-zenith/PLATFORM_RECORDS.md, 火山平台 Docker, its GPU 驱动
+# entry); the build checks its download against the digest too (build arg
+# CUDA_COMPAT_SHA256).
 CUDA_COMPAT_URL = "https://developer.download.nvidia.com/compute/cuda/repos/debian12/x86_64/cuda-compat-13-0_580.196.07-1_amd64.deb"
 CUDA_COMPAT_NAME = "cuda-compat-13-0_580.196.07-1_amd64.deb"
 CUDA_COMPAT_SHA256 = "d2d3262512046b23215ff197fe79a6ca0d44299ed0e665275ac05bb28b79e4e3"
@@ -274,7 +279,7 @@ class Workflow:
             if not os.access(self.tools / name, os.X_OK):
                 raise WorkflowError(
                     f"{self.tools / name} is not executable: ZGCA_COMPUTE must name the "
-                    "zgca-compute checkout (default ~/zgca-compute)"
+                    f"zgca-zenith toolkit directory (default {COMPUTE_TOOLS})"
                 )
 
     @property
@@ -286,7 +291,7 @@ class Workflow:
     def call(
         self, tool: str, *args: str, capture: bool = False, data: bytes | None = None, quiet: bool = False
     ) -> subprocess.CompletedProcess[bytes]:
-        """One run of a ~/zgca-compute entry (`instance`, `dev`), pointed at this workflow's instance; ``data`` is its stdin, ``quiet`` captures its stderr."""
+        """One run of a ~/compute/zgca-zenith entry (`instance`, `dev`), pointed at this workflow's instance; ``data`` is its stdin, ``quiet`` captures its stderr."""
         env = {**os.environ, "ZGCA_INSTANCE": self.instance}
         return subprocess.run(
             [str(self.tools / tool), *args],
@@ -849,7 +854,7 @@ def main(
     try:
         workflow = Workflow(
             repo_root=repo_root,
-            tools=tools or Path(os.environ.get("ZGCA_COMPUTE") or "~/zgca-compute").expanduser(),
+            tools=tools or Path(os.environ.get("ZGCA_COMPUTE") or COMPUTE_TOOLS).expanduser(),
             instance=options.instance,
         )
         if options.command == "up":

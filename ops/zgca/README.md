@@ -1,6 +1,6 @@
 # ZGCA A100 工作流
 
-`ops/zgca/zgca.py` 把在 ZGCA A100 开发机上跑一轮研究的整个周期做成八个子命令：`up`、`deploy`、`run`、`resume`、`status`、`sync`、`sync-rounds`、`down`。它只调用 `~/zgca-compute` 的平台入口：`instance` 查看与启停实例，`dev` 经跳板登录开发机，并用它的四个原语补装基础工具（`bootstrap`）、做带比对的传输（`copy`）、写仅属主可读的文件（`put`）和报告 GPU、磁盘与 tmux（`report`）。实例生命周期、传输吞吐、个人存储和火山 Docker 这些与项目无关的平台事实只记在 `~/zgca-compute`（规则在 `README.md`，带日期的观察在 `PLATFORM_RECORDS.md`），这里只写本项目的步骤。沙箱隔离按执行器原样：平台提供的 rootless Docker、`--network none`、非 root 的 agent 用户、只读的策略挂载，这里一概不动；除了填充循环和定时同步，这里不安排任何定时任务，不缓存平台端点，也不在仓库里存放密钥。开发机那一侧的步骤都在 `remote.sh` 里，每次调用把本地这份脚本原样发过去，在登录 shell 里执行，开发机上不会留下过期副本。
+`ops/zgca/zgca.py` 把在 ZGCA A100 开发机上跑一轮研究的整个周期做成八个子命令：`up`、`deploy`、`run`、`resume`、`status`、`sync`、`sync-rounds`、`down`。它只调用平台工具包的两个入口：`instance` 查看与启停实例，`dev` 经跳板登录开发机，并用它的四个原语补装基础工具（`bootstrap`）、做带比对的传输（`copy`）、写仅属主可读的文件（`put`）和报告 GPU、磁盘与 tmux（`report`）。工具包是 `~/compute` 仓库里 ZGCA Zenith 集群的目录 `~/compute/zgca-zenith`，工作流按这个路径直接调用其中的入口，不经 `~/compute` 的统一命令 `compute`（cron 的 `PATH` 里没有它）。实例生命周期、传输吞吐、个人存储和火山 Docker 这些与项目无关的平台事实只记在工具包里（规则在 `README.md`，带日期的观察在 `PLATFORM_RECORDS.md`），这里只写本项目的步骤。沙箱隔离按执行器原样：平台提供的 rootless Docker、`--network none`、非 root 的 agent 用户、只读的策略挂载，这里一概不动；除了填充循环和定时同步，这里不安排任何定时任务，不缓存平台端点，也不在仓库里存放密钥。开发机那一侧的步骤都在 `remote.sh` 里，每次调用把本地这份脚本原样发过去，在登录 shell 里执行，开发机上不会留下过期副本。
 
 ```bash
 python ops/zgca/zgca.py up
@@ -14,7 +14,7 @@ python ops/zgca/zgca.py down
 python ops/zgca/zgca.py --instance <平台实例 id> status
 ```
 
-在本机的 `quant` 环境里运行。`deploy` 要读种子记下的快照配置，`sync-rounds` 要导入轮次文件，这些模块依赖 numpy、pandas 等第三方包；其余子命令不需要它们，系统 `python3` 也能跑。`ZGCA_COMPUTE` 可以指向别处的 zgca-compute 检出，默认 `~/zgca-compute`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（平台 id `mpo06t71crmmtdsrb98ckwk29`；2026-11-02 起是一张 A100-80G，名字沿用建时的两卡）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的布局不随实例改变：仓库根目录是 `/personal_fast_storage/auto-trade`，控制台和 worker 用的 venv 在它旁边的 `/personal_fast_storage/envs/quant`，预训练模型库和 research release 在实例自己的盘上（见[存储布局](#存储布局)）；这些路径只写在 `zgca.py` 里，每次调用时传给 `remote.sh`。
+在本机的 `quant` 环境里运行。`deploy` 要读种子记下的快照配置，`sync-rounds` 要导入轮次文件，这些模块依赖 numpy、pandas 等第三方包；其余子命令不需要它们，系统 `python3` 也能跑。`ZGCA_COMPUTE` 可以把工具包指到别的目录，默认 `~/compute/zgca-zenith`；`ZGCA_GITHUB_PROXY` 是下载 GitHub 发布包时先试的代理前缀（例如 `https://ghfast.top/`）。实例缺省是 `auto-trade-dev-a100x2`（平台 id `mpo06t71crmmtdsrb98ckwk29`；2026-11-02 起是一张 A100-80G，名字沿用建时的两卡）；放在子命令之前的 `--instance <平台实例 id>` 让同一个脚本驱动另一台，`instance` 和 `dev` 都被指到所选的这台，别的实例同时在跑也不会选错。开发机上的布局不随实例改变：仓库根目录是 `/personal_fast_storage/auto-trade`，控制台和 worker 用的 venv 在它旁边的 `/personal_fast_storage/envs/quant`，预训练模型库和 research release 在实例自己的盘上（见[存储布局](#存储布局)）；这些路径只写在 `zgca.py` 里，每次调用时传给 `remote.sh`。
 
 ## 各子命令
 
@@ -39,7 +39,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 `run <轮次文件> [启动器参数...]` 要求轮次文件是仓库里的受管文件（否则 `deploy` 不会把它带过去），并且开发机上次部署记下的提交（`deployed_commit`）就是本机的 HEAD：开发机跑的是部署过去的那棵树，不一致或从未部署时拒绝，什么也不启动，先部署这个提交。核对通过后，它先确保控制台在 tmux 会话 `autotrade-console` 里以 `AUTOTRADE_GPU_NAME=A100` 运行并回答 `/api/health`：控制台只用它启动时的代码，所以没有实验在跑时，已有的控制台先被结束、在当前检出上重启，`deploy` 之后建实验就按新代码校验；有实验在跑时保留它，直到实验都结束（等待中的填充循环每一遍都重新连控制台，正赶上重启那几秒的一遍以非零退出、结束循环，`status` 里看得到）。然后把启动器放进 tmux 会话 `autotrade-round`，同样带着 `AUTOTRADE_GPU_NAME=A100`，端口由脚本补上，其余参数（`--dry-run`、`--fill`、实验 id）原样传给轮次文件；输出写到开发机的 `logs/zgca/<轮次文件名>_<UTC 时间>.log`，结束时追加一行 `round-exit <退出码>`。上一轮启动器还在跑时拒绝再启动。启动器创建实验之前要先做起步策略的冒烟回放，在 A100 上实测约两小时；通过的记录在开发机的 `logs/research/smoke/` 下按种子、几何与起步策略字节保存，下次直接复用。
 
-带 `--fill` 而不是 `--dry-run` 时，启动器改放进 tmux 会话 `autotrade-fill`，每十分钟跑一遍，直到轮次里没有待建的实验。一遍 `--fill` 只建当下空闲槽位与空闲卡容得下的实验，其余留作待建，等循环的下一遍。每一遍都追加到同一份 `logs/zgca/fill_<轮次文件名>_<UTC 时间>.log`：某一遍的汇总行报 `0 pending` 时循环以 `round-exit 0` 结束；某一遍以非零退出（创建被拒、控制台不回答）时循环以那个退出码结束，不再重试，留给操作者处理。每一遍开始前先量一次个人存储：配额下的余量不足 40 GiB 或者量不出来（见[存储布局](#存储布局)）时，这一遍不跑启动器，只记一行，例如 `<时间> fill held, no experiment is created this pass: storage: 61.0 of 100 GiB used, 39.0 free (du of /personal_fast_storage), below the 40 GiB floor`，量不出来时冒号后是 `storage: unknown, du of /personal_fast_storage failed (exit 1): <du 的报错>`，du 300 秒内没有量完时是 `storage: unknown, du of /personal_fast_storage did not finish within 300 s`，十分钟后的下一遍再量。它与 `autotrade-round` 分开，之后别的轮次的 `run` 既不等它也不会结束它；同一时间只有一个填充循环，要提前停下就 `~/zgca-compute/dev tmux kill-session -t autotrade-fill`。
+带 `--fill` 而不是 `--dry-run` 时，启动器改放进 tmux 会话 `autotrade-fill`，每十分钟跑一遍，直到轮次里没有待建的实验。一遍 `--fill` 只建当下空闲槽位与空闲卡容得下的实验，其余留作待建，等循环的下一遍。每一遍都追加到同一份 `logs/zgca/fill_<轮次文件名>_<UTC 时间>.log`：某一遍的汇总行报 `0 pending` 时循环以 `round-exit 0` 结束；某一遍以非零退出（创建被拒、控制台不回答）时循环以那个退出码结束，不再重试，留给操作者处理。每一遍开始前先量一次个人存储：配额下的余量不足 40 GiB 或者量不出来（见[存储布局](#存储布局)）时，这一遍不跑启动器，只记一行，例如 `<时间> fill held, no experiment is created this pass: storage: 61.0 of 100 GiB used, 39.0 free (du of /personal_fast_storage), below the 40 GiB floor`，量不出来时冒号后是 `storage: unknown, du of /personal_fast_storage failed (exit 1): <du 的报错>`，du 300 秒内没有量完时是 `storage: unknown, du of /personal_fast_storage did not finish within 300 s`，十分钟后的下一遍再量。它与 `autotrade-round` 分开，之后别的轮次的 `run` 既不等它也不会结束它；同一时间只有一个填充循环，要提前停下就 `~/compute/zgca-zenith/dev tmux kill-session -t autotrade-fill`。
 
 `resume <实验 id>` 让控制台续跑一个 worker 已不在、却没有完成的实验：以 failed 结束的，或者停在被终止、被中断（例如实例重启后）状态的；completed 和 stopped 的拒绝。前提与 `run` 相同，开发机上次部署的提交就是本机的 HEAD；另外实验当前不在跑，配额下的余量也不低于填充循环的 40 GiB 下限。任何一条不满足都直接拒绝，什么也不改。核对通过后它像 `run` 一样确保控制台在跑，删掉本机这个实验的同步标记（见下文 `sync`），再在开发机上向控制台发它自己的续跑请求（`POST /api/experiments/<实验 id>/control`，`{"action": "resume"}`），打印控制台的回答；回答里没有新起的 worker 就以错误退出。删掉标记是为了实验再结束时被定时同步重新取回；控制台拒绝时标记也已删掉，下一遍同步只是再拷一次，结果不变。续跑接着用实验的沙箱工作区，所以可续跑的实验什么都不释放（见 `sync`）。实例重启之后，先用 `resume` 续跑被中断的实验，再启动填充循环。
 
@@ -51,7 +51,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 `sync-rounds [轮次文件...]` 是定时同步的一遍，由本机 cron（`ops/cron/zgca_sync.cron`，安装用 `install_cron.py --block zgca`）每 30 分钟跑一次，输出追加到 `logs/zgca/sync_cron.log`。锁和时限由 `ops/cron/locked.sh` 负责。上一遍还占着锁时（一次拷贝约一小时），到点的这一遍什么也不做，只记一行带时间的 `zgca sync skipped: the previous run still holds .runtime/zgca/sync_cron.lock`，以 0 退出；拷贝期间有一两行是正常的，接连很多行说明占着锁的那一遍卡住了。每一遍最多跑 4 小时（三次拷贝再加余量）：到时 `timeout` 向这一遍的整个进程组发 TERM，`dev`、ssh 和 rsync 随之结束，10 秒后组里还在的进程被强行结束、锁随之释放，并记一行带时间的 `zgca sync stopped: the run reached its time limit`，以 124 退出；被截断的拷贝由下一遍接着拷（见 `sync`）。要提前结束卡住的一遍，就向它的 `timeout` 进程发 TERM（`ps -eo pid,lstart,args | grep '[t]imeout 4h'` 找到它），`timeout` 把它转给自己的整个进程组；复用连接的共享 ssh 自成一组、不在其中，不要动它。同步本身失败时照常记它自己的行、以它自己的非零状态退出，不会记成占锁或到时。它读出这些轮次文件定义的实验：标记是 `released` 的，或者是 `synced` 而副本不是已完成实验的，算已同步，不碰平台；标记是 `synced`、副本是已完成实验的（释放上线之前同步的都是这样）只在开发机上释放；其余的逐个用 `experiment-state` 问一次。要碰开发机时先确认实例在运行。开发机上还没有的算待建，worker 还在跑的算在跑，都不拷贝；worker 已不在却没到结束状态（completed、failed、stopped 之外，例如被终止）的算中断，每遍记一行、不同步，要续跑就 `resume`，要按原样取回就手工 `sync`；到了结束状态的才像 `sync` 一样拷贝、打 tag、释放已完成的。标记是 `copied` 的（拷贝完了、tag 被拒）每遍只重试打 tag 和释放、不重新拷贝，并记一行原因，直到两边镜像一致；开发机上已没有它钉住的镜像的，记一行说明重试也打不上这个 tag，算已同步，以后不再过问。被拒的释放算失败、标记不前进，下一遍再试。实例没在运行或平台查询失败时这一遍只记一行，下一遍再试；某个实验失败只记它一行，后面的照常进行。每遍最后一行是带时间的汇总，已同步、未打 tag、在跑、中断、待建、失败各几个（实例问不到时另加未检查的个数与原因），所以 `tail -1` 连同它的时间就是现状；有失败、未打 tag 或实例问不到时以 1 退出。它不开 Paper 账户。cron 文件里的 `ZGCA_ROUNDS` 列出还有实验要取回的 ZGCA 轮次文件：轮次关闭后仍留在里面，直到它的实验都同步回来，并在轮次文件离开仓库之前移出；不在其中的已完成实验由手工 `sync <实验 id>` 释放。
 
-`down` 就是 `instance stop`：等到 STOPPED 后打印卡时。实例在运行时先做与 `deploy` 相同的检查，有实验或启动器在跑就拒绝，因为停机会结束它们；确要放弃这些实验，直接用 `~/zgca-compute/instance stop <平台实例 id>`。
+`down` 就是 `instance stop`：等到 STOPPED 后打印卡时。实例在运行时先做与 `deploy` 相同的检查，有实验或启动器在跑就拒绝，因为停机会结束它们；确要放弃这些实验，直接用 `~/compute/zgca-zenith/instance stop <平台实例 id>`。
 
 ## GPU 驱动
 
@@ -61,7 +61,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 ## 幂等与失败
 
-启停的幂等意图（键何时写下、保留或删除）和平台暂时拒绝时的退避重试都由 `instance` 负责，见 `~/zgca-compute/README.md` 的“API 与生命周期”；启停没有确认到目标状态时，重跑同一个子命令即可。每一步都校验自己的结果，失败就以非零退出并说明原因，没有静默回退。一次平台查询 120 秒得不到回答时，`~/zgca-compute` 的入口对读请求隔 5 秒重试一次；仍无回答，或请求是写操作，就以一行错误失败，不会无限期地等下去。
+启停的幂等意图（键何时写下、保留或删除）和平台暂时拒绝时的退避重试都由 `instance` 负责，见 `~/compute/zgca-zenith/README.md` 的“API 与生命周期”；启停没有确认到目标状态时，重跑同一个子命令即可。每一步都校验自己的结果，失败就以非零退出并说明原因，没有静默回退。一次平台查询 120 秒得不到回答时，`~/compute/zgca-zenith` 的入口对读请求隔 5 秒重试一次；仍无回答，或请求是写操作，就以一行错误失败，不会无限期地等下去。
 
 ## 存储布局
 
@@ -69,7 +69,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 个人存储 `/personal_fast_storage` 是 GPFS 上有 100 GiB 硬配额的一块（工具包的平台记录；`zgca.py` 的 `STORAGE_QUOTA`）。`df` 和 `statvfs` 在那里看到的是整个 3.8 PB 的共享文件系统，所以 `dev report`、控制台建实验时的余量检查和 Agent 工具的余量下限都看不到配额；容器里也没有任何配额工具，`remote.sh` 只能用 `du` 量整棵树，硬链接只算一次，与配额的算法一致，2026-11-20 量一次约一秒；GPFS 上也有过一个小时不返回的 `du`，所以每次最多等 300 秒，超时按量不出来处理。量的结果由 `status` 显示；填充循环和 `resume` 在配额下的余量不足 40 GiB（`STORAGE_FLOOR`）或量不出来时不起新实验，因为一次会话的沙箱工作区长到过 20 GiB，worker 在每次尝试结束时又把工作区（单个超过 64 MiB 的文件和 `refs/` 除外）归档进实验的 `artifacts/run_*/workspace`。2026-11-20 配额写满：一条跑了 18 小时的会话以 `Disk quota exceeded` 失败，随后的填充又建了同轮的两条实验，都当场失败。已完成的实验同步回本机之后由 `sync` 释放它在开发机上的大件（见上文），其余的配额由种子、研究包载荷、venv、日志和还可能续跑的实验占着；载荷每包至多 512 MiB，每次尝试开局另复制一份进会话工作区的 `refs/`；这份能从研究包和载荷库重建，所以不随工作区归档，只在归档旁的省略清单 `workspace.omitted.json` 里记下它和它的字节数。
 
-预训练模型库和 research release 放在实例自己的盘上，即 `/ebs/auto-trade/pretrained` 和 `/ebs/auto-trade/research_releases`，仓库根的 `data/pretrained` 和 `data/research_releases` 是指向它们的链接。两者放在个人存储上都会和种子与实验抢这份配额，又都能放到别处：它们只被原地读取，从不硬链接进实验，本机也各有一份，丢了可以重传。实验只钉住库清单的摘要和 release 的 generation id；容器启动时解析库的链接、挂载它指向的目录，release 只由宿主侧的 worker 经链接读，钉住时实验里只写下清单和质量文件的副本，所以除了这两条链接没有别处知道它们在哪。种子不能这样搬，每个实验都硬链接它。2026-11-27 之前部署的开发机上，`data/research_releases` 还是个人存储上的真实目录，部署建目录那一步拒绝它、什么也不动：开发机上没有实验还要续跑时直接删掉它（`~/zgca-compute/dev rm -rf /personal_fast_storage/auto-trade/data/research_releases`），否则先把它们钉着的 generation 搬进实例盘（`~/zgca-compute/dev bash -lc 'mkdir -p /ebs/auto-trade/research_releases && mv /personal_fast_storage/auto-trade/data/research_releases/<generation> /ebs/auto-trade/research_releases/ && rm -rf /personal_fast_storage/auto-trade/data/research_releases'`），再部署。
+预训练模型库和 research release 放在实例自己的盘上，即 `/ebs/auto-trade/pretrained` 和 `/ebs/auto-trade/research_releases`，仓库根的 `data/pretrained` 和 `data/research_releases` 是指向它们的链接。两者放在个人存储上都会和种子与实验抢这份配额，又都能放到别处：它们只被原地读取，从不硬链接进实验，本机也各有一份，丢了可以重传。实验只钉住库清单的摘要和 release 的 generation id；容器启动时解析库的链接、挂载它指向的目录，release 只由宿主侧的 worker 经链接读，钉住时实验里只写下清单和质量文件的副本，所以除了这两条链接没有别处知道它们在哪。种子不能这样搬，每个实验都硬链接它。2026-11-27 之前部署的开发机上，`data/research_releases` 还是个人存储上的真实目录，部署建目录那一步拒绝它、什么也不动：开发机上没有实验还要续跑时直接删掉它（`~/compute/zgca-zenith/dev rm -rf /personal_fast_storage/auto-trade/data/research_releases`），否则先把它们钉着的 generation 搬进实例盘（`~/compute/zgca-zenith/dev bash -lc 'mkdir -p /ebs/auto-trade/research_releases && mv /personal_fast_storage/auto-trade/data/research_releases/<generation> /ebs/auto-trade/research_releases/ && rm -rf /personal_fast_storage/auto-trade/data/research_releases'`），再部署。
 
 实例盘同时是实例的根和 Docker 的镜像存储。缺省实例原先 100 GiB 的数据盘放不下本机原先十个模型的库（133.6 GiB）再加一个约 15 GiB 的镜像，所以两台主机用同一份精简的库：现在是六个模型、约 50 GiB。2026-11-27 数据盘扩到 197 GiB，库、release、镜像连同 20 GiB 余量都放得下。
 
@@ -77,7 +77,7 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 ## 一个周期的开销
 
-卡时规则见 `~/zgca-compute/README.md`。全新的根要把种子（十年那颗约 20 GB）、release 里种子要读的部分（约 13 GB）和模型库（约 54 GB）传一遍。按工具包平台记录里的 3.1–3.7 MB/s，种子与 release 要两个多小时，模型库四到五小时；实例盘上已有的模型和 release 不再传。之后 `deploy` 只传差异，几分钟内完成；准备步骤冷构建镜像加 GPU 检查约二十分钟，镜像缓存命中时不到一分钟。起步策略的冒烟约两小时；一条 HCM 整期实验约七小时。
+卡时规则见 `~/compute/zgca-zenith/README.md` 的“配额、规格与存储”。全新的根要把种子（十年那颗约 20 GB）、release 里种子要读的部分（约 13 GB）和模型库（约 54 GB）传一遍。按工具包平台记录里的 3.1–3.7 MB/s，种子与 release 要两个多小时，模型库四到五小时；实例盘上已有的模型和 release 不再传。之后 `deploy` 只传差异，几分钟内完成；准备步骤冷构建镜像加 GPU 检查约二十分钟，镜像缓存命中时不到一分钟。起步策略的冒烟约两小时；一条 HCM 整期实验约七小时。
 
 ## 已接受的局限
 
@@ -87,9 +87,9 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 `deploy` 只在仍含受管文件的顶层目录里清理：整个退出版本库的顶层目录和仓库根下不再受管的文件仍留在开发机上。镜像只在合同指纹说它缺失或过期时重建，所以只改 Dockerfile、合同文件不变的改动不会让实例重建，要先在实例上删掉镜像 tag 再部署。`deploy` 本身不重启控制台，下一次 `run` 在没有实验运行时才重启它；部署之后若先有实验经旧控制台建起（例如填充循环），新的建实验校验或参数表要等它们结束、再 `run` 时才生效。`status` 只认 `create_round_*` 与 `fill_create_round_*` 命名的启动器日志。
 
-`deploy` 只镜像这次点名的种子和它的 release，从不删除开发机上以前部署的种子与 release：旧种子占着 100 GiB 的个人存储配额（2026-11-10 两份种子各约 20 GB、两份当时还在个人存储上的 release 各约 13 GB，连同实验与 smoke 暂存把配额写满，一遍填充的 smoke 以 `Disk quota exceeded` 失败），旧 release 占着实例盘，算在部署的余量核对里。换种子之后，等开发机上没有未结束的实验再钉旧种子和旧 release，就手工删掉它们：`~/zgca-compute/dev rm -rf /personal_fast_storage/auto-trade/data/<旧种子目录> /ebs/auto-trade/research_releases/<旧 generation>`。实验的 `pit_views/` 硬链接着种子的文件（可从种子重建，`sync` 也不拉回）；已完成实验的那份在同步后已释放，其余结束状态的实验还留着它，要连这些 `pit_views/` 一起删掉才真正腾出配额。
+`deploy` 只镜像这次点名的种子和它的 release，从不删除开发机上以前部署的种子与 release：旧种子占着 100 GiB 的个人存储配额（2026-11-10 两份种子各约 20 GB、两份当时还在个人存储上的 release 各约 13 GB，连同实验与 smoke 暂存把配额写满，一遍填充的 smoke 以 `Disk quota exceeded` 失败），旧 release 占着实例盘，算在部署的余量核对里。换种子之后，等开发机上没有未结束的实验再钉旧种子和旧 release，就手工删掉它们：`~/compute/zgca-zenith/dev rm -rf /personal_fast_storage/auto-trade/data/<旧种子目录> /ebs/auto-trade/research_releases/<旧 generation>`。实验的 `pit_views/` 硬链接着种子的文件（可从种子重建，`sync` 也不拉回）；已完成实验的那份在同步后已释放，其余结束状态的实验还留着它，要连这些 `pit_views/` 一起删掉才真正腾出配额。
 
-模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 只有在某个对话角色跑在本机模型上时 worker 才要求，开发机上没有这个网关，所以用不上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几个实验写在同一棵目录里，续跑换了进程号的旧文件也无从按实验认出，一条 gpt-6 实验就有数百 MB；要用时整棵取回，`~/zgca-compute/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有实验在跑时目录仍在增长，所以不用 `dev copy` 比对）。
+模型服务的 key 在实例存在期间一直留在开发机的 `.env` 里（仅 root 可读），停机不清除；其中本机 vLLM 网关的 key 只有在某个对话角色跑在本机模型上时 worker 才要求，开发机上没有这个网关，所以用不上。`sync` 不拉回开发机上的模型服务会话日志（`data/llm_conversations/`）：日志按服务方、模型、日期和 worker 进程号分文件，几个实验写在同一棵目录里，续跑换了进程号的旧文件也无从按实验认出，一条 gpt-6 实验就有数百 MB；要用时整棵取回，`~/compute/zgca-zenith/dev rsync -a dev:/personal_fast_storage/auto-trade/data/llm_conversations/ <本地目录>/`（有实验在跑时目录仍在增长，所以不用 `dev copy` 比对）。
 
 在实例上定版、同步回本机的策略和本机的一样可以开 Paper 账户跟随：建账户只按本机的实验目录重建设置，不读参数里记着的实例实验根和沙箱根；控制台对标为“通过”的策略显示建账户的按钮。建账户时本机还要核对两件事，缺一就拒绝且什么都不写：注册的策略字节与账本为它记下的指纹一致，钉住的镜像 tag 在本机存在并内置本机代码要求的策略运行时，这个 tag 由上面的 `sync` 或定时同步打上。
 
@@ -97,4 +97,4 @@ TuShare 令牌、`HF_TOKEN` 等其余变量不离开本机。种子、release �
 
 配额的检查只是某一时刻的量：40 GiB 是留出的余量而不是保证，已经在跑的会话仍可能把配额写满；`du` 遍历时正赶上会话删除文件会报错，那一次按量不出来处理（`status` 显示 unknown，填充那一遍不建）。释放只覆盖同步回来的已完成实验，failed 和 stopped 的实验、旧种子与 release、对话日志都不在其内。worker 在每次会话结束时把工作区复制（而不是移动）进实验的 `artifacts`，所以那一刻要另有一份工作区大小的余量。
 
-开发机上的容器遥测缺少峰值内存和 GPU 峰值，开发机上的一切又都以 root 运行，原因见工具包 README 的“火山平台 Docker”；所以在开发机宿主上跑单元测试时，依赖目录权限位的测试会失败，Docker 沙箱以 uid 61000 运行，不受影响。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance`、`dev` 和本机 `docker`，不访问网络也不启停实例；那些入口本身的测试在 `~/zgca-compute/tests`。
+开发机上的容器遥测缺少峰值内存和 GPU 峰值，开发机上的一切又都以 root 运行，原因见工具包 README 的“火山平台 Docker”；所以在开发机宿主上跑单元测试时，依赖目录权限位的测试会失败，Docker 沙箱以 uid 61000 运行，不受影响。离线测试在 `tests/unit/test_zgca_workflow.py`，用模拟的 `instance`、`dev` 和本机 `docker`，不访问网络也不启停实例；那些入口本身的测试在 `~/compute/zgca-zenith/tests`。
